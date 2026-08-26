@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>ruoyi-vue-plus</artifactId>
+        <groupId>org.dromara</groupId>
+        <version>${revision}</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.panjia</groupId>
+    <artifactId>panjia-modules</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <description>
+        panjia-modules 盘家业务域
+    </description>
+
+    <modules>
+        <module>panjia-common</module>
+        <module>panjia-salary</module>
+        <module>panjia-license</module>
+        <module>panjia-backup</module>
+        <module>panjia-customer</module>
+        <module>panjia-im-core</module>
+        <!-- 以下预留，按需取消注释 -->
+        <!-- <module>panjia-im-dingtalk</module> -->
+        <!-- <module>panjia-im-wecom</module> -->
+        <!-- <module>panjia-im-feishu</module> -->
+        <!-- <module>panjia-ai</module> -->
+        <!-- <module>panjia-bi</module> -->
+        <module>panjia-arch-test</module>
+    </modules>
+
+</project>

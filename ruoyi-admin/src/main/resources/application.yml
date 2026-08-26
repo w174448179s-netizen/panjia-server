@@ -46,6 +46,18 @@ user:
 spring:
   application:
     name: RuoYi-Vue-Plus
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    # 基线版本设为 0，确保 V1 基线脚本在空库时始终执行
+    baseline-version: 0
+    # 独立数据源，绕过 dynamic-datasource 路由（与 application-dev.yml master 数据源一致）
+    url: jdbc:postgresql://localhost:5432/postgres
+    user: root
+    password: root
+    # 关闭占位符替换，SQL 中的 ${initiator} 等 SpEL 表达式不会被 Flyway 解析
+    placeholder-replacement: false
   threads:
     # 开启虚拟线程 仅jdk21可用
     virtual:

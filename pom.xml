@@ -67,6 +67,11 @@
         <!-- mqtt客户端 -->
         <mica-mqtt.version>2.6.8</mica-mqtt.version>
 
+        <!-- 盘家智管版本 -->
+        <panjia.version>1.0.0-SNAPSHOT</panjia.version>
+        <!-- ArchUnit 架构测试 -->
+        <archunit.version>1.3.0</archunit.version>
+
         <!-- Maven 构建插件版本 -->
         <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
         <maven-war-plugin.version>3.5.1</maven-war-plugin.version>
@@ -457,6 +462,46 @@
                 <version>${revision}</version>
             </dependency>
 
+            <!-- ==================== 盘家智管模块 ==================== -->
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-common</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-salary</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-license</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-backup</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-customer</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-im-core</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+
+            <!-- ArchUnit 架构测试 -->
+            <dependency>
+                <groupId>com.tngtech.archunit</groupId>
+                <artifactId>archunit</artifactId>
+                <version>${archunit.version}</version>
+                <scope>test</scope>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
@@ -467,10 +512,12 @@
         <module>ruoyi-common</module>
         <!-- 扩展模块 -->
         <module>ruoyi-extend</module>
-        <!-- 业务模块 -->
+        <!-- 底座业务模块 -->
         <module>ruoyi-modules</module>
         <!-- api模块 -->
         <module>ruoyi-api</module>
+        <!-- 盘家业务域（新增） -->
+        <module>panjia-modules</module>
     </modules>
     <packaging>pom</packaging>
 

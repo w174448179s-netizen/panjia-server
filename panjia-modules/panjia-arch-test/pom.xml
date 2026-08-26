@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-arch-test</artifactId>
+
+    <description>
+        panjia-arch-test 架构测试（ArchUnit 规则）
+    </description>
+
+    <dependencies>
+        <!-- ArchUnit -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 底座模块（仅用于架构测试扫描，不产生运行时依赖） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-system</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- 盘家模块 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-salary</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-license</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

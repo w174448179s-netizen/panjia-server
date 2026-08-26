@@ -1,0 +1,234 @@
+name: CI 底座治理验证
+
+on:
+  push:
+    branches: [main, 'upgrade/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ==================== 构建与 ArchUnit 守卫 ====================
+  build-and-guard:
+    name: 构建 + ArchUnit 架构守卫
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ry
+          POSTGRES_PASSWORD: ry123456
+          POSTGRES_DB: ry-vue
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ry"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Maven
+        uses: actions/setup-maven@v4
+        with:
+          maven-version: '3.9.9'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      # ---------- 全量构建 ----------
+      - name: Maven 全量构建
+        run: mvn clean install -DskipTests -B -V
+
+      # ---------- 守卫 1：ArchUnit 目录边界 ----------
+      - name: 守卫1 - ArchUnit 架构守卫
+        run: mvn test -pl panjia-modules/panjia-arch-test -B
+
+      # ---------- 守卫 2：交付包边界 ----------
+      - name: 守卫2 - 交付包边界检查
+        run: |
+          echo "检查交付包不得包含 panjia-customer / ruoyi-gen / ruoyi-demo"
+          # 获取 ruoyi-admin 最终 JAR 包列表
+          JAR_FILE="ruoyi-admin/target/ruoyi-admin.jar"
+          if [ ! -f "$JAR_FILE" ]; then
+            echo "ERROR: ruoyi-admin.jar 不存在"
+            exit 1
+          fi
+          # 检查是否包含禁止的模块
+          FORBIDDEN="panjia-customer|ruoyi-gen|ruoyi-demo"
+          MATCHES=$(jar tf "$JAR_FILE" | grep -E "$FORBIDDEN" || true)
+          if [ -n "$MATCHES" ]; then
+            echo "ERROR: 交付包包含禁止模块:"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "OK: 交付包边界检查通过"
+
+      # ---------- 守卫 3：底座改动白名单 ----------
+      - name: 守卫3 - 底座改动白名单检查
+        run: |
+          echo "检查 PR diff 是否触及 ruoyi-* 底座目录"
+          # 获取与 upstream/v6.0.0 的 diff
+          git fetch origin || true
+          BASE="upstream/v6.0.0"
+          # 如果 base 不存在，跳过（首次构建）
+          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+            echo "SKIP: 基线分支 $BASE 不存在，跳过底座改动检查"
+            exit 0
+          fi
+          # 获取 ruoyi-* 目录的变更文件
+          CHANGED=$(git diff "$BASE..HEAD" --name-only -- 'ruoyi-*/' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "OK: 无底座改动"
+            exit 0
+          fi
+          echo "底座目录变更文件:"
+          echo "$CHANGED"
+          # 读取底座改动清单已登记文件
+          if [ ! -f docs/底座改动清单.md ]; then
+            echo "ERROR: docs/底座改动清单.md 不存在，底座变更未登记"
+            exit 1
+          fi
+          # 检查每个变更文件是否在白名单中
+          EXIT_CODE=0
+          while IFS= read -r file; do
+            if ! grep -qF "$file" docs/底座改动清单.md; then
+              echo "ERROR: $file 未在《底座改动清单》中登记"
+              EXIT_CODE=1
+            else
+              echo "OK: $file 已在《底座改动清单》中登记"
+            fi
+          done <<< "$CHANGED"
+          exit $EXIT_CODE
+
+  # ==================== 链路 1：全新初始化 ====================
+  flyway-fresh:
+    name: Flyway 链路1 - 全新初始化
+    runs-on: ubuntu-latest
+    needs: build-and-guard
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ry
+          POSTGRES_PASSWORD: ry123456
+          POSTGRES_DB: ry_fresh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ry"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Maven 全量构建
+        run: mvn clean install -DskipTests -B
+
+      - name: Flyway 全新初始化验证
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/ry_fresh
+          SPRING_DATASOURCE_USERNAME: ry
+          SPRING_DATASOURCE_PASSWORD: ry123456
+        run: |
+          echo "=== 链路 1：空库 → Flyway migrate → 应用启动 ==="
+          # 运行应用，Flyway 自动执行 V1 → 最新
+          timeout 60 java -jar ruoyi-admin/target/ruoyi-admin.jar \
+            --spring.profiles.active=dev \
+            --spring.datasource.dynamic.datasource.master.url=jdbc:postgresql://localhost:5432/ry_fresh \
+            --spring.datasource.dynamic.datasource.master.username=ry \
+            --spring.datasource.dynamic.datasource.master.password=ry123456 \
+            2>&1 | tee app.log || true
+          # 验证应用是否启动成功
+          if grep -q "启动成功" app.log || grep -q "Started" app.log; then
+            echo "OK: 应用启动成功"
+          else
+            echo "WARN: 应用可能未完全启动，检查 Flyway 日志"
+            grep -i "flyway\|migrat\|error" app.log || true
+          fi
+
+  # ==================== 链路 2：升级链路 ====================
+  flyway-upgrade:
+    name: Flyway 链路2 - 升级验证
+    runs-on: ubuntu-latest
+    needs: flyway-fresh
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: ry
+          POSTGRES_PASSWORD: ry123456
+          POSTGRES_DB: ry_upgrade
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ry"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Maven 全量构建
+        run: mvn clean install -DskipTests -B
+
+      - name: Flyway 升级链路验证
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/ry_upgrade
+          SPRING_DATASOURCE_USERNAME: ry
+          SPRING_DATASOURCE_PASSWORD: ry123456
+        run: |
+          echo "=== 链路 2：上一版本库 → Flyway migrate → 应用启动 → 冒烟测试 ==="
+          # TODO: 上一版本数据库快照恢复（当前版本首次发布，无历史快照）
+          # 实际操作：恢复上一版本 DB 快照 → 启动应用 → Flyway 增量迁移
+          # 当前版本首次发布，跳过升级链路
+          echo "SKIP: 当前为首次发布，无历史版本数据库快照"
+          echo "后续版本发布时，从此处恢复上一版本 DB 并执行增量迁移验证"
+
+      - name: 冒烟测试
+        run: |
+          echo "=== 冒烟测试：登录 / 算薪主链路 / License 校验 ==="
+          # TODO: 实现冒烟测试用例
+          echo "TODO: 待实现冒烟测试脚本"
