@@ -85,6 +85,7 @@ public class IntegrityChecker {
                 return false;
             }
             for (String cls : List.of(
+                    "com/panjia/license/LicenseMode.class",
                     "com/panjia/license/security/LicenseGuard.class",
                     "com/panjia/license/security/IntegrityChecker.class",
                     "com/panjia/license/crypto/verify/LicenseVerifier.class")) {
@@ -105,6 +106,9 @@ public class IntegrityChecker {
      * 自校验：IntegrityChecker.class 自身也在列表中。
      */
     private void registerCriticalClasses() {
+        // 编译时常量（最高优先：改了 DEV=false→true 就能绕过一切）
+        criticalClasses.add("com/panjia/license/LicenseMode.class");
+
         // License 校验核心
         criticalClasses.add("com/panjia/license/crypto/verify/LicenseVerifier.class");
         criticalClasses.add("com/panjia/license/crypto/verify/KeyStore.class");
