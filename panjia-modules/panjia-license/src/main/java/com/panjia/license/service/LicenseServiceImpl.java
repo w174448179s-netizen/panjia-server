@@ -13,6 +13,7 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,8 @@ import java.time.Instant;
 /**
  * LicenseService 实现。
  * 调用授权服务器接口，管理激活/心跳/校验全流程。
+ *
+ * dev 模式下使用预置 dev token 初始化，跳过远程调用。
  */
 @Slf4j
 @Service
@@ -34,6 +37,25 @@ public class LicenseServiceImpl implements LicenseService {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
+    }
+
+    /**
+     * dev 模式：用预置 dev token 初始化上下文。
+     * 生产模式：无操作，等待激活流程。
+     */
+    @PostConstruct
+    public void initDevMode() {
+        if (properties.isDevMode() && !properties.getDevToken().isEmpty()) {
+            try {
+                LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
+                context.setLicense(content, properties.getDevToken());
+                context.setNetworkReachable(true);
+                log.info("[LicenseServiceImpl] dev 模式初始化完成，authCode={}, fpHash={}",
+                        content.getAuthCode(), content.getFingerprintHash());
+            } catch (Exception e) {
+                log.error("[LicenseServiceImpl] dev token 解析失败: {}", e.getMessage());
+            }
+        }
     }
 
     @Override
@@ -82,6 +104,12 @@ public class LicenseServiceImpl implements LicenseService {
 
     @Override
     public HeartbeatResult heartbeat() {
+        // dev 模式：跳过远程心跳
+        if (properties.isDevMode()) {
+            log.debug("[heartbeat] dev 模式，跳过远程心跳");
+            return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
+        }
+
         if (context.getToken() == null) {
             throw new LicenseException("未激活，无法心跳");
         }
@@ -125,6 +153,11 @@ public class LicenseServiceImpl implements LicenseService {
     @Override
     public CheckResult check(String operation) {
         OperationEnum op = OperationEnum.valueOf(operation);
+
+        // dev 模式：直接放行所有操作
+        if (properties.isDevMode()) {
+            return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
+        }
 
         // 1. 真·断网 → 离线模式禁用 /check 缓存（铁律 2）
         if (!context.isNetworkReachable()) {

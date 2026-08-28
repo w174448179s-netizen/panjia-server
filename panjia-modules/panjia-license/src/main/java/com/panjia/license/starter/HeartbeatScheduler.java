@@ -14,7 +14,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * 后台心跳调度器。
- * 非 prod 且 enabled=false 时不启动，prod 下强制启动。
+ *
+ * dev 模式：不启动远程心跳调度（dev token 本地自洽）。
+ * 生产模式：按 heartbeatIntervalMs 间隔定期调用授权服务器。
  */
 @Slf4j
 @Component
@@ -36,8 +38,10 @@ public class HeartbeatScheduler {
 
     @PostConstruct
     public void start() {
-        if (!licenseGuard.shouldEnforce()) {
-            log.info("[HeartbeatScheduler] License 已关闭，心跳调度器不启动");
+        // LicenseGuard 始终返回 true，不再作为跳过条件
+        // dev 模式跳过心跳调度
+        if (properties.isDevMode()) {
+            log.info("[HeartbeatScheduler] dev 模式，跳过远程心跳调度");
             return;
         }
 

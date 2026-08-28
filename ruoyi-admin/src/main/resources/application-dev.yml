@@ -1,7 +1,9 @@
---- # License 配置（本地开发关闭，避免连不上授权服务器）
+--- # License 配置（dev 模式：使用预置 dev token，走完整校验流程但跳过远程调用）
 panjia:
   license:
-    enabled: false
+    enabled: true
+    dev-mode: true
+    dev-token: "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdXRoQ29kZSI6IkRFVi0wMDAwLTAwMDAtMDAwMCIsImZpbmdlcnByaW50SGFzaCI6IkRFVi1GSU5HRVJQUklOVCIsIm1pblZlcnNpb24iOiIxLjAuMCIsIm1heFZlcnNpb24iOiI5OS45OS45OSIsImNsaWVudE1vZGUiOiJOT1JNQUwiLCJpYXQiOjE3ODc5Mjg3MjAsImV4cCI6NDk0MTUyODcyMCwib2ZmbGluZUV4cGlyZUF0Ijo0OTQxNTI4NzIwMDAwfQ.t0fomk4nKXy78gRWyXlDgJqWTReJME1fUKO57MG_9QIjNSkLseaegVEvf81so2sb7GdYsay3fNIN80rl-lr6ApfAIRRkiaUuBj5oxnfTRISJG0apxEimTl07pAXASLCcvJqk6csjMRj2Qb0IGXzonRHVYf8VfbHiOkuKX8i79QjcGgrju7xPaKGQEkFBoY7Xj58qeCwYVOgyjLFxTLDrPwLcdQsyD3CoU915pNhxExEG1AeY-chDIXkBaQm3nkUaGDKdUwrGuJY56t-ETtV0EP0h5IjL2_6Mal9HCN4SPiXivBVP6XqK8SCwaNOahoPe_f3XqF3aPhRISYptsKBjlQ"
 
 --- # 监控中心配置
 spring.boot.admin.client:

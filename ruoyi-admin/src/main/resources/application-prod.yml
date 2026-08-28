@@ -323,7 +323,9 @@ justauth:
       redirect-uri: ${justauth.address}/social-callback?source=gitea
 
 --- # License 授权校验配置
-# 生产环境强制开启，代码级保护（LicenseGuard 检测 prod profile 时忽略 enabled=false）
+# 生产环境：真实激活流程 + 远程心跳，无 dev token
 panjia:
   license:
     enabled: true
+    dev-mode: false
+    dev-token: ""

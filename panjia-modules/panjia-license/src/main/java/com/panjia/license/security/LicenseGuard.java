@@ -9,14 +9,12 @@ import org.springframework.stereotype.Component;
 /**
  * License 强制守卫。
  *
- * 安全策略（安全默认 / 白名单关闭）：
- * - 只有 dev / local 两个开发 profile 才允许通过 enabled=false 关闭 License。
- * - 其他所有 profile（prod / staging / test / 未设置 / 随便编的）都强制运行 License。
+ * 安全策略：
+ * - 始终返回 true，所有环境都执行 License 校验。
+ * - dev 环境通过预置 dev token + 跳过远程心跳实现"本地自洽"。
+ * - 生产环境需要真实激活 token + 远程心跳。
  *
- * 这意味着：
- * - 生产环境改 profile=dev 会触发其他生产配置失效（数据库、日志级别等），代价极高。
- * - 改成任意非开发 profile（如 staging），License 仍然强制运行。
- * - 不设置 profile，License 默认强制（安全默认）。
+ * 这意味着所有环境走同一套代码路径，License 代码在开发时就被验证。
  */
 @Slf4j
 @Component
@@ -31,26 +29,14 @@ public class LicenseGuard {
     }
 
     /**
-     * License 是否应该强制执行校验。
-     * 白名单策略：只有 dev/local 才允许关闭，其余全部强制。
+     * 始终返回 true。所有环境都执行 License 校验。
+     * dev 环境通过 devMode + devToken 实现本地自洽，不跳过校验逻辑。
      */
     public boolean shouldEnforce() {
-        boolean isDevProfile = environment.acceptsProfiles(Profiles.of("dev", "local"));
-
-        if (isDevProfile) {
-            if (properties.isEnabled()) {
-                log.info("[LicenseGuard] 开发环境，enabled=true，License 正常运行");
-                return true;
-            }
-            log.info("[LicenseGuard] 开发环境，enabled=false，License 已关闭");
-            return false;
-        }
-
-        // 非开发环境：一律强制
-        String activeProfiles = String.join(",", environment.getActiveProfiles());
-        if (!properties.isEnabled()) {
-            log.warn("[LicenseGuard] profile=[{}] enabled=false，但非开发环境，已强制覆盖为 true（代码级保护）", activeProfiles);
+        if (properties.isDevMode()) {
+            log.info("[LicenseGuard] 开发模式，使用预置 dev token，License 校验正常运行（跳过远程心跳）");
         } else {
+            String activeProfiles = String.join(",", environment.getActiveProfiles());
             log.info("[LicenseGuard] profile=[{}] License 正常运行", activeProfiles);
         }
         return true;

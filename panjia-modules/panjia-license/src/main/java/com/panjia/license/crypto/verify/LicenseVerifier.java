@@ -1,64 +1,67 @@
 package com.panjia.license.crypto.verify;
 
-import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.domain.LicenseContent;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.io.InputStream;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.Date;
 
 /**
- * License JWT 签名验签核心。
- * 负责 token 的解码、签名验证、payload 提取。
+ * License JWT 签名验签核心（RSA 非对称）。
+ *
+ * 安全模型：
+ * - 授权服务器持有私钥，签发 token。
+ * - 客户端 JAR 内嵌公钥（license-public-key.pem），只能验签，不能签名。
+ * - 客户无法伪造合法 token，因为没有私钥。
+ *
+ * 公钥来源：classpath 资源 license-public-key.pem（JAR 内，不可被外部修改）。
  */
 @Slf4j
 @Component
 public class LicenseVerifier {
 
-    private final SecretKey signingKey;
+    private final PublicKey publicKey;
 
-    public LicenseVerifier(LicenseProperties properties) {
-        this.signingKey = deriveKey(properties.getSigningKey());
+    public LicenseVerifier() {
+        this.publicKey = loadPublicKey();
     }
 
     /**
-     * 从配置的密钥字符串派生 32 字节 HMAC-SHA256 密钥。
-     * 兼容 Base64 编码和原始字符串，无论长度多少都能生成合法密钥。
+     * 从 classpath 加载内嵌的 RSA 公钥证书。
      */
-    private static SecretKey deriveKey(String keyStr) {
-        byte[] raw;
-        try {
-            raw = Base64.getDecoder().decode(keyStr);
-        } catch (IllegalArgumentException e) {
-            raw = keyStr.getBytes(StandardCharsets.UTF_8);
-        }
-        // SHA-256 派生，确保 32 字节（HS256 最低要求）
-        try {
-            byte[] derived = MessageDigest.getInstance("SHA-256").digest(raw);
-            return Keys.hmacShaKeyFor(derived);
+    private static PublicKey loadPublicKey() {
+        try (InputStream is = LicenseVerifier.class.getClassLoader()
+                .getResourceAsStream("license-public-key.pem")) {
+            if (is == null) {
+                throw new IllegalStateException("license-public-key.pem 未找到（JAR 内嵌资源缺失）");
+            }
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            X509Certificate cert = (X509Certificate) cf.generateCertificate(is);
+            log.info("[LicenseVerifier] RSA 公钥加载成功: {}", cert.getSubjectX500Principal().getName());
+            return cert.getPublicKey();
         } catch (Exception e) {
-            throw new IllegalStateException("License 签名密钥派生失败", e);
+            throw new IllegalStateException("License 公钥加载失败: " + e.getMessage(), e);
         }
     }
 
     /**
-     * 解码并验证 token 签名。
+     * 解码并验证 token 签名（RSA 验签）。
      * @throws JwtException 签名无效/过期时抛出
      */
     public LicenseContent decodeToken(String token) {
         try {
             Jws<Claims> claimsJws = Jwts.parser()
-                    .verifyWith(signingKey)
+                    .verifyWith(publicKey)
                     .clock(() -> new Date(System.currentTimeMillis()))
                     .build()
                     .parseSignedClaims(token);
