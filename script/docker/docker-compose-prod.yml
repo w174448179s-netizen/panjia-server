@@ -1,0 +1,330 @@
+# ============================================================
+# 盘家智管 · 生产环境 Docker Compose
+# 使用方式：
+#   1. 复制 .env.example 为 .env 并修改其中的密码和配置
+#   2. 确保前端静态文件已放置到 config/nginx/html/ 目录
+#   3. 确保 Nginx SSL 证书已放置到 config/nginx/cert/ 目录
+#   4. 确保应用 jar 包已构建：
+#      mvn clean package -Pprod -DskipTests
+#   5. 启动：docker compose -f docker-compose-prod.yml up -d
+# ============================================================
+
+services:
+
+  # ==================== 数据库 ====================
+  postgres:
+    image: postgres:14.2
+    container_name: panjia-postgres
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      POSTGRES_USER: ${POSTGRES_USER:-panjia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Panjia@Prod2026}
+      POSTGRES_DB: ${POSTGRES_DB:-panjia}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panjia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - panjia-net
+
+  # ==================== 缓存 ====================
+  redis:
+    image: redis:8.6.3
+    container_name: panjia-redis
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ./config/redis:/redis/config:ro
+      - ./data/redis:/redis/data:rw
+    command: >-
+      redis-server /redis/config/redis.conf
+      --requirepass ${REDIS_PASSWORD:-Panjia@Redis2026}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-Panjia@Redis2026}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - panjia-net
+
+  # ==================== 对象存储 ====================
+  minio:
+    image: pgsty/minio:RELEASE.2026-04-17T00-00-00Z
+    container_name: panjia-minio
+    restart: unless-stopped
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-panjia}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-Panjia@Minio2026}
+      MINIO_COMPRESS: "off"
+      MINIO_COMPRESS_EXTENSIONS: ""
+      MINIO_COMPRESS_MIME_TYPES: ""
+      # 生产环境如需 HTTPS，取消以下注释并配置域名
+      # MINIO_SERVER_URL: "https://minio.panjia.com:9000"
+      # MINIO_BROWSER_REDIRECT_URL: "https://minio-console.panjia.com:9001"
+    volumes:
+      - ./data/minio:/data
+    command: server --address ':9000' --console-address ':9001' /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - panjia-net
+
+  # ==================== 盘家智管后端 ====================
+  panjia-admin:
+    build:
+      context: ../../ruoyi-admin
+      dockerfile: Dockerfile
+    image: panjia/admin:latest
+    container_name: panjia-admin
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      # Spring Profile
+      SPRING_PROFILES_ACTIVE: prod
+      # 数据库连接（覆盖 application-prod.yml 中的默认值）
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-panjia}?useUnicode=true&characterEncoding=utf8&useSSL=false&autoReconnect=true&reWriteBatchedInserts=true
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_USERNAME: ${POSTGRES_USER:-panjia}
+      SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_PASSWORD: ${POSTGRES_PASSWORD:-Panjia@Prod2026}
+      # Redis 连接
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:-Panjia@Redis2026}
+      # MinIO 连接
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-panjia}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-Panjia@Minio2026}
+      # Flyway 独立数据源（绕过 dynamic-datasource）
+      SPRING_FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-panjia}
+      SPRING_FLYWAY_USER: ${POSTGRES_USER:-panjia}
+      SPRING_FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-Panjia@Prod2026}
+      # License 配置
+      PANJIA_LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-https://license.panjia.com}
+      PANJIA_LICENSE_SIGNING_KEY: ${LICENSE_SIGNING_KEY:-cGFuamlhLWxpY2Vuc2Utc2lnbmluZy1rZXktMjAyNg==}
+      PANJIA_LICENSE_DATA_DIR: /data/panjia-license
+      # JVM 参数
+      JAVA_OPTS: >-
+        -Xms512m -Xmx2g
+        -XX:MaxMetaspaceSize=256m
+        -XX:+HeapDumpOnOutOfMemoryError
+        -XX:HeapDumpPath=/ruoyi/server/logs/heapdump.hprof
+        -Dserver.port=8080
+    ports:
+      - "${ADMIN_PORT:-8080}:8080"
+    volumes:
+      - ./data/panjia-admin/logs:/ruoyi/server/logs
+      - ./data/panjia-admin/temp:/ruoyi/server/temp
+      - panjia-license-data:/data/panjia-license
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    networks:
+      - panjia-net
+
+  # ==================== Nginx 反向代理 ====================
+  nginx-web:
+    image: nginx:1.31.1
+    container_name: panjia-nginx
+    restart: unless-stopped
+    depends_on:
+      panjia-admin:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # SSL 证书
+      - ./config/nginx/cert:/etc/nginx/cert
+      # Nginx 配置
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf
+      # 前端静态文件
+      - ./config/nginx/html:/usr/share/nginx/html
+      # 日志
+      - ./data/nginx/log:/var/log/nginx
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    networks:
+      - panjia-net
+
+  # ==================== 监控中心（可选） ====================
+  # 取消注释以启用 Spring Boot Admin 监控
+  # monitor-admin:
+  #   build:
+  #     context: ../../ruoyi-extend/ruoyi-monitor-admin
+  #     dockerfile: Dockerfile
+  #   image: panjia/monitor-admin:latest
+  #   container_name: panjia-monitor
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: Asia/Shanghai
+  #     JAVA_OPTS: "-Xms256m -Xmx512m"
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./data/monitor/logs:/ruoyi/monitor/logs
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 768M
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "3"
+  #   networks:
+  #     - panjia-net
+
+  # ==================== 定时任务调度（可选） ====================
+  # 取消注释以启用 SnailJob 定时任务
+  # snailjob-server:
+  #   build:
+  #     context: ../../ruoyi-extend/ruoyi-snailjob-server
+  #     dockerfile: Dockerfile
+  #   image: panjia/snailjob-server:latest
+  #   container_name: panjia-snailjob
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   environment:
+  #     TZ: Asia/Shanghai
+  #     JAVA_OPTS: "-Xms256m -Xmx512m"
+  #   ports:
+  #     - "8800:8800"
+  #     - "17888:17888"
+  #   volumes:
+  #     - ./data/snailjob/logs:/ruoyi/snailjob/logs
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 768M
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "3"
+  #   networks:
+  #     - panjia-net
+
+  # ==================== AI 服务（可选） ====================
+  # 取消注释以启用 SnailAI 智能助手
+  # snailai-server:
+  #   build:
+  #     context: ../../ruoyi-extend/ruoyi-snailai-server
+  #     dockerfile: Dockerfile
+  #   image: panjia/snailai-server:latest
+  #   container_name: panjia-snailai
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   environment:
+  #     TZ: Asia/Shanghai
+  #     JAVA_OPTS: "-Xms256m -Xmx1g"
+  #   ports:
+  #     - "8900:8900"
+  #     - "18888:18888"
+  #   volumes:
+  #     - ./data/snailai/logs:/ruoyi/snailai/logs
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 2G
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "3"
+  #   networks:
+  #     - panjia-net
+
+# ==================== 网络 ====================
+networks:
+  panjia-net:
+    driver: bridge
+
+# ==================== 数据卷 ====================
+volumes:
+  panjia-license-data:
+    driver: local

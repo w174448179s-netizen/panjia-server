@@ -57,3 +57,4 @@ application-ga.yml
 ######################################################################
 # Docker runtime data（配置提交 Git，运行时数据不提交）
 script/docker/data/
+script/docker/.env
