@@ -4,6 +4,7 @@ import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.panjia.license.LicenseMode;
 import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.crypto.verify.LicenseVerifier;
 import com.panjia.license.domain.HardwareFingerprint;
@@ -13,7 +14,6 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
-import com.panjia.license.security.LicenseGuard;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -33,23 +33,22 @@ public class LicenseServiceImpl implements LicenseService {
     private final LicenseProperties properties;
     private final LicenseContext context;
     private final LicenseVerifier licenseVerifier;
-    private final LicenseGuard licenseGuard;
 
     public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
-                              LicenseVerifier licenseVerifier, LicenseGuard licenseGuard) {
+                              LicenseVerifier licenseVerifier) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
-        this.licenseGuard = licenseGuard;
     }
 
     /**
      * dev 模式：用预置 dev token 初始化上下文。
      * 生产模式：无操作，等待激活流程。
+     * LicenseMode.DEV 是编译时常量，prod 构建时此方法体被编译器消除。
      */
     @PostConstruct
     public void initDevMode() {
-        if (licenseGuard.isDevMode() && !properties.getDevToken().isEmpty()) {
+        if (LicenseMode.DEV && !properties.getDevToken().isEmpty()) {
             try {
                 LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
                 context.setLicense(content, properties.getDevToken());
@@ -108,8 +107,8 @@ public class LicenseServiceImpl implements LicenseService {
 
     @Override
     public HeartbeatResult heartbeat() {
-        // dev 模式：跳过远程心跳
-        if (licenseGuard.isDevMode()) {
+        // dev 模式：跳过远程心跳（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
+        if (LicenseMode.DEV) {
             log.debug("[heartbeat] dev 模式，跳过远程心跳");
             return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
         }
@@ -158,8 +157,8 @@ public class LicenseServiceImpl implements LicenseService {
     public CheckResult check(String operation) {
         OperationEnum op = OperationEnum.valueOf(operation);
 
-        // dev 模式：直接放行所有操作
-        if (licenseGuard.isDevMode()) {
+        // dev 模式：直接放行所有操作（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
+        if (LicenseMode.DEV) {
             return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
         }
 

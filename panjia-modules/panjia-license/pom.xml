@@ -66,25 +66,45 @@
     </dependencies>
 
     <build>
-        <resources>
-            <!-- 对 license-mode.properties 启用 Maven filtering，构建时注入 mode -->
-            <resource>
-                <directory>src/main/resources</directory>
-                <filtering>true</filtering>
-                <includes>
-                    <include>panjia-license-mode.properties</include>
-                </includes>
-            </resource>
-            <!-- 其余资源不过滤 -->
-            <resource>
-                <directory>src/main/resources</directory>
-                <filtering>false</filtering>
-                <excludes>
-                    <exclude>panjia-license-mode.properties</exclude>
-                </excludes>
-            </resource>
-        </resources>
         <plugins>
+            <!-- 构建时生成 LicenseMode.java（编译时常量，编译器消除死分支） -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>templating-maven-plugin</artifactId>
+                <version>3.0.0</version>
+                <executions>
+                    <execution>
+                        <id>generate-license-mode</id>
+                        <goals>
+                            <goal>filter-sources</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <sourceDirectory>${basedir}/src/main/templates</sourceDirectory>
+                    <outputDirectory>${project.build.directory}/generated-sources/license</outputDirectory>
+                </configuration>
+            </plugin>
+            <!-- 将生成目录加入编译源路径 -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <id>add-license-mode-source</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>add-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.build.directory}/generated-sources/license</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- 构建时生成 class 校验和（打包进 JAR，运行时 IntegrityChecker 读取） -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
@@ -111,21 +131,21 @@
     </build>
 
     <profiles>
-        <!-- 开发构建：mvn -P dev package -->
+        <!-- 开发构建：mvn -P dev package → DEV=true，dev 分支保留 -->
         <profile>
             <id>dev</id>
             <properties>
-                <license.mode>dev</license.mode>
+                <license.dev>true</license.dev>
             </properties>
         </profile>
-        <!-- 生产构建（默认）：mvn package -->
+        <!-- 生产构建（默认）：mvn package → DEV=false，dev 分支被编译器消除 -->
         <profile>
             <id>prod</id>
             <activation>
                 <activeByDefault>true</activeByDefault>
             </activation>
             <properties>
-                <license.mode>prod</license.mode>
+                <license.dev>false</license.dev>
             </properties>
         </profile>
     </profiles>

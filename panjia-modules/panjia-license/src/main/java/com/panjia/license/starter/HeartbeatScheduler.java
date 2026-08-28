@@ -1,7 +1,7 @@
 package com.panjia.license.starter;
 
+import com.panjia.license.LicenseMode;
 import com.panjia.license.config.LicenseProperties;
-import com.panjia.license.security.LicenseGuard;
 import com.panjia.license.service.LicenseService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -25,22 +25,18 @@ public class HeartbeatScheduler {
     private final LicenseProperties properties;
     private final LicenseService licenseService;
     private final MonotonicClock monotonicClock;
-    private final LicenseGuard licenseGuard;
     private ScheduledExecutorService scheduler;
 
     public HeartbeatScheduler(LicenseProperties properties, LicenseService licenseService,
-                               MonotonicClock monotonicClock, LicenseGuard licenseGuard) {
+                               MonotonicClock monotonicClock) {
         this.properties = properties;
         this.licenseService = licenseService;
         this.monotonicClock = monotonicClock;
-        this.licenseGuard = licenseGuard;
     }
 
     @PostConstruct
     public void start() {
-        // LicenseGuard 始终返回 true，不再作为跳过条件
-        // dev 模式跳过心跳调度
-        if (licenseGuard.isDevMode()) {
+        if (LicenseMode.DEV) {
             log.info("[HeartbeatScheduler] dev 模式，跳过远程心跳调度");
             return;
         }
