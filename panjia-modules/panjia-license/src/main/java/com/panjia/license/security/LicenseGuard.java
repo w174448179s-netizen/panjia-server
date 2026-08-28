@@ -9,12 +9,12 @@ import org.springframework.stereotype.Component;
 /**
  * License 强制守卫。
  *
- * 安全策略：
- * - 始终返回 true，所有环境都执行 License 校验。
- * - dev 环境通过预置 dev token + 跳过远程心跳实现"本地自洽"。
- * - 生产环境需要真实激活 token + 远程心跳。
+ * dev 模式由 Spring profile 推导，不是配置项：
+ * - profile=dev/local → dev 模式（跳过远程心跳，使用预置 dev token）
+ * - 其他 profile → 生产模式（真实激活 + 远程心跳）
  *
- * 这意味着所有环境走同一套代码路径，License 代码在开发时就被验证。
+ * 这意味着客户无法通过改 yml 配置进入 dev 模式，
+ * 必须改 spring.profiles.active，而改 profile 会导致数据库、日志等全部变化。
  */
 @Slf4j
 @Component
@@ -30,15 +30,19 @@ public class LicenseGuard {
 
     /**
      * 始终返回 true。所有环境都执行 License 校验。
-     * dev 环境通过 devMode + devToken 实现本地自洽，不跳过校验逻辑。
      */
     public boolean shouldEnforce() {
-        if (properties.isDevMode()) {
-            log.info("[LicenseGuard] 开发模式，使用预置 dev token，License 校验正常运行（跳过远程心跳）");
-        } else {
-            String activeProfiles = String.join(",", environment.getActiveProfiles());
-            log.info("[LicenseGuard] profile=[{}] License 正常运行", activeProfiles);
+        if (isDevMode()) {
+            log.info("[LicenseGuard] dev profile，使用预置 dev token，License 校验正常运行（跳过远程心跳）");
         }
         return true;
+    }
+
+    /**
+     * 是否为开发模式。由 Spring profile 推导，不可通过配置项覆盖。
+     * 只有 dev / local 两个 profile 才返回 true。
+     */
+    public boolean isDevMode() {
+        return environment.acceptsProfiles(Profiles.of("dev", "local"));
     }
 }

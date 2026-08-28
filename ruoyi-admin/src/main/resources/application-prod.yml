@@ -326,5 +326,4 @@ justauth:
 # 生产环境：真实激活流程 + 远程心跳，无 dev token
 panjia:
   license:
-    dev-mode: false
     dev-token: ""

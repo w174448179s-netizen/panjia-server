@@ -13,6 +13,7 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
+import com.panjia.license.security.LicenseGuard;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -32,11 +33,14 @@ public class LicenseServiceImpl implements LicenseService {
     private final LicenseProperties properties;
     private final LicenseContext context;
     private final LicenseVerifier licenseVerifier;
+    private final LicenseGuard licenseGuard;
 
-    public LicenseServiceImpl(LicenseProperties properties, LicenseContext context, LicenseVerifier licenseVerifier) {
+    public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
+                              LicenseVerifier licenseVerifier, LicenseGuard licenseGuard) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
+        this.licenseGuard = licenseGuard;
     }
 
     /**
@@ -45,7 +49,7 @@ public class LicenseServiceImpl implements LicenseService {
      */
     @PostConstruct
     public void initDevMode() {
-        if (properties.isDevMode() && !properties.getDevToken().isEmpty()) {
+        if (licenseGuard.isDevMode() && !properties.getDevToken().isEmpty()) {
             try {
                 LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
                 context.setLicense(content, properties.getDevToken());
@@ -105,7 +109,7 @@ public class LicenseServiceImpl implements LicenseService {
     @Override
     public HeartbeatResult heartbeat() {
         // dev 模式：跳过远程心跳
-        if (properties.isDevMode()) {
+        if (licenseGuard.isDevMode()) {
             log.debug("[heartbeat] dev 模式，跳过远程心跳");
             return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
         }
@@ -155,7 +159,7 @@ public class LicenseServiceImpl implements LicenseService {
         OperationEnum op = OperationEnum.valueOf(operation);
 
         // dev 模式：直接放行所有操作
-        if (properties.isDevMode()) {
+        if (licenseGuard.isDevMode()) {
             return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
         }
 

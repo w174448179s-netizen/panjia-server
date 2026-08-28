@@ -15,9 +15,6 @@ public class LicenseProperties {
     /** 授权服务器基础地址 */
     private String serverUrl = "https://license.panjia.com";
 
-    /** 开发模式（跳过远程心跳，使用预置 dev token） */
-    private boolean devMode = false;
-
     /** 预置 dev token（开发环境用，生产环境为空） */
     private String devToken = "";
 

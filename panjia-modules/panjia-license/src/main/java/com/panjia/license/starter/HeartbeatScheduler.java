@@ -40,7 +40,7 @@ public class HeartbeatScheduler {
     public void start() {
         // LicenseGuard 始终返回 true，不再作为跳过条件
         // dev 模式跳过心跳调度
-        if (properties.isDevMode()) {
+        if (licenseGuard.isDevMode()) {
             log.info("[HeartbeatScheduler] dev 模式，跳过远程心跳调度");
             return;
         }
