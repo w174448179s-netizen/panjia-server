@@ -1,5 +1,6 @@
 package com.panjia.license.security;
 
+import com.panjia.license.LicenseMode;
 import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.exception.IntegrityException;
 import com.panjia.license.util.LicenseFileUtils;
@@ -77,7 +78,11 @@ public class IntegrityChecker {
         try {
             Map<String, String> stored = loadChecksums();
             if (stored == null) {
-                return true; // 无校验和文件（开发模式），跳过
+                if (LicenseMode.DEV) {
+                    return true; // 开发模式无 checksums，跳过
+                }
+                log.error("[IntegrityChecker] 生产环境 checksums 缺失，快速校验失败");
+                return false;
             }
             for (String cls : List.of(
                     "com/panjia/license/security/LicenseGuard.class",
@@ -243,12 +248,7 @@ public class IntegrityChecker {
     }
 
     private boolean isDevEnvironment() {
-        try {
-            String profiles = System.getProperty("spring.profiles.active", "");
-            return profiles.contains("dev") || profiles.contains("local");
-        } catch (Exception e) {
-            return false;
-        }
+        return LicenseMode.DEV;
     }
 
     private byte[] sha256(byte[] data) {
