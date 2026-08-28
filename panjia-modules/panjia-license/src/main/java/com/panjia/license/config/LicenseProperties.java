@@ -12,9 +12,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "panjia.license")
 public class LicenseProperties {
 
-    /** 是否启用 License 校验 */
-    private boolean enabled = true;
-
     /** 授权服务器基础地址 */
     private String serverUrl = "https://license.panjia.com";
 
