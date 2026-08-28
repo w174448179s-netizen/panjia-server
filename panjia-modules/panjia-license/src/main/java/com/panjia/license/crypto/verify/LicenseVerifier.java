@@ -11,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import javax.crypto.SecretKey;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
@@ -18,8 +20,6 @@ import java.util.Date;
 /**
  * License JWT 签名验签核心。
  * 负责 token 的解码、签名验证、payload 提取。
- *
- * 注意：本类不直接做指纹比对（那是服务端职责），仅做签名合法性验证 + payload 解码。
  */
 @Slf4j
 @Component
@@ -28,8 +28,27 @@ public class LicenseVerifier {
     private final SecretKey signingKey;
 
     public LicenseVerifier(LicenseProperties properties) {
-        byte[] keyBytes = Base64.getDecoder().decode(properties.getSigningKey());
-        this.signingKey = Keys.hmacShaKeyFor(keyBytes);
+        this.signingKey = deriveKey(properties.getSigningKey());
+    }
+
+    /**
+     * 从配置的密钥字符串派生 32 字节 HMAC-SHA256 密钥。
+     * 兼容 Base64 编码和原始字符串，无论长度多少都能生成合法密钥。
+     */
+    private static SecretKey deriveKey(String keyStr) {
+        byte[] raw;
+        try {
+            raw = Base64.getDecoder().decode(keyStr);
+        } catch (IllegalArgumentException e) {
+            raw = keyStr.getBytes(StandardCharsets.UTF_8);
+        }
+        // SHA-256 派生，确保 32 字节（HS256 最低要求）
+        try {
+            byte[] derived = MessageDigest.getInstance("SHA-256").digest(raw);
+            return Keys.hmacShaKeyFor(derived);
+        } catch (Exception e) {
+            throw new IllegalStateException("License 签名密钥派生失败", e);
+        }
     }
 
     /**

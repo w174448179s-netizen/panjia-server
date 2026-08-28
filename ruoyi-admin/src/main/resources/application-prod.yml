@@ -321,3 +321,9 @@ justauth:
       client-id: 10**********6
       client-secret: 1f7d08**********5b7**********29e
       redirect-uri: ${justauth.address}/social-callback?source=gitea
+
+--- # License 授权校验配置
+# 生产环境强制开启，代码级保护（LicenseGuard 检测 prod profile 时忽略 enabled=false）
+panjia:
+  license:
+    enabled: true

@@ -2,6 +2,7 @@ package com.panjia.license.interceptor;
 
 import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.enums.OperationEnum;
+import com.panjia.license.security.LicenseGuard;
 import com.panjia.license.service.LicenseContext;
 import com.panjia.license.service.LicenseService;
 import lombok.extern.slf4j.Slf4j;
@@ -14,11 +15,8 @@ import jakarta.servlet.http.HttpServletResponse;
 /**
  * License 关键操作拦截器。
  *
- * 铁律：关键操作（IMPORT/CALCULATE/EXPORT）每次调用 /check，按 operation 枚举区分。
- * 降级优先级（§2.5，避免逻辑冲突）：
- *   1. 真·断网（networkReachable=false）→ 离线模式规则1，无论缓存是否有效，均禁止核心操作
- *   2. 在线 + 服务端临时不可达（5xx/超时，但 TCP 通）+ 30 分钟内曾成功 /check → 允许（用缓存）
- *   3. 在线 + 服务端不可达超过 30 分钟 → 锁定核心功能
+ * 当 License 未启用时（非 prod profile 且 enabled=false），所有请求直接放行。
+ * prod profile 下 LicenseGuard 强制开启，无法绕过。
  *
  * 使用方式：在 Controller 方法上标注 @LicenseCheck(operation = OperationEnum.CALCULATE)
  */
@@ -28,23 +26,26 @@ public class LicenseInterceptor implements HandlerInterceptor {
 
     private final LicenseService licenseService;
     private final LicenseContext licenseContext;
-    private final LicenseProperties properties;
+    private final LicenseGuard licenseGuard;
 
     public LicenseInterceptor(LicenseService licenseService,
                               LicenseContext licenseContext,
-                              LicenseProperties properties) {
+                              LicenseGuard licenseGuard) {
         this.licenseService = licenseService;
         this.licenseContext = licenseContext;
-        this.properties = properties;
+        this.licenseGuard = licenseGuard;
     }
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
-        // 仅拦截标注了 @LicenseCheck 的方法（通过反射判断）
+        if (!licenseGuard.shouldEnforce()) {
+            return true;
+        }
+
         if (handler instanceof org.springframework.web.method.HandlerMethod hm) {
             var annotation = hm.getMethodAnnotation(com.panjia.license.interceptor.annotation.LicenseCheck.class);
             if (annotation == null) {
-                return true; // 未标注 → 放行
+                return true;
             }
             OperationEnum operation = annotation.operation();
 

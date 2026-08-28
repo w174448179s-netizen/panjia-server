@@ -1,3 +1,8 @@
+--- # License 配置（本地开发关闭，避免连不上授权服务器）
+panjia:
+  license:
+    enabled: false
+
 --- # 监控中心配置
 spring.boot.admin.client:
   # 增加客户端开关

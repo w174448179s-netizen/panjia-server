@@ -2,14 +2,13 @@ package com.panjia.license.config;
 
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.stereotype.Component;
 
 /**
  * License 模块配置属性。
  * 对应 application.yml 中 panjia.license.* 节点。
+ * 通过 @EnableConfigurationProperties 在 LicenseAutoConfiguration 中注册，不需要 @Component。
  */
 @Data
-@Component
 @ConfigurationProperties(prefix = "panjia.license")
 public class LicenseProperties {
 

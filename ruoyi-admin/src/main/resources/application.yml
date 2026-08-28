@@ -43,10 +43,10 @@ user:
     lockTime: 10
 
 # License 授权校验配置
+# enabled 默认 true（生产环境强制开启，代码级保护不可关闭）
+# 本地开发请在 application-dev.yml / application-local.yml 中设置 enabled: false
 panjia:
   license:
-    # 是否启用 License 校验（生产环境必须开启）
-    enabled: true
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://license.panjia.example.com}
     # JWT 签名密钥（Base64 编码，生产环境必须替换）

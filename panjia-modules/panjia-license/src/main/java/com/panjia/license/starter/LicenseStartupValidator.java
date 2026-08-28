@@ -4,6 +4,7 @@ import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.exception.LicenseException;
 import com.panjia.license.exception.MonotonicException;
+import com.panjia.license.security.LicenseGuard;
 import com.panjia.license.security.RestrictedMode;
 import com.panjia.license.service.LicenseService;
 import com.panjia.license.service.MultiInstanceDetector;
@@ -14,7 +15,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * 启动时执行 License 校验。
- * 设计 §2.1 阶段一：客户端启动 → 加载本地 License → 计算 fingerprint → 校验 → 失败则受限模式
+ * 非 prod 且 enabled=false 时跳过，prod 下强制执行。
  */
 @Slf4j
 @Component
@@ -24,27 +25,29 @@ public class LicenseStartupValidator {
     private final LicenseProperties properties;
     private final RestrictedMode restrictedMode;
     private final MultiInstanceDetector multiInstanceDetector;
+    private final LicenseGuard licenseGuard;
 
     public LicenseStartupValidator(LicenseService licenseService,
                                    LicenseProperties properties,
                                    RestrictedMode restrictedMode,
-                                   MultiInstanceDetector multiInstanceDetector) {
+                                   MultiInstanceDetector multiInstanceDetector,
+                                   LicenseGuard licenseGuard) {
         this.licenseService = licenseService;
         this.properties = properties;
         this.restrictedMode = restrictedMode;
         this.multiInstanceDetector = multiInstanceDetector;
+        this.licenseGuard = licenseGuard;
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void onApplicationReady() {
-        if (!properties.isEnabled()) {
-            log.info("[LicenseStartupValidator] License 校验已关闭（license.enabled=false）");
+        if (!licenseGuard.shouldEnforce()) {
+            log.info("[LicenseStartupValidator] License 校验已关闭（非 prod 环境，enabled=false）");
             return;
         }
 
         log.info("[LicenseStartupValidator] ========== License 启动校验开始 ==========");
 
-        // 1. 先检查是否被拉黑（多实例自动拉黑）
         if (multiInstanceDetector.isBlacklisted()) {
             log.warn("[LicenseStartupValidator] 检测到拉黑标记，直接进入受限模式");
             restrictedMode.trigger("T2_SERVER_REVOKED", "启动检测到拉黑标记");
@@ -52,7 +55,6 @@ public class LicenseStartupValidator {
             return;
         }
 
-        // 2. 正常启动校验
         try {
             LicenseStatusEnum status = licenseService.getCurrentStatus();
             log.info("[LicenseStartupValidator] 当前授权状态: {}", status);
