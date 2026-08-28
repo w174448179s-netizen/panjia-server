@@ -9,12 +9,14 @@ import org.springframework.stereotype.Component;
 /**
  * License 强制守卫。
  *
- * 安全策略：
- *   - prod profile 激活时，License 强制开启，无视 panjia.license.enabled=false 配置。
- *   - 非 prod profile（dev/local/test）时，尊重 enabled 配置，开发可关闭。
+ * 安全策略（安全默认 / 白名单关闭）：
+ * - 只有 dev / local 两个开发 profile 才允许通过 enabled=false 关闭 License。
+ * - 其他所有 profile（prod / staging / test / 未设置 / 随便编的）都强制运行 License。
  *
- * 这意味着：即使在生产环境有人修改 yml 或注入环境变量 PANJIA_LICENSE_ENABLED=false，
- * 只要 Spring profile=prod，License 校验仍然强制运行。
+ * 这意味着：
+ * - 生产环境改 profile=dev 会触发其他生产配置失效（数据库、日志级别等），代价极高。
+ * - 改成任意非开发 profile（如 staging），License 仍然强制运行。
+ * - 不设置 profile，License 默认强制（安全默认）。
  */
 @Slf4j
 @Component
@@ -30,15 +32,27 @@ public class LicenseGuard {
 
     /**
      * License 是否应该强制执行校验。
-     * prod 环境永远返回 true，非 prod 环境跟随 enabled 配置。
+     * 白名单策略：只有 dev/local 才允许关闭，其余全部强制。
      */
     public boolean shouldEnforce() {
-        if (environment.acceptsProfiles(Profiles.of("prod"))) {
-            if (!properties.isEnabled()) {
-                log.warn("[LicenseGuard] 检测到 prod profile 但 enabled=false，已强制覆盖为 true（代码级保护）");
+        boolean isDevProfile = environment.acceptsProfiles(Profiles.of("dev", "local"));
+
+        if (isDevProfile) {
+            if (properties.isEnabled()) {
+                log.info("[LicenseGuard] 开发环境，enabled=true，License 正常运行");
+                return true;
             }
-            return true;
+            log.info("[LicenseGuard] 开发环境，enabled=false，License 已关闭");
+            return false;
         }
-        return properties.isEnabled();
+
+        // 非开发环境：一律强制
+        String activeProfiles = String.join(",", environment.getActiveProfiles());
+        if (!properties.isEnabled()) {
+            log.warn("[LicenseGuard] profile=[{}] enabled=false，但非开发环境，已强制覆盖为 true（代码级保护）", activeProfiles);
+        } else {
+            log.info("[LicenseGuard] profile=[{}] License 正常运行", activeProfiles);
+        }
+        return true;
     }
 }
