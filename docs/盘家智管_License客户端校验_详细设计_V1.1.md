@@ -1,9 +1,16 @@
 # 盘家智管 License 客户端校验详细设计
 
-> 版本：V1.1
+> 版本：V1.2
 > 状态：设计定稿（第一阶段）
 > 开发工作量：约 11.5 人天
 > 评审结论：通过（6 处修订全部落地，无架构级缺陷）
+>
+> V1.2 变更（2026-08-28）：
+> - 修订 §2.10：dev/prod 模式从 Spring profile 推导改为**编译时常量**（`LicenseMode.DEV`），消除运行时判断方法
+> - 修订 §4.6：quickCheck 校验范围从 3 个 class 扩展到 4 个（加入 `LicenseMode.class`）；全量校验 14 个 class
+> - 修订铁律 20：从"Spring profile 推导"改为"编译时 Maven 注入常量"
+> - 新增铁律 23：`LicenseMode.class` 必须纳入完整性校验列表
+> - 新增验收标准 41：生产构建 `DEV=false`，dev 分支被编译器死代码消除
 >
 > V1.1 变更（2026-08-28）：
 > - 新增 §2.9：RSA 非对称签名机制（防止客户伪造 token）
@@ -285,22 +292,35 @@ script/keys/generate-keys.sh
 **dev 模式判定方式（关键安全设计）**：
 
 ```
-❌ 旧方案（V1.0 隐含）：
+❌ V1.0 隐含方案：
   LicenseProperties.devMode = true  ← 配置项，客户可改
 
-✅ 新方案（V1.1）：
+❌ V1.1 方案：
   LicenseGuard.isDevMode()
     → environment.acceptsProfiles(Profiles.of("dev", "local"))
-    → 由 spring.profiles.active 决定，不是配置项
+    → 由 spring.profiles.active 决定
+    → 仍有运行时方法可被反编译修改
+
+✅ V1.2 方案（当前）：
+  LicenseMode.DEV  ← 编译时常量，Maven 构建时注入
+    → templating-maven-plugin 生成 LicenseMode.java
+    → mvn package        → DEV=false → 编译器消除所有 if (LicenseMode.DEV) 分支
+    → mvn -P dev package → DEV=true  → dev 分支保留
+    → 没有 isDevMode() 运行时方法
+    → 不读 Spring profile，不读 yml，不读环境变量
+    → prod JAR 的字节码中根本不存在 dev 分支
 ```
 
-**为什么 dev-mode 不能是配置项**：
+**为什么不能用运行时判断（包括 Spring profile）**：
 
-| 攻击方式 | 成本 | dev-mode 配置项 | Spring profile 推导 |
+| 攻击方式 | 成本 | 运行时方法 / profile | 编译时常量 |
 |---|---|---|---|
-| 改 yml `dev-mode: true` | 极低 | ❌ 可绕过 | ✅ 不存在此配置项 |
-| 改环境变量 | 极低 | ❌ 可绕过 | ✅ 无此变量 |
-| 改 `spring.profiles.active=dev` | 高 | 不适用 | ⚠️ 可绕过但数据库、日志、Redis 全部变 dev 配置，应用基本不可用 |
+| 改 yml | 极低 | ❌ 可绕过 | ✅ 不读 yml |
+| 改环境变量 | 极低 | ❌ 可绕过 | ✅ 不读环境变量 |
+| 改 spring.profiles.active=dev | 低 | ❌ 可绕过（虽有副作用） | ✅ 不读 profile |
+| 反编译改 isDevMode() → return true | 中 | ❌ 可绕过 | ✅ 方法不存在 |
+| 反编译改 LicenseMode.class → DEV=true | 中 | 不适用 | ⚠️ IntegrityChecker 检出（class 哈希不匹配） |
+| 解压 JAR 改 properties 文件 | 低 | 不适用 | ✅ 不存在 properties 文件 |
 
 **dev token 安全性**：
 
@@ -314,7 +334,7 @@ script/keys/generate-keys.sh
   → 没有私钥 → 签不出来 → 公钥验签失败
 ```
 
-> **铁律 20**：开发模式由 `spring.profiles.active` 推导（dev/local → dev 模式），不允许通过配置项 `dev-mode` 控制。`application.yml` 中不存在的配置项无法被修改。
+> **铁律 20**：开发/生产模式由**编译时常量** `LicenseMode.DEV` 决定（Maven `templating-maven-plugin` 构建时注入）。禁止使用运行时方法（`isDevMode()`）、Spring profile 推导、`System.getProperty`、配置项（`dev-mode`）等任何运行时判断。生产构建（`mvn package`）的 JAR 中 `DEV=false`，编译器消除所有 dev 分支，字节码中不存在 dev 逻辑。
 
 > **铁律 21**：所有环境（含 dev）必须走完整 License 校验代码路径。禁止通过 `enabled=false` 跳过校验。dev 与 prod 的差异仅在数据来源（dev token vs 真实 token），不在代码路径。
 
@@ -529,9 +549,9 @@ mvn process-classes
 
 | 方法 | 校验范围 | 调用时机 | 性能 |
 |---|---|---|---|
-| `checkStartup()` | 全量 16 个关键 class | Spring 启动阶段 | 启动期，可接受 |
-| `checkBeforeSalary()` | 全量 16 个关键 class | 算薪前 | 低频操作，可接受 |
-| `quickCheck()` | 3 个核心 class（LicenseGuard + IntegrityChecker + LicenseVerifier） | 拦截器每次请求 | 高频，<1ms |
+| `checkStartup()` | 全量 14 个关键 class（含 `LicenseMode.class`） | Spring 启动阶段 | 启动期，可接受 |
+| `checkBeforeSalary()` | 全量 14 个关键 class（含 `LicenseMode.class`） | 算薪前 | 低频操作，可接受 |
+| `quickCheck()` | 4 个核心 class（`LicenseMode` + `LicenseGuard` + `IntegrityChecker` + `LicenseVerifier`） | 拦截器每次请求 | 高频，<1ms |
 
 **自校验机制**：
 
@@ -817,10 +837,14 @@ volumes:
 
 35. License token 使用 RSA 非对称签名；私钥不在客户端 JAR / 配置文件中 → 客户无法伪造 token
 36. 公钥嵌入 JAR classpath 资源（`license-public-key.pem`），不在 `application.yml` 中
-37. dev 模式由 `spring.profiles.active` 推导，yml 中不存在 `dev-mode` 配置项 → 改 yml 无法进入 dev 模式
+37. dev/prod 模式由编译时常量 `LicenseMode.DEV` 决定（Maven 构建时注入）；生产 JAR 中 `DEV=false`，dev 分支被编译器消除；不存在 `isDevMode()` 运行时方法；改 yml / 环境变量 / Spring profile 均无效
 38. 所有环境（含 dev）走完整 License 校验代码路径，`enabled` 配置项不存在 → 无法跳过
 39. 移除 `panjia-license` 模块 → 应用启动失败（`LicenseStartupHook` 找不到 `LicenseCheckPoint` bean）
 40. 完整性校验自校验：篡改 `IntegrityChecker.class` 本身 → 校验和不匹配 → 被检出
+
+### 编译时常量与完整性校验（41，V1.2 新增）
+
+41. `LicenseMode.class` 纳入完整性校验列表（全量 + 快检）；反编译篡改 `DEV=false → true` → SHA-256 不匹配 → IntegrityChecker 检出 → 进入受限模式
 
 ---
 
@@ -828,6 +852,7 @@ volumes:
 
 ```
 com.panjia.license
+├── LicenseMode        # ⚠️ 编译时常量（Maven templating-maven-plugin 生成，不入 src/main/java）
 ├── config/           # LicenseProperties、Web 配置
 ├── domain/           # LicenseContent、HardwareFingerprint、FingerprintFactor、VersionRange
 ├── enums/            # LicenseStatusEnum、FingerprintStatusEnum、ClientModeEnum、OperationEnum、TriggerCodeEnum
@@ -873,9 +898,10 @@ com.panjia.admin
 | 17 | 证书轮换备指纹不可服务端下发；**阶段 3/4 后不可回退旧证书** | — |
 | 18 | 版本越界一律拒绝，不高版本绕过安全修复 | §7.4 |
 | 19 | License token 必须使用 RSA 非对称签名；私钥仅在授权服务器，公钥嵌入 JAR；禁止对称签名，禁止密钥放配置文件 | §2.9 |
-| 20 | 开发模式由 `spring.profiles.active` 推导，不允许通过配置项 `dev-mode` 控制 | §2.10 |
+| 20 | 开发/生产模式由编译时常量 `LicenseMode.DEV` 决定（Maven 构建时注入）；禁止运行时方法、Spring profile 推导、`System.getProperty`、配置项；生产 JAR 中 dev 分支被编译器消除 | §2.10 |
 | 21 | 所有环境（含 dev）必须走完整 License 校验代码路径，禁止通过 `enabled=false` 跳过 | §2.10 |
 | 22 | `panjia-license` 是应用启动硬依赖，移除模块必须导致启动失败；业务关键方法必须调用 `LicenseCheckPoint.requireLicense()` | §4.5 |
+| 23 | `LicenseMode.class` 必须纳入完整性校验列表（全量 + 快检）；篡改编译时常量 → 哈希不匹配 → 被检出 | §4.6 |
 
 ---
 
