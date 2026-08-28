@@ -66,6 +66,24 @@
     </dependencies>
 
     <build>
+        <resources>
+            <!-- 对 license-mode.properties 启用 Maven filtering，构建时注入 mode -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>panjia-license-mode.properties</include>
+                </includes>
+            </resource>
+            <!-- 其余资源不过滤 -->
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>panjia-license-mode.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <!-- 构建时生成 class 校验和（打包进 JAR，运行时 IntegrityChecker 读取） -->
             <plugin>
@@ -91,5 +109,25 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- 开发构建：mvn -P dev package -->
+        <profile>
+            <id>dev</id>
+            <properties>
+                <license.mode>dev</license.mode>
+            </properties>
+        </profile>
+        <!-- 生产构建（默认）：mvn package -->
+        <profile>
+            <id>prod</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <properties>
+                <license.mode>prod</license.mode>
+            </properties>
+        </profile>
+    </profiles>
 
 </project>

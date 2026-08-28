@@ -1,48 +1,69 @@
 package com.panjia.license.security;
 
-import com.panjia.license.config.LicenseProperties;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.core.env.Environment;
-import org.springframework.core.env.Profiles;
 import org.springframework.stereotype.Component;
+
+import java.io.InputStream;
+import java.util.Properties;
 
 /**
  * License 强制守卫。
  *
- * dev 模式由 Spring profile 推导，不是配置项：
- * - profile=dev/local → dev 模式（跳过远程心跳，使用预置 dev token）
- * - 其他 profile → 生产模式（真实激活 + 远程心跳）
+ * dev/prod 模式由构建时 Maven 注入，不是运行时配置：
+ * - 开发构建（mvn -P dev package）→ JAR 内 panjia-license-mode.properties 写 mode=dev
+ * - 生产构建（mvn package）        → JAR 内写 mode=prod
  *
- * 这意味着客户无法通过改 yml 配置进入 dev 模式，
- * 必须改 spring.profiles.active，而改 profile 会导致数据库、日志等全部变化。
+ * 客户拿到生产 JAR → properties 烙死 mode=prod → dev 模式永不激活。
+ * 改 yml / 环境变量 / Spring profile 均无效，因为不读这些。
+ * 要改必须解压 JAR 替换 properties → 重新打包（攻击成本高）。
  */
 @Slf4j
 @Component
 public class LicenseGuard {
 
-    private final LicenseProperties properties;
-    private final Environment environment;
+    private final boolean devMode;
 
-    public LicenseGuard(LicenseProperties properties, Environment environment) {
-        this.properties = properties;
-        this.environment = environment;
+    public LicenseGuard() {
+        this.devMode = loadBakedMode();
+        if (devMode) {
+            log.info("[LicenseGuard] dev 模式（构建时注入），License 校验运行但跳过远程调用");
+        } else {
+            log.info("[LicenseGuard] prod 模式（构建时注入），License 完整校验");
+        }
     }
 
     /**
      * 始终返回 true。所有环境都执行 License 校验。
      */
     public boolean shouldEnforce() {
-        if (isDevMode()) {
-            log.info("[LicenseGuard] dev profile，使用预置 dev token，License 校验正常运行（跳过远程心跳）");
-        }
         return true;
     }
 
     /**
-     * 是否为开发模式。由 Spring profile 推导，不可通过配置项覆盖。
-     * 只有 dev / local 两个 profile 才返回 true。
+     * 是否为开发模式。读 JAR 内嵌的 panjia-license-mode.properties（构建时注入）。
+     * 不读 Spring profile，不读 yml，不读环境变量。
      */
     public boolean isDevMode() {
-        return environment.acceptsProfiles(Profiles.of("dev", "local"));
+        return devMode;
+    }
+
+    /**
+     * 从 classpath 加载构建时注入的 mode 标志。
+     * 此文件在 JAR 内部，运行时不可修改。
+     */
+    private static boolean loadBakedMode() {
+        try (InputStream is = LicenseGuard.class.getClassLoader()
+                .getResourceAsStream("panjia-license-mode.properties")) {
+            if (is == null) {
+                log.warn("[LicenseGuard] panjia-license-mode.properties 未找到，默认 prod 模式");
+                return false;
+            }
+            Properties props = new Properties();
+            props.load(is);
+            return "dev".equals(props.getProperty("license.mode"));
+        } catch (Exception e) {
+            log.warn("[LicenseGuard] 加载 license mode 失败: {}，默认 prod 模式", e.getMessage());
+            return false;
+        }
     }
 }
