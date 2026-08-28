@@ -1,0 +1,35 @@
+# panjia-license 客户端模块配置
+spring:
+  application:
+    name: panjia-license
+
+# License 客户端配置
+panjia:
+  license:
+    # 授权服务器地址（运维通过环境变量覆盖）
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://license.panjia.example.com}
+    # 激活超时(ms)
+    activate-timeout-ms: 10000
+    # TCP连接超时(ms)
+    tcp-timeout-ms: 5000
+    # 心跳间隔(h)
+    heartbeat-interval-h: 24
+    # 心跳超时(ms)
+    heartbeat-timeout-ms: 10000
+    # 离线模式宽限(ms)：断网后允许操作的最长时间
+    offline-grace-ms: 1800000
+    # 单调时钟容忍窗口(ms)：NTP微调不超过此值，否则判定回拨
+    monotonic-tolerance-ms: 300000
+    # SSL Pinning：两个指纹的硬编码清单（运维通过环境变量覆盖）
+    ssl-pinning:
+      fingerprints:
+        - ${PANJIA_PIN_FP_A:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+        - ${PANJIA_PIN_FP_B:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy}
+    # 版本范围校验
+    version:
+      min: ${PANJIA_LICENSE_MIN_VERSION:1.0.0}
+      max: ${PANJIA_LICENSE_MAX_VERSION:9.9.9}
+    # 诊断CLI仅允许本地执行，禁止HTTP/API入口
+    diagnostic:
+      http-disabled: true
+      mtls-only: true

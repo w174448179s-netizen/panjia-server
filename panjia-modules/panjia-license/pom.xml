@@ -12,14 +12,57 @@
     <artifactId>panjia-license</artifactId>
 
     <description>
-        panjia-license License 授权校验
+        panjia-license 盘家 License 客户端校验模块
     </description>
 
     <dependencies>
+
+        <!-- 盘家公共模块 -->
         <dependency>
             <groupId>com.panjia</groupId>
             <artifactId>panjia-common</artifactId>
         </dependency>
+
+        <!-- 底座公共核心（R 等通用类） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 Web 模块（拦截器需要） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- Spring Boot 基础事件（ApplicationReadyEvent 等） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+        </dependency>
+
+        <!-- Hutool HTTP（调用授权服务器） -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-http</artifactId>
+        </dependency>
+
+        <!-- JJWT（token 解析） -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-jackson</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
     </dependencies>
 
 </project>

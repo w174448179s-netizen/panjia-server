@@ -1,0 +1,13 @@
+# 生产环境覆盖配置（由K8s/容器环境变量注入）
+panjia:
+  license:
+    server-url: ${PANJIA_LICENSE_SERVER_URL}
+    ssl-pinning:
+      fingerprints:
+        - ${PANJIA_PIN_FP_A}
+        - ${PANJIA_PIN_FP_B}
+    version:
+      min: ${PANJIA_LICENSE_MIN_VERSION}
+      max: ${PANJIA_LICENSE_MAX_VERSION}
+    diagnostic:
+      http-disabled: true

@@ -1,0 +1,229 @@
+package com.panjia.license.service;
+
+import cn.hutool.http.HttpRequest;
+import cn.hutool.http.HttpResponse;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
+import com.panjia.license.config.LicenseProperties;
+import com.panjia.license.crypto.verify.LicenseVerifier;
+import com.panjia.license.domain.HardwareFingerprint;
+import com.panjia.license.domain.LicenseContent;
+import com.panjia.license.enums.ClientModeEnum;
+import com.panjia.license.enums.CheckResultEnum;
+import com.panjia.license.enums.LicenseStatusEnum;
+import com.panjia.license.enums.OperationEnum;
+import com.panjia.license.exception.LicenseException;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+
+/**
+ * LicenseService 实现。
+ * 调用授权服务器接口，管理激活/心跳/校验全流程。
+ */
+@Slf4j
+@Service
+public class LicenseServiceImpl implements LicenseService {
+
+    private final LicenseProperties properties;
+    private final LicenseContext context;
+    private final LicenseVerifier licenseVerifier;
+
+    public LicenseServiceImpl(LicenseProperties properties, LicenseContext context, LicenseVerifier licenseVerifier) {
+        this.properties = properties;
+        this.context = context;
+        this.licenseVerifier = licenseVerifier;
+    }
+
+    @Override
+    public ActivateResult activate(String authCode, HardwareFingerprint fingerprint, String productVersion) {
+        log.info("[activate] 开始激活，authCode={}, fpHash={}", maskAuthCode(authCode), fingerprint.calculateHash());
+
+        String url = properties.getServerUrl() + "/api/auth/activate";
+        JSONObject body = new JSONObject();
+        body.set("authCode", authCode);
+        body.set("fingerprint", fingerprint);
+        body.set("productVersion", productVersion);
+
+        HttpResponse resp = HttpRequest.post(url)
+                .body(body.toString())
+                .timeout(properties.getTcpTimeoutMs())
+                .execute();
+
+        if (!resp.isOk()) {
+            log.warn("[activate] 授权服务器返回非 2xx: {}", resp.getStatus());
+            throw new LicenseException("激活失败：授权服务器返回 " + resp.getStatus());
+        }
+
+        JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
+        String license = json.getStr("license");
+        String token = json.getStr("token");
+        long offlineExpireAt = json.getLong("offlineExpireAt", 0L);
+        String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
+
+        // 解码 License 内容
+        LicenseContent content = licenseVerifier.decodeToken(token);
+
+        // 写入上下文
+        context.setLicense(content, token);
+        context.setFingerprint(fingerprint);
+        context.invalidateCheckCache(null); // 清空所有操作缓存
+
+        // 处理 clientMode 指令
+        if (ClientModeEnum.RESTRICT.name().equals(clientMode)) {
+            context.setRestricted(ClientModeEnum.RESTRICT);
+            log.warn("[activate] 服务端下发受限模式指令，clientMode=RESTRICT");
+        }
+
+        log.info("[activate] 激活成功");
+        return new ActivateResult(license, token, offlineExpireAt, clientMode);
+    }
+
+    @Override
+    public HeartbeatResult heartbeat() {
+        if (context.getToken() == null) {
+            throw new LicenseException("未激活，无法心跳");
+        }
+
+        String url = properties.getServerUrl() + "/api/auth/heartbeat";
+        JSONObject body = new JSONObject();
+        body.set("token", context.getToken());
+
+        HttpResponse resp = HttpRequest.post(url)
+                .body(body.toString())
+                .timeout(properties.getTcpTimeoutMs())
+                .execute();
+
+        if (!resp.isOk()) {
+            log.warn("[heartbeat] 心跳失败，status={}", resp.getStatus());
+            return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
+        }
+
+        JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
+        String status = json.getStr("status", "NORMAL");
+        long offlineExpireAt = json.getLong("offlineExpireAt", 0L);
+        String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
+
+        // 铁律 5：offlineExpireAt 仅在心跳成功时刷新
+        if (context.getLicenseContent() != null) {
+            context.getLicenseContent().setOfflineExpireAt(Instant.ofEpochMilli(offlineExpireAt));
+        }
+        context.setLastHeartbeatTime(System.currentTimeMillis());
+
+        // 处理 clientMode
+        if (ClientModeEnum.RESTRICT.name().equals(clientMode)) {
+            context.setRestricted(ClientModeEnum.RESTRICT);
+        } else if (ClientModeEnum.NORMAL.name().equals(clientMode)) {
+            context.setRestricted(ClientModeEnum.NORMAL);
+        }
+
+        log.info("[heartbeat] 心跳成功，status={}", status);
+        return new HeartbeatResult(status, offlineExpireAt, clientMode);
+    }
+
+    @Override
+    public CheckResult check(String operation) {
+        OperationEnum op = OperationEnum.valueOf(operation);
+
+        // 1. 真·断网 → 离线模式禁用 /check 缓存（铁律 2）
+        if (!context.isNetworkReachable()) {
+            log.warn("[check] 网络不可达，离线模式禁用缓存，操作={}", operation);
+            return new CheckResult(false, CheckResultEnum.NETWORK_OFFLINE.getMessage(), CheckResultEnum.NETWORK_OFFLINE.getCode());
+        }
+
+        // 2. 离线锁死 → 禁止所有核心操作
+        if (context.getStatus() == LicenseStatusEnum.OFFLINE_LOCK) {
+            return new CheckResult(false, "离线锁死，功能受限", CheckResultEnum.OPERATION_DENIED.getCode());
+        }
+
+        // 3. 受限模式 → 核心操作禁止（算薪/导入/导出均受限）
+        if (context.isRestricted()) {
+            if (op == OperationEnum.EXPORT) {
+                // 受限模式下允许导出核对（不阻止客户自查）
+                return new CheckResult(true, "受限模式，导出允许", "ALLOWED");
+            }
+            return new CheckResult(false, "受限模式，核心操作禁止", CheckResultEnum.OPERATION_DENIED.getCode());
+        }
+
+        // 4. 离线宽限期 → 禁止核心操作，仅允许查看
+        if (context.getStatus() == LicenseStatusEnum.OFFLINE_GRACE) {
+            if (op == OperationEnum.EXPORT) {
+                return new CheckResult(true, "离线宽限期，导出允许", "ALLOWED");
+            }
+            return new CheckResult(false, "离线宽限期，核心操作禁止", CheckResultEnum.OPERATION_DENIED.getCode());
+        }
+
+        // 5. 在线模式 → 调用 /check 实时校验
+        return doRemoteCheck(op);
+    }
+
+    /**
+     * 调用服务端 /check 接口。
+     */
+    private CheckResult doRemoteCheck(OperationEnum op) {
+        String url = properties.getServerUrl() + "/api/auth/check";
+        JSONObject body = new JSONObject();
+        body.set("token", context.getToken());
+        body.set("operation", op.name());
+
+        HttpResponse resp = HttpRequest.post(url)
+                .body(body.toString())
+                .timeout(properties.getTcpTimeoutMs())
+                .execute();
+
+        if (resp.isOk()) {
+            JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
+            boolean allowed = json.getBool("allowed", false);
+            String reason = json.getStr("reason", "");
+            String code = json.getStr("code", CheckResultEnum.ALLOWED.getCode());
+            // 写入缓存
+            if (allowed) {
+                context.cacheCheckResult(op.name(), properties.getCheckCacheTtlMs());
+            }
+            return new CheckResult(allowed, reason, code);
+        }
+
+        // 服务端暂时不可达 → 走 30 分钟缓存降级（铁律 10：5xx ≠ 断网）
+        log.warn("[check] 服务端不可达（5xx/超时），走缓存降级，操作={}", op.name());
+        if (context.isCheckCacheValid(op.name())) {
+            return new CheckResult(true, CheckResultEnum.CACHE_FALLBACK.getMessage(), CheckResultEnum.CACHE_FALLBACK.getCode());
+        }
+        return new CheckResult(false, "服务端不可达且缓存失效", CheckResultEnum.NETWORK_OFFLINE.getCode());
+    }
+
+    @Override
+    public boolean isOperationAllowed(String operation) {
+        return check(operation).isAllowed();
+    }
+
+    @Override
+    public LicenseStatusEnum getCurrentStatus() {
+        return context.getStatus();
+    }
+
+    @Override
+    public boolean isRestricted() {
+        return context.isRestricted();
+    }
+
+    @Override
+    public HardwareFingerprint getCurrentFingerprint() {
+        return context.getFingerprint();
+    }
+
+    @Override
+    public LicenseContent getLicenseContent() {
+        return context.getLicenseContent();
+    }
+
+    /**
+     * 脱敏授权码（日志输出用）。
+     */
+    private String maskAuthCode(String authCode) {
+        if (authCode == null || authCode.length() < 8) {
+            return "******";
+        }
+        return authCode.substring(0, 4) + "****" + authCode.substring(authCode.length() - 4);
+    }
+}
