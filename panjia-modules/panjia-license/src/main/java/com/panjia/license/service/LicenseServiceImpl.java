@@ -60,6 +60,7 @@ public class LicenseServiceImpl implements LicenseService {
             try {
                 LicenseContent content = licenseVerifier.decodeToken(persistedToken);
                 context.setLicense(content, persistedToken);
+                context.setFingerprint(fingerprintService.getCurrentFingerprint());
                 log.info("[initOnStartup] 从磁盘加载 token 成功，authCode={}", content.getAuthCode());
                 return;
             } catch (Exception e) {
@@ -74,6 +75,7 @@ public class LicenseServiceImpl implements LicenseService {
                 LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
                 context.setLicense(content, properties.getDevToken());
                 context.setNetworkReachable(true);
+                context.setFingerprint(fingerprintService.getCurrentFingerprint());
                 log.info("[initOnStartup] dev 模式初始化完成，authCode={}", content.getAuthCode());
             } catch (Exception e) {
                 log.error("[initOnStartup] dev token 解析失败: {}", e.getMessage());
@@ -117,9 +119,8 @@ public class LicenseServiceImpl implements LicenseService {
 
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
         String token = json.getStr("jwt");
-        String offlineExpireAtStr = json.getStr("offlineExpireAt");
-        long offlineExpireAt = offlineExpireAtStr != null
-                ? OffsetDateTime.parse(offlineExpireAtStr).toInstant().toEpochMilli() : 0L;
+        long offlineExpireAt = json.getStr("offlineExpireAt") != null
+                ? OffsetDateTime.parse(json.getStr("offlineExpireAt")).toInstant().toEpochMilli() : 0L;
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
 
         // 解码 License 内容
@@ -161,6 +162,10 @@ public class LicenseServiceImpl implements LicenseService {
             throw new LicenseException("未激活，无法心跳");
         }
 
+        if (context.getFingerprint() == null) {
+            throw new LicenseException("指纹未初始化，无法心跳");
+        }
+
         String url = properties.getServerUrl() + "/api/auth/heartbeat";
 
         JSONObject body = new JSONObject();
@@ -181,9 +186,8 @@ public class LicenseServiceImpl implements LicenseService {
 
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
-        String offlineExpireAtStr = json.getStr("offlineExpireAt");
-        long offlineExpireAt = offlineExpireAtStr != null
-                ? OffsetDateTime.parse(offlineExpireAtStr).toInstant().toEpochMilli() : 0L;
+        long offlineExpireAt = json.getStr("offlineExpireAt") != null
+                ? OffsetDateTime.parse(json.getStr("offlineExpireAt")).toInstant().toEpochMilli() : 0L;
 
         // 铁律 5：offlineExpireAt 仅在心跳成功时刷新
         if (context.getLicenseContent() != null) {
