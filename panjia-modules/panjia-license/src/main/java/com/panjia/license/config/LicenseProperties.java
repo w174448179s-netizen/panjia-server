@@ -18,6 +18,15 @@ public class LicenseProperties {
     /** 预置 dev token（开发环境用，生产环境为空） */
     private String devToken = "";
 
+    /** 测试模式：dev 环境下也执行远程 License 校验（连本地授权服务） */
+    private boolean testMode = false;
+
+    /** 授权码（首次部署时由管理后台生成，激活后作废） */
+    private String authCode = "";
+
+    /** 产品版本号（激活时上报） */
+    private String productVersion = "1.0.0";
+
     /** 心跳间隔（毫秒），默认 24h */
     private long heartbeatIntervalMs = 86_400_000L;
 

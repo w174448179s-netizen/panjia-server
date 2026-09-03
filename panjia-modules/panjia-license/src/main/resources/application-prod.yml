@@ -2,6 +2,11 @@
 panjia:
   license:
     server-url: ${PANJIA_LICENSE_SERVER_URL}
+    # 授权码（首次部署注入，激活后作废）
+    auth-code: ${PANJIA_AUTH_CODE:}
+    product-version: ${panjia.version:1.0.0}
+    # 数据目录（Docker 卷挂载点，由 PANJIA_LICENSE_DATA_DIR 覆盖）
+    data-dir: ${PANJIA_LICENSE_DATA_DIR:/data/panjia-license}
     ssl-pinning:
       fingerprints:
         - ${PANJIA_PIN_FP_A}

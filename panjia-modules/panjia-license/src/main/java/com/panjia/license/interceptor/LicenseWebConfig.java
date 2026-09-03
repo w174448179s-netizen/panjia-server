@@ -28,7 +28,6 @@ public class LicenseWebConfig implements WebMvcConfigurer {
                 .addPathPatterns("/**")
                 .excludePathPatterns(
                         "/auth/**",              // 登录/认证接口
-                        "/api/v1/license/**",    // License 模块内部接口
                         "/actuator/**",           // 监控端点
                         "/error",                 // 错误页
                         "/static/**",             // 静态资源

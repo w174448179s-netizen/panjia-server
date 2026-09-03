@@ -1,5 +1,6 @@
 package com.panjia.license.starter;
 
+import com.panjia.license.LicenseMode;
 import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.exception.LicenseException;
@@ -82,8 +83,12 @@ public class LicenseStartupValidator {
             log.info("[LicenseStartupValidator] 当前授权状态: {}", status);
 
             if (status == LicenseStatusEnum.NOT_ACTIVATED) {
-                log.warn("[LicenseStartupValidator] 尚未激活，进入受限模式（只读）");
-                restrictedMode.trigger("T4_NOT_ACTIVATED", "尚未激活");
+                if (LicenseMode.DEV && properties.isTestMode()) {
+                    log.warn("[LicenseStartupValidator] test 模式：尚未激活，等待调用激活接口（不触发受限模式）");
+                } else {
+                    log.warn("[LicenseStartupValidator] 尚未激活，进入受限模式（只读）");
+                    restrictedMode.trigger("T4_NOT_ACTIVATED", "尚未激活");
+                }
             } else if (status == LicenseStatusEnum.EXPIRED) {
                 log.warn("[LicenseStartupValidator] License 已过期");
             } else if (licenseService.isRestricted()) {

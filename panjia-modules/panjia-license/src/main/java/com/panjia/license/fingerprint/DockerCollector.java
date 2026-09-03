@@ -63,9 +63,30 @@ public class DockerCollector {
      * Docker 部署时由 docker-compose 以 :ro 挂载。
      */
     private String readHostMachineId() {
+        // Linux: /etc/machine-id
         try {
             return new String(Files.readAllBytes(Paths.get("/etc/machine-id"))).trim();
         } catch (IOException e) {
+            // macOS fallback: ioreg 获取 IOPlatformUUID
+            String osName = System.getProperty("os.name", "").toLowerCase();
+            if (osName.contains("mac")) {
+                try {
+                    Process proc = Runtime.getRuntime().exec(
+                        new String[]{"ioreg", "-d2", "-c", "IOPlatformExpertDevice"});
+                    String output = new String(proc.getInputStream().readAllBytes());
+                    for (String line : output.split("\n")) {
+                        if (line.contains("IOPlatformUUID")) {
+                            String[] parts = line.split("\"");
+                            if (parts.length >= 4) {
+                                log.info("[DockerCollector] macOS: 使用 IOPlatformUUID 作为 hostMachineId");
+                                return parts[3].trim();
+                            }
+                        }
+                    }
+                } catch (Exception ex) {
+                    log.warn("[DockerCollector] macOS UUID 获取失败: {}", ex.getMessage());
+                }
+            }
             // 容器内未挂载 → 明确报错（不做静默降级，铁律 14）
             throw new FingerprintException("无法读取 /etc/machine-id: " + e.getMessage()
                     + "。请通过部署工具挂载宿主机 machine-id 到 /etc/machine-id:ro");
@@ -82,6 +103,8 @@ public class DockerCollector {
             if (Files.exists(path)) {
                 return new String(Files.readAllBytes(path)).trim();
             }
+            // 确保目录存在
+            Files.createDirectories(path.getParent());
             // 不存在 → 生成 UUID 并持久化
             String uuid = UUID.randomUUID().toString();
             Files.writeString(path, uuid);

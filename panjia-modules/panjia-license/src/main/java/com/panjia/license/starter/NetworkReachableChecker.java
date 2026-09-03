@@ -62,7 +62,7 @@ public class NetworkReachableChecker {
      */
     private boolean doCheck() {
         String host = extractHost(properties.getServerUrl());
-        int port = 443;
+        int port = extractPort(properties.getServerUrl());
         try {
             InetAddress addr = InetAddress.getByName(host);
             Socket sock = new Socket();
@@ -97,6 +97,21 @@ public class NetworkReachableChecker {
             return java.net.URI.create(url).getHost();
         } catch (Exception e) {
             return url.replaceAll("https?://", "").split("/")[0];
+        }
+    }
+
+    /**
+     * 从 URL 提取端口，未指定时 https 默认 443，http 默认 80。
+     */
+    private int extractPort(String url) {
+        try {
+            int port = java.net.URI.create(url).getPort();
+            if (port > 0) {
+                return port;
+            }
+            return url.startsWith("https://") ? 443 : 80;
+        } catch (Exception e) {
+            return 443;
         }
     }
 }

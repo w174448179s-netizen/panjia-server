@@ -49,8 +49,6 @@ panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://license.panjia.example.com}
-    # JWT 签名密钥（Base64 编码，生产环境必须替换）
-    signing-key: ${PANJIA_LICENSE_SIGNING_KEY:cGFuamlhLWxpY2Vuc2Utc2lnbmluZy1rZXktMjAyNg==}
     # 心跳间隔（毫秒），默认 24h
     heartbeat-interval-ms: 86400000
     # /check 结果缓存有效期（毫秒），默认 30 分钟

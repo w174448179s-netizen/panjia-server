@@ -150,8 +150,9 @@ services:
       SPRING_FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:-Panjia@Prod2026}
       # License 配置
       PANJIA_LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-https://license.panjia.com}
-      PANJIA_LICENSE_SIGNING_KEY: ${LICENSE_SIGNING_KEY:-cGFuamlhLWxpY2Vuc2Utc2lnbmluZy1rZXktMjAyNg==}
       PANJIA_LICENSE_DATA_DIR: /data/panjia-license
+      # 授权码（首次部署注入，激活后作废；后续重启自动从持久化 token 恢复）
+      PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
       # JVM 参数
       JAVA_OPTS: >-
         -Xms512m -Xmx2g

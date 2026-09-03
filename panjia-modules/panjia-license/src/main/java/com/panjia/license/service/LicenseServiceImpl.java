@@ -14,11 +14,13 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
+import com.panjia.license.util.LicenseFileUtils;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.time.OffsetDateTime;
 
 /**
  * LicenseService 实现。
@@ -33,30 +35,61 @@ public class LicenseServiceImpl implements LicenseService {
     private final LicenseProperties properties;
     private final LicenseContext context;
     private final LicenseVerifier licenseVerifier;
+    private final LicenseFileUtils fileUtils;
+    private final FingerprintService fingerprintService;
 
     public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
-                              LicenseVerifier licenseVerifier) {
+                              LicenseVerifier licenseVerifier, LicenseFileUtils fileUtils,
+                              FingerprintService fingerprintService) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
+        this.fileUtils = fileUtils;
+        this.fingerprintService = fingerprintService;
     }
 
     /**
-     * dev 模式：用预置 dev token 初始化上下文。
-     * 生产模式：无操作，等待激活流程。
-     * LicenseMode.DEV 是编译时常量，prod 构建时此方法体被编译器消除。
+     * 启动初始化：优先从磁盘加载已持久化的 token，其次使用 dev token。
+     * 所有模式均执行磁盘加载（dev/test/prod），确保重启后自动恢复。
      */
     @PostConstruct
-    public void initDevMode() {
-        if (LicenseMode.DEV && !properties.getDevToken().isEmpty()) {
+    public void initOnStartup() {
+        // 1. 所有模式：尝试从磁盘加载已持久化的 token
+        String persistedToken = fileUtils.readFirstLine(properties.getFile().getToken());
+        if (persistedToken != null && !persistedToken.isEmpty()) {
+            try {
+                LicenseContent content = licenseVerifier.decodeToken(persistedToken);
+                context.setLicense(content, persistedToken);
+                log.info("[initOnStartup] 从磁盘加载 token 成功，authCode={}", content.getAuthCode());
+                return;
+            } catch (Exception e) {
+                log.warn("[initOnStartup] 持久化 token 已失效，清除: {}", e.getMessage());
+                fileUtils.delete(properties.getFile().getToken());
+            }
+        }
+
+        // 2. DEV 模式：使用 dev token（prod 构建时编译器消除此分支）
+        if (LicenseMode.DEV && !properties.isTestMode() && !properties.getDevToken().isEmpty()) {
             try {
                 LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
                 context.setLicense(content, properties.getDevToken());
                 context.setNetworkReachable(true);
-                log.info("[LicenseServiceImpl] dev 模式初始化完成，authCode={}, fpHash={}",
-                        content.getAuthCode(), content.getFingerprintHash());
+                log.info("[initOnStartup] dev 模式初始化完成，authCode={}", content.getAuthCode());
             } catch (Exception e) {
-                log.error("[LicenseServiceImpl] dev token 解析失败: {}", e.getMessage());
+                log.error("[initOnStartup] dev token 解析失败: {}", e.getMessage());
+            }
+            return;
+        }
+
+        // 3. authCode 自动激活（prod 或 dev+testMode，且 authCode 已配置）
+        if ((!LicenseMode.DEV || properties.isTestMode()) && !properties.getAuthCode().isEmpty()) {
+            try {
+                log.info("[initOnStartup] 检测到 authCode，开始自动激活");
+                HardwareFingerprint fp = fingerprintService.getCurrentFingerprint();
+                activate(properties.getAuthCode(), fp, properties.getProductVersion());
+                log.info("[initOnStartup] 自动激活成功");
+            } catch (Exception e) {
+                log.error("[initOnStartup] 自动激活失败: {}", e.getMessage());
             }
         }
     }
@@ -68,8 +101,9 @@ public class LicenseServiceImpl implements LicenseService {
         String url = properties.getServerUrl() + "/api/auth/activate";
         JSONObject body = new JSONObject();
         body.set("authCode", authCode);
-        body.set("fingerprint", fingerprint);
+        body.set("fingerprint", fingerprint.calculateHash());
         body.set("productVersion", productVersion);
+        body.set("instanceId", fingerprint.getInstanceId());
 
         HttpResponse resp = HttpRequest.post(url)
                 .body(body.toString())
@@ -82,9 +116,10 @@ public class LicenseServiceImpl implements LicenseService {
         }
 
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
-        String license = json.getStr("license");
-        String token = json.getStr("token");
-        long offlineExpireAt = json.getLong("offlineExpireAt", 0L);
+        String token = json.getStr("jwt");
+        String offlineExpireAtStr = json.getStr("offlineExpireAt");
+        long offlineExpireAt = offlineExpireAtStr != null
+                ? OffsetDateTime.parse(offlineExpireAtStr).toInstant().toEpochMilli() : 0L;
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
 
         // 解码 License 内容
@@ -101,14 +136,23 @@ public class LicenseServiceImpl implements LicenseService {
             log.warn("[activate] 服务端下发受限模式指令，clientMode=RESTRICT");
         }
 
+        // 持久化 token 到磁盘，重启后自动恢复
+        try {
+            fileUtils.ensureDataDir();
+            fileUtils.atomicWrite(properties.getFile().getToken(), token);
+            log.info("[activate] token 已持久化到磁盘");
+        } catch (Exception e) {
+            log.error("[activate] token 持久化失败: {}", e.getMessage());
+        }
+
         log.info("[activate] 激活成功");
-        return new ActivateResult(license, token, offlineExpireAt, clientMode);
+        return new ActivateResult(token, offlineExpireAt, clientMode);
     }
 
     @Override
     public HeartbeatResult heartbeat() {
         // dev 模式：跳过远程心跳（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
-        if (LicenseMode.DEV) {
+        if (LicenseMode.DEV && !properties.isTestMode()) {
             log.debug("[heartbeat] dev 模式，跳过远程心跳");
             return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
         }
@@ -118,10 +162,14 @@ public class LicenseServiceImpl implements LicenseService {
         }
 
         String url = properties.getServerUrl() + "/api/auth/heartbeat";
+
         JSONObject body = new JSONObject();
-        body.set("token", context.getToken());
+        body.set("instanceId", context.getFingerprint().getInstanceId());
+        body.set("fingerprint", context.getFingerprint().calculateHash());
+        body.set("reportedAt", OffsetDateTime.now().toString());
 
         HttpResponse resp = HttpRequest.post(url)
+                .header("Authorization", "Bearer " + context.getToken())
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
                 .execute();
@@ -132,9 +180,10 @@ public class LicenseServiceImpl implements LicenseService {
         }
 
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
-        String status = json.getStr("status", "NORMAL");
-        long offlineExpireAt = json.getLong("offlineExpireAt", 0L);
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
+        String offlineExpireAtStr = json.getStr("offlineExpireAt");
+        long offlineExpireAt = offlineExpireAtStr != null
+                ? OffsetDateTime.parse(offlineExpireAtStr).toInstant().toEpochMilli() : 0L;
 
         // 铁律 5：offlineExpireAt 仅在心跳成功时刷新
         if (context.getLicenseContent() != null) {
@@ -149,8 +198,8 @@ public class LicenseServiceImpl implements LicenseService {
             context.setRestricted(ClientModeEnum.NORMAL);
         }
 
-        log.info("[heartbeat] 心跳成功，status={}", status);
-        return new HeartbeatResult(status, offlineExpireAt, clientMode);
+        log.info("[heartbeat] 心跳成功，clientMode={}", clientMode);
+        return new HeartbeatResult("NORMAL", offlineExpireAt, clientMode);
     }
 
     @Override
@@ -158,7 +207,7 @@ public class LicenseServiceImpl implements LicenseService {
         OperationEnum op = OperationEnum.valueOf(operation);
 
         // dev 模式：直接放行所有操作（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
-        if (LicenseMode.DEV) {
+        if (LicenseMode.DEV && !properties.isTestMode()) {
             return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
         }
 
@@ -200,19 +249,20 @@ public class LicenseServiceImpl implements LicenseService {
     private CheckResult doRemoteCheck(OperationEnum op) {
         String url = properties.getServerUrl() + "/api/auth/check";
         JSONObject body = new JSONObject();
-        body.set("token", context.getToken());
-        body.set("operation", op.name());
+        body.set("productVersion", properties.getProductVersion());
 
         HttpResponse resp = HttpRequest.post(url)
+                .header("Authorization", "Bearer " + context.getToken())
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
                 .execute();
 
         if (resp.isOk()) {
             JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
-            boolean allowed = json.getBool("allowed", false);
-            String reason = json.getStr("reason", "");
-            String code = json.getStr("code", CheckResultEnum.ALLOWED.getCode());
+            String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
+            String code = json.getStr("code", "");
+            boolean allowed = ClientModeEnum.NORMAL.name().equals(clientMode);
+            String reason = allowed ? "操作允许" : "受限模式，操作禁止";
             // 写入缓存
             if (allowed) {
                 context.cacheCheckResult(op.name(), properties.getCheckCacheTtlMs());

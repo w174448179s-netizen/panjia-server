@@ -67,19 +67,16 @@ public interface LicenseService {
      * 激活结果载体。
      */
     class ActivateResult {
-        private final String license;
         private final String token;
         private final long offlineExpireAt;
         private final String clientMode;
 
-        public ActivateResult(String license, String token, long offlineExpireAt, String clientMode) {
-            this.license = license;
+        public ActivateResult(String token, long offlineExpireAt, String clientMode) {
             this.token = token;
             this.offlineExpireAt = offlineExpireAt;
             this.clientMode = clientMode;
         }
 
-        public String getLicense() { return license; }
         public String getToken() { return token; }
         public long getOfflineExpireAt() { return offlineExpireAt; }
         public String getClientMode() { return clientMode; }

@@ -36,9 +36,13 @@ public class HeartbeatScheduler {
 
     @PostConstruct
     public void start() {
-        if (LicenseMode.DEV) {
+        if (LicenseMode.DEV && !properties.isTestMode()) {
             log.info("[HeartbeatScheduler] dev 模式，跳过远程心跳调度");
             return;
+        }
+
+        if (LicenseMode.DEV && properties.isTestMode()) {
+            log.info("[HeartbeatScheduler] test 模式，启用远程心跳调度（连本地授权服务）");
         }
 
         long interval = properties.getHeartbeatIntervalMs();
