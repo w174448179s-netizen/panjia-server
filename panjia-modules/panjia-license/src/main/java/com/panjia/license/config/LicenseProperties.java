@@ -54,7 +54,6 @@ public class LicenseProperties {
     @Data
     public static class FileNames {
         private String instanceId = ".panjia_instance_id";
-        private String license = "license.lic";
         private String token = ".panjia_token";
         private String monotonic = ".panjia_monotonic";
         private String checksums = "panjia-checksums";

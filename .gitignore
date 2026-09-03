@@ -59,3 +59,4 @@ application-ga.yml
 script/docker/data/
 script/docker/.env
 script/keys/
+data/

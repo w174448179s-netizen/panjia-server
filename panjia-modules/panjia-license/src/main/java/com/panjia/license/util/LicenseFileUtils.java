@@ -74,14 +74,6 @@ public class LicenseFileUtils {
     }
 
     /**
-     * 读取 License 文件内容。
-     * @return License 字符串（JWT 格式），文件不存在返回 null
-     */
-    public String readLicense() {
-        return readFirstLine(properties.getFile().getLicense());
-    }
-
-    /**
      * 判断状态文件是否存在。
      */
     public boolean exists(String fileName) {

@@ -1,9 +1,22 @@
 # 盘家智管 License 客户端校验详细设计
 
-> 版本：V1.2
+> 版本：V1.3
 > 状态：设计定稿（第一阶段）
 > 开发工作量：约 11.5 人天
 > 评审结论：通过（6 处修订全部落地，无架构级缺陷）
+>
+> V1.3 变更（2026-09-03）：
+> - 修订 §2.2：客户端启动流程加入 **authCode 自动激活**（方案 A），首次启动无需人工调接口
+> - 修订 §2.10：`LicenseServiceImpl.init()` 更名为 `initOnStartup()`，三步加载（磁盘 token → dev token → authCode 自动激活）
+> - 修订 §2.9：密钥生成脚本 `generate-license-key.sh` 已回退，密钥由管理端处理
+> - 修订 §3.4：instanceId 路径从硬编码 `/data/` 改为可配置 `data-dir`（支持 macOS 开发环境）
+> - 修订 §6.2：docker-compose 新增 `PANJIA_AUTH_CODE` 环境变量
+> - 修订 §6.3：容器内目录删除 `license.lic`（死文件），新增 authCode 自动激活说明
+> - 修订 §9：删除 LicenseController（4 个 HTTP 接口全部移除，License 流程完全内部闭环）
+> - 修订 §11：包结构删除 `controller/`，`fingerprint/` 新增 `FingerprintService`
+> - 新增铁律 24：authCode 一次性消费，激活后作废；prod 环境自动激活分支受 `LicenseMode.DEV` 编译时常量守卫
+> - 新增验收标准 42：authCode 自动激活 + 一次性消费 + prod 环境注入无效
+> - 清理：移除 `signing-key` 配置项（HMAC 对称签名残留）、`license.lic` 文件名、`LicenseFileUtils.readLicense()` 方法
 >
 > V1.2 变更（2026-08-28）：
 > - 修订 §2.10：dev/prod 模式从 Spring profile 推导改为**编译时常量**（`LicenseMode.DEV`），消除运行时判断方法
@@ -97,15 +110,39 @@ Spring Boot 启动
   → ① MonotonicClock.verify()           （§3.5 离线时间防护）
   → ② IntegrityChecker.checkStartup()   （§4.3 完整性自检，启动期）
   → ③ LicenseStartupValidator.run()
-       → 尝试在线激活 / 心跳
-            → 成功 → 缓存 token（基于机器指纹派生的 AES 密钥加密）
-            → 失败 → 离线模式
-                 → 检查 License 文件 offlineExpireAt
+       → LicenseServiceImpl.initOnStartup()
+            → 步骤 1：磁盘有持久化 token？→ 加载，return
+            → 步骤 2：dev 模式 + 有 devToken？→ 加载，return
+            → 步骤 3：配置了 authCode？→ 自动激活
+                 → 采集机器指纹（hostMachineId + instanceId）
+                 → POST {server-url}/api/auth/activate
+                 → 成功 → 持久化 token 到磁盘 → 进入 NORMAL
+                 → 失败 → 进入受限/锁死
+            → 步骤 4：无 authCode 或激活失败
+                 → 检查离线 token（offlineExpireAt）
                  → 未过期 → 离线宽限期（允许查看，禁止核心操作）
                  → 已过期 → 离线锁死（只读，提示"请联系服务商"）
   → ④ 校验通过 → 正常启动
   → ⑤ RestrictedMode 检查（§5）
 ```
+
+**authCode 自动激活（V1.3 新增，方案 A）：**
+
+> 客户无需人工调用激活接口。我方在管理后台生成 authCode，打包时写入配置文件 / Docker 环境变量。客户端首次启动自动读取 authCode 并激活，激活成功后 token 持久化到磁盘，后续重启从磁盘加载，不再需要 authCode。
+
+```
+首次启动（无持久化 token）
+  → initOnStartup() 步骤 3：检测到 authCode
+  → 采集机器指纹 + 调用 /api/auth/activate
+  → 成功 → token 写入 {data-dir}/.panjia_token
+  → authCode 由服务端标记一次性消费（防止复制到其他机器）
+
+重启（有持久化 token）
+  → initOnStartup() 步骤 1：从磁盘加载 token
+  → 验签通过 → 直接进入 NORMAL，不需要 authCode
+```
+
+> **安全守卫**：自动激活分支受 `(!LicenseMode.DEV || properties.isTestMode())` 编译时常量守卫。生产构建 `LicenseMode.DEV=false` → `false && testMode` = `false` → 自动激活分支不可达。攻击者即使注入 `auth-code` 也无法触发。
 
 ### 2.3 心跳机制
 
@@ -254,11 +291,14 @@ if (networkReachable) {
 
 **密钥生成**：
 
-```bash
-# 生成 RSA 密钥对（仅授权服务器执行）
-script/keys/generate-keys.sh
-  → 输出 panjia-license.jks（私钥库，不打包）
-  → 输出 license-public-key.pem（公钥，打包进客户端 JAR）
+> 密钥生成由管理端（`panjia-customer`）统一处理，不再使用独立脚本。原 `script/keys/generate-license-key.sh` 已回退。
+
+```
+管理端（panjia-customer）：
+  → 管理后台提供密钥管理界面
+  → 生成 RSA 密钥对 → 存入 panjia-license.jks（私钥库，不打包，不入 Git）
+  → 导出公钥 license-public-key.pem（打包进客户端 JAR）
+  → 支持多公钥机制（JWT kid 头选择对应公钥验签，实现平滑密钥轮换）
 ```
 
 **为何从 HMAC 改为 RSA**：
@@ -284,7 +324,7 @@ script/keys/generate-keys.sh
 | **LicenseVerifier** | 验签 dev token（RSA 验签正常执行） | 验签真实 token |
 | **HeartbeatScheduler** | 跳过远程调用（避免开发时依赖授权服务器） | 定期远程心跳 |
 | **LicenseService.check()** | 直接放行（无需授权服务器在线） | 远程 `/check` 校验 |
-| **LicenseServiceImpl.init()** | 加载预置 dev token | 等待真实激活流程 |
+| **LicenseServiceImpl.initOnStartup()** | 步骤 2：加载预置 dev token | 步骤 1：磁盘加载持久化 token；步骤 3：authCode 自动激活 |
 | **IntegrityChecker** | 正常执行 | 正常执行 |
 
 → 所有环境走**同一套代码**，License 代码在开发时就被验证，不存在"到生产才暴露 bug"的风险。
@@ -375,9 +415,12 @@ script/keys/generate-keys.sh
 public Map<String, String> collectFactors() {
     Map<String, String> factors = new LinkedHashMap<>();
     String hostId = readFirstLine("/etc/machine-id");
+    // macOS 开发环境回退：/etc/machine-id 不存在时用 ioreg 获取 IOPlatformUUID
+    if (isBlank(hostId)) hostId = readMacOsPlatformUUID();
     if (isBlank(hostId)) throw new LicenseException("machine-id 未挂载，请联系部署人员");
     factors.put("hostMachineId", hostId.trim());
-    Path f = Paths.get("/data/.panjia_instance_id");
+    Path f = Paths.get(dataDir, ".panjia_instance_id");
+    Files.createDirectories(f.getParent()); // V1.3 修复：写文件前确保目录存在
     String instanceId = Files.exists(f) ? readFirstLine(f) : UUID.randomUUID().toString();
     Files.writeString(f, instanceId); // 持久化到数据卷
     factors.put("instanceId", instanceId.trim());
@@ -650,9 +693,10 @@ services:
     restart: unless-stopped
     volumes:
       - /etc/machine-id:/etc/machine-id:ro      # 指纹主因子（只读）
-      - panjia-data:/data                        # 持久化数据卷（instanceId + 业务数据 + 状态文件）
+      - panjia-data:/data                        # 持久化数据卷（instanceId + token + 状态文件 + 业务数据）
     environment:
-      - LICENSE_SERVER=https://license.panjia.com
+      - PANJIA_LICENSE_SERVER_URL=https://license.panjia.com
+      - PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE}      # V1.3：authCode，首次启动自动激活，激活后不需要
 
 volumes:
   panjia-data:
@@ -660,17 +704,20 @@ volumes:
     # 生产建议映射到云盘挂载点，如 /mnt/cloud-disk/panjia-data
 ```
 
+> `PANJIA_AUTH_CODE` 仅在首次启动时使用，激活成功后 token 持久化到数据卷，后续重启从数据卷加载。authCode 由服务端标记一次性消费。
+
 ### 6.3 容器内目录结构
 
 ```
-/data/
-  ├── .panjia_instance_id     ← 指纹辅因子（自动生成）
-  ├── license.lic             ← 授权文件
-  ├── .panjia_token           ← 在线鉴权 token（机器指纹派生密钥加密）
+/data/panjia-license/
+  ├── .panjia_instance_id     ← 指纹辅因子（自动生成，首次启动创建）
+  ├── .panjia_token           ← 在线鉴权 JWT token（RSA 验签，激活成功后持久化）
   ├── .panjia_monotonic       ← 单调时钟（离线时间防护，**缺失即锁死，禁止重建**）
-  ├── panjia-checksums        ← 完整性校验和（META-INF，构建期生成，ClassFinal 加密前算）
+  ├── panjia-checksums        ← 完整性校验和（外部降级文件，首选 JAR 内嵌 META-INF）
   └── business/               ← 业务数据
 ```
+
+> V1.3 变更：删除 `license.lic`（死文件，原设计存放人类可读 license 文本，现在只存 JWT token）。`data-dir` 路径可通过配置项 `panjia.license.data-dir` 调整，默认 `/data/panjia-license`（Docker）或 `./data/panjia-license`（开发环境）。
 
 > 所有状态文件必须位于**持久化数据卷**，不得放系统盘临时目录。
 
@@ -769,7 +816,7 @@ volumes:
 |---|---|---|
 | 授权服务器后端（3 接口 + 多实例自动拉黑 + 版本校验 + clientMode 指令） | 2.2 天 | 较初始 +0.2（versionRange + clientMode） |
 | 最小运营后台（授权码生成 + 黑名单 + 告警 + 手动解除拉黑 + 测试码回收） | 2 天 | 不变 |
-| 客户端在线校验 + 心跳 + networkReachable 判定 + 30 分钟降级 | 2 天 | 较初始 +0.5（networkReachable 伪代码 + 三态路径） |
+| 客户端在线校验 + 心跳 + networkReachable 判定 + 30 分钟降级 + authCode 自动激活 + token 持久化 | 2 天 | V1.3：删除 LicenseController 4 个 HTTP 接口，新增 authCode 自动激活 + token 磁盘持久化，净增持平 |
 | DockerCollector（hostMachineId + instanceId） | 0.5 天 | 不变 |
 | 单调时钟（bootTime + 系统时间 + 防删锁死 + 异常处理降级） | 0.3 天 | 较初始 +0.1 |
 | 完整性自检（启动期 + 算薪前 + 构建顺序铁律） | 0.8 天 | 新增 L5，checksum-gen 顺序 |
@@ -846,6 +893,10 @@ volumes:
 
 41. `LicenseMode.class` 纳入完整性校验列表（全量 + 快检）；反编译篡改 `DEV=false → true` → SHA-256 不匹配 → IntegrityChecker 检出 → 进入受限模式
 
+### authCode 自动激活与安全（42，V1.3 新增）
+
+42. 首次启动配置了 authCode → 自动采集指纹 + 调用 `/api/auth/activate` → token 持久化到磁盘 → 后续重启不需要 authCode；authCode 一次性消费，第二次激活被拒绝；prod 环境（`LicenseMode.DEV=false`）注入 `auth-code` 环境变量 → 自动激活分支不可达（`false && testMode` = `false`），无法触发
+
 ---
 
 ## 十一、包结构
@@ -858,13 +909,15 @@ com.panjia.license
 ├── enums/            # LicenseStatusEnum、FingerprintStatusEnum、ClientModeEnum、OperationEnum、TriggerCodeEnum
 ├── exception/        # LicenseException 及子类
 ├── crypto/verify/    # LicenseVerifier（RSA 验签）、KeyStore（双指纹）
-├── fingerprint/      # FingerprintCollector、DockerCollector
+├── fingerprint/      # FingerprintCollector、DockerCollector、FingerprintService（V1.3 新增，供 LicenseServiceImpl 注入采集指纹）
 ├── starter/          # LicenseStartupValidator、MonotonicClock、HeartbeatScheduler
 ├── security/         # IntegrityChecker（L5）、RestrictedMode（L4）、LicenseGuard（强制守卫）、LicenseCheckPoint（多点散布校验）
 ├── interceptor/      # LicenseInterceptor（关键操作 /check，按 operation 枚举）
-├── service/          # LicenseContext、LicenseService、LicenseServiceImpl
+├── service/          # LicenseContext、LicenseService、LicenseServiceImpl（initOnStartup + authCode 自动激活 + token 持久化）
 ├── diagnose/         # LicenseDiagnosticCli（仅本地控制台，禁止 HTTP 入口）
 └── util/             # LicenseFileUtils、MonotonicTolerance（⚠️ 单一常量，全代码一处引用）
+
+# V1.3 变更：删除 controller/ 包（LicenseController 4 个 HTTP 接口全部移除，License 流程完全内部闭环）
 
 # admin 模块中：
 com.panjia.admin
@@ -902,6 +955,7 @@ com.panjia.admin
 | 21 | 所有环境（含 dev）必须走完整 License 校验代码路径，禁止通过 `enabled=false` 跳过 | §2.10 |
 | 22 | `panjia-license` 是应用启动硬依赖，移除模块必须导致启动失败；业务关键方法必须调用 `LicenseCheckPoint.requireLicense()` | §4.5 |
 | 23 | `LicenseMode.class` 必须纳入完整性校验列表（全量 + 快检）；篡改编译时常量 → 哈希不匹配 → 被检出 | §4.6 |
+| 24 | authCode 一次性消费，激活后服务端标记作废，防止复制到其他机器；自动激活分支受 `(!LicenseMode.DEV \|\| isTestMode())` 编译时常量守卫，prod 环境注入 `auth-code` 无法触发 | §2.2 |
 
 ---
 
@@ -918,12 +972,14 @@ com.panjia.admin
 
 ## 十四、交付物清单
 
-1. `panjia-license` 模块源码（约 35 个 Java 文件，含 L5 完整性自检）
-2. 授权服务器（Spring Boot，4 接口 + 版本校验 + clientMode 指令 + 最小运营后台）
-3. `panjia-deploy` 部署工具（Docker Compose 一键部署 + machine-id 校验）
+1. `panjia-license` 模块源码（约 35 个 Java 文件，含 L5 完整性自检、authCode 自动激活、token 持久化）
+2. 授权服务器（Spring Boot，3 接口 + 版本校验 + clientMode 指令 + 最小运营后台 + 密钥管理）
+3. `panjia-deploy` 部署工具（Docker Compose 一键部署 + machine-id 校验 + authCode 环境变量注入）
 4. ProGuard + ClassFinal 构建脚本（**含 checksum-gen 顺序铁律注释**）
-5. 运营手册（证书轮换四阶段 + 回退警告、换机流程、告警处理、单调时钟人工重建 SOP）
+5. 运营手册（证书轮换四阶段 + 回退警告、换机流程、告警处理、单调时钟人工重建 SOP、密钥轮换 SOP）
 6. 本文档（设计与验收唯一依据）
 7. 开发评审 Checklist（三档打勾版）
+
+> V1.3 变更：交付物 1 删除 `LicenseController`（4 个 HTTP 接口移除），新增 `FingerprintService`、token 持久化逻辑；交付物 2 接口数从 4 调整为 3（客户端不再暴露 HTTP 激活/心跳/检查接口，全部内部调用）；交付物 3 新增 authCode 环境变量注入。
 </content>
 </invoke>
