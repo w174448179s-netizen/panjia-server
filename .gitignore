@@ -61,6 +61,7 @@ script/docker/.env
 script/keys/
 data/
 .claude/
+.codex/
 .workbuddy/
 .DS_Store
 
