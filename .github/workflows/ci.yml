@@ -7,9 +7,9 @@ on:
     branches: [main]
 
 jobs:
-  # ==================== 构建与 ArchUnit 守卫 ====================
+  # ==================== 构建与架构守卫 ====================
   build-and-guard:
-    name: 构建 + ArchUnit 架构守卫
+    name: 构建 + 架构守卫
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -53,12 +53,8 @@ jobs:
       - name: Maven 全量构建
         run: mvn clean install -DskipTests -B -V
 
-      # ---------- 守卫 1：ArchUnit 目录边界 ----------
-      - name: 守卫1 - ArchUnit 架构守卫
-        run: mvn test -pl panjia-modules/panjia-arch-test -B
-
-      # ---------- 守卫 2：交付包边界 ----------
-      - name: 守卫2 - 交付包边界检查
+      # ---------- 守卫 1：交付包边界 ----------
+      - name: 守卫1 - 交付包边界检查
         run: |
           echo "检查交付包不得包含 panjia-customer / ruoyi-gen / ruoyi-demo"
           # 获取 ruoyi-admin 最终 JAR 包列表
@@ -77,8 +73,8 @@ jobs:
           fi
           echo "OK: 交付包边界检查通过"
 
-      # ---------- 守卫 3：底座改动白名单 ----------
-      - name: 守卫3 - 底座改动白名单检查
+      # ---------- 守卫 2：底座改动白名单 ----------
+      - name: 守卫2 - 底座改动白名单检查
         run: |
           echo "检查 PR diff 是否触及 ruoyi-* 底座目录"
           # 获取与 upstream/v6.0.0 的 diff

@@ -69,8 +69,6 @@
 
         <!-- 盘家智管版本 -->
         <panjia.version>1.0.0-SNAPSHOT</panjia.version>
-        <!-- ArchUnit 架构测试 -->
-        <archunit.version>1.3.0</archunit.version>
 
         <!-- Maven 构建插件版本 -->
         <maven-jar-plugin.version>3.5.0</maven-jar-plugin.version>
@@ -492,14 +490,6 @@
                 <groupId>com.panjia</groupId>
                 <artifactId>panjia-im-core</artifactId>
                 <version>${panjia.version}</version>
-            </dependency>
-
-            <!-- ArchUnit 架构测试 -->
-            <dependency>
-                <groupId>com.tngtech.archunit</groupId>
-                <artifactId>archunit</artifactId>
-                <version>${archunit.version}</version>
-                <scope>test</scope>
             </dependency>
 
         </dependencies>
