@@ -56,7 +56,6 @@
         <!-- <module>panjia-im-feishu</module> -->
         <!-- <module>panjia-ai</module> -->
         <!-- <module>panjia-bi</module> -->
-        <module>panjia-arch-test</module>
     </modules>
 
 </project>
