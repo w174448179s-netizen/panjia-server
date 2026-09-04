@@ -60,3 +60,7 @@ script/docker/data/
 script/docker/.env
 script/keys/
 data/
+.claude/
+.workbuddy/
+.DS_Store
+
