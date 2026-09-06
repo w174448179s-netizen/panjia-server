@@ -131,7 +131,7 @@ if ($AuthCode) {
 Write-Log "授权服务器: $LicenseServer"
 Write-Log "=========================================="
 
-$TotalSteps = 7
+$TotalSteps = 6
 
 # ==================== 步骤 1：系统检查 ====================
 if (-not (Test-StepDone 1)) {
@@ -830,9 +830,18 @@ if (Test-Path $ddExeForRun) {
     }
 }
 
-# ==================== 步骤 6：启动服务 ====================
+# ==================== 步骤 6：启动服务并验证激活 ====================
+# 注意：激活验证合并到本步骤（不再有独立步骤 7）。原理：
+#   1. docker compose up -d 把容器跑起来
+#   2. 扫后端日志（docker logs panjia-server）确认 Spring Boot 真正启动完成
+#      - 看到 "Started panjia-admin" + 容器 healthy → 激活必然成功
+#        （LicenseServiceImpl.initOnStartup 抛异常 = Spring 启动失败）
+#      - 看到 "Application run failed" / "LicenseException" / "License.*拒绝启动"
+#        → 立即 exit 1，引导用户跑 reauth-app.ps1 重新激活
+#   3. 容器健康但日志里看不到 Started，可能是首次启动慢（DB 建表/JIT），
+#      但 5 分钟还看不到就一定有故障，不再 warn 后假装成功。
 if (-not (Test-StepDone 6)) {
-    Write-Step 6 $TotalSteps "启动服务"
+    Write-Step 6 $TotalSteps "启动服务并验证激活"
 
     $configDir = "$InstallDir\config"
     Set-Location $configDir
@@ -848,19 +857,17 @@ if (-not (Test-StepDone 6)) {
         exit 1
     }
 
-    # 等待健康检查
-    Write-Log "等待服务启动（最多 5 分钟）..."
+    # 双层健康检查：① 容器 running/healthy  ② Spring Boot Started 关键字
+    # （不读 token 文件——token 出现 ⇔ Spring 启动成功，是同一个事件的延迟回显）
+    Write-Log "等待服务启动并激活（最多 5 分钟）..."
     $maxWait = 300
     $waited = 0
-    $allHealthy = $false
+    $springStarted = $false
+    $containerHealthy = $false
+    $startupFailed = $false
 
     while ($waited -lt $maxWait) {
-        # 注意：不要用 docker compose ps --format json——实测在 PS 5.1 下有两个坑：
-        #   ① 输出含 UTF-8 字符（如 /run/desktop/mnp 的特殊字符），被 GBK 控制台
-        #      解码后变成乱码，JSON 本身已损坏，ConvertFrom-Json 必然失败；
-        #   ② PS 5.1 的 ConvertFrom-Json 抛的是 .NET 级 ArgumentException，
-        #      -ErrorAction SilentlyContinue 压不住（try/catch 才能接住），报错刷屏。
-        # 改用 docker inspect 模板输出，纯 ASCII，无编码/无 JSON 解析风险。
+        # ---------- Layer 1: 容器状态 ----------
         $status = @()
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
@@ -872,76 +879,97 @@ if (-not (Test-StepDone 6)) {
             }
         }
         $ErrorActionPreference = $prevEap
+
         if ($status.Count -gt 0) {
             $totalCount = @($status).Count
             $healthyCount = @($status | Where-Object {
                 $_.State -eq "running" -and ($_.Health -eq "healthy" -or $_.Health -eq "none")
             }).Count
             if ($healthyCount -eq $totalCount -and $totalCount -gt 0) {
-                $allHealthy = $true
-                break
+                $containerHealthy = $true
             }
-            if ($waited -gt 0 -and $waited % 30 -eq 0) {
-                Write-Log "  等待中... 健康 $healthyCount/$totalCount（$waited s / $maxWait s）"
+
+            # ---------- Layer 2: Spring Boot 日志关键字 ----------
+            # 先抓 server 容器 ID（按服务名筛）；只读一次，避免每轮重复读全量日志
+            $serverCid = docker compose ps -q server 2>$null
+            if ([string]::IsNullOrWhiteSpace($serverCid)) {
+                # 服务名筛不到（多 server 副本或别名差异），回退到用容器名
+                $serverCid = docker ps --filter "name=panjia-server" --format "{{.ID}}" 2>$null | Select-Object -First 1
             }
-        } elseif ($waited -gt 0 -and $waited % 30 -eq 0) {
-            Write-Log "  等待中... $waited s / $maxWait s（暂无法读取容器状态）"
+            if (-not [string]::IsNullOrWhiteSpace($serverCid)) {
+                $logsRaw = docker logs $serverCid --tail 80 2>&1
+                if ($logsRaw) {
+                    $logText = ($logsRaw -join "`n")
+
+                    # 启动失败关键字（优先级最高，避免被 Started 抢先匹配）
+                    if ($logText -match 'Application run failed|LicenseException|License.*自动激活失败|License.*拒绝启动|Web server failed to start') {
+                        $startupFailed = $true
+                    }
+                    # Spring Boot 启动完成关键字（必须紧跟 "Started" + "panjia-admin" 才算）
+                    elseif ($logText -match 'Started panjia-admin') {
+                        $springStarted = $true
+                    }
+                }
+            }
+        }
+
+        if ($startupFailed) {
+            break
+        }
+        if ($springStarted -and $containerHealthy) {
+            break
+        }
+
+        if ($waited -gt 0 -and $waited % 30 -eq 0) {
+            Write-Log "  等待启动... $waited s / $maxWait s（容器健康：$containerHealthy）"
         }
         Start-Sleep -Seconds 5
         $waited += 5
     }
 
-    if (-not $allHealthy) {
-        Write-Log "警告: 部分容器健康检查未通过，继续下一步..." "WARN"
+    # ---------- 结果判定 ----------
+    if ($startupFailed) {
+        Write-Log "检测到 Spring Boot 启动失败（授权码无效 / 服务器不可达 / 配置错误）" "ERROR"
+        Write-Log "" "ERROR"
+        Write-Log "后端日志最后 30 行：" "ERROR"
+        $logsRaw = docker logs panjia-server --tail 30 2>&1
+        if ($logsRaw) {
+            $logsRaw | Select-Object -Last 30 | ForEach-Object { Write-Log "  $_" }
+        }
+        Write-Log "" "ERROR"
+        Write-Log "【补救方法】" "ERROR"
+        Write-Log "  1. 大多数情况是授权码无效，请使用「重新激活授权」工具改码：" "ERROR"
+        Write-Log "     开始菜单 → 盘家智管 → 重新激活授权" "ERROR"
+        Write-Log "     或执行：powershell -File `"$InstallDir\scripts\reauth-app.ps1`"" "ERROR"
+        Write-Log "  2. 如服务器不可达，先 ping 通授权服务器后重试" "ERROR"
+        Write-Log "  3. 改完授权码后，重新运行本安装程序即可（会自动从断点续装）" "ERROR"
+        exit 1
     }
 
-    Write-Log "服务启动完成"
+    if (-not $springStarted) {
+        # 5 分钟还没看到 Started 但日志里也没失败关键字 → 可能是首次启动慢
+        # 但我们宁可中断也不能假装成功（避免客户访问受限功能才发现授权无效）
+        Write-Log "5 分钟内未检测到 Spring Boot 启动完成（容器健康：$containerHealthy）" "ERROR"
+        Write-Log "" "ERROR"
+        Write-Log "可能原因：" "ERROR"
+        Write-Log "  1. 首次启动较慢（JIT 编译 + DB 建表 + integrity check），重新运行 install 续装即可" "ERROR"
+        Write-Log "  2. 后端 OOM 或死锁，请查看日志: docker logs panjia-server --tail 100" "ERROR"
+        Write-Log "  3. .env 中授权码错误，使用「重新激活授权」工具改码：" "ERROR"
+        Write-Log "     开始菜单 → 盘家智管 → 重新激活授权" "ERROR"
+        Write-Log "后端日志最后 30 行：" "ERROR"
+        $logsRaw = docker logs panjia-server --tail 30 2>&1
+        if ($logsRaw) {
+            $logsRaw | Select-Object -Last 30 | ForEach-Object { Write-Log "  $_" }
+        }
+        exit 1
+    }
+
+    Write-Log "服务启动完成 + 授权激活成功（Spring Boot 已 Started）"
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     docker compose ps 2>&1 | ForEach-Object { Write-Log "  $_" }
     $ErrorActionPreference = $prevEap
     Set-Progress 6
-}
-
-# ==================== 步骤 7：激活授权 ====================
-if (-not (Test-StepDone 7)) {
-    Write-Step 7 $TotalSteps "激活授权码"
-
-    if ([string]::IsNullOrWhiteSpace($AuthCode)) {
-        Write-Log "警告: 未提供授权码，跳过自动激活" "WARN"
-        Write-Log "手动激活方法：编辑 $InstallDir\config\.env 设置 PANJIA_AUTH_CODE=你的授权码，"
-        Write-Log "然后执行: cd `"$InstallDir\config`" ; docker compose up -d server"
-    } else {
-        Write-Log "授权服务器: $LicenseServer"
-        Write-Log "激活方式: 后端启动时读取 .env 中的授权码，自动向授权服务器激活"
-
-        # 激活发生在后端启动流程里（initOnStartup → 调授权服务器 /api/auth/activate），
-        # 成功的标志是把 token 落盘（容器 /data/panjia-license/.panjia_token
-        # → 宿主机 data\panjia-license\.panjia_token）。
-        # 注意：不能调 http://localhost:8080——server 服务只有 expose 没有 ports，
-        # 宿主机根本访问不到 8080；且后端也不存在 /api/license/activate 接口。
-        $tokenFile = "$InstallDir\data\panjia-license\.panjia_token"
-        $activated = $false
-        for ($i = 0; $i -lt 60; $i++) {
-            if (Test-Path $tokenFile) {
-                $activated = $true
-                break
-            }
-            if ($i -gt 0 -and $i % 10 -eq 0) {
-                Write-Log "  等待后端自动激活...（$($i * 5) s / 300 s）"
-            }
-            Start-Sleep -Seconds 5
-        }
-        if ($activated) {
-            Write-Log "授权激活成功（token 已生成）"
-        } else {
-            Write-Log "警告: 300 秒内未检测到激活 token" "WARN"
-            Write-Log "可能原因: 授权码无效 / 授权服务器不可达 / 后端未启动完成"
-            Write-Log "请查看后端日志排查: docker logs panjia-server --tail 100"
-        }
-    }
-
-    Set-Progress 7
 }
 
 # ==================== 完成 ====================

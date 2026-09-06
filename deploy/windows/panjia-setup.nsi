@@ -141,6 +141,7 @@ Section "主程序" SecMain
     File "scripts\uninstall.ps1"
     File "scripts\start-app.ps1"
     File "scripts\stop-app.ps1"
+    File "scripts\reauth-app.ps1"
 
     ; 释放前端静态资源
     SetOutPath "$INSTDIR\web\dist"
@@ -238,6 +239,11 @@ Section "开始菜单快捷方式" SecStartMenu
     CreateShortCut "$SMPROGRAMS\${APPNAME}\查看日志.lnk" \
         "$INSTDIR\logs"
 
+    CreateShortCut "$SMPROGRAMS\${APPNAME}\重新激活授权.lnk" \
+        "powershell.exe" \
+        '-NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\reauth-app.ps1" -InstallDir "$INSTDIR"' \
+        "" "" ""
+
     CreateShortCut "$SMPROGRAMS\${APPNAME}\卸载${APPNAME}.lnk" \
         "$INSTDIR\uninstall.exe"
 
@@ -267,6 +273,7 @@ Section "Uninstall"
     Delete "$SMPROGRAMS\${APPNAME}\停止盘家智管.lnk"
     Delete "$SMPROGRAMS\${APPNAME}\打开盘家智管.lnk"
     Delete "$SMPROGRAMS\${APPNAME}\查看日志.lnk"
+    Delete "$SMPROGRAMS\${APPNAME}\重新激活授权.lnk"
     Delete "$SMPROGRAMS\${APPNAME}\卸载${APPNAME}.lnk"
     RMDir "$SMPROGRAMS\${APPNAME}"
 
