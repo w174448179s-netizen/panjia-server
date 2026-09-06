@@ -276,6 +276,31 @@ Section "Uninstall"
     ; 删除注册表
     DeleteRegKey HKLM "Software\Panjia\${APPNAME}"
 
+    ; 询问是否卸载 Docker Desktop（默认保留：Docker 是平台组件，客户可能有其他用途）
+    MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "是否同时卸载 Docker Desktop？$\n$\n选择「是」将卸载 Docker Desktop（只有本次安装时才装的 Docker 才需要卸载；若是机器本来就有 Docker，请选择「否」）。$\n$\n选择「否」将保留 Docker Desktop（重新安装盘家智管时无需重装 Docker）。$\n$\n推荐：选择「否」（默认）。" IDYES doUninstallDocker IDNO keepDocker
+
+    doUninstallDocker:
+        DetailPrint "正在卸载 Docker Desktop（可能需要 1-3 分钟）..."
+        ; 从注册表读取 Docker Desktop 真实安装路径（避免 32 位 uninstaller 的
+        ; WOW64 重定向问题和客户机自定义安装路径问题）。注册表无值时 fallback 到
+        ; 64 位默认路径（绝大多数 64 位 Windows 的标准安装位置）。
+        ReadRegStr $R1 HKLM "SOFTWARE\Docker Inc.\Docker\Desktop" "InstallLocation"
+        ${If} $R1 == ""
+            StrCpy $R1 "C:\Program Files\Docker\Docker"
+        ${EndIf}
+        ${If} ${FileExists} "$R1\Docker Desktop Installer.exe"
+            ExecWait '"$R1\Docker Desktop Installer.exe" uninstall --quiet'
+            DetailPrint " Docker Desktop 已卸载（建议重启电脑完成清理）"
+        ${Else}
+            DetailPrint " 未找到 Docker Desktop 卸载程序（$R1\Docker Desktop Installer.exe）"
+            DetailPrint " 如需卸载请从「设置 - 应用」中手动卸载 Docker Desktop"
+        ${EndIf}
+        Goto askKeepData
+
+    keepDocker:
+        DetailPrint "保留 Docker Desktop"
+
+    askKeepData:
     ; 询问是否保留数据
     MessageBox MB_YESNO|MB_ICONQUESTION "是否保留数据文件？$\n$\n选择「是」将保留数据库和授权信息，选择「否」将删除全部数据。" IDYES keepData
     DetailPrint "删除全部数据..."
