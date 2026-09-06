@@ -24,7 +24,8 @@ deploy/windows/
 │   └── nginx.conf         Nginx 配置
 ├── web/dist/              前端静态资源（构建时生成）
 ├── docker/                Docker Desktop 安装包（构建时下载）
-│   └── Docker Desktop Installer.exe
+│   ├── Docker Desktop Installer.exe
+│   └── wsl.msi            WSL 内核离线更新包（构建时自动下载，离线客户机必需）
 ├── images/                Docker 镜像 tar（构建时导出）
 │   ├── panjia-server.tar  业务镜像
 │   ├── postgres.tar       PostgreSQL

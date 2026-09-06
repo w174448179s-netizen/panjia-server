@@ -252,6 +252,74 @@ elif [ "$ONLINE_MODE" = "0" ]; then
         size=$(du -h "$DOCKER_INSTALLER" | cut -f1)
         echo "  ✓ Docker Desktop 安装包下载完成 ($size)"
     fi
+
+    # WSL 内核离线更新包：客户机 WSL 过旧时报 "WSL is too old"，
+    # 离线环境无法执行 wsl --update，需要内置 MSI 静默升级。
+    # 已存在则跳过；下载失败仅告警（在线客户机仍可 wsl --update）。
+    # 注意：国内访问 GitHub 可能极慢，所有网络操作都带超时，超时即跳过，
+    # 不会阻塞构建。
+    WSL_MSI="$INSTALLER_DIR/docker/wsl.msi"
+    # 从 GitHub API 获取最新版信息（带超时；失败不阻塞构建）
+    WSL_API_JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://api.github.com/repos/microsoft/WSL/releases/latest" 2>/dev/null || true)
+    WSL_ASSET_URL=$(printf '%s' "$WSL_API_JSON" \
+        | grep -o '"browser_download_url": *"[^"]*\.x64\.msi"' \
+        | head -1 | grep -o 'https[^"]*' || true)
+    WSL_EXPECTED_SIZE=$(printf '%s' "$WSL_API_JSON" | python3 -c '
+import json, sys
+try:
+    for a in json.load(sys.stdin).get("assets", []):
+        if a.get("name", "").endswith("x64.msi"):
+            print(a.get("size")); break
+except Exception:
+    pass' 2>/dev/null || true)
+
+    # 校验 wsl.msi 完整性：OLE 魔数 + 与 GitHub API 报告的精确字节数比对。
+    # 只查魔数会放过「断点续传中断的半截文件」——残缺 MSI 装到客户机会报 1620。
+    verify_wsl_msi() {
+        local f="$1"
+        [ -s "$f" ] || return 1
+        head -c 8 "$f" | od -An -tx1 | grep -qi "d0 cf 11 e0" || return 1
+        if [ -n "$WSL_EXPECTED_SIZE" ]; then
+            local actual
+            actual=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null)
+            [ "$actual" = "$WSL_EXPECTED_SIZE" ] || return 1
+        fi
+        return 0
+    }
+
+    if [ -f "$WSL_MSI" ]; then
+        if verify_wsl_msi "$WSL_MSI"; then
+            echo "  ✓ 已存在 WSL 内核更新包 ($(du -h "$WSL_MSI" | cut -f1))"
+        else
+            echo "  [WARN] 本地 WSL 更新包不完整（疑为中断的下载残留），删除后重新下载..."
+            rm -f "$WSL_MSI"
+        fi
+    fi
+    if [ ! -f "$WSL_MSI" ]; then
+        echo "  下载 WSL 内核更新包（GitHub 最新版，超时 5 分钟自动跳过）..."
+        if [ -n "$WSL_ASSET_URL" ]; then
+            if curl -fL -C - --connect-timeout 15 --max-time 300 -o "$WSL_MSI" "$WSL_ASSET_URL" -sS \
+               || wget -T 30 -c -O "$WSL_MSI" "$WSL_ASSET_URL" -q; then
+                if verify_wsl_msi "$WSL_MSI"; then
+                    echo "  ✓ WSL 内核更新包下载完成 ($(du -h "$WSL_MSI" | cut -f1))"
+                else
+                    echo "  [WARN] WSL 更新包下载不完整，已丢弃（安装器仍可构建）"
+                    rm -f "$WSL_MSI"
+                fi
+            else
+                rm -f "$WSL_MSI"
+                echo "  [WARN] WSL 内核更新包下载失败（不影响构建）"
+            fi
+        else
+            echo "  [WARN] 无法获取 WSL 最新版本信息（不影响构建）"
+        fi
+        if [ ! -f "$WSL_MSI" ]; then
+            echo "  提示：离线客户机需要 WSL 更新包时，手动下载后放到："
+            echo "        $INSTALLER_DIR/docker/wsl.msi"
+            echo "        下载地址: https://github.com/microsoft/WSL/releases/latest"
+        fi
+    fi
     echo ""
 else
     echo "[$STEP_NUM/8] 跳过 Docker Desktop 安装包（--online 在线模式）"

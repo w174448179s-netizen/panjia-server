@@ -37,6 +37,34 @@ if ($confirm -eq "y" -or $confirm -eq "Y") {
     Write-Host " 保留 Docker 镜像"
 }
 
+# 询问是否卸载 Docker Desktop（可选）
+# 默认保留：Docker 是平台组件，客户机器可能有其他用途；
+# 但很多客户的 Docker 是本安装器装的，彻底清理时应提供选项。
+Write-Host ""
+$removeDocker = Read-Host "是否卸载 Docker Desktop？(y/N)"
+if ($removeDocker -eq "y" -or $removeDocker -eq "Y") {
+    $dockerInstaller = "$env:ProgramFiles\Docker\Docker\Docker Desktop Installer.exe"
+    if (Test-Path $dockerInstaller) {
+        Write-Host " 卸载 Docker Desktop（可能需要几分钟）..."
+        try {
+            $proc = Start-Process -FilePath $dockerInstaller -ArgumentList "uninstall", "--quiet" -Wait -PassThru
+            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+                Write-Host " ✓ Docker Desktop 已卸载（建议重启电脑完成清理）"
+            } else {
+                Write-Host " 卸载程序退出码 $($proc.ExitCode)，请检查 Docker 是否仍在（设置-应用）"
+            }
+        } catch {
+            Write-Host " 卸载失败: $($_.Exception.Message)"
+            Write-Host " 请从 设置-应用 中手动卸载 Docker Desktop"
+        }
+    } else {
+        Write-Host " 未找到 Docker Desktop 安装程序"
+        Write-Host " 如需卸载请从 设置-应用 中手动操作"
+    }
+} else {
+    Write-Host " 保留 Docker Desktop（重新安装盘家智管时无需重装 Docker）"
+}
+
 # 询问是否保留数据
 Write-Host ""
 $keepData = Read-Host "是否保留数据（数据库、授权信息）？(Y/n)"
@@ -52,6 +80,8 @@ if ($keepData -eq "n" -or $keepData -eq "N") {
     if (Test-Path "$InstallDir\config") {
         Remove-Item -Path "$InstallDir\config\*.yml", "$InstallDir\config\.env" -Force -ErrorAction SilentlyContinue
     }
+    # 进度文件必须删掉，否则下次安装会误认为未完成而跳过前几步
+    Remove-Item -Path "$InstallDir\config\install-progress.ini" -Force -ErrorAction SilentlyContinue
     Remove-Item -Path "$InstallDir\scripts", "$InstallDir\nginx", "$InstallDir\web" -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host " ✓ 程序文件已删除，数据已保留"
 }

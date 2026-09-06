@@ -153,6 +153,8 @@ Section "主程序" SecMain
     ; 释放 Docker Desktop 安装包（有就打进去，离线安装用）
     SetOutPath "$INSTDIR\docker"
     File /nonfatal "docker\Docker Desktop Installer.exe"
+    ; WSL 内核离线更新包（离线客户机避免 "WSL is too old" 报错）
+    File /nonfatal "docker\wsl.msi"
 
     ; 写入安装信息
     WriteIniStr "$INSTDIR\config\install-config.ini" "General" "InstallDir" "$INSTDIR"
@@ -287,6 +289,7 @@ Section "Uninstall"
     Delete "$INSTDIR\config\.env"
     Delete "$INSTDIR\config\install-config.ini"
     Delete "$INSTDIR\config\install-info.json"
+    Delete "$INSTDIR\config\install-progress.ini"
     Delete "$INSTDIR\nginx\nginx.conf"
     RMDir /r "$INSTDIR\scripts"
     RMDir /r "$INSTDIR\web"

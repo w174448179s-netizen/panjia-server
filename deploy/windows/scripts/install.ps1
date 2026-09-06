@@ -5,19 +5,53 @@
 # 参数：
 #   -InstallDir   安装目录（默认 C:\Program Files\Panjia）
 #   -AuthCode     授权码
-#   -LicenseServer 授权服务器地址（默认 https://license.panjia.icu）
+#   -LicenseServer 授权服务器地址（默认 https://panjia.icu）
 #   -ImageTag     镜像标签（默认 latest）
+#
+# 说明：
+#   - 需要管理员权限，未提权时会自动弹出 UAC 自我重启
+#   - Docker Desktop 以静默方式安装（install --quiet --accept-license）
+#   - WSL 内核过旧时自动更新：优先安装离线包 docker\wsl.msi（缺省从
+#     https://github.com/microsoft/WSL/releases/latest 下载），在线环境
+#     会执行 wsl --update --web-download
+#   - 支持断点续装：若安装过程中要求重启，会注册 RunOnce 在重启后继续
+#     退出码：0 成功；1 失败；3 需要重启后续装
 # ============================================================================
 
 param(
     [string]$InstallDir = "C:\Program Files\Panjia",
     [string]$AuthCode = "",
-    [string]$LicenseServer = "https://license.panjia.icu",
+    [string]$LicenseServer = "https://panjia.icu",
     [string]$ImageTag = "latest"
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+# ==================== 管理员权限检查 ====================
+# 静默安装 Docker Desktop、写入 Program Files 都需要管理员权限。
+# 非管理员运行时自动提权重启自身（典型场景：重启后 RunOnce 断点续装）。
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "需要管理员权限，正在请求提权..."
+    try {
+        # 注意：Start-Process 不会自动给含空格的参数加引号，必须手动加
+        $argList = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", ('"{0}"' -f $PSCommandPath),
+            "-InstallDir", ('"{0}"' -f $InstallDir),
+            "-AuthCode", ('"{0}"' -f $AuthCode),
+            "-LicenseServer", ('"{0}"' -f $LicenseServer),
+            "-ImageTag", ('"{0}"' -f $ImageTag)
+        )
+        Start-Process -FilePath "powershell" -Verb RunAs -ArgumentList $argList | Out-Null
+    } catch {
+        Write-Host "提权被取消或失败: $_"
+        exit 1
+    }
+    exit 0
+}
 
 # 日志
 $LogDir = "$InstallDir\logs"
@@ -132,45 +166,156 @@ if (-not (Test-StepDone 2)) {
     Write-Step 2 $TotalSteps "Docker 环境检查"
 
     function Test-DockerInstalled {
-        try {
-            $null = docker --version 2>&1
-            return $true
-        } catch {
-            return $false
-        }
+        # 用 Get-Command 探测命令是否存在，兼容 PS5.1 / PS7
+        # （PS7 下原生命令写 stderr 不会抛异常，try/catch 会误判为已安装）
+        return ($null -ne (Get-Command docker -ErrorAction SilentlyContinue))
     }
 
     function Test-DockerRunning {
+        # 用退出码判断 daemon 是否就绪，兼容 PS5.1 / PS7
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         try {
-            $null = docker info 2>&1
-            return $true
-        } catch {
-            return $false
+            docker info 2>&1 | Out-Null
+        } finally {
+            $ErrorActionPreference = $prevEap
         }
+        return ($LASTEXITCODE -eq 0)
     }
 
-    $needReboot = $false
+    # 需要重启时：注册 RunOnce 断点续装，提示用户，以退出码 3 结束
+    function Request-RebootAndContinue {
+        param([string]$Reason)
+        Write-Log $Reason "WARN"
+        Register-RestartContinue
+        Write-Log "已注册重启后自动续装，请重启电脑"
+        [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show(
+            "$Reason。`n`n重启后将自动继续安装盘家智管，无需再次运行安装程序。",
+            "盘家智管 - 需要重启",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        ) | Out-Null
+        exit 3
+    }
+
+    # 更新 WSL2 内核。Docker Desktop 内核过旧时会报错：
+    #   "Your version of Windows Subsystem for Linux (WSL) is too old."
+    # 更新顺序：本地离线包 wsl.msi（推荐，离线环境可用）
+    #          → wsl --update --web-download（绕过 Microsoft Store）
+    #          → wsl --update
+    # wsl.exe 的输出是 UTF-16LE 编码，PowerShell 5.1 默认按 ANSI/OEM 解码会得到乱码，
+    # 且乱码中夹杂的控制字符会破坏日志行（把关键日志行搅在一起，无法判断执行到哪一步）。
+    # 统一走本函数执行 wsl：临时把控制台编码切为 Unicode，并清洗控制字符。
+    function Invoke-WslCommand {
+        param([Parameter(Mandatory)][string[]]$WslArgs)
+        $prevEnc = [Console]::OutputEncoding
+        $prevEap = $ErrorActionPreference
+        try {
+            [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+            $ErrorActionPreference = "Continue"
+            $output = @(wsl @WslArgs 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            [Console]::OutputEncoding = $prevEnc
+            $ErrorActionPreference = $prevEap
+        }
+        $clean = @(foreach ($line in $output) {
+            ("$line" -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
+        } | Where-Object { "$_" -match '\S' })
+        return @{ Output = $clean; ExitCode = $exitCode }
+    }
+
+    function Update-Wsl {
+        # wsl.exe 不存在说明 WSL 功能未启用，交给 Docker Desktop 安装器处理
+        if ($null -eq (Get-Command wsl -ErrorAction SilentlyContinue)) {
+            Write-Log "  未检测到 wsl.exe，跳过 WSL 内核检查（由 Docker Desktop 安装器启用）"
+            return
+        }
+
+        # 检查内核版本（旧版内置 WSL 不支持 --version，退出码非 0，说明必须更新）
+        $verResult = Invoke-WslCommand @("--version")
+        $verOut = $verResult.Output
+        $verExit = $verResult.ExitCode
+
+        if ($verExit -eq 0) {
+            # 输出为本地化文本，如 "WSL 版本: 2.6.1.0" / "内核版本: 6.6.87.2-1"
+            # 或英文 "Kernel version: 6.6.87.2-1"，取前三个数字段比较即可
+            $kernelLine = ($verOut | Where-Object { "$_" -match 'Kernel\s*version|内核版本' } | Select-Object -First 1)
+            if ("$kernelLine" -match '(\d+)\.(\d+)\.(\d+)') {
+                $kernelVer = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+                if ($kernelVer -ge [version]"5.10.0") {
+                    Write-Log "  WSL 内核版本 $kernelVer 满足要求，无需更新"
+                    return
+                }
+                Write-Log "  WSL 内核版本过旧（$kernelVer），需要更新"
+            } else {
+                Write-Log "  无法解析 WSL 内核版本，尝试更新"
+            }
+        } else {
+            Write-Log "  WSL 版本过旧（不支持 --version 命令），需要更新"
+        }
+
+        # 方式一：本地离线 MSI（随安装包分发，放在 docker\wsl.msi）
+        # 下载地址：https://github.com/microsoft/WSL/releases/latest
+        $wslMsi = "$PSScriptRoot\..\docker\wsl.msi"
+        if (Test-Path $wslMsi) {
+            Write-Log "  从本地离线包更新 WSL（$([System.IO.Path]::GetFileName($wslMsi))）..."
+            $process = Start-Process -FilePath "msiexec.exe" -Wait -PassThru `
+                -ArgumentList "/i", "`"$wslMsi`"", "/quiet", "/norestart"
+            $msiExit = $process.ExitCode
+            Write-Log "  WSL MSI 安装退出码: $msiExit"
+            if ($msiExit -eq 0) {
+                Write-Log "  WSL 内核更新完成"
+                return
+            }
+            if ($msiExit -eq 3010) {
+                # 3010: 安装成功但需要重启
+                Request-RebootAndContinue "WSL 内核更新完成，需要重启电脑才能继续"
+            }
+            Write-Log "  WSL MSI 安装失败（退出码 $msiExit），尝试在线更新" "WARN"
+        }
+
+        # 方式二：在线更新（--web-download 不依赖 Microsoft Store）
+        foreach ($updArgs in @(@("--update", "--web-download"), @("--update"))) {
+            $cmdText = "wsl $($updArgs -join ' ')"
+            Write-Log "  执行 $cmdText ..."
+            $updResult = Invoke-WslCommand $updArgs
+            $updResult.Output | ForEach-Object { Write-Log "    $_" }
+            if ($updResult.ExitCode -eq 0) {
+                Write-Log "  WSL 更新完成"
+                return
+            }
+            Write-Log "  $cmdText 失败（退出码 $($updResult.ExitCode)）" "WARN"
+        }
+
+        Write-Log "  WSL 更新失败。若 Docker 启动时仍报 WSL 版本过旧，" "WARN"
+        Write-Log "  请以管理员身份手动执行: wsl --update" "WARN"
+    }
+
     $dockerJustInstalled = $false
 
     if (Test-DockerInstalled) {
         $ver = docker --version 2>&1
         Write-Log "Docker 已安装: $ver"
     } else {
-        Write-Log "未检测到 Docker，开始安装 Docker Desktop..."
+        Write-Log "未检测到 Docker，需要安装 Docker Desktop"
         $dockerJustInstalled = $true
 
-        # 优先使用本地安装包（离线模式）
+        # 找 Docker Desktop 安装包
         $localDockerInstaller = "$PSScriptRoot\..\docker\Docker Desktop Installer.exe"
         $dockerInstaller = ""
+        $dockerInstallerDownloaded = $false
 
         if (Test-Path $localDockerInstaller) {
             $sizeMB = [math]::Round((Get-Item $localDockerInstaller).Length / 1MB, 1)
-            Write-Log "  找到本地 Docker Desktop 安装包（$sizeMB MB），使用离线安装"
+            Write-Log "  找到本地 Docker Desktop 安装包（$sizeMB MB）"
             $dockerInstaller = $localDockerInstaller
         } else {
             Write-Log "  未找到本地安装包，尝试在线下载..."
             $dockerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
             $dockerInstaller = "$env:TEMP\DockerDesktopInstaller.exe"
+            $dockerInstallerDownloaded = $true
 
             Write-Log "  下载 Docker Desktop 安装包（约 600MB），请耐心等待..."
             try {
@@ -182,135 +327,148 @@ if (-not (Test-StepDone 2)) {
             }
         }
 
-        # 启用 WSL2 和虚拟机平台（Docker Desktop 依赖）
-        Write-Log "检查并启用 Windows 功能（WSL2 / 虚拟机平台）..."
+        # 静默安装 Docker Desktop（无界面，自动接受许可协议）
+        Write-Log "以静默方式安装 Docker Desktop（可能需要几分钟）..."
 
-        try {
-            # 启用 Microsoft-Windows-Subsystem-Linux
-            $wslState = (Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -ErrorAction Stop).State
-            if ($wslState -ne "Enabled") {
-                Write-Log "  启用 WSL 子系统..."
-                Enable-WindowsOptionalFeature -Online -FeatureName "Microsoft-Windows-Subsystem-Linux" -NoRestart -All | Out-Null
-                $needReboot = $true
-                Write-Log "  WSL 子系统已启用"
-            } else {
-                Write-Log "  WSL 子系统已启用"
-            }
+        # PowerShell 下参数必须通过 ArgumentList 传递，且需放在 flags 之前
+        $process = Start-Process -FilePath $dockerInstaller -Wait -PassThru `
+            -ArgumentList "install", "--quiet", "--accept-license"
+        $dockerInstallExit = $process.ExitCode
+        Write-Log "  Docker Desktop 安装程序退出码: $dockerInstallExit"
 
-            # 启用 VirtualMachinePlatform
-            $vmState = (Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction Stop).State
-            if ($vmState -ne "Enabled") {
-                Write-Log "  启用虚拟机平台..."
-                Enable-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -NoRestart -All | Out-Null
-                $needReboot = $true
-                Write-Log "  虚拟机平台已启用"
-            } else {
-                Write-Log "  虚拟机平台已启用"
-            }
-        } catch {
-            Write-Log "  警告: 启用 Windows 功能时出错: $_" "WARN"
+        if ($dockerInstallExit -ne 0 -and $dockerInstallExit -ne 3010) {
+            Write-Log "Docker Desktop 静默安装失败（退出码 $dockerInstallExit）" "ERROR"
+            Write-Log "请手动安装 Docker Desktop 后重新运行本安装程序" "ERROR"
+            exit 1
         }
 
-        # 安装 Docker Desktop（静默安装，WSL2 后端）
-        Write-Log "安装 Docker Desktop（静默安装，WSL2 后端）..."
+        # 清理在线下载的安装包（约 600MB）
+        if ($dockerInstallerDownloaded -and (Test-Path $dockerInstaller)) {
+            Remove-Item $dockerInstaller -Force -ErrorAction SilentlyContinue
+            Write-Log "  已清理下载的 Docker 安装包"
+        }
 
-        $installArgs = @(
-            "install",
-            "--quiet",
-            "--accept-license",
-            "--backend=wsl-2"
-        )
+        if ($dockerInstallExit -eq 3010) {
+            # 3010: 安装成功但需要重启（WSL/系统组件变更未生效）
+            Request-RebootAndContinue "Docker Desktop 安装完成，需要重启电脑才能继续"
+        }
+        Write-Log "Docker Desktop 静默安装完成"
 
-        $process = Start-Process -FilePath $dockerInstaller -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
-
-        Write-Log "  Docker Desktop 安装退出码: $($process.ExitCode)"
-
-        # Docker Desktop 安装后 PATH 可能还没刷新，手动加入可能的安装路径
+        # Docker Desktop 安装后 PATH 可能还没刷新，手动加入
         $dockerCliPath = "$env:ProgramFiles\Docker\Docker\resources\bin"
         if (Test-Path $dockerCliPath) {
             $env:PATH = "$dockerCliPath;$env:PATH"
             Write-Log "  已将 Docker CLI 加入 PATH"
         }
-
-        # 检查安装结果
-        if (-not (Test-DockerInstalled)) {
-            $dockerExe = "$env:ProgramFiles\Docker\Docker\resources\bin\docker.exe"
-            if (Test-Path $dockerExe) {
-                Write-Log "Docker Desktop 安装完成（通过完整路径检测）"
-            } else {
-                Write-Log "Docker Desktop 安装失败" "ERROR"
-                exit 1
+        # 从注册表刷新 PATH（Docker 安装后会写入系统 PATH）
+        try {
+            $sysEnvKey = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+            $sysPath = (Get-ItemProperty -Path $sysEnvKey -ErrorAction Stop).Path
+            if ($sysPath) {
+                $env:PATH = "$sysPath;$env:PATH"
             }
-        } else {
+        } catch {}
+
+        # 再次确认 Docker 已安装
+        if (Test-DockerInstalled) {
             Write-Log "Docker Desktop 安装完成"
-        }
-    }
-
-    # 新安装 Docker Desktop 后，如果启用了 WSL2 功能，必须重启才能用
-    # 不重启的话 Docker daemon 根本启动不了，干等也没用
-    if ($dockerJustInstalled -and $needReboot) {
-        Write-Log "Docker Desktop 已安装，WSL2 功能已启用" "WARN"
-        Write-Log "必须重启电脑后 Docker 才能正常运行，系统将自动重启..." "WARN"
-        Write-Log "重启后安装程序会自动继续，无需手动操作" "WARN"
-        Register-RestartContinue
-        Write-Log "10 秒后重启电脑..."
-        Start-Sleep -Seconds 10
-        Restart-Computer -Force
-        exit 0
-    }
-
-    # 启动 Docker Desktop（已安装且已重启的情况）
-    if (-not (Test-DockerRunning)) {
-        Write-Log "启动 Docker Desktop..."
-
-        # 预配置 Docker Desktop：跳过首次启动向导和 EULA 弹窗
-        $settingsDir = "$env:APPDATA\Docker"
-        if (-not (Test-Path $settingsDir)) {
-            New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
-        }
-        $settingsFile = "$settingsDir\settings-store.json"
-        if (-not (Test-Path $settingsFile)) {
-            $settings = @{
-                AcceptEula = $true
-                SkipTutorial = $true
-                SkipThankYouPage = $true
-                ShowTip = $false
-            }
-            $settings | ConvertTo-Json | Set-Content -Path $settingsFile -Force
-            Write-Log "  已预配置 Docker Desktop 设置（跳过首次向导）"
-        }
-
-        $dockerPath = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-        if (Test-Path $dockerPath) {
-            Start-Process $dockerPath
-            Write-Log "  已启动 Docker Desktop"
         } else {
-            try {
-                Start-Process "Docker Desktop" -ErrorAction Stop
-                Write-Log "  已启动 Docker Desktop"
-            } catch {
-                Write-Log "  无法启动 Docker Desktop: $_" "WARN"
-            }
+            Write-Log "未检测到 docker 命令" "ERROR"
+            Write-Log "请确认 Docker Desktop 是否已安装成功" "ERROR"
+            exit 1
+        }
+    }
+
+    # 确保 Docker daemon 已启动（静默安装后不会自动启动；重启续装时也需要手动拉起）
+    if (-not (Test-DockerRunning)) {
+        # 先检查/更新 WSL 内核，避免 Docker Desktop 启动时报 WSL 版本过旧
+        # （放这里而非安装前：无论是新装、重启续装还是 Docker 已装未运行，都会走到）
+        Write-Log "检查 WSL 内核版本..."
+        Update-Wsl
+
+        $dockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+        if (Test-Path $dockerDesktopExe) {
+            Write-Log "启动 Docker Desktop..."
+            # 注意：本脚本以管理员身份运行，直接 Start-Process 会让 Docker Desktop
+            # 继承管理员权限运行——这种模式下 Docker Desktop 经常启动失败
+            # （用户双击是普通权限，反而正常）。
+            # 通过 explorer.exe 中转启动，使其回落到当前登录用户的普通权限。
+            Start-Process -FilePath "explorer.exe" -ArgumentList "`"$dockerDesktopExe`""
+        } else {
+            Write-Log "未找到 Docker Desktop.exe，请手动启动 Docker Desktop" "WARN"
         }
 
-        # 等待 Docker daemon 就绪（最多 3 分钟，重启后应该很快）
-        Write-Log "等待 Docker 启动..."
-        $maxWait = 180
+        Write-Log "等待 Docker Desktop 启动（首次启动可能需要几分钟）..."
+        Write-Log "请查看右下角托盘，Docker 鲸鱼图标变绿表示已就绪"
+
+        $dockerTimeout = 300
         $waited = 0
-        while ($waited -lt $maxWait) {
+        $fallbackTried = $false
+        while ($waited -lt $dockerTimeout) {
             if (Test-DockerRunning) {
                 break
+            }
+            # explorer 中转若无效，60 秒后用 runas /trustlevel 再补一次
+            # （trustlevel:0x20000 以受限令牌运行，即普通用户权限，无需密码）
+            if (-not $fallbackTried -and $waited -ge 60 -and (Test-Path $dockerDesktopExe)) {
+                Write-Log "  尝试备用启动方式（runas /trustlevel 降权）..."
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                try {
+                    Start-Process -FilePath "runas.exe" `
+                        -ArgumentList "/trustlevel:0x20000", "`"$dockerDesktopExe`"" 2>&1 | Out-Null
+                } catch {
+                    Write-Log "  runas 降权启动失败: $_" "WARN"
+                } finally {
+                    $ErrorActionPreference = $prevEap
+                }
+                $fallbackTried = $true
+            }
+            # 若 Docker Desktop 进程根本没存活（启动即失败或闪退），每 60 秒补拉一次
+            if ($waited -gt 0 -and $waited % 60 -eq 0 `
+                -and $null -eq (Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue) `
+                -and (Test-Path $dockerDesktopExe)) {
+                Write-Log "  Docker Desktop 进程未运行，重新尝试启动..."
+                Start-Process -FilePath "explorer.exe" -ArgumentList "`"$dockerDesktopExe`""
             }
             Start-Sleep -Seconds 5
             $waited += 5
             if ($waited % 30 -eq 0) {
-                Write-Log "  等待中... ${waited}s / ${maxWait}s"
+                Write-Log "  等待中... $waited s / $dockerTimeout s"
             }
         }
 
         if (-not (Test-DockerRunning)) {
-            Write-Log "Docker 启动超时" "ERROR"
-            Write-Log "请手动启动 Docker Desktop，确保 Docker 正常运行后重新运行安装程序" "ERROR"
+            Write-Log "Docker 尚未就绪" "WARN"
+            # 把失败原因写进日志，便于排查（进程状态、docker info 的错误输出、WSL 状态）
+            Write-Log "---- 诊断信息 ----"
+            $ddProc = Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue
+            if ($ddProc) {
+                Write-Log "  [进程] Docker Desktop 运行中（PID: $($ddProc.Id -join ', ')），但引擎未就绪"
+            } else {
+                Write-Log "  [进程] Docker Desktop 未运行（自动启动失败或已退出）"
+            }
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                $infoOut = docker info 2>&1
+                $infoOut | Where-Object { "$_" -match '\S' } | ForEach-Object { Write-Log "  [docker info] $_" }
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+            $wslResult = Invoke-WslCommand @("--status")
+            $wslResult.Output | ForEach-Object { Write-Log "  [wsl --status] $_" }
+            Write-Log "------------------"
+            Write-Log ""
+            Write-Log "请检查：" "WARN"
+            Write-Log "  1. 右下角托盘是否有 Docker 图标（鲸鱼）" "WARN"
+            Write-Log "  2. Docker 是否提示需要更新 WSL 或重启电脑" "WARN"
+            Write-Log "  3. 如果提示需要重启，请重启电脑后重新运行本安装程序" "WARN"
+            Write-Log "  4. 若 docker info 提示虚拟化/WSL 相关错误，" "WARN"
+            Write-Log "     请确认 BIOS 已开启虚拟化（VT-x/AMD-V），" "WARN"
+            Write-Log "     且 Windows「虚拟机平台」功能已启用" "WARN"
+            Write-Log ""
+            Write-Log "重新运行后会从断点继续，不会重复安装" "WARN"
             exit 1
         }
     }
@@ -318,13 +476,16 @@ if (-not (Test-StepDone 2)) {
     Write-Log "Docker 运行正常"
 
     # 检查 docker compose
-    try {
-        $composeVer = docker compose version 2>&1
-        Write-Log "docker compose 可用: $composeVer"
-    } catch {
-        Write-Log "docker compose 不可用" "ERROR"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $composeVer = docker compose version 2>&1
+    $composeExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($composeExit -ne 0) {
+        Write-Log "docker compose 不可用: $composeVer" "ERROR"
         exit 1
     }
+    Write-Log "docker compose 可用: $composeVer"
 
     Set-Progress 2
 }
@@ -349,6 +510,17 @@ if (-not (Test-StepDone 3)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
 
+    # Docker Desktop 以普通用户权限运行（文件共享层同样非提权），
+    # 而 Program Files 下的目录 ACL 只允许管理员写入，
+    # 容器写宿主目录（postgres/redis 数据、业务日志）会报 permission denied。
+    # 授权 Users 对 data/logs 修改权限（仅这两个目录，最小化范围）。
+    foreach ($writableDir in @("$InstallDir\data", "$InstallDir\logs")) {
+        if (Test-Path $writableDir) {
+            $icaclOut = icacls $writableDir /grant "Users:(OI)(CI)M" 2>&1
+            Write-Log "  已授权 Users 写入: $writableDir"
+        }
+    }
+
     Write-Log "目录结构创建完成: $InstallDir"
     Set-Progress 3
 }
@@ -357,23 +529,29 @@ if (-not (Test-StepDone 3)) {
 if (-not (Test-StepDone 4)) {
     Write-Step 4 $TotalSteps "部署配置文件"
 
-    # 复制 docker-compose.yml
-    $composeSource = "$PSScriptRoot\..\config\docker-compose.yml"
-    $composeDest = "$InstallDir\config\docker-compose.yml"
-    if (Test-Path $composeSource) {
-        Copy-Item $composeSource $composeDest -Force
-        Write-Log "docker-compose.yml 已部署"
-    } else {
-        Write-Log "警告: 未找到 docker-compose.yml" "WARN"
+    # NSIS 调用时配置文件已被直接释放到 $InstallDir（源和目标是同一个文件），
+    # Copy-Item 会报 "无法使用项自身覆盖该项"；独立运行时源在安装包目录，正常复制。
+    function Copy-ConfigFile {
+        param([string]$Source, [string]$Dest, [string]$Name)
+        if (-not (Test-Path $Source)) {
+            Write-Log "警告: 未找到 $Name" "WARN"
+            return
+        }
+        $srcFull = [System.IO.Path]::GetFullPath($Source)
+        $dstFull = [System.IO.Path]::GetFullPath($Dest)
+        if ($srcFull -ieq $dstFull) {
+            Write-Log "$Name 已就位（安装器已释放），跳过复制"
+            return
+        }
+        Copy-Item $Source $Dest -Force
+        Write-Log "$Name 已部署"
     }
 
-    # 复制 nginx.conf
-    $nginxSource = "$PSScriptRoot\..\config\nginx.conf"
-    $nginxDest = "$InstallDir\nginx\nginx.conf"
-    if (Test-Path $nginxSource) {
-        Copy-Item $nginxSource $nginxDest -Force
-        Write-Log "nginx.conf 已部署"
-    }
+    Copy-ConfigFile -Source "$PSScriptRoot\..\config\docker-compose.yml" `
+        -Dest "$InstallDir\config\docker-compose.yml" -Name "docker-compose.yml"
+
+    Copy-ConfigFile -Source "$PSScriptRoot\..\config\nginx.conf" `
+        -Dest "$InstallDir\nginx\nginx.conf" -Name "nginx.conf"
 
     # 生成随机密码（只在首次安装时生成，续装时读取已有 .env）
     $envFile = "$InstallDir\config\.env"
@@ -453,34 +631,45 @@ if (-not (Test-StepDone 5)) {
             [string]$RemoteImage
         )
 
-        try {
-            $null = docker inspect $ImageName 2>&1
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        docker inspect $ImageName 2>&1 | Out-Null
+        $inspectExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        if ($inspectExit -eq 0) {
             Write-Log "  [$ImageName] 已存在，跳过"
             return
-        } catch {}
+        }
 
         if (Test-Path $LocalTarFile) {
             Write-Log "  [$ImageName] 从本地镜像包加载..."
-            try {
-                docker load -i $LocalTarFile 2>&1 | ForEach-Object { Write-Log "    $_" }
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            docker load -i $LocalTarFile 2>&1 | ForEach-Object { Write-Log "    $_" }
+            $loadExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($loadExit -eq 0) {
                 Write-Log "  [$ImageName] 本地加载成功"
                 return
-            } catch {
-                Write-Log "  [$ImageName] 本地加载失败: $_" "WARN"
             }
+            Write-Log "  [$ImageName] 本地加载失败（退出码 $loadExit）" "WARN"
         }
 
         if ($RemoteImage) {
             Write-Log "  [$ImageName] 从远程拉取..."
-            try {
-                docker pull $RemoteImage 2>&1 | ForEach-Object { Write-Log "    $_" }
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            docker pull $RemoteImage 2>&1 | ForEach-Object { Write-Log "    $_" }
+            $pullExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($pullExit -ne 0) {
+                Write-Log "  [$ImageName] 远程拉取失败（退出码 $pullExit）" "WARN"
+            } else {
                 if ($RemoteImage -ne $ImageName) {
                     docker tag $RemoteImage $ImageName 2>&1 | Out-Null
                 }
                 Write-Log "  [$ImageName] 远程拉取成功"
                 return
-            } catch {
-                Write-Log "  [$ImageName] 远程拉取失败: $_" "WARN"
             }
         }
 
@@ -514,30 +703,94 @@ if (-not (Test-StepDone 5)) {
     $serverImageName = "panjia-server:$ImageTag"
     $serverTar = "$imagesDir\panjia-server.tar"
 
-    try {
-        $null = docker inspect $serverImageName 2>&1
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    docker inspect $serverImageName 2>&1 | Out-Null
+    $serverInspectExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    if ($serverInspectExit -eq 0) {
         Write-Log "  [$serverImageName] 已存在，跳过"
-    } catch {
-        if (Test-Path $serverTar) {
-            Write-Log "  [$serverImageName] 从本地镜像包加载 ($([math]::Round((Get-Item $serverTar).Length / 1MB, 1)) MB)..."
-            try {
-                docker load -i $serverTar 2>&1 | ForEach-Object { Write-Log "    $_" }
-                Write-Log "  [$serverImageName] 本地加载成功"
-            } catch {
-                Write-Log "  [$serverImageName] 本地加载失败: $_" "WARN"
-                throw "业务镜像加载失败"
-            }
-        } else {
-            Write-Log "  [$serverImageName] 未找到本地镜像包" "ERROR"
-            Write-Log "  离线安装需要 panjia-server.tar 镜像包" "ERROR"
-            Write-Log "  请确认安装包是否完整，或联系技术支持" "ERROR"
-            exit 1
+    } elseif (Test-Path $serverTar) {
+        Write-Log "  [$serverImageName] 从本地镜像包加载 ($([math]::Round((Get-Item $serverTar).Length / 1MB, 1)) MB)..."
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        docker load -i $serverTar 2>&1 | ForEach-Object { Write-Log "    $_" }
+        $loadExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        if ($loadExit -ne 0) {
+            Write-Log "  [$serverImageName] 本地加载失败（退出码 $loadExit）" "WARN"
+            throw "业务镜像加载失败"
         }
+        Write-Log "  [$serverImageName] 本地加载成功"
+    } else {
+        Write-Log "  [$serverImageName] 未找到本地镜像包" "ERROR"
+        Write-Log "  离线安装需要 panjia-server.tar 镜像包" "ERROR"
+        Write-Log "  请确认安装包是否完整，或联系技术支持" "ERROR"
+        exit 1
     }
 
     Write-Log ""
     Write-Log "全部镜像就绪"
     Set-Progress 5
+}
+
+# ==================== 机器指纹文件（授权绑定依赖，幂等） ====================
+# 后端授权校验要求容器内存在 /etc/machine-id（生产 Linux 由宿主机直接挂载）。
+# Windows 宿主机没有该文件，改用注册表 MachineGuid（随 Windows 安装生成，
+# 重装系统才变化，比 WSL 的 machine-id 稳定）写入固定文件后挂载进容器。
+# 幂等设计：文件已存在则不覆盖——重装/升级不换机，授权不受影响。
+$machineIdFile = "$InstallDir\config\machine-id"
+if (-not (Test-Path $machineIdFile)) {
+    Write-Log "生成机器指纹文件（授权绑定用）..."
+
+    $machineGuid = $null
+    try {
+        $machineGuid = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -ErrorAction Stop).MachineGuid
+        Write-Log "  使用 Windows MachineGuid 作为机器指纹"
+    } catch {
+        Write-Log "  MachineGuid 读取失败，改用随机指纹（本机首次生成后固定）" "WARN"
+    }
+    if ([string]::IsNullOrWhiteSpace($machineGuid)) {
+        $machineGuid = [guid]::NewGuid().ToString()
+    }
+
+    # ASCII 无 BOM、无换行：容器内按纯文本整行读取，BOM/CRLF 会污染指纹
+    [IO.File]::WriteAllText($machineIdFile, $machineGuid, (New-Object System.Text.ASCIIEncoding))
+    Write-Log "  机器指纹文件已生成: $machineIdFile"
+
+    # 升级场景：容器已在运行但缺挂载 → 重建 server 容器使挂载生效
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $existingServer = docker ps -a --filter "name=panjia-server" --format "{{.Names}}" 2>$null
+    $ErrorActionPreference = $prevEap
+    if ($existingServer) {
+        Write-Log "  重建 server 容器以挂载机器指纹..."
+        Push-Location "$InstallDir\config"
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        docker compose up -d server 2>&1 | ForEach-Object { Write-Log "  $_" }
+        $ErrorActionPreference = $prevEap
+        Pop-Location
+    }
+} else {
+    Write-Log "机器指纹文件已存在（重装不换机）: $machineIdFile"
+}
+
+# ==================== Docker Desktop 登录自启（幂等） ====================
+# 静默安装场景下 Docker Desktop 可能未注册自启 Run 键，
+# 导致重启后 Docker 不随登录启动、容器（unless-stopped）也无法拉起。
+$ddExeForRun = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+$runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+if (Test-Path $ddExeForRun) {
+    $existingRun = (Get-ItemProperty $runKeyPath -Name "Docker Desktop" -ErrorAction SilentlyContinue)."Docker Desktop"
+    if ([string]::IsNullOrWhiteSpace($existingRun)) {
+        New-ItemProperty -Path $runKeyPath -Name "Docker Desktop" `
+            -Value "`"$ddExeForRun`" -Autostart" -PropertyType String -Force | Out-Null
+        Write-Log "已注册 Docker Desktop 开机自启（登录时启动）"
+    } else {
+        Write-Log "Docker Desktop 开机自启已存在，无需处理"
+    }
 }
 
 # ==================== 步骤 6：启动服务 ====================
@@ -548,7 +801,15 @@ if (-not (Test-StepDone 6)) {
     Set-Location $configDir
 
     Write-Log "启动容器（docker compose up -d）..."
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     docker compose up -d 2>&1 | ForEach-Object { Write-Log "  $_" }
+    $upExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($upExit -ne 0) {
+        Write-Log "容器启动失败（退出码 $upExit），请查看上方日志" "ERROR"
+        exit 1
+    }
 
     # 等待健康检查
     Write-Log "等待服务启动（最多 5 分钟）..."
@@ -557,7 +818,12 @@ if (-not (Test-StepDone 6)) {
     $allHealthy = $false
 
     while ($waited -lt $maxWait) {
-        $status = docker compose ps --format json 2>&1 | ConvertFrom-Json -ErrorAction SilentlyContinue
+        try {
+            # @() 保证单容器时 Count 也可用
+            $status = @(docker compose ps --format json 2>&1 | ConvertFrom-Json -ErrorAction SilentlyContinue)
+        } catch {
+            $status = @()
+        }
         if ($status -and $status.Count -gt 0) {
             $healthyCount = ($status | Where-Object { $_.State -eq "running" -and $_.Health -eq "healthy" }).Count
             $totalCount = $status.Count
@@ -575,7 +841,10 @@ if (-not (Test-StepDone 6)) {
     }
 
     Write-Log "服务启动完成"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     docker compose ps 2>&1 | ForEach-Object { Write-Log "  $_" }
+    $ErrorActionPreference = $prevEap
     Set-Progress 6
 }
 
