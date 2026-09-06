@@ -13,7 +13,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class LicenseProperties {
 
     /** 授权服务器基础地址 */
-    private String serverUrl = "https://license.panjia.com";
+    private String serverUrl = "https://panjia.icu";
 
     /** 预置 dev token（开发环境用，生产环境为空） */
     private String devToken = "";

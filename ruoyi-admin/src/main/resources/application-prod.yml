@@ -328,7 +328,8 @@ panjia:
   license:
     dev-token: ""
     # 授权服务器地址（我方 License 服务）
-    server-url: ${PANJIA_LICENSE_SERVER:https://license.panjia.com}
+    # 注意：环境变量名与 license 模块/docker compose 保持一致（PANJIA_LICENSE_SERVER_URL）
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
     # 授权码（首次部署时由管理后台生成，写入环境变量；激活后作废）
     auth-code: ${PANJIA_AUTH_CODE:}
     product-version: ${panjia.version:1.0.0}

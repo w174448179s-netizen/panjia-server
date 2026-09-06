@@ -695,7 +695,7 @@ services:
       - /etc/machine-id:/etc/machine-id:ro      # 指纹主因子（只读）
       - panjia-data:/data                        # 持久化数据卷（instanceId + token + 状态文件 + 业务数据）
     environment:
-      - PANJIA_LICENSE_SERVER_URL=https://license.panjia.com
+      - PANJIA_LICENSE_SERVER_URL=https://panjia.icu
       - PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE}      # V1.3：authCode，首次启动自动激活，激活后不需要
 
 volumes:
@@ -793,7 +793,7 @@ volumes:
 | 普通 HTTP 正向代理（`HTTPS_PROXY`，不解密 HTTPS） | ✅ 正常，HTTPS 隧道透明转发，证书链完整校验 |
 | SSL 中间人代理（网关替换证书） | ❌ 证书指纹不命中 → SSL 握手失败 → 鉴权不通 |
 
-**写死约束**：授权服务通信**不支持 SSL 中间人解密代理**。客户出网网关（若有）不得将 `license.panjia.com` 加入 SSL 解密拦截，须加**解密白名单（放行不解密）**。
+**写死约束**：授权服务通信**不支持 SSL 中间人解密代理**。客户出网网关（若有）不得将 `panjia.icu` 加入 SSL 解密拦截，须加**解密白名单（放行不解密）**。
 
 **证书轮换（双指纹过渡）：**
 

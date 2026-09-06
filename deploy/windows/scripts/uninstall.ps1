@@ -8,6 +8,9 @@ param(
 
 $ErrorActionPreference = "SilentlyContinue"
 
+# 64 位真实 Program Files（本脚本可能由 32 位进程拉起，$env:ProgramFiles 会被 WOW64 重定向）
+$ProgramFilesNative = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
+
 Write-Host "=========================================="
 Write-Host " 盘家智管卸载"
 Write-Host "=========================================="
@@ -43,7 +46,7 @@ if ($confirm -eq "y" -or $confirm -eq "Y") {
 Write-Host ""
 $removeDocker = Read-Host "是否卸载 Docker Desktop？(y/N)"
 if ($removeDocker -eq "y" -or $removeDocker -eq "Y") {
-    $dockerInstaller = "$env:ProgramFiles\Docker\Docker\Docker Desktop Installer.exe"
+    $dockerInstaller = "$ProgramFilesNative\Docker\Docker\Docker Desktop Installer.exe"
     if (Test-Path $dockerInstaller) {
         Write-Host " 卸载 Docker Desktop（可能需要几分钟）..."
         try {

@@ -68,11 +68,13 @@ deploy/docker/web/dist/
 ######################################################################
 # Windows 安装器构建产物（源码提交，构建结果不提交）
 deploy/windows/panjia-setup.exe
+deploy/windows/panjia-upgrade.exe
 deploy/windows/web/
 deploy/windows/images/
 deploy/windows/docker/
 deploy/windows/logs/
 deploy/windows/build_nsi/
+deploy/windows/build_nsi_upgrade/
 .claude/
 .codex/
 .workbuddy/

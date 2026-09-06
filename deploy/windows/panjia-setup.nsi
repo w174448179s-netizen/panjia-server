@@ -30,7 +30,7 @@
 !define DEFAULT_INSTALL_DIR "$PROGRAMFILES\Panjia"
 
 ; 默认授权服务器地址
-!define DEFAULT_LICENSE_SERVER "https://license.panjia.icu"
+!define DEFAULT_LICENSE_SERVER "https://panjia.icu"
 !define DEFAULT_IMAGE_TAG "latest"
 
 ; -------------------- MUI 配置 --------------------

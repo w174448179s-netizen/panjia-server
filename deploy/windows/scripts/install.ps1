@@ -58,6 +58,11 @@ $LogDir = "$InstallDir\logs"
 $LogFile = "$LogDir\install.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+# 64 位真实的 Program Files：本脚本由 32 位 NSIS 安装器拉起，PowerShell 也是 32 位，
+# WOW64 会把 $env:ProgramFiles 重定向为 C:\Program Files (x86)——
+# 用它找 Docker Desktop（装在 64 位 Program Files 下）必然 Test-Path 失败。
+$ProgramFilesNative = if (${env:ProgramW6432}) { ${env:ProgramW6432} } else { $env:ProgramFiles }
+
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -220,8 +225,10 @@ if (-not (Test-StepDone 2)) {
             [Console]::OutputEncoding = $prevEnc
             $ErrorActionPreference = $prevEap
         }
-        $clean = @(foreach ($line in $output) {
-            ("$line" -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
+        # 注意：foreach 语句不能直接接管道（PS5.1 报「不允许使用空管道元素」），
+        # 必须用管道形式的 ForEach-Object。
+        $clean = @($output | ForEach-Object {
+            ("$_" -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')
         } | Where-Object { "$_" -match '\S' })
         return @{ Output = $clean; ExitCode = $exitCode }
     }
@@ -355,7 +362,8 @@ if (-not (Test-StepDone 2)) {
         Write-Log "Docker Desktop 静默安装完成"
 
         # Docker Desktop 安装后 PATH 可能还没刷新，手动加入
-        $dockerCliPath = "$env:ProgramFiles\Docker\Docker\resources\bin"
+        # 注意用 $ProgramFilesNative（32 位进程下 $env:ProgramFiles 被 WOW64 重定向）
+        $dockerCliPath = "$ProgramFilesNative\Docker\Docker\resources\bin"
         if (Test-Path $dockerCliPath) {
             $env:PATH = "$dockerCliPath;$env:PATH"
             Write-Log "  已将 Docker CLI 加入 PATH"
@@ -386,7 +394,7 @@ if (-not (Test-StepDone 2)) {
         Write-Log "检查 WSL 内核版本..."
         Update-Wsl
 
-        $dockerDesktopExe = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+        $dockerDesktopExe = "$ProgramFilesNative\Docker\Docker\Docker Desktop.exe"
         if (Test-Path $dockerDesktopExe) {
             Write-Log "启动 Docker Desktop..."
             # 注意：本脚本以管理员身份运行，直接 Start-Process 会让 Docker Desktop
@@ -460,16 +468,45 @@ if (-not (Test-StepDone 2)) {
             $wslResult.Output | ForEach-Object { Write-Log "  [wsl --status] $_" }
             Write-Log "------------------"
             Write-Log ""
-            Write-Log "请检查：" "WARN"
-            Write-Log "  1. 右下角托盘是否有 Docker 图标（鲸鱼）" "WARN"
-            Write-Log "  2. Docker 是否提示需要更新 WSL 或重启电脑" "WARN"
-            Write-Log "  3. 如果提示需要重启，请重启电脑后重新运行本安装程序" "WARN"
-            Write-Log "  4. 若 docker info 提示虚拟化/WSL 相关错误，" "WARN"
-            Write-Log "     请确认 BIOS 已开启虚拟化（VT-x/AMD-V），" "WARN"
-            Write-Log "     且 Windows「虚拟机平台」功能已启用" "WARN"
-            Write-Log ""
-            Write-Log "重新运行后会从断点继续，不会重复安装" "WARN"
-            exit 1
+
+            # 弹窗提醒用户手工启动 Docker Desktop，再给 5 分钟等待窗口
+            Add-Type -AssemblyName System.Windows.Forms | Out-Null
+            [System.Windows.Forms.MessageBox]::Show(
+                "Docker Desktop 自动启动未成功。`n`n请手工启动 Docker Desktop：`n双击桌面或开始菜单中的 Docker Desktop 图标，`n等右下角托盘的鲸鱼图标停止动画（变绿）。`n`n点击「确定」后，安装程序会继续等待其就绪。",
+                "盘家智管 - 请手工启动 Docker",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            Write-Log "已弹窗提醒用户手工启动 Docker Desktop，继续等待（最长 300 秒）..."
+            $manualTimeout = 300
+            $manualWaited = 0
+            while ($manualWaited -lt $manualTimeout -and -not (Test-DockerRunning)) {
+                Start-Sleep -Seconds 5
+                $manualWaited += 5
+                if ($manualWaited % 30 -eq 0) {
+                    Write-Log "  等待手工启动... $manualWaited s / $manualTimeout s"
+                }
+            }
+
+            if (Test-DockerRunning) {
+                Write-Log "Docker 已手工启动并就绪，继续安装"
+            } else {
+                Write-Log "手工启动等待超时，Docker 仍未就绪" "ERROR"
+                Write-Log "请检查：" "WARN"
+                Write-Log "  1. 右下角托盘是否有 Docker 图标（鲸鱼）" "WARN"
+                Write-Log "  2. Docker 是否提示需要更新 WSL 或重启电脑" "WARN"
+                Write-Log "  3. 如果提示需要重启，请重启电脑后重新运行本安装程序" "WARN"
+                Write-Log "  4. 若 docker info 提示虚拟化/WSL 相关错误，" "WARN"
+                Write-Log "     请确认 BIOS 已开启虚拟化（VT-x/AMD-V），" "WARN"
+                Write-Log "     且 Windows「虚拟机平台」功能已启用" "WARN"
+                Write-Log ""
+                Write-Log "重新运行后会从断点继续，不会重复安装" "WARN"
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Docker Desktop 仍未就绪，安装暂时中止。`n`n请手工启动 Docker Desktop（桌面或开始菜单双击图标），`n确认右下角鲸鱼图标变绿后，重新运行本安装程序。`n`n之前已完成的步骤会自动跳过，不会重复安装。",
+                    "盘家智管 - Docker 未就绪",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+                exit 1
+            }
         }
     }
 
@@ -780,7 +817,7 @@ if (-not (Test-Path $machineIdFile)) {
 # ==================== Docker Desktop 登录自启（幂等） ====================
 # 静默安装场景下 Docker Desktop 可能未注册自启 Run 键，
 # 导致重启后 Docker 不随登录启动、容器（unless-stopped）也无法拉起。
-$ddExeForRun = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+$ddExeForRun = "$ProgramFilesNative\Docker\Docker\Docker Desktop.exe"
 $runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 if (Test-Path $ddExeForRun) {
     $existingRun = (Get-ItemProperty $runKeyPath -Name "Docker Desktop" -ErrorAction SilentlyContinue)."Docker Desktop"
@@ -818,19 +855,37 @@ if (-not (Test-StepDone 6)) {
     $allHealthy = $false
 
     while ($waited -lt $maxWait) {
-        try {
-            # @() 保证单容器时 Count 也可用
-            $status = @(docker compose ps --format json 2>&1 | ConvertFrom-Json -ErrorAction SilentlyContinue)
-        } catch {
-            $status = @()
+        # 注意：不要用 docker compose ps --format json——实测在 PS 5.1 下有两个坑：
+        #   ① 输出含 UTF-8 字符（如 /run/desktop/mnp 的特殊字符），被 GBK 控制台
+        #      解码后变成乱码，JSON 本身已损坏，ConvertFrom-Json 必然失败；
+        #   ② PS 5.1 的 ConvertFrom-Json 抛的是 .NET 级 ArgumentException，
+        #      -ErrorAction SilentlyContinue 压不住（try/catch 才能接住），报错刷屏。
+        # 改用 docker inspect 模板输出，纯 ASCII，无编码/无 JSON 解析风险。
+        $status = @()
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $cids = @(docker compose ps -aq 2>$null)
+        foreach ($cid in $cids) {
+            $line = docker inspect --format "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}" $cid 2>$null
+            if ("$line" -match '^(\S+) (\S+)$') {
+                $status += [pscustomobject]@{ State = $matches[1]; Health = $matches[2] }
+            }
         }
-        if ($status -and $status.Count -gt 0) {
-            $healthyCount = ($status | Where-Object { $_.State -eq "running" -and $_.Health -eq "healthy" }).Count
-            $totalCount = $status.Count
-            if ($healthyCount -eq $totalCount) {
+        $ErrorActionPreference = $prevEap
+        if ($status.Count -gt 0) {
+            $totalCount = @($status).Count
+            $healthyCount = @($status | Where-Object {
+                $_.State -eq "running" -and ($_.Health -eq "healthy" -or $_.Health -eq "none")
+            }).Count
+            if ($healthyCount -eq $totalCount -and $totalCount -gt 0) {
                 $allHealthy = $true
                 break
             }
+            if ($waited -gt 0 -and $waited % 30 -eq 0) {
+                Write-Log "  等待中... 健康 $healthyCount/$totalCount（$waited s / $maxWait s）"
+            }
+        } elseif ($waited -gt 0 -and $waited % 30 -eq 0) {
+            Write-Log "  等待中... $waited s / $maxWait s（暂无法读取容器状态）"
         }
         Start-Sleep -Seconds 5
         $waited += 5
@@ -853,44 +908,36 @@ if (-not (Test-StepDone 7)) {
     Write-Step 7 $TotalSteps "激活授权码"
 
     if ([string]::IsNullOrWhiteSpace($AuthCode)) {
-        Write-Log "警告: 未提供授权码，跳过激活" "WARN"
-        Write-Log "请手动激活：打开 http://localhost 按提示操作"
+        Write-Log "警告: 未提供授权码，跳过自动激活" "WARN"
+        Write-Log "手动激活方法：编辑 $InstallDir\config\.env 设置 PANJIA_AUTH_CODE=你的授权码，"
+        Write-Log "然后执行: cd `"$InstallDir\config`" ; docker compose up -d server"
     } else {
         Write-Log "授权服务器: $LicenseServer"
-        Write-Log "正在激活授权码..."
+        Write-Log "激活方式: 后端启动时读取 .env 中的授权码，自动向授权服务器激活"
 
-        Write-Log "等待后端 API 就绪..."
-        $apiReady = $false
-        for ($i = 0; $i -lt 30; $i++) {
-            try {
-                $resp = Invoke-WebRequest -Uri "http://localhost:8080/actuator/health" -UseBasicParsing -TimeoutSec 5
-                if ($resp.StatusCode -eq 200) {
-                    $apiReady = $true
-                    break
-                }
-            } catch {}
-            Start-Sleep -Seconds 3
-        }
-
-        if ($apiReady) {
-            Write-Log "后端 API 就绪"
-            try {
-                $activateBody = @{
-                    authCode = $AuthCode
-                } | ConvertTo-Json
-
-                $resp = Invoke-WebRequest -Uri "http://localhost:8080/api/license/activate" `
-                    -Method POST -Body $activateBody -ContentType "application/json" `
-                    -UseBasicParsing -TimeoutSec 30
-
-                Write-Log "授权激活成功"
-            } catch {
-                Write-Log "警告: 授权激活接口调用失败: $_" "WARN"
-                Write-Log "请打开 http://localhost 手动激活"
+        # 激活发生在后端启动流程里（initOnStartup → 调授权服务器 /api/auth/activate），
+        # 成功的标志是把 token 落盘（容器 /data/panjia-license/.panjia_token
+        # → 宿主机 data\panjia-license\.panjia_token）。
+        # 注意：不能调 http://localhost:8080——server 服务只有 expose 没有 ports，
+        # 宿主机根本访问不到 8080；且后端也不存在 /api/license/activate 接口。
+        $tokenFile = "$InstallDir\data\panjia-license\.panjia_token"
+        $activated = $false
+        for ($i = 0; $i -lt 60; $i++) {
+            if (Test-Path $tokenFile) {
+                $activated = $true
+                break
             }
+            if ($i -gt 0 -and $i % 10 -eq 0) {
+                Write-Log "  等待后端自动激活...（$($i * 5) s / 300 s）"
+            }
+            Start-Sleep -Seconds 5
+        }
+        if ($activated) {
+            Write-Log "授权激活成功（token 已生成）"
         } else {
-            Write-Log "警告: 后端 API 未就绪，跳过自动激活" "WARN"
-            Write-Log "请打开 http://localhost 按提示操作激活"
+            Write-Log "警告: 300 秒内未检测到激活 token" "WARN"
+            Write-Log "可能原因: 授权码无效 / 授权服务器不可达 / 后端未启动完成"
+            Write-Log "请查看后端日志排查: docker logs panjia-server --tail 100"
         }
     }
 

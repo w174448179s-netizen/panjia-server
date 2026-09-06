@@ -259,13 +259,20 @@ elif [ "$ONLINE_MODE" = "0" ]; then
     # 注意：国内访问 GitHub 可能极慢，所有网络操作都带超时，超时即跳过，
     # 不会阻塞构建。
     WSL_MSI="$INSTALLER_DIR/docker/wsl.msi"
-    # 从 GitHub API 获取最新版信息（带超时；失败不阻塞构建）
-    WSL_API_JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 \
-        "https://api.github.com/repos/microsoft/WSL/releases/latest" 2>/dev/null || true)
-    WSL_ASSET_URL=$(printf '%s' "$WSL_API_JSON" \
-        | grep -o '"browser_download_url": *"[^"]*\.x64\.msi"' \
-        | head -1 | grep -o 'https[^"]*' || true)
-    WSL_EXPECTED_SIZE=$(printf '%s' "$WSL_API_JSON" | python3 -c '
+
+    # 已存在且非空即直接使用（纯本地判断，不请求网络）。
+    # 不做与 GitHub latest 的字节数比对——latest 版本一更新就会导致
+    # 本地完好的旧版被误删重下 247MB。完整性由下载时的一次性校验保证。
+    if [ -s "$WSL_MSI" ]; then
+        echo "  ✓ 已存在 WSL 内核更新包 ($(du -h "$WSL_MSI" | cut -f1))，跳过"
+    else
+        # 从 GitHub API 获取最新版信息（仅在缺失时才请求；带超时，失败不阻塞构建）
+        WSL_API_JSON=$(curl -fsSL --connect-timeout 10 --max-time 30 \
+            "https://api.github.com/repos/microsoft/WSL/releases/latest" 2>/dev/null || true)
+        WSL_ASSET_URL=$(printf '%s' "$WSL_API_JSON" \
+            | grep -o '"browser_download_url": *"[^"]*\.x64\.msi"' \
+            | head -1 | grep -o 'https[^"]*' || true)
+        WSL_EXPECTED_SIZE=$(printf '%s' "$WSL_API_JSON" | python3 -c '
 import json, sys
 try:
     for a in json.load(sys.stdin).get("assets", []):
@@ -274,29 +281,20 @@ try:
 except Exception:
     pass' 2>/dev/null || true)
 
-    # 校验 wsl.msi 完整性：OLE 魔数 + 与 GitHub API 报告的精确字节数比对。
-    # 只查魔数会放过「断点续传中断的半截文件」——残缺 MSI 装到客户机会报 1620。
-    verify_wsl_msi() {
-        local f="$1"
-        [ -s "$f" ] || return 1
-        head -c 8 "$f" | od -An -tx1 | grep -qi "d0 cf 11 e0" || return 1
-        if [ -n "$WSL_EXPECTED_SIZE" ]; then
-            local actual
-            actual=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null)
-            [ "$actual" = "$WSL_EXPECTED_SIZE" ] || return 1
-        fi
-        return 0
-    }
+        # 下载后的一次性校验：OLE 魔数 + 与 API 报告的精确字节数比对。
+        # 只查魔数会放过「断点续传中断的半截文件」——残缺 MSI 装到客户机会报 1620。
+        verify_wsl_msi() {
+            local f="$1"
+            [ -s "$f" ] || return 1
+            head -c 8 "$f" | od -An -tx1 | grep -qi "d0 cf 11 e0" || return 1
+            if [ -n "$WSL_EXPECTED_SIZE" ]; then
+                local actual
+                actual=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null)
+                [ "$actual" = "$WSL_EXPECTED_SIZE" ] || return 1
+            fi
+            return 0
+        }
 
-    if [ -f "$WSL_MSI" ]; then
-        if verify_wsl_msi "$WSL_MSI"; then
-            echo "  ✓ 已存在 WSL 内核更新包 ($(du -h "$WSL_MSI" | cut -f1))"
-        else
-            echo "  [WARN] 本地 WSL 更新包不完整（疑为中断的下载残留），删除后重新下载..."
-            rm -f "$WSL_MSI"
-        fi
-    fi
-    if [ ! -f "$WSL_MSI" ]; then
         echo "  下载 WSL 内核更新包（GitHub 最新版，超时 5 分钟自动跳过）..."
         if [ -n "$WSL_ASSET_URL" ]; then
             if curl -fL -C - --connect-timeout 15 --max-time 300 -o "$WSL_MSI" "$WSL_ASSET_URL" -sS \

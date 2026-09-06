@@ -7,7 +7,7 @@ spring:
 panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
-    server-url: ${PANJIA_LICENSE_SERVER_URL:https://license.panjia.example.com}
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
     # 激活超时(ms)
     activate-timeout-ms: 10000
     # TCP连接超时(ms)

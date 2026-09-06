@@ -48,7 +48,7 @@ user:
 panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
-    server-url: ${PANJIA_LICENSE_SERVER_URL:https://license.panjia.example.com}
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
     # 心跳间隔（毫秒），默认 24h
     heartbeat-interval-ms: 86400000
     # /check 结果缓存有效期（毫秒），默认 30 分钟

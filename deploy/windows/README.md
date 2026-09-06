@@ -168,7 +168,7 @@ docker compose logs -f postgres
 
 ## 授权服务器配置
 
-默认授权服务器地址：`https://license.panjia.icu`
+默认授权服务器地址：`https://panjia.icu`
 
 如需修改：
 - 安装时在授权码页面的"授权服务器地址"字段修改
