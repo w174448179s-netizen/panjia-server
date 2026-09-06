@@ -60,6 +60,19 @@ script/docker/data/
 script/docker/.env
 script/keys/
 data/
+deploy/docker/.env
+deploy/docker/data/
+deploy/docker/logs/
+deploy/docker/web/dist/
+
+######################################################################
+# Windows 安装器构建产物（源码提交，构建结果不提交）
+deploy/windows/panjia-setup.exe
+deploy/windows/web/
+deploy/windows/images/
+deploy/windows/docker/
+deploy/windows/logs/
+deploy/windows/build_nsi/
 .claude/
 .codex/
 .workbuddy/
