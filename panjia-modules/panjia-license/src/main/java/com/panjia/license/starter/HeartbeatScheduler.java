@@ -51,8 +51,9 @@ public class HeartbeatScheduler {
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleAtFixedRate(this::doHeartbeat, interval, interval, TimeUnit.MILLISECONDS);
-        log.info("[HeartbeatScheduler] 已启动，间隔={}h", interval / 3_600_000);
+        // 初始延迟 0：启动成功后立即发一次心跳，之后按 interval 周期执行
+        scheduler.scheduleAtFixedRate(this::doHeartbeat, 0, interval, TimeUnit.MILLISECONDS);
+        log.info("[HeartbeatScheduler] 已启动，立即执行首次心跳，后续间隔={}h", interval / 3_600_000);
     }
 
     @PreDestroy
