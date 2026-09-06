@@ -17,7 +17,7 @@
 #   - 容器会写 data/panjia-license/.panjia_token（宿主机路径 = $InstallDir\data\panjia-license\.panjia_token）
 #   - 如果授权码绑定了机器指纹（machine-id），换机器必须先在授权后台解绑
 #
-# 退出码：0 激活成功/用户取消；1 激活失败
+# 退出码：0 激活成功；1 激活失败；2 用户取消（供安装器失败重试分支区分）
 # ============================================================================
 
 param(
@@ -156,7 +156,7 @@ $inputBox = New-Object AuthCodeInputBox -ArgumentList @(
 $result = $inputBox.ShowDialog()
 if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
     # 用户点取消
-    exit 0
+    exit 2
 }
 $newCode = $inputBox.Value
 $inputBox.Dispose()
@@ -171,7 +171,7 @@ if ([string]::IsNullOrWhiteSpace($newCode)) {
         "盘家智管 - 重新激活授权",
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-    exit 0
+    exit 2
 }
 
 # 如果与当前码一致，给个提示但仍继续（避免用户误以为脚本没干活）
@@ -182,7 +182,7 @@ if ($newCode -eq $currentCode -and -not [string]::IsNullOrWhiteSpace($currentCod
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
         [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($yn -ne [System.Windows.Forms.DialogResult]::Yes) {
-        exit 0
+        exit 2
     }
 }
 
@@ -296,7 +296,7 @@ if ($activated) {
 可能原因：
   1. 授权码无效或已过期（请联系系统管理员确认）
   2. 授权码绑定了其他机器的指纹（换机器必须在授权后台先解绑）
-  3. 授权服务器不可达（检查 $InstallDir\config\.env 的 PANJIA_LICENSE_SERVER 配置）
+  3. 授权服务器不可达（检查 $InstallDir\config\.env 的 LICENSE_SERVER_URL 配置）
   4. 后端启动未完成（server 容器首次启动较慢）
 
 排查命令：

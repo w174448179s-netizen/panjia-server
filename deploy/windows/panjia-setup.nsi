@@ -208,8 +208,34 @@ Section "主程序" SecMain
         DetailPrint " [错误] 安装失败，错误代码: $R0"
         DetailPrint " 请查看日志: $INSTDIR\logs\install.log"
         DetailPrint "=========================================="
-        MessageBox MB_OK|MB_ICONSTOP "安装失败！$\n$\n请查看日志文件：$INSTDIR\logs\install.log$\n$\n或联系技术支持。"
+
+        ; 即使安装失败也创建关键快捷方式，保证用户之后仍有「重新激活授权」入口，
+        ; 避免"激活失败后没有地方再输入授权码"
+        CreateDirectory "$SMPROGRAMS\${APPNAME}"
+        CreateShortCut "$SMPROGRAMS\${APPNAME}\重新激活授权.lnk" \
+            "powershell.exe" \
+            '-NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\reauth-app.ps1" -InstallDir "$INSTDIR"' \
+            "" "" ""
+        CreateShortCut "$SMPROGRAMS\${APPNAME}\查看日志.lnk" "$INSTDIR\logs"
+
+        ; 允许用户立即重输授权码重试（安装器本身已是管理员，reauth 不会再弹 UAC）
+        retryAuth:
+        MessageBox MB_RETRYCANCEL|MB_ICONSTOP "安装失败（错误代码 $R0）！$\n$\n最常见原因：授权码无效、已过期或绑定了其他机器。$\n$\n点「重试」立即重新输入授权码；$\n点「取消」中止安装（之后可从 开始菜单 → 盘家智管 → 重新激活授权 补救）。$\n$\n详细日志：$INSTDIR\logs\install.log" IDRETRY doRetryAuth
         Abort
+
+        doRetryAuth:
+        DetailPrint "等待重新输入授权码..."
+        nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\reauth-app.ps1" -InstallDir "$INSTDIR"'
+        Pop $R1
+        ${If} $R1 == 0
+            DetailPrint " 重新激活成功，继续完成安装"
+        ${ElseIf} $R1 == 2
+            MessageBox MB_OK|MB_ICONINFORMATION "已取消重新输入授权码。$\n$\n可稍后从 开始菜单 → 盘家智管 → 重新激活授权 继续操作。"
+            Abort
+        ${Else}
+            StrCpy $R0 $R1
+            Goto retryAuth
+        ${EndIf}
     ${EndIf}
 
     DetailPrint ""
