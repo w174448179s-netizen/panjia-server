@@ -18,7 +18,11 @@ class PinnedTrustManager implements X509TrustManager {
     private final List<String> allowedFingerprints;
 
     PinnedTrustManager(String primary, String secondary) {
-        this.allowedFingerprints = List.of(primary, secondary);
+        if (secondary == null || secondary.isEmpty()) {
+            this.allowedFingerprints = List.of(primary);
+        } else {
+            this.allowedFingerprints = List.of(primary, secondary);
+        }
     }
 
     @Override

@@ -6,6 +6,7 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.panjia.license.LicenseMode;
 import com.panjia.license.config.LicenseProperties;
+import com.panjia.license.crypto.verify.KeyStore;
 import com.panjia.license.crypto.verify.LicenseVerifier;
 import com.panjia.license.domain.HardwareFingerprint;
 import com.panjia.license.domain.LicenseContent;
@@ -37,15 +38,17 @@ public class LicenseServiceImpl implements LicenseService {
     private final LicenseVerifier licenseVerifier;
     private final LicenseFileUtils fileUtils;
     private final FingerprintService fingerprintService;
+    private final KeyStore keyStore;
 
     public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
                               LicenseVerifier licenseVerifier, LicenseFileUtils fileUtils,
-                              FingerprintService fingerprintService) {
+                              FingerprintService fingerprintService, KeyStore keyStore) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
         this.fileUtils = fileUtils;
         this.fingerprintService = fingerprintService;
+        this.keyStore = keyStore;
     }
 
     /**
@@ -84,6 +87,7 @@ public class LicenseServiceImpl implements LicenseService {
         }
 
         // 3. authCode 自动激活（prod 或 dev+testMode，且 authCode 已配置）
+        // 硬失败：激活失败直接抛异常阻止 Spring 上下文刷新（@PostConstruct 抛异常 = 启动失败）
         if ((!LicenseMode.DEV || properties.isTestMode()) && !properties.getAuthCode().isEmpty()) {
             try {
                 log.info("[initOnStartup] 检测到 authCode，开始自动激活");
@@ -91,7 +95,8 @@ public class LicenseServiceImpl implements LicenseService {
                 activate(properties.getAuthCode(), fp, properties.getProductVersion());
                 log.info("[initOnStartup] 自动激活成功");
             } catch (Exception e) {
-                log.error("[initOnStartup] 自动激活失败: {}", e.getMessage());
+                log.error("[initOnStartup] 自动激活失败，拒绝启动: {}", e.getMessage());
+                throw new LicenseException("License 自动激活失败，应用拒绝启动: " + e.getMessage(), e);
             }
         }
     }
@@ -110,6 +115,7 @@ public class LicenseServiceImpl implements LicenseService {
         HttpResponse resp = HttpRequest.post(url)
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
+                .setSSLSocketFactory(keyStore.getSSLSocketFactory())
                 .execute();
 
         if (!resp.isOk()) {
@@ -177,6 +183,7 @@ public class LicenseServiceImpl implements LicenseService {
                 .header("Authorization", "Bearer " + context.getToken())
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
+                .setSSLSocketFactory(keyStore.getSSLSocketFactory())
                 .execute();
 
         if (!resp.isOk()) {
@@ -259,6 +266,7 @@ public class LicenseServiceImpl implements LicenseService {
                 .header("Authorization", "Bearer " + context.getToken())
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
+                .setSSLSocketFactory(keyStore.getSSLSocketFactory())
                 .execute();
 
         if (resp.isOk()) {

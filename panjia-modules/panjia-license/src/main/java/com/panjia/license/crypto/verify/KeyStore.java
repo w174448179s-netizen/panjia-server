@@ -4,11 +4,10 @@ import com.panjia.license.config.LicenseProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
-import java.security.cert.X509Certificate;
-import java.util.Arrays;
 
 /**
  * SSL Pinning 证书指纹管理。
@@ -24,7 +23,8 @@ import java.util.Arrays;
 public class KeyStore {
 
     private final LicenseProperties properties;
-    private SSLContext sslContext;
+    private volatile SSLContext sslContext;
+    private volatile SSLSocketFactory sslSocketFactory;
 
     public KeyStore(LicenseProperties properties) {
         this.properties = properties;
@@ -39,25 +39,35 @@ public class KeyStore {
             return sslContext;
         }
         try {
-            // 自定义 TrustManager，只接受指定指纹的证书
-            X509TrustManager trustManager = new PinnedTrustManager(properties.getSslPinning().getPrimaryFingerprint(),
-                    properties.getSslPinning().getSecondaryFingerprint());
+            TrustManager[] trustManagers = new TrustManager[]{
+                    new PinnedTrustManager(properties.getSslPinning().getPrimaryFingerprint(),
+                            properties.getSslPinning().getSecondaryFingerprint())
+            };
             SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, null, null);
-            // 替换 TrustManager
-            ctx = java.security.SecureClassLoader.class.getModule() != null ? ctx : ctx;
-            // 使用 reflection 替换 TrustManagers（标准做法）
-            var field = ctx.getClass().getDeclaredField("trustManager");
-            field.setAccessible(true);
-            field.set(ctx, new X509TrustManager[]{trustManager});
+            ctx.init(null, trustManagers, new java.security.SecureRandom());
             sslContext = ctx;
             log.info("[KeyStore] SSL Pinning 已启用，主指纹={}, 备指纹={}",
                     maskFingerprint(properties.getSslPinning().getPrimaryFingerprint()),
                     maskFingerprint(properties.getSslPinning().getSecondaryFingerprint()));
             return sslContext;
         } catch (Exception e) {
-            throw new RuntimeException("SSL Pinning 初始化失败", e);
+            throw new RuntimeException("SSL Pinning 初始化失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 获取 SSLSocketFactory（懒加载，线程安全）。
+     * 供 hutool HttpRequest.setSSLSocketFactory() 使用。
+     */
+    public SSLSocketFactory getSSLSocketFactory() {
+        if (sslSocketFactory == null) {
+            synchronized (this) {
+                if (sslSocketFactory == null) {
+                    sslSocketFactory = buildSslContext().getSocketFactory();
+                }
+            }
+        }
+        return sslSocketFactory;
     }
 
     /**

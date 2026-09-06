@@ -61,10 +61,10 @@ public class LicenseProperties {
 
     @Data
     public static class SslPinning {
-        /** 主指纹（当前生效） */
-        private String primaryFingerprint = "AbC123dEf456GhI789jKlM012nOp345qRs";
-        /** 备指纹（过渡期可先信任） */
-        private String secondaryFingerprint = "xYz901aBc234dEf567gHh890iJk123lMn456oP";
+        /** 主指纹（当前生效，panjia.icu 证书 SHA-256 小写无冒号） */
+        private String primaryFingerprint = "98c173cbc20f87ea6667c41a32e0e48365f80e1213e7d9dcc4044a7b2746e6da";
+        /** 备指纹（证书轮换过渡期先信任，留空表示无备指纹；续签时取新证书指纹填入此处，切换后再清空旧主） */
+        private String secondaryFingerprint = "";
     }
 
     @Data
