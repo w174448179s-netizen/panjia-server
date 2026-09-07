@@ -64,7 +64,7 @@ public class ChecksumGenerator {
     private static final String OUTPUT_PATH = "META-INF/panjia-checksums.txt";
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 1) {
+        if (args.length == 0) {
             System.err.println("用法: ChecksumGenerator <classesDirectory>");
             System.exit(1);
         }

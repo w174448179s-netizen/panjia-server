@@ -69,6 +69,12 @@ public interface LicenseService {
     String getToken();
 
     /**
+     * 判断当前 License 是否已过期。
+     * 综合检查 JWT exp 与 licenseExpireAt，任一过期返回 true。
+     */
+    boolean isTokenExpired();
+
+    /**
      * 激活结果载体。
      */
     class ActivateResult {

@@ -116,7 +116,9 @@ public class LicenseStartupValidator {
                     shutdownApplication();
                     return;
                 }
-            } else if (status == LicenseStatusEnum.EXPIRED) {
+            } else if (status == LicenseStatusEnum.EXPIRED || licenseService.isTokenExpired()) {
+                // 双重保险：status==EXPIRED 或 token 实际过期（exp 或 licenseExpireAt）
+                // decodeToken 只校验 JWT exp，自定义 licenseExpireAt 过期需在此拦截
                 log.error("[LicenseStartupValidator] License 已过期，拒绝启动");
                 restrictedMode.trigger("T1_AUTH_FAIL", "License 已过期");
                 shutdownApplication();

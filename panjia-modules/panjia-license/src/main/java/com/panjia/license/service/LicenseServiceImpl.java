@@ -66,12 +66,13 @@ public class LicenseServiceImpl implements LicenseService {
         if (persistedToken != null && !persistedToken.isEmpty()) {
             try {
                 LicenseContent content = licenseVerifier.decodeToken(persistedToken);
+                verifyFingerprint(content); // L2 机器指纹比对：防止容器整体拷贝
                 context.setLicense(content, persistedToken);
                 context.setFingerprint(fingerprintService.getCurrentFingerprint());
                 log.info("[initOnStartup] 从磁盘加载 token 成功，authCode={}", content.getAuthCode());
                 return;
             } catch (Exception e) {
-                log.warn("[initOnStartup] 持久化 token 已失效，清除: {}", e.getMessage());
+                log.warn("[initOnStartup] 持久化 token 已失效或指纹不匹配，清除: {}", e.getMessage());
                 fileUtils.delete(properties.getFile().getToken());
             }
         }
@@ -135,6 +136,7 @@ public class LicenseServiceImpl implements LicenseService {
 
         // 解码 License 内容
         LicenseContent content = licenseVerifier.decodeToken(token);
+        verifyFingerprint(content); // L2 机器指纹比对：防御服务端 bug 导致指纹错配
 
         // 写入上下文
         context.setLicense(content, token);
@@ -244,6 +246,7 @@ public class LicenseServiceImpl implements LicenseService {
     private void renewToken(String newToken) {
         try {
             LicenseContent content = licenseVerifier.decodeToken(newToken);
+            verifyFingerprint(content); // L2 机器指纹比对：续签 token 必须仍是同一台机器
             // 验签通过 → 更新内存（setLicense 会重置状态为 NORMAL、清空缓存、重置失败计数）
             context.setLicense(content, newToken);
             // 持久化到磁盘，重启后自动加载新 token
@@ -305,6 +308,21 @@ public class LicenseServiceImpl implements LicenseService {
             return new CheckResult(false, "授权已过期，请联系服务商续签", CheckResultEnum.OPERATION_DENIED.getCode());
         }
 
+        // 1.5 L2 运行时指纹比对：防止容器运行中被迁移到其他机器
+        // 采集开销极小（读两个文件），但能在运行中检测授权迁移
+        if (context.getLicenseContent() != null && context.getLicenseContent().getFingerprintHash() != null) {
+            try {
+                String currentFpHash = fingerprintService.getCurrentFingerprint().calculateHash();
+                if (!context.getLicenseContent().getFingerprintHash().equals(currentFpHash)) {
+                    log.error("[check] 机器指纹不匹配，疑似授权迁移，操作被拒: {}", operation);
+                    context.setRestricted(ClientModeEnum.RESTRICT);
+                    return new CheckResult(false, "机器指纹不匹配，授权已锁定", CheckResultEnum.OPERATION_DENIED.getCode());
+                }
+            } catch (Exception e) {
+                log.warn("[check] 运行时指纹采集失败: {}", e.getMessage());
+            }
+        }
+
         // 2. 受限模式（服务端明确下发的 clientMode=RESTRICT）→ 核心操作禁止
         // 注意：即使服务器不可达，restricted 状态保留，因为这是服务端的明确指令
         if (context.isRestricted()) {
@@ -329,7 +347,8 @@ public class LicenseServiceImpl implements LicenseService {
      * 判断本地 token 是否已过期。
      * 优先用 JWT 的 expiresAt，其次用 licenseExpireAt。
      */
-    private boolean isTokenExpired() {
+    @Override
+    public boolean isTokenExpired() {
         LicenseContent content = context.getLicenseContent();
         if (content == null) {
             return true;
@@ -429,5 +448,33 @@ public class LicenseServiceImpl implements LicenseService {
             return "******";
         }
         return authCode.substring(0, 4) + "****" + authCode.substring(authCode.length() - 4);
+    }
+
+    /**
+     * 机器指纹比对：验证 token 绑定的机器与当前机器一致。
+     * 防止授权/容器整体拷贝到其他机器使用。
+     *
+     * 比对时机：加载 token 后（磁盘加载 / 激活 / 续签），setLicense 之前。
+     * 不匹配则抛异常，阻止 token 生效。
+     *
+     * 例外：
+     * - dev 模式跳过（开发环境 token 可能在不同机器生成）
+     * token 无 fingerprintHash 时跳过（兼容旧版 token）
+     */
+    private void verifyFingerprint(LicenseContent content) {
+        if (LicenseMode.DEV) {
+            return;
+        }
+        String tokenFpHash = content.getFingerprintHash();
+        if (tokenFpHash == null || tokenFpHash.isEmpty()) {
+            log.warn("[verifyFingerprint] token 无指纹信息，跳过比对（兼容旧版）");
+            return;
+        }
+        String currentFpHash = fingerprintService.getCurrentFingerprint().calculateHash();
+        if (!tokenFpHash.equals(currentFpHash)) {
+            throw new LicenseException(
+                    "机器指纹不匹配：token 绑定机器=" + tokenFpHash + "，当前机器=" + currentFpHash
+                            + "（疑似授权迁移到其他机器）");
+        }
     }
 }
