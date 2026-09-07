@@ -63,10 +63,41 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- 单元测试 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
         <plugins>
+            <!-- License 模块需要运行单元测试，覆盖父 pom 的 maven.test.skip=true -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <configuration>
+                            <skip>false</skip>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skip>false</skip>
+                    <skipTests>false</skipTests>
+                    <!-- 清空父 pom 的 groups 过滤，运行所有单元测试 -->
+                    <groups></groups>
+                    <excludedGroups></excludedGroups>
+                </configuration>
+            </plugin>
             <!-- 构建时生成 LicenseMode.java（编译时常量，编译器消除死分支） -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>

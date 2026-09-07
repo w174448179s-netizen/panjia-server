@@ -16,9 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * 线程安全单例，持有当前 License 状态、指纹、token 等运行时信息。
  * 所有组件通过此上下文读写 License 运行时状态。
  *
- * 敏感字段（licenseContent/fingerprint/token/status/restricted/checkCache）不暴露 setter，
- * 只能通过受控方法（setLicense/setRestricted/setOfflineLock/setOfflineGrace）修改，
- * 防止外部代码直接重置授权状态绕过受限模式。
+ * 敏感字段（licenseContent/fingerprint/token/status/restricted/checkCache/heartbeatFailureCount/serverUnavailableUntil）不暴露 setter，
+ * 只能通过受控方法修改，防止外部代码直接重置授权状态绕过受限模式。
  */
 @Getter
 @Component
@@ -34,8 +33,9 @@ public class LicenseContext {
     /** 解密后的 JWT token 字符串（用于心跳/check 复用），仅可通过 setLicense 设置 */
     private volatile String token;
 
-    /** 当前授权状态，仅可通过 setLicense/setRestricted/setOfflineLock/setOfflineGrace 变更 */
-    private volatile LicenseStatusEnum status = LicenseStatusEnum.NORMAL;
+    /** 当前授权状态，仅可通过 setLicense/setRestricted/setOfflineLock/setOfflineGrace 变更。
+     *  默认 NOT_ACTIVATED，只有成功加载 token（setLicense）后才变为 NORMAL。 */
+    private volatile LicenseStatusEnum status = LicenseStatusEnum.NOT_ACTIVATED;
 
     /** 是否处于受限模式，仅可通过 setLicense/setRestricted/setOfflineLock/setOfflineGrace 变更 */
     private volatile boolean restricted = false;
@@ -47,7 +47,14 @@ public class LicenseContext {
     @Setter
     private volatile long lastHeartbeatTime = 0;
 
-    /** 网络可达标志（§2.4，由 LicenseServiceImpl 在 dev token 加载/心跳成功后更新） */
+    /** 心跳连续失败次数（仅可通过 incrementHeartbeatFailure / resetHeartbeatFailure 修改） */
+    private volatile int heartbeatFailureCount = 0;
+
+    /** 服务器不可用短路截止时间戳（仅可通过 setServerUnavailableUntil / clearServerUnavailable 修改）。
+     *  check 失败后设置，在此时间前不再发 HTTP 请求，直接走缓存/拒绝，避免每次操作等 TCP 超时。 */
+    private volatile long serverUnavailableUntil = 0L;
+
+    /** 网络可达标志（§2.4，由 LicenseServiceImpl 在心跳成功/失败后更新） */
     @Setter
     private volatile boolean networkReachable = true;
 
@@ -62,6 +69,20 @@ public class LicenseContext {
         this.restricted = false;
         this.checkCache.clear();
         this.lastHeartbeatTime = System.currentTimeMillis();
+        this.heartbeatFailureCount = 0;
+    }
+
+    /**
+     * 受控更新：心跳返回的 offlineExpireAt。
+     * LicenseContent 不可变，内部用 toBuilder() 生成新对象替换引用。
+     * 仅 LicenseServiceImpl 在心跳成功时调用。
+     */
+    public void updateOfflineExpireAt(java.time.Instant offlineExpireAt) {
+        if (this.licenseContent != null) {
+            this.licenseContent = this.licenseContent.toBuilder()
+                    .offlineExpireAt(offlineExpireAt)
+                    .build();
+        }
     }
 
     /**
@@ -87,6 +108,44 @@ public class LicenseContext {
     public void setOfflineLock() {
         this.status = LicenseStatusEnum.OFFLINE_LOCK;
         this.restricted = false;
+    }
+
+    /**
+     * 心跳失败计数 +1（心跳失败时由 LicenseServiceImpl 调用）。
+     * @return 自增后的失败次数
+     */
+    public int incrementHeartbeatFailure() {
+        return ++this.heartbeatFailureCount;
+    }
+
+    /**
+     * 重置心跳失败计数为 0（心跳成功时由 LicenseServiceImpl 调用）。
+     */
+    public void resetHeartbeatFailure() {
+        this.heartbeatFailureCount = 0;
+    }
+
+    /**
+     * 设置服务器不可用短路截止时间（check 失败时由 LicenseServiceImpl 调用）。
+     * @param untilMs 截止时间戳（毫秒）
+     */
+    public void setServerUnavailableUntil(long untilMs) {
+        this.serverUnavailableUntil = untilMs;
+    }
+
+    /**
+     * 清除服务器不可用短路标记（check 成功/心跳成功时由 LicenseServiceImpl 调用）。
+     */
+    public void clearServerUnavailable() {
+        this.serverUnavailableUntil = 0L;
+    }
+
+    /**
+     * 判断当前是否处于服务器不可用短路期。
+     * @return true = 短路期内，不应发 HTTP 请求
+     */
+    public boolean isServerUnavailable() {
+        return this.serverUnavailableUntil > System.currentTimeMillis();
     }
 
     /**

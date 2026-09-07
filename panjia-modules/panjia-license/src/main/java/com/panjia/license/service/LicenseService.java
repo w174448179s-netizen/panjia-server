@@ -64,6 +64,11 @@ public interface LicenseService {
     LicenseContent getLicenseContent();
 
     /**
+     * 获取当前持久化的 JWT token 字符串（未激活时为 null）。
+     */
+    String getToken();
+
+    /**
      * 激活结果载体。
      */
     class ActivateResult {
@@ -89,16 +94,23 @@ public interface LicenseService {
         private final String status;
         private final long offlineExpireAt;
         private final String clientMode;
+        private final String newToken;
 
         public HeartbeatResult(String status, long offlineExpireAt, String clientMode) {
+            this(status, offlineExpireAt, clientMode, null);
+        }
+
+        public HeartbeatResult(String status, long offlineExpireAt, String clientMode, String newToken) {
             this.status = status;
             this.offlineExpireAt = offlineExpireAt;
             this.clientMode = clientMode;
+            this.newToken = newToken;
         }
 
         public String getStatus() { return status; }
         public long getOfflineExpireAt() { return offlineExpireAt; }
         public String getClientMode() { return clientMode; }
+        public String getNewToken() { return newToken; }
     }
 
     /**

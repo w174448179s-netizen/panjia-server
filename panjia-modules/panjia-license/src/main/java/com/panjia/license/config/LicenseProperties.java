@@ -30,11 +30,23 @@ public class LicenseProperties {
     /** 心跳间隔（毫秒），默认 24h */
     private long heartbeatIntervalMs = 86_400_000L;
 
+    /** token 续签阈值（毫秒），默认 30 天。
+     *  心跳时若 token 剩余有效期小于此值，服务端可返回新 token 自动续签。 */
+    private long tokenRenewThresholdMs = 2_592_000_000L;
+
     /** /check 结果缓存有效期（毫秒），默认 30 分钟 */
     private long checkCacheTtlMs = 1_800_000L;
 
-    /** 离线宽限期（毫秒），默认 7 天 */
+    /** 离线宽限期（毫秒），默认 7 天；超过后未成功心跳则进入离线锁死 */
     private long offlineGraceMs = 604_800_000L;
+
+    /** 心跳连续失败次数阈值，达到后进入离线宽限期（OFFLINE_GRACE），默认 3 次 */
+    private int heartbeatFailureGraceThreshold = 3;
+
+    /** check 失败后服务器不可用短路窗口（毫秒），默认 60 秒。
+     *  在此期间 check 不再发 HTTP 请求，直接走缓存/拒绝，避免每次操作等 TCP 超时。
+     *  窗口过后下次 check 会再试一次探测服务器是否恢复。 */
+    private long checkFailureBackoffMs = 60_000L;
 
     /** 单调时钟 TCP 连接超时（毫秒） */
     private int tcpTimeoutMs = 5000;

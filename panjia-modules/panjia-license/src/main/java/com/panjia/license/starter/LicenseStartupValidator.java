@@ -97,6 +97,15 @@ public class LicenseStartupValidator {
             LicenseStatusEnum status = licenseService.getCurrentStatus();
             log.info("[LicenseStartupValidator] 当前授权状态: {}", status);
 
+            // 双重保险：即使 status 字段被误设为 NORMAL，只要 token 为空就拒绝启动
+            // 防止"未加载 token 却因默认值错误通过校验"的情况
+            if (licenseService.getToken() == null && !(LicenseMode.DEV && properties.isTestMode())) {
+                log.error("[LicenseStartupValidator] 未检测到有效 token，拒绝启动");
+                restrictedMode.trigger("T4_NOT_ACTIVATED", "未检测到有效 token");
+                shutdownApplication();
+                return;
+            }
+
             if (status == LicenseStatusEnum.NOT_ACTIVATED) {
                 if (LicenseMode.DEV && properties.isTestMode()) {
                     // testMode 软失败：允许启动后调用激活接口（联调场景）

@@ -3,18 +3,22 @@ package com.panjia.license.domain;
 import io.jsonwebtoken.Claims;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
-import lombok.Data;
+import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.Date;
 
 /**
- * License 内容实体。
+ * License 内容实体（不可变）。
  * JWT token 的 payload 载体，含指纹哈希、版本范围、过期时间等。
+ *
+ * 安全设计：此类不可变，无 setter。外部拿到引用后无法篡改任何字段。
+ * 需要更新 offlineExpireAt 时，通过 LicenseContext.updateOfflineExpireAt()
+ * 内部用 toBuilder() 生成新对象替换引用，外部无感知。
  */
-@Data
-@Builder
+@Getter
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class LicenseContent {

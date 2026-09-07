@@ -15,6 +15,7 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
+import com.panjia.license.starter.NetworkReachableChecker;
 import com.panjia.license.util.LicenseFileUtils;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -39,16 +40,19 @@ public class LicenseServiceImpl implements LicenseService {
     private final LicenseFileUtils fileUtils;
     private final FingerprintService fingerprintService;
     private final KeyStore keyStore;
+    private final NetworkReachableChecker networkReachableChecker;
 
     public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
                               LicenseVerifier licenseVerifier, LicenseFileUtils fileUtils,
-                              FingerprintService fingerprintService, KeyStore keyStore) {
+                              FingerprintService fingerprintService, KeyStore keyStore,
+                              NetworkReachableChecker networkReachableChecker) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
         this.fileUtils = fileUtils;
         this.fingerprintService = fingerprintService;
         this.keyStore = keyStore;
+        this.networkReachableChecker = networkReachableChecker;
     }
 
     /**
@@ -179,28 +183,43 @@ public class LicenseServiceImpl implements LicenseService {
         body.set("fingerprint", context.getFingerprint().calculateHash());
         body.set("reportedAt", OffsetDateTime.now().toString());
 
-        HttpResponse resp = HttpRequest.post(url)
-                .header("Authorization", "Bearer " + context.getToken())
-                .body(body.toString())
-                .timeout(properties.getTcpTimeoutMs())
-                .setSSLSocketFactory(keyStore.getSSLSocketFactory())
-                .execute();
-
-        if (!resp.isOk()) {
-            log.warn("[heartbeat] 心跳失败，status={}", resp.getStatus());
-            return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
+        HttpResponse resp;
+        try {
+            resp = HttpRequest.post(url)
+                    .header("Authorization", "Bearer " + context.getToken())
+                    .body(body.toString())
+                    .timeout(properties.getTcpTimeoutMs())
+                    .setSSLSocketFactory(keyStore.getSSLSocketFactory())
+                    .execute();
+        } catch (Exception e) {
+            // 连接异常（超时/被拒/网络不通）→ 心跳失败处理
+            return handleHeartbeatFailure(e.getMessage());
         }
 
+        if (!resp.isOk()) {
+            return handleHeartbeatFailure("HTTP " + resp.getStatus());
+        }
+
+        // ---------- 心跳成功 ----------
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
         long offlineExpireAt = json.getStr("offlineExpireAt") != null
                 ? OffsetDateTime.parse(json.getStr("offlineExpireAt")).toInstant().toEpochMilli() : 0L;
+        String newToken = json.getStr("token", json.getStr("newToken"));
 
-        // 铁律 5：offlineExpireAt 仅在心跳成功时刷新
         if (context.getLicenseContent() != null) {
-            context.getLicenseContent().setOfflineExpireAt(Instant.ofEpochMilli(offlineExpireAt));
+            context.updateOfflineExpireAt(Instant.ofEpochMilli(offlineExpireAt));
         }
         context.setLastHeartbeatTime(System.currentTimeMillis());
+
+        // 缺陷1修复：心跳成功 → 网络可达，重置失败计数，从离线宽限期恢复
+        context.setNetworkReachable(true);
+        context.resetHeartbeatFailure();
+        context.clearServerUnavailable(); // 心跳成功说明服务器恢复，清除 check 短路标记
+        if (context.getStatus() == LicenseStatusEnum.OFFLINE_GRACE) {
+            context.setRestricted(ClientModeEnum.NORMAL); // setRestricted(NORMAL) 会把 status 置回 NORMAL
+            log.info("[heartbeat] 从离线宽限期恢复为正常模式");
+        }
 
         // 处理 clientMode
         if (ClientModeEnum.RESTRICT.name().equals(clientMode)) {
@@ -209,8 +228,62 @@ public class LicenseServiceImpl implements LicenseService {
             context.setRestricted(ClientModeEnum.NORMAL);
         }
 
-        log.info("[heartbeat] 心跳成功，clientMode={}", clientMode);
-        return new HeartbeatResult("NORMAL", offlineExpireAt, clientMode);
+        // 自动续签：服务端返回新 token 时，验签后更新内存 + 持久化磁盘，客户无感
+        if (newToken != null && !newToken.isEmpty()) {
+            renewToken(newToken);
+        }
+
+        log.info("[heartbeat] 心跳成功，clientMode={}, renewed={}", clientMode, newToken != null);
+        return new HeartbeatResult("NORMAL", offlineExpireAt, clientMode, newToken);
+    }
+
+    /**
+     * 自动续签 token：验签新 token → 更新内存 context → 持久化到磁盘。
+     * 客户无需重启服务，续签无感完成。
+     */
+    private void renewToken(String newToken) {
+        try {
+            LicenseContent content = licenseVerifier.decodeToken(newToken);
+            // 验签通过 → 更新内存（setLicense 会重置状态为 NORMAL、清空缓存、重置失败计数）
+            context.setLicense(content, newToken);
+            // 持久化到磁盘，重启后自动加载新 token
+            fileUtils.ensureDataDir();
+            fileUtils.atomicWrite(properties.getFile().getToken(), newToken);
+            log.info("[renewToken] token 自动续签成功，新过期时间={}", content.getExpiresAt());
+        } catch (Exception e) {
+            // 新 token 验签失败 → 不更新，继续用旧 token（安全降级）
+            log.error("[renewToken] 新 token 验签失败，续签取消，继续使用旧 token: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 心跳失败统一处理：回写网络可达状态、递增失败计数。
+     * 设计原则：服务器挂了不影响客户操作，只在 token 过期时才锁死。
+     */
+    private HeartbeatResult handleHeartbeatFailure(String reason) {
+        // 缺陷1修复：心跳失败时探测网络可达性并回写 context
+        boolean reachable = networkReachableChecker.isNetworkReachable();
+        context.setNetworkReachable(reachable);
+
+        // 连续失败计数（用于监控/诊断，不再触发操作拒绝）
+        int failures = context.incrementHeartbeatFailure();
+        log.warn("[heartbeat] 心跳失败（第 {} 次），networkReachable={}，原因={}", failures, reachable, reason);
+
+        // 只有 token 过期才进入离线锁死，服务器挂了不锁死
+        if (isTokenExpired() && context.getStatus() != LicenseStatusEnum.OFFLINE_LOCK) {
+            log.error("[heartbeat] token 已过期，进入离线锁死");
+            context.setOfflineLock();
+            return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
+        }
+
+        // 连续失败达到阈值 → 进入离线宽限期（仅状态标记，不拒绝操作）
+        if (failures >= properties.getHeartbeatFailureGraceThreshold()
+                && context.getStatus() == LicenseStatusEnum.NORMAL) {
+            log.warn("[heartbeat] 连续心跳失败 {} 次，进入离线宽限期（不影响操作）", failures);
+            context.setOfflineGrace();
+        }
+
+        return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
     }
 
     @Override
@@ -222,36 +295,53 @@ public class LicenseServiceImpl implements LicenseService {
             return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
         }
 
-        // 1. 真·断网 → 离线模式禁用 /check 缓存（铁律 2）
-        if (!context.isNetworkReachable()) {
-            log.warn("[check] 网络不可达，离线模式禁用缓存，操作={}", operation);
-            return new CheckResult(false, CheckResultEnum.NETWORK_OFFLINE.getMessage(), CheckResultEnum.NETWORK_OFFLINE.getCode());
+        // 1. token 过期检查（运行中过期）→ 拒绝
+        // token 是 JWT + RSA 签名，本地可验签。过期说明授权到期，必须连服务器续签。
+        if (isTokenExpired()) {
+            log.error("[check] token 已过期，操作被拒: {}", operation);
+            if (context.getStatus() != LicenseStatusEnum.OFFLINE_LOCK) {
+                context.setOfflineLock();
+            }
+            return new CheckResult(false, "授权已过期，请联系服务商续签", CheckResultEnum.OPERATION_DENIED.getCode());
         }
 
-        // 2. 离线锁死 → 禁止所有核心操作
-        if (context.getStatus() == LicenseStatusEnum.OFFLINE_LOCK) {
-            return new CheckResult(false, "离线锁死，功能受限", CheckResultEnum.OPERATION_DENIED.getCode());
-        }
-
-        // 3. 受限模式 → 核心操作禁止（算薪/导入/导出均受限）
+        // 2. 受限模式（服务端明确下发的 clientMode=RESTRICT）→ 核心操作禁止
+        // 注意：即使服务器不可达，restricted 状态保留，因为这是服务端的明确指令
         if (context.isRestricted()) {
             if (op == OperationEnum.EXPORT) {
                 // 受限模式下允许导出核对（不阻止客户自查）
                 return new CheckResult(true, "受限模式，导出允许", "ALLOWED");
             }
-            return new CheckResult(false, "受限模式，核心操作禁止", CheckResultEnum.OPERATION_DENIED.getCode());
+            return new CheckResult(false, "授权受限，核心功能不可用，请联系服务商", CheckResultEnum.OPERATION_DENIED.getCode());
         }
 
-        // 4. 离线宽限期 → 禁止核心操作，仅允许查看
-        if (context.getStatus() == LicenseStatusEnum.OFFLINE_GRACE) {
-            if (op == OperationEnum.EXPORT) {
-                return new CheckResult(true, "离线宽限期，导出允许", "ALLOWED");
-            }
-            return new CheckResult(false, "离线宽限期，核心操作禁止", CheckResultEnum.OPERATION_DENIED.getCode());
+        // 3. 服务器不可用短路期内 → 信任本地 token 放行，不发 HTTP 请求
+        if (context.isServerUnavailable()) {
+            log.debug("[check] 服务器不可用短路期内，信任本地 token 放行，操作={}", operation);
+            return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
         }
 
-        // 5. 在线模式 → 调用 /check 实时校验
+        // 4. 服务器可达 → 调用 /check 实时校验
         return doRemoteCheck(op);
+    }
+
+    /**
+     * 判断本地 token 是否已过期。
+     * 优先用 JWT 的 expiresAt，其次用 licenseExpireAt。
+     */
+    private boolean isTokenExpired() {
+        LicenseContent content = context.getLicenseContent();
+        if (content == null) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        if (content.getExpiresAt() != null && content.getExpiresAt().toEpochMilli() < now) {
+            return true;
+        }
+        if (content.getLicenseExpireAt() != null && content.getLicenseExpireAt().toEpochMilli() < now) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -262,12 +352,22 @@ public class LicenseServiceImpl implements LicenseService {
         JSONObject body = new JSONObject();
         body.set("productVersion", properties.getProductVersion());
 
-        HttpResponse resp = HttpRequest.post(url)
-                .header("Authorization", "Bearer " + context.getToken())
-                .body(body.toString())
-                .timeout(properties.getTcpTimeoutMs())
-                .setSSLSocketFactory(keyStore.getSSLSocketFactory())
-                .execute();
+        HttpResponse resp;
+        try {
+            resp = HttpRequest.post(url)
+                    .header("Authorization", "Bearer " + context.getToken())
+                    .body(body.toString())
+                    .timeout(properties.getTcpTimeoutMs())
+                    .setSSLSocketFactory(keyStore.getSSLSocketFactory())
+                    .execute();
+        } catch (Exception e) {
+            // 连接异常（超时/被拒/网络不通）→ 信任本地 token 放行
+            // 设置短路窗口，后续 check 不再发 HTTP 请求
+            context.setServerUnavailableUntil(System.currentTimeMillis() + properties.getCheckFailureBackoffMs());
+            log.warn("[check] 服务端连接异常（{}），短路 {}ms，信任本地 token 放行，操作={}",
+                    e.getMessage(), properties.getCheckFailureBackoffMs(), op.name());
+            return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
+        }
 
         if (resp.isOk()) {
             JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
@@ -275,19 +375,20 @@ public class LicenseServiceImpl implements LicenseService {
             String code = json.getStr("code", "");
             boolean allowed = ClientModeEnum.NORMAL.name().equals(clientMode);
             String reason = allowed ? "操作允许" : "受限模式，操作禁止";
-            // 写入缓存
-            if (allowed) {
-                context.cacheCheckResult(op.name(), properties.getCheckCacheTtlMs());
+            // check 成功 → 清除服务器不可用短路标记（说明服务器恢复了）
+            context.clearServerUnavailable();
+            // 服务端下发受限模式
+            if (!allowed) {
+                context.setRestricted(ClientModeEnum.RESTRICT);
             }
             return new CheckResult(allowed, reason, code);
         }
 
-        // 服务端暂时不可达 → 走 30 分钟缓存降级（铁律 10：5xx ≠ 断网）
-        log.warn("[check] 服务端不可达（5xx/超时），走缓存降级，操作={}", op.name());
-        if (context.isCheckCacheValid(op.name())) {
-            return new CheckResult(true, CheckResultEnum.CACHE_FALLBACK.getMessage(), CheckResultEnum.CACHE_FALLBACK.getCode());
-        }
-        return new CheckResult(false, "服务端不可达且缓存失效", CheckResultEnum.NETWORK_OFFLINE.getCode());
+        // 服务端 5xx → 信任本地 token 放行
+        context.setServerUnavailableUntil(System.currentTimeMillis() + properties.getCheckFailureBackoffMs());
+        log.warn("[check] 服务端不可达（5xx），短路 {}ms，信任本地 token 放行，操作={}",
+                properties.getCheckFailureBackoffMs(), op.name());
+        return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
     }
 
     @Override
@@ -313,6 +414,11 @@ public class LicenseServiceImpl implements LicenseService {
     @Override
     public LicenseContent getLicenseContent() {
         return context.getLicenseContent();
+    }
+
+    @Override
+    public String getToken() {
+        return context.getToken();
     }
 
     /**
