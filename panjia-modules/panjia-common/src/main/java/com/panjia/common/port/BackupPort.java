@@ -16,5 +16,7 @@ public interface BackupPort {
      * @param reason   备份原因
      * @param operator 操作人（异步 / SnailJob 场景必须显式传，如 "system"）
      */
-    void trigger(BackupReason reason, String operator);
+    default void trigger(BackupReason reason, String operator) {
+
+    }
 }

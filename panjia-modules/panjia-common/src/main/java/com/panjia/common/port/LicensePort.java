@@ -16,12 +16,16 @@ public interface LicensePort {
      *
      * @return true 表示当前 License 有效
      */
-    boolean isActive();
+    default boolean isActive() {
+        return false;
+    }
 
     /**
      * 主动触发 License 校验，失败抛 ServiceException。
      *
      * @throws ServiceException 校验未通过时抛出
      */
-    void check() throws ServiceException;
+    default void check() throws ServiceException {
+
+    }
 }
