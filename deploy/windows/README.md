@@ -209,7 +209,7 @@ docker compose logs -f postgres
 
 如需修改：
 - 安装时在授权码页面的"授权服务器地址"字段修改
-- 或安装后修改 `config\.env` 中的 `LICENSE_SERVER_URL` 配置，然后重启服务
+- 或安装后修改 `config\.env` 中的 `PANJIA_LICENSE_SERVER_URL` 配置，然后重启服务
 
 ## 常见问题
 
@@ -259,7 +259,7 @@ panjia-setup.exe (NSIS)
                         → 立即报错退出 + 引导用 reauth-app.ps1 重新激活
 ```
 
-**激活机制**：授权码写在 `.env` 的 `PANJIA_AUTH_CODE`，后端启动时自动向授权服务器（`LICENSE_SERVER_URL`，默认 https://panjia.icu）激活，成功后 token 落盘到 `data\panjia-license\`。激活失败后端拒绝启动（硬失败），所以"服务启动成功"即"激活成功"，无需单独的激活步骤。
+**激活机制**：授权码写在 `.env` 的 `PANJIA_AUTH_CODE`，后端启动时自动向授权服务器（`PANJIA_LICENSE_SERVER_URL`，默认 https://panjia.icu）激活，成功后 token 落盘到 `data\panjia-license\`。激活失败后端拒绝启动（硬失败），所以"服务启动成功"即"激活成功"，无需单独的激活步骤。
 
 ## 文件清单（完全离线安装包）
 

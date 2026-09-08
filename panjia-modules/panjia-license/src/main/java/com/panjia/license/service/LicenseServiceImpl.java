@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.net.Proxy;
 
 /**
  * LicenseService 实现。
@@ -150,6 +151,7 @@ public class LicenseServiceImpl implements LicenseService {
                 .body(body.toString())
                 .timeout(properties.getTcpTimeoutMs())
                 .setSSLSocketFactory(keyStore.getSSLSocketFactory())
+                .setProxy(Proxy.NO_PROXY)
                 .execute();
 
         if (!resp.isOk()) {
@@ -224,6 +226,7 @@ public class LicenseServiceImpl implements LicenseService {
                     .body(body.toString())
                     .timeout(properties.getTcpTimeoutMs())
                     .setSSLSocketFactory(keyStore.getSSLSocketFactory())
+                    .setProxy(Proxy.NO_PROXY)
                     .execute();
         } catch (Exception e) {
             // 连接异常（超时/被拒/网络不通）→ 心跳失败处理
@@ -431,6 +434,7 @@ public class LicenseServiceImpl implements LicenseService {
                     .body(body.toString())
                     .timeout(properties.getTcpTimeoutMs())
                     .setSSLSocketFactory(keyStore.getSSLSocketFactory())
+                    .setProxy(Proxy.NO_PROXY)
                     .execute();
         } catch (Exception e) {
             // 连接异常（超时/被拒/网络不通）→ 信任本地 token 放行

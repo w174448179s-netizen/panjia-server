@@ -327,7 +327,7 @@ if ($activated) {
 可能原因：
   1. 授权码无效或已过期（请联系系统管理员确认）
   2. 授权码绑定了其他机器的指纹（换机器必须在授权后台先解绑）
-  3. 授权服务器不可达（检查 $InstallDir\config\.env 的 LICENSE_SERVER_URL 配置）
+  3. 授权服务器不可达（检查 $InstallDir\config\.env 的 PANJIA_LICENSE_SERVER_URL 配置）
   4. 后端启动未完成（server 容器首次启动较慢）
 
 排查命令：
