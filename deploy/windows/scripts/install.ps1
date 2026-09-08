@@ -624,8 +624,8 @@ SERVER_PORT=8080
 # JVM 参数
 JAVA_OPTS=-Xms512m -Xmx1024m -XX:+UseG1GC
 
-# License 授权（compose 里 server 服务读取的是 LICENSE_SERVER_URL）
-LICENSE_SERVER_URL=$LicenseServer
+# License 授权
+PANJIA_LICENSE_SERVER_URL=$LicenseServer
 PANJIA_AUTH_CODE=$AuthCode
 "@
 
