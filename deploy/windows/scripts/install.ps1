@@ -608,18 +608,15 @@ if (-not (Test-StepDone 4)) {
 POSTGRES_USER=$dbUser
 POSTGRES_PASSWORD=$dbPassword
 POSTGRES_DB=$dbName
-POSTGRES_PORT=5432
 
 # Redis
 REDIS_PASSWORD=$redisPassword
-REDIS_PORT=6379
 
 # 镜像标签
 IMAGE_TAG=$ImageTag
 
 # 端口
 WEB_PORT=80
-SERVER_PORT=8080
 
 # JVM 参数
 JAVA_OPTS=-Xms512m -Xmx1024m -XX:+UseG1GC
