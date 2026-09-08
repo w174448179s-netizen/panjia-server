@@ -138,6 +138,11 @@ if [ "$SKIP_BUILD" = "0" ]; then
         fi
     fi
 
+    # 修复 MapStruct Plus 增量标记文件（文件损坏会导致编译失败：ExceptionInInitializerError）
+    # 内容必须是纯数字，损坏后重置为 0 即可
+    mkdir -p ~/.msp
+    echo "0" > ~/.msp/incrementMark
+
     mvn clean package -Pprod -DskipTests -q
 
     if [ ! -f "ruoyi-admin/target/ruoyi-admin.jar" ]; then

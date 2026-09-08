@@ -601,6 +601,25 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- 修复 MapStruct Plus 增量标记文件（损坏会导致 ExceptionInInitializerError，编译失败） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>fix-msp-increment-mark</id>
+                        <phase>initialize</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <mkdir dir="${user.home}/.msp"/>
+                                <echo file="${user.home}/.msp/incrementMark" message="0"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
         <resources>
             <resource>

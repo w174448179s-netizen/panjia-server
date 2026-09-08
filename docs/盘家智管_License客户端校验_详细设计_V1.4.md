@@ -1,11 +1,20 @@
 # 盘家智管 License 客户端校验详细设计
 
-> 版本：V1.3
+> 版本：**V1.4**
 > 状态：设计定稿（第一阶段）
 > 开发工作量：约 11.5 人天
 > 评审结论：通过（6 处修订全部落地，无架构级缺陷）
+> 对齐基线：服务端详设 **V1.7**
 >
-> V1.3 变更（2026-09-03）：
+> **V1.4 变更（2026-09-08）**：
+> - 修订 §2.1：心跳响应新增 `jwt` 字段（token 刷新），与服务端 V1.7 对齐
+> - 修订 §2.3：心跳机制补充 token 自动续签说明（剩余寿命 < 7 天时心跳返回新 JWT，客户端验签后无感替换）
+> - 修订 §2.9：JWT 校验新增 `licenseExpireAt` claim，客户端据此做授权到期兜底
+> - 新增铁律 25：token 过期双重判定（`exp` 与 `licenseExpireAt` 取先到者）；`licenseExpireAt` 用 Instant 比较，不受客户端时区影响
+> - 新增验收标准 43：心跳 token 续签（jwt 字段非空时验签并替换本地 token） + licenseExpireAt 兜底校验
+> - 补充时区说明：服务端时区基准为 `Asia/Shanghai`，`endDate` 到期时间点为北京时间当天 23:59:59；客户端侧用 Instant 比较，无本地时区问题
+>
+> **V1.3 变更（2026-09-03）**：
 > - 修订 §2.2：客户端启动流程加入 **authCode 自动激活**（方案 A），首次启动无需人工调接口
 > - 修订 §2.10：`LicenseServiceImpl.init()` 更名为 `initOnStartup()`，三步加载（磁盘 token → dev token → authCode 自动激活）
 > - 修订 §2.9：密钥生成脚本 `generate-license-key.sh` 已回退，密钥由管理端处理
@@ -89,19 +98,31 @@
 | APM 白名单 | 客户无 IT，不装 APM |
 | N-1 阈值匹配 | 改为双因子全量匹配，逻辑更简单 |
 
+### 1.6 时区说明（V1.4 新增）
+
+**服务端时区基准：北京时间（`Asia/Shanghai`）。**
+
+- 授权到期日 `endDate`（LocalDate）的精确到期时间点为 **北京时间当天 23:59:59**，不是当天 0 点
+- JWT 中 `licenseExpireAt` 字段存储此瞬时时间点（JWT NumericDate，即 epoch 秒）
+- **客户端侧无时区问题**：客户端用 `claims.get("licenseExpireAt", Date.class).toInstant()` 与 `Instant.now()` 比较，`Instant` 是绝对时间，不受客户端本地时区影响
+
+> 为什么客户端不用关心时区：`licenseExpireAt` 是 JWT NumericDate（从 1970-01-01 UTC 开始的秒数），是绝对时间点。客户端用 `Instant.now()` 做比较，无论客户机在哪个时区，比较结果都一致。
+
 ---
 
 ## 二、L1 在线鉴权
 
-### 2.1 授权服务器接口
+### 2.1 授权服务器接口（对齐服务端 V1.7）
 
 | 接口 | 方法 | 请求 | 响应 | 说明 |
 |---|---|---|---|---|
-| `/api/auth/activate` | POST | `{authCode, fingerprint, productVersion}` | `{license, token, offlineExpireAt, clientMode}` | 首次激活，绑定指纹，校验版本范围 |
-| `/api/auth/heartbeat` | POST | `{token}` | `{status, offlineExpireAt, clientMode}` | 24h 心跳续期，可下发 `clientMode` 指令 |
-| `/api/auth/check` | POST | `{token, operation}` | `{allowed: true/false, reason, code}` | 关键操作实时校验，按操作粒度返回 |
+| `/api/auth/activate` | POST | `{authCode, fingerprint, productVersion}` | `{jwt, offlineExpireAt, clientMode}` | 首次激活，绑定指纹，校验版本范围 |
+| `/api/auth/heartbeat` | POST | `{instanceId, fingerprint, reportedAt}`（JWT 在 Authorization header） | `{jwt, offlineExpireAt, clientMode, code}` | 24h 心跳，可刷新 token + 下发 clientMode 指令 |
+| `/api/auth/check` | POST | `{productVersion, currentStores, currentUsers}`（JWT 在 Authorization header） | `{clientMode, code, capabilities, maxStores, maxUsers, endDate}` | 关键操作实时校验 |
 
-**服务端不信任客户端上报的 fingerprint**：token 为 JWT，payload 内含 `fingerprintHash` 与 `versionRange`，服务端解密 token 取指纹比对 + 版本校验（详见 §2.6、§7.4）。
+**服务端不信任客户端上报的 fingerprint**：token 为 JWT，payload 内含 `fpHash` 与 `versionRange`，服务端解密 token 取指纹比对 + 版本校验（详见 §2.6、§7.4）。
+
+> ★ **V1.4 修正**：心跳响应新增 `jwt` 字段（可选），用于 token 自动续签。JWT 统一通过 `Authorization: Bearer` 请求头传递，不在 body 中。
 
 ### 2.2 客户端启动流程
 
@@ -111,7 +132,7 @@ Spring Boot 启动
   → ② IntegrityChecker.checkStartup()   （§4.3 完整性自检，启动期）
   → ③ LicenseStartupValidator.run()
        → LicenseServiceImpl.initOnStartup()
-            → 步骤 1：磁盘有持久化 token？→ 加载，return
+            → 步骤 1：磁盘有持久化 token？→ 加载，验签通过则 return
             → 步骤 2：dev 模式 + 有 devToken？→ 加载，return
             → 步骤 3：配置了 authCode？→ 自动激活
                  → 采集机器指纹（hostMachineId + instanceId）
@@ -119,7 +140,7 @@ Spring Boot 启动
                  → 成功 → 持久化 token 到磁盘 → 进入 NORMAL
                  → 失败 → 进入受限/锁死
             → 步骤 4：无 authCode 或激活失败
-                 → 检查离线 token（offlineExpireAt）
+                 → 检查离线 token（offlineExpireAt + licenseExpireAt）
                  → 未过期 → 离线宽限期（允许查看，禁止核心操作）
                  → 已过期 → 离线锁死（只读，提示"请联系服务商"）
   → ④ 校验通过 → 正常启动
@@ -139,7 +160,7 @@ Spring Boot 启动
 
 重启（有持久化 token）
   → initOnStartup() 步骤 1：从磁盘加载 token
-  → 验签通过 → 直接进入 NORMAL，不需要 authCode
+  → 验签 + licenseExpireAt 校验通过 → 直接进入 NORMAL，不需要 authCode
 ```
 
 > **安全守卫**：自动激活分支受 `(!LicenseMode.DEV || properties.isTestMode())` 编译时常量守卫。生产构建 `LicenseMode.DEV=false` → `false && testMode` = `false` → 自动激活分支不可达。攻击者即使注入 `auth-code` 也无法触发。
@@ -149,14 +170,30 @@ Spring Boot 启动
 | 项目 | 值 |
 |---|---|
 | 间隔 | 24h |
-| 触发 | 后台线程 |
-| 成功响应 | 更新本地 `offlineExpireAt`（= 服务器当前时间 + 7 天），返回最新 `clientMode` |
-| 失败 | 记录失败但不立即停服；`offlineExpireAt` 到期则锁核心功能 |
-| 刷新规则 | **仅在心跳成功时刷新**；客户须至少每 7 天成功联网一次 |
+| 触发 | 后台线程（`HeartbeatScheduler`） |
+| 成功响应 | 更新本地 `offlineExpireAt`（= 服务器当前时间 + 7 天），返回最新 `clientMode`；**若 `jwt` 字段非空则刷新本地 token** |
+| 失败 | 记录失败但不立即停服；`offlineExpireAt` 到期或 `licenseExpireAt` 到期则锁核心功能 |
+| 刷新规则 | **仅在心跳成功时刷新 `offlineExpireAt`**；客户须至少每 7 天成功联网一次 |
+| token 续签 | **剩余寿命 < 7 天时，心跳响应携带新 JWT**，客户端验签后无感替换（`renewToken`） |
 
 **`clientMode` 指令**（心跳响应携带，客户端运行时读取）：
 - `NORMAL`：正常模式
 - `RESTRICT`：服务端下发受限指令，客户端进入受限模式（算薪偏移），写告警日志
+
+**token 自动续签（V1.4 新增）**：
+
+```
+心跳成功
+  → 解析响应中的 jwt 字段
+  → 若 jwt 非空：
+     → LicenseVerifier.decodeToken() 验签新 token
+     → 验签通过 → 替换本地 token（内存 + 磁盘持久化）
+     → 验签失败 → 忽略，继续用旧 token（安全降级）
+  → 更新 offlineExpireAt
+  → 更新 clientMode
+```
+
+> ★ 续签 token 必须经过完整 RSA 验签，防止"假服务器下发恶意 token"。验签失败则忽略，不影响当前 token 使用。
 
 ### 2.4 网络状态判定（`networkReachable`）
 
@@ -261,9 +298,11 @@ if (networkReachable) {
 
 | 状态 | 触发 | 可用功能 | 恢复方式 |
 |---|---|---|---|
-| **离线宽限期** | 真·断网且 `offlineExpireAt` 未过期 | 查看历史、基础设置 | 恢复联网心跳 |
-| **离线锁死** | `offlineExpireAt` 已过期 / 单调时钟回拨 / 单调文件缺失 | 仅只读浏览 | 联系我方运维远程恢复 |
+| **离线宽限期** | 真·断网且 `offlineExpireAt` 未过期 且 `licenseExpireAt` 未过期 | 查看历史、基础设置 | 恢复联网心跳 |
+| **离线锁死** | `offlineExpireAt` 已过期 / `licenseExpireAt` 已过期 / 单调时钟回拨 / 单调文件缺失 | 仅只读浏览 | 联系我方运维远程恢复 |
 | **受限模式** | 校验/完整性异常 / 服务端 REVOKED 指令 | **功能可用但算薪错误** | 联网 + 校验通过 / 服务端解除 |
+
+> ★ **V1.4 补充**：离线模式下，即使 `offlineExpireAt` 还有剩余，若 `licenseExpireAt`（授权最终到期日）已过，同样进入离线锁死。
 
 ### 2.9 RSA 非对称签名机制（V1.1 新增）
 
@@ -281,6 +320,20 @@ if (networkReachable) {
   → 不在 application.yml 配置文件中
   → 客户看得见公钥，但拿公钥签不出合法 token
 ```
+
+**JWT claims 校验（客户端侧，V1.4 更新）**：
+
+客户端 `LicenseVerifier.decodeToken()` 验签通过后，逐项校验 claims：
+
+| claim | 校验方式 | 说明 |
+|---|---|---|
+| 签名 | RSA 公钥验签 | 基础防线 |
+| `exp` | `Date.before(new Date())` | JWT 本身有效期（14 天，可续签） |
+| `licenseExpireAt` | `Date.before(new Date())` | **授权最终到期日**（不可续签），V1.4 新增 |
+| `fpHash` | 与本地采集指纹哈希比对 | 指纹绑定校验 |
+| `authCode` / `customerNo` | 一致性检查 | 身份绑定 |
+
+> ★ **双重过期判定（铁律 25）**：`exp` 与 `licenseExpireAt` 取先到者。即使 token 还没到 `exp`，只要到了 `licenseExpireAt` 就视为过期。两者都是 JWT NumericDate（绝对时间），用 `Date` 比较，不受本地时区影响。
 
 **密钥管理**：
 
@@ -322,7 +375,7 @@ if (networkReachable) {
 |---|---|---|
 | **LicenseGuard** | 始终 `true`（不跳过） | 始终 `true` |
 | **LicenseVerifier** | 验签 dev token（RSA 验签正常执行） | 验签真实 token |
-| **HeartbeatScheduler** | 跳过远程调用（避免开发时依赖授权服务器） | 定期远程心跳 |
+| **HeartbeatScheduler** | 跳过远程调用（避免开发时依赖授权服务器） | 定期远程心跳 + token 续签 |
 | **LicenseService.check()** | 直接放行（无需授权服务器在线） | 远程 `/check` 校验 |
 | **LicenseServiceImpl.initOnStartup()** | 步骤 2：加载预置 dev token | 步骤 1：磁盘加载持久化 token；步骤 3：authCode 自动激活 |
 | **IntegrityChecker** | 正常执行 | 正常执行 |
@@ -623,16 +676,18 @@ IntegrityChecker.class 自身也在校验列表中
 
 | 信号 | 触发条件 | 触发方 | 进入模式 |
 |---|---|---|---|
-| **T1 授权校验失败** | 指纹不匹配 / 版本越界 / token 签名无效 | 启动校验 | RESTRICTED |
+| **T1 授权校验失败** | 指纹不匹配 / 版本越界 / token 签名无效 / licenseExpireAt 到期 | 启动校验 | RESTRICTED |
 | **T2 服务端 REVOKED** | 心跳/激活返回 `clientMode=RESTRICT` 或 `code=TOKEN_REVOKED` | 服务端指令 | RESTRICTED |
 | **T3 完整性自检失败** | 启动期或算薪前 class 校验不匹配 | 自检 | RESTRICTED |
 | **T4 单调时钟回拨** | `trustedNow` 回拨超容忍 | 时钟 | **OFFLINE_LOCK**（非受限，见下） |
-| **T5 离线锁死** | `offlineExpireAt` 过期 / 单调文件缺失 | 离线 | **OFFLINE_LOCK** |
+| **T5 离线锁死** | `offlineExpireAt` 过期 / `licenseExpireAt` 过期 / 单调文件缺失 | 离线 | **OFFLINE_LOCK** |
 
 > **T3 注释（防误用）**：T3 是**兜底信号**，仅在"锁死逻辑本身被绕过"的前提下才走到算薪。
 > ❌ **禁止**把正常的"指纹异常 / 时钟回拨"直接触发受限模式——那些**正常流程优先走 OFFLINE_LOCK**。
 > ✅ T3 仅在"完整性自检发现 class 被静态替换"这一**入侵异常**时触发。
 > 开发误用（把时钟回拨直接挂到 T3）会破坏离线锁死主流程，属 Bug。
+
+> ★ **V1.4 补充**：T1 增加 `licenseExpireAt` 到期触发。授权最终到期日到达时，即使 JWT `exp` 还没到，也视为授权失效。
 
 ### 5.3 行为（绝不篡改业务数据）
 
@@ -650,7 +705,7 @@ IntegrityChecker.class 自身也在校验列表中
 
 | 字段 | 说明 |
 |---|---|
-| `trigger` | 触发原因码：`T1_AUTH_FAIL` / `T2_SERVER_REVOKED` / `T3_INTEGRITY` / `SERVER_DECISION` |
+| `trigger` | 触发原因码：`T1_AUTH_FAIL` / `T2_SERVER_REVOKED` / `T3_INTEGRITY` / `SERVER_DECISION` / `LICENSE_EXPIRED` |
 | `offset` | 本次应用的偏移量（确定性派生值） |
 | `ts` | 触发时间戳 |
 | `fpHash` | 机器指纹哈希（脱敏） |
@@ -661,7 +716,7 @@ IntegrityChecker.class 自身也在校验列表中
 
 | 维度 | 离线锁死 | 受限模式 |
 |---|---|---|
-| 触发 | 离线超时 / 时钟回拨 / 单调文件缺失（T4/T5） | 校验/完整性异常 / 服务端指令（T1/T2/T3） |
+| 触发 | 离线超时 / 时钟回拨 / 单调文件缺失 / licenseExpireAt 到期（T4/T5） | 校验/完整性异常 / 服务端指令（T1/T2/T3） |
 | 表现 | 功能锁定（无法操作） | 功能可用但算薪错误 |
 | 恢复 | 联网 + 心跳成功 | 联网 + 校验通过 / 服务端解除 |
 
@@ -695,7 +750,7 @@ services:
       - /etc/machine-id:/etc/machine-id:ro      # 指纹主因子（只读）
       - panjia-data:/data                        # 持久化数据卷（instanceId + token + 状态文件 + 业务数据）
     environment:
-      - PANJIA_LICENSE_SERVER_URL=https://panjia.icu
+      - PANJIA_LICENSE_SERVER_URL=https://license.panjia.com
       - PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE}      # V1.3：authCode，首次启动自动激活，激活后不需要
 
 volumes:
@@ -762,8 +817,8 @@ volumes:
 
 | 场景 | 行为 | 归属 |
 |---|---|---|
-| 断网 ≤ 7 天 | 离线宽限期，允许查看 | 自动 |
-| 断网 > 7 天 | 离线锁死，只读 | 联系我方恢复 |
+| 断网 ≤ 7 天且授权未到期 | 离线宽限期，允许查看 | 自动 |
+| 断网 > 7 天 或 授权已到期 | 离线锁死，只读 | 联系我方恢复 |
 | 授权服务器宕机 | 30 分钟缓存内可用，超期锁核心功能 | 我方保障 SLA |
 | 更换核心硬件 / 换机 | 指纹不匹配 → 需重新激活 | §7.2 我方处理 |
 | 升配 / 降配 / 重启 | 无影响 | 自动 |
@@ -793,7 +848,7 @@ volumes:
 | 普通 HTTP 正向代理（`HTTPS_PROXY`，不解密 HTTPS） | ✅ 正常，HTTPS 隧道透明转发，证书链完整校验 |
 | SSL 中间人代理（网关替换证书） | ❌ 证书指纹不命中 → SSL 握手失败 → 鉴权不通 |
 
-**写死约束**：授权服务通信**不支持 SSL 中间人解密代理**。客户出网网关（若有）不得将 `panjia.icu` 加入 SSL 解密拦截，须加**解密白名单（放行不解密）**。
+**写死约束**：授权服务通信**不支持 SSL 中间人解密代理**。客户出网网关（若有）不得将 `license.panjia.com` 加入 SSL 解密拦截，须加**解密白名单（放行不解密）**。
 
 **证书轮换（双指纹过渡）：**
 
@@ -814,9 +869,9 @@ volumes:
 
 | 模块 | 工作量 | 说明 |
 |---|---|---|
-| 授权服务器后端（3 接口 + 多实例自动拉黑 + 版本校验 + clientMode 指令） | 2.2 天 | 较初始 +0.2（versionRange + clientMode） |
+| 授权服务器后端（3 接口 + 多实例自动拉黑 + 版本校验 + clientMode 指令 + token 续签） | 2.4 天 | V1.4：+0.2（心跳 token 续签 + licenseExpireAt） |
 | 最小运营后台（授权码生成 + 黑名单 + 告警 + 手动解除拉黑 + 测试码回收） | 2 天 | 不变 |
-| 客户端在线校验 + 心跳 + networkReachable 判定 + 30 分钟降级 + authCode 自动激活 + token 持久化 | 2 天 | V1.3：删除 LicenseController 4 个 HTTP 接口，新增 authCode 自动激活 + token 磁盘持久化，净增持平 |
+| 客户端在线校验 + 心跳 + networkReachable 判定 + 30 分钟降级 + authCode 自动激活 + token 持久化 + token 续签 | 2.2 天 | V1.4：+0.2（心跳 jwt 字段处理 + licenseExpireAt 校验） |
 | DockerCollector（hostMachineId + instanceId） | 0.5 天 | 不变 |
 | 单调时钟（bootTime + 系统时间 + 防删锁死 + 异常处理降级） | 0.3 天 | 较初始 +0.1 |
 | 完整性自检（启动期 + 算薪前 + 构建顺序铁律） | 0.8 天 | 新增 L5，checksum-gen 顺序 |
@@ -825,7 +880,7 @@ volumes:
 | 部署工具 + 远程运维通道（mTLS + CLI 防 HTTP 暴露） | 0.5 天 | 不变（+CLI 约束） |
 | 多实例自动拉黑 + 旧实例降级行为 | 0.3 天 | 新增，复用换机逻辑 |
 | 证书轮换四阶段 + 回退警告 | 0.2 天 | 新增，运维文档为主 |
-| **合计** | **约 11.5 人天** | 较初始 V2.5 +1.5 |
+| **合计** | **约 11.9 人天** | V1.4 较 V1.3 +0.4 |
 
 ---
 
@@ -897,6 +952,10 @@ volumes:
 
 42. 首次启动配置了 authCode → 自动采集指纹 + 调用 `/api/auth/activate` → token 持久化到磁盘 → 后续重启不需要 authCode；authCode 一次性消费，第二次激活被拒绝；prod 环境（`LicenseMode.DEV=false`）注入 `auth-code` 环境变量 → 自动激活分支不可达（`false && testMode` = `false`），无法触发
 
+### token 续签与 licenseExpireAt 兜底（43，V1.4 新增）
+
+43. 心跳响应 `jwt` 字段非空时 → 完整 RSA 验签 → 通过则替换内存 + 磁盘 token（无感续签），失败则忽略继续用旧 token；JWT 含 `licenseExpireAt` claim → 客户端 `decodeToken` 时双重过期判定（`exp` 与 `licenseExpireAt` 取先到者）；`licenseExpireAt` 用 `Date` / `Instant` 比较，不受客户端时区影响
+
 ---
 
 ## 十一、包结构
@@ -908,16 +967,17 @@ com.panjia.license
 ├── domain/           # LicenseContent、HardwareFingerprint、FingerprintFactor、VersionRange
 ├── enums/            # LicenseStatusEnum、FingerprintStatusEnum、ClientModeEnum、OperationEnum、TriggerCodeEnum
 ├── exception/        # LicenseException 及子类
-├── crypto/verify/    # LicenseVerifier（RSA 验签）、KeyStore（双指纹）
-├── fingerprint/      # FingerprintCollector、DockerCollector、FingerprintService（V1.3 新增，供 LicenseServiceImpl 注入采集指纹）
+├── crypto/verify/    # LicenseVerifier（RSA 验签 + licenseExpireAt 兜底校验）、KeyStore（双指纹）
+├── fingerprint/      # FingerprintCollector、DockerCollector、FingerprintService
 ├── starter/          # LicenseStartupValidator、MonotonicClock、HeartbeatScheduler
 ├── security/         # IntegrityChecker（L5）、RestrictedMode（L4）、LicenseGuard（强制守卫）、LicenseCheckPoint（多点散布校验）
 ├── interceptor/      # LicenseInterceptor（关键操作 /check，按 operation 枚举）
-├── service/          # LicenseContext、LicenseService、LicenseServiceImpl（initOnStartup + authCode 自动激活 + token 持久化）
+├── service/          # LicenseContext、LicenseService、LicenseServiceImpl（initOnStartup + authCode 自动激活 + token 持久化 + token 续签）
 ├── diagnose/         # LicenseDiagnosticCli（仅本地控制台，禁止 HTTP 入口）
 └── util/             # LicenseFileUtils、MonotonicTolerance（⚠️ 单一常量，全代码一处引用）
 
 # V1.3 变更：删除 controller/ 包（LicenseController 4 个 HTTP 接口全部移除，License 流程完全内部闭环）
+# V1.4 变更：crypto/verify/ 增加 licenseExpireAt 兜底校验；service/ 增加 token 续签逻辑
 
 # admin 模块中：
 com.panjia.admin
@@ -956,6 +1016,7 @@ com.panjia.admin
 | 22 | `panjia-license` 是应用启动硬依赖，移除模块必须导致启动失败；业务关键方法必须调用 `LicenseCheckPoint.requireLicense()` | §4.5 |
 | 23 | `LicenseMode.class` 必须纳入完整性校验列表（全量 + 快检）；篡改编译时常量 → 哈希不匹配 → 被检出 | §4.6 |
 | 24 | authCode 一次性消费，激活后服务端标记作废，防止复制到其他机器；自动激活分支受 `(!LicenseMode.DEV \|\| isTestMode())` 编译时常量守卫，prod 环境注入 `auth-code` 无法触发 | §2.2 |
+| 25 | **token 过期双重判定**：`exp`（JWT 本身有效期，可续签）与 `licenseExpireAt`（授权最终到期日，不可续签）取先到者；`licenseExpireAt` 用 `Date` / `Instant` 比较，不受客户端时区影响 | §2.9 |
 
 ---
 
@@ -972,14 +1033,14 @@ com.panjia.admin
 
 ## 十四、交付物清单
 
-1. `panjia-license` 模块源码（约 35 个 Java 文件，含 L5 完整性自检、authCode 自动激活、token 持久化）
-2. 授权服务器（Spring Boot，3 接口 + 版本校验 + clientMode 指令 + 最小运营后台 + 密钥管理）
+1. `panjia-license` 模块源码（约 35 个 Java 文件，含 L5 完整性自检、authCode 自动激活、token 持久化、token 续签、licenseExpireAt 兜底校验）
+2. 授权服务器（Spring Boot，3 接口 + 版本校验 + clientMode 指令 + 最小运营后台 + 密钥管理 + token 续签）
 3. `panjia-deploy` 部署工具（Docker Compose 一键部署 + machine-id 校验 + authCode 环境变量注入）
-4. ProGuard + ClassFinal 构建脚本（**含 checksum-gen 顺序铁律注释**）
+4. ProGuard + ClassFinal 加密脚本（**含 checksum-gen 顺序铁律注释**）
 5. 运营手册（证书轮换四阶段 + 回退警告、换机流程、告警处理、单调时钟人工重建 SOP、密钥轮换 SOP）
 6. 本文档（设计与验收唯一依据）
 7. 开发评审 Checklist（三档打勾版）
 
 > V1.3 变更：交付物 1 删除 `LicenseController`（4 个 HTTP 接口移除），新增 `FingerprintService`、token 持久化逻辑；交付物 2 接口数从 4 调整为 3（客户端不再暴露 HTTP 激活/心跳/检查接口，全部内部调用）；交付物 3 新增 authCode 环境变量注入。
-</content>
-</invoke>
+>
+> V1.4 变更：交付物 1 新增 token 续签逻辑（`renewToken`）+ licenseExpireAt 兜底校验；交付物 2 心跳接口新增 jwt 响应字段。
