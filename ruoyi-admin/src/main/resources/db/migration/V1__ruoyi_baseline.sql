@@ -336,6 +336,7 @@ insert into sys_menu values(1761400000000000001, '系统管理', 0, 1, 'system',
 insert into sys_menu values(1761400000000000002, '系统监控', 0, 3, 'monitor', null, '', 'N', 'Y', 'M', '0', '0', '', 'monitor', '', '', 1761000000000000100, 1761100000000000001, now(), null, null, '系统监控目录');
 insert into sys_menu values(1761400000000000003, '系统工具', 0, 4, 'tool', null, '', 'N', 'Y', 'M', '0', '0', '', 'tool', '', '', 1761000000000000100, 1761100000000000001, now(), null, null, '系统工具目录');
 insert into sys_menu values(1761400000000000006, 'AI会话',  0, 8, 'aichat', 'ai/chat/index', '', 'N', 'Y', 'C', '0', '0', '', 'checkbox', '', '', 1761000000000000100, 1761100000000000001, now(), null, null, 'AI聊天菜单');
+
 -- 二级菜单
 insert into sys_menu values(1761400000000000100, '用户管理', 1761400000000000001, 1, 'user', 'system/user/index', '', 'N', 'Y', 'C', '0', '0', 'system:user:list', 'user', '', '', 1761000000000000100, 1761100000000000001, now(), null, null, '用户管理菜单');
 insert into sys_menu values(1761400000000000101, '角色管理', 1761400000000000001, 2, 'role', 'system/role/index', '', 'N', 'Y', 'C', '0', '0', 'system:role:list', 'peoples', '', '', 1761000000000000100, 1761100000000000001, now(), null, null, '角色管理菜单');
