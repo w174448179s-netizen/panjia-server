@@ -12,9 +12,11 @@
     <packaging>pom</packaging>
 
     <modules>
+        <!-- 独立部署的服务端，不随主应用打包
         <module>ruoyi-monitor-admin</module>
         <module>ruoyi-snailai-server</module>
         <module>ruoyi-snailjob-server</module>
+        -->
     </modules>
 
 </project>

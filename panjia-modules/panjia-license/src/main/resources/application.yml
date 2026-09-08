@@ -3,33 +3,47 @@ spring:
   application:
     name: panjia-license
 
-# License 客户端配置
+# License 客户端配置（与 LicenseProperties 类字段一一对应）
 panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
-    # 激活超时(ms)
-    activate-timeout-ms: 10000
-    # TCP连接超时(ms)
-    tcp-timeout-ms: 5000
-    # 心跳间隔(h)
-    heartbeat-interval-h: 24
-    # 心跳超时(ms)
-    heartbeat-timeout-ms: 10000
-    # 离线模式宽限(ms)：断网后允许操作的最长时间
-    offline-grace-ms: 1800000
-    # 单调时钟容忍窗口(ms)：NTP微调不超过此值，否则判定回拨
-    monotonic-tolerance-ms: 300000
-    # SSL Pinning：两个指纹的硬编码清单（运维通过环境变量覆盖）
+    # 预置 dev token（开发环境用，生产环境为空）
+    dev-token: ${PANJIA_DEV_TOKEN:}
+    # 测试模式：dev 环境下也执行远程 License 校验（连本地授权服务）
+    test-mode: ${PANJIA_TEST_MODE:false}
+    # 授权码（首次部署时由管理后台生成，激活后作废）
+    auth-code: ${PANJIA_AUTH_CODE:}
+    # 产品版本号（激活时上报）
+    product-version: ${PANJIA_PRODUCT_VERSION:1.0.0}
+    # 心跳间隔（毫秒），默认 24h
+    heartbeat-interval-ms: ${PANJIA_HEARTBEAT_INTERVAL_MS:86400000}
+    # token 续签阈值（毫秒），默认 30 天
+    token-renew-threshold-ms: ${PANJIA_TOKEN_RENEW_THRESHOLD_MS:2592000000}
+    # /check 结果缓存有效期（毫秒），默认 30 分钟
+    check-cache-ttl-ms: ${PANJIA_CHECK_CACHE_TTL_MS:1800000}
+    # 离线宽限期（毫秒），默认 7 天
+    offline-grace-ms: ${PANJIA_OFFLINE_GRACE_MS:604800000}
+    # 心跳连续失败次数阈值，达到后进入离线宽限期
+    heartbeat-failure-grace-threshold: ${PANJIA_HEARTBEAT_FAILURE_THRESHOLD:3}
+    # check 失败后服务器不可用短路窗口（毫秒）
+    check-failure-backoff-ms: ${PANJIA_CHECK_FAILURE_BACKOFF_MS:1800000}
+    # JWT 时钟偏差容忍（秒）
+    clock-skew-seconds: ${PANJIA_CLOCK_SKEW_SECONDS:60}
+    # TCP 连接超时（毫秒）
+    tcp-timeout-ms: ${PANJIA_TCP_TIMEOUT_MS:5000}
+    # 持久化数据卷根目录
+    data-dir: ${PANJIA_LICENSE_DATA_DIR:/data}
+    # 状态文件名
+    file:
+      instance-id: .panjia_instance_id
+      token: .panjia_token
+      monotonic: .panjia_monotonic
+      checksums: panjia-checksums
+    # SSL Pinning 双指纹
     ssl-pinning:
-      fingerprints:
-        - ${PANJIA_PIN_FP_A:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
-        - ${PANJIA_PIN_FP_B:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy}
-    # 版本范围校验
-    version:
-      min: ${PANJIA_LICENSE_MIN_VERSION:1.0.0}
-      max: ${PANJIA_LICENSE_MAX_VERSION:9.9.9}
-    # 诊断CLI仅允许本地执行，禁止HTTP/API入口
-    diagnostic:
-      http-disabled: true
-      mtls-only: true
+      primary-fingerprint: ${PANJIA_PIN_FP_A:}
+      secondary-fingerprint: ${PANJIA_PIN_FP_B:}
+    # 日志配置
+    log:
+      restricted-alert-file: ${PANJIA_RESTRICTED_LOG:/data/panjia_restricted_alert.log}
