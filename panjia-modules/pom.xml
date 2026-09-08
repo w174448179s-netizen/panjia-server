@@ -50,6 +50,9 @@
         <module>panjia-license</module>
         <module>panjia-backup</module>
         <module>panjia-im-core</module>
+        <module>panjia-import</module>
+        <module>panjia-contracts</module>
+        <module>panjia-outbox</module>
         <!-- 以下预留，按需取消注释 -->
         <!-- <module>panjia-im-dingtalk</module> -->
         <!-- <module>panjia-im-wecom</module> -->
