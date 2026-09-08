@@ -9,6 +9,7 @@ import org.dromara.common.core.domain.R;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 
 /**
  * License 全局异常处理器。
@@ -66,6 +67,19 @@ public class GlobalLicenseExceptionHandler {
             default -> "登录状态异常，请重新登录";
         };
         return R.fail(HttpStatus.HTTP_UNAUTHORIZED, msg);
+    }
+
+    /**
+     * 处理 SSE 异步响应不可用异常。
+     * SSE 长连接断开（客户端断网、页面关闭等）时，SseEmitterSessionManager 清理连接调用
+     * emitter.complete() 会抛出此异常。此时响应体已是 text/event-stream 且不可写，
+     * 只打日志即可，不要尝试返回 R JSON 对象（否则会因 Content-Type 不匹配产生二次报错）。
+     *
+     * 这是正常现象（客户端随时可能断开 SSE 连接），日志级别为 warn 不打堆栈。
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleAsyncRequestNotUsableException(AsyncRequestNotUsableException e) {
+        log.warn("[GlobalLicenseExceptionHandler] SSE 连接已断开: {}", e.getMessage());
     }
 
     /**
