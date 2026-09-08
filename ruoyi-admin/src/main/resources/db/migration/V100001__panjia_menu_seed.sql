@@ -447,7 +447,8 @@ VALUES (1762400000000000326, 1762400000000000301, 'commission_verify', 1, 'commi
 -- 流程二：结佣调整审批（commission_adjust）
 -- 依据：业务需求 9.4 节
 -- 场景：漏算补录、金额差异、85折调整
--- 链路：开始 → 申请人(${initiator}) → 总监审批 → 结束
+-- 链路：开始 → 申请人(${initiator}) → 核验(算薪人员) → 总监审批 → 结束
+-- 支持跳过核验开关：#{skip_verify == true}
 -- ============================================================
 
 INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
@@ -460,22 +461,35 @@ INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permi
 VALUES (1762400000000000511, 1, 1762400000000000501, 'adjust_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000512, 1, 1762400000000000501, 'adjust_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
+VALUES (1762400000000000512, 1, 1762400000000000501, 'adjust_verify', '核验(算薪人员)', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000513, 2, 1762400000000000501, 'adjust_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
+VALUES (1762400000000000513, 1, 1762400000000000501, 'adjust_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000514, 2, 1762400000000000501, 'adjust_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
 VALUES (1762400000000000520, 1762400000000000501, 'adjust_start', 0, 'adjust_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000521, 1762400000000000501, 'adjust_applicant', 1, 'adjust_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000521, 1762400000000000501, 'adjust_applicant', 1, 'adjust_verify', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
+
+-- 跳过核验直接总监审批（通过 skip_condition 控制开关）
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000522, 1762400000000000501, 'adjust_applicant', 1, 'adjust_director', 1, '跳过核验', 'PASS', '#{skip_verify == true}', '410,200;670,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000522, 1762400000000000501, 'adjust_director', 1, 'adjust_end', 2, NULL, 'PASS', NULL, '590,200;880,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000523, 1762400000000000501, 'adjust_verify', 1, 'adjust_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000523, 1762400000000000501, 'adjust_director', 1, 'adjust_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000524, 1762400000000000501, 'adjust_director', 1, 'adjust_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000525, 1762400000000000501, 'adjust_director', 1, 'adjust_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000526, 1762400000000000501, 'adjust_verify', 1, 'adjust_applicant', 1, '核验驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
 
 -- ============================================================
 -- 流程三：奖金录入审批（bonus_apply）
@@ -554,7 +568,8 @@ VALUES (1762400000000000624, 1762400000000000601, 'payroll_review', 1, 'payroll_
 -- 流程五：补发单审批（payroll_supplement）
 -- 依据：业务需求 10.5 节
 -- 场景：工资已锁定后发现少发，新增补发单并入指定月份
--- 链路：开始 → 申请人(${initiator}) → 总监审批 → 结束
+-- 链路：开始 → 申请人(${initiator}) → 核验(算薪人员) → 总监审批 → 结束
+-- 支持跳过核验开关：#{skip_verify == true}
 -- ============================================================
 
 INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
@@ -567,21 +582,48 @@ INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permi
 VALUES (1762400000000000711, 1, 1762400000000000701, 'supplement_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000712, 1, 1762400000000000701, 'supplement_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
+VALUES (1762400000000000712, 1, 1762400000000000701, 'supplement_verify', '核验(算薪人员)', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000713, 2, 1762400000000000701, 'supplement_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
+VALUES (1762400000000000713, 1, 1762400000000000701, 'supplement_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000714, 2, 1762400000000000701, 'supplement_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
 VALUES (1762400000000000720, 1762400000000000701, 'supplement_start', 0, 'supplement_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000721, 1762400000000000701, 'supplement_applicant', 1, 'supplement_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000721, 1762400000000000701, 'supplement_applicant', 1, 'supplement_verify', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
+
+-- 跳过核验直接总监审批（通过 skip_condition 控制开关）
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000722, 1762400000000000701, 'supplement_applicant', 1, 'supplement_director', 1, '跳过核验', 'PASS', '#{skip_verify == true}', '410,200;670,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000722, 1762400000000000701, 'supplement_director', 1, 'supplement_end', 2, NULL, 'PASS', NULL, '590,200;880,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000723, 1762400000000000701, 'supplement_verify', 1, 'supplement_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
 
 INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000723, 1762400000000000701, 'supplement_director', 1, 'supplement_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
+VALUES (1762400000000000724, 1762400000000000701, 'supplement_director', 1, 'supplement_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000725, 1762400000000000701, 'supplement_director', 1, 'supplement_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000726, 1762400000000000701, 'supplement_verify', 1, 'supplement_applicant', 1, '核验驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
+
+-- ============================================================
+-- 六、系统参数配置（panjia. 前缀）
+-- 跳过核验开关：发起流程时读取此参数，传入流程变量 skip_verify
+-- ============================================================
+
+INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
+VALUES (1761500000000000001, '结佣申请审批-跳过核验', 'panjia.workflow.commission_apply.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '结佣申请审批是否跳过核验(算薪人员)直接总监审批，true=跳过，false=不跳过');
+
+INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
+VALUES (1761500000000000002, '结佣调整审批-跳过核验', 'panjia.workflow.commission_adjust.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '结佣调整审批是否跳过核验(算薪人员)直接总监审批，true=跳过，false=不跳过');
+
+INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
+VALUES (1761500000000000003, '补发单审批-跳过核验', 'panjia.workflow.payroll_supplement.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '补发单审批是否跳过核验(算薪人员)直接总监审批，true=跳过，false=不跳过');
 
 COMMIT;
