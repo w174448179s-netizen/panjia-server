@@ -1,7 +1,5 @@
 package com.panjia.license.starter;
 
-import com.panjia.license.LicenseMode;
-import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.exception.LicenseException;
 import com.panjia.license.exception.MonotonicException;
@@ -19,19 +17,17 @@ import org.springframework.stereotype.Component;
 
 /**
  * 启动时执行 License 校验。
- * 非 prod 且 enabled=false 时跳过，prod 下强制执行。
  *
  * 校验链路：
  * 1. 完整性自检（T3 触发点）→ 防 class 被篡改
  * 2. 多实例检测 → 防拉黑机器启动
  * 3. 授权状态校验 → 激活/心跳/过期
  *
- * 硬失败策略（生产环境）：
+ * 硬失败策略：
  * - 完整性校验失败 → 拒绝启动
  * - 服务端拉黑 → 拒绝启动
- * - 未激活（非 testMode）→ 拒绝启动
+ * - 未激活 → 拒绝启动
  * - License 已过期 → 拒绝启动
- * - testMode + 未激活 → 软失败（保留启动后调激活接口的联调用途）
  *
  * 实现方式：ApplicationReadyEvent 阶段抛异常不会阻止启动，
  * 故通过 ConfigurableApplicationContext.close() 触发上下文关闭实现硬失败。
@@ -41,7 +37,6 @@ import org.springframework.stereotype.Component;
 public class LicenseStartupValidator {
 
     private final LicenseService licenseService;
-    private final LicenseProperties properties;
     private final RestrictedMode restrictedMode;
     private final MultiInstanceDetector multiInstanceDetector;
     private final LicenseGuard licenseGuard;
@@ -49,14 +44,12 @@ public class LicenseStartupValidator {
     private final ApplicationContext applicationContext;
 
     public LicenseStartupValidator(LicenseService licenseService,
-                                   LicenseProperties properties,
                                    RestrictedMode restrictedMode,
                                    MultiInstanceDetector multiInstanceDetector,
                                    LicenseGuard licenseGuard,
                                    IntegrityChecker integrityChecker,
                                    ApplicationContext applicationContext) {
         this.licenseService = licenseService;
-        this.properties = properties;
         this.restrictedMode = restrictedMode;
         this.multiInstanceDetector = multiInstanceDetector;
         this.licenseGuard = licenseGuard;
@@ -67,7 +60,7 @@ public class LicenseStartupValidator {
     @EventListener(ApplicationReadyEvent.class)
     public void onApplicationReady() {
         if (!licenseGuard.shouldEnforce()) {
-            log.info("[LicenseStartupValidator] License 校验已关闭（非 prod 环境，enabled=false）");
+            log.info("[LicenseStartupValidator] License 校验已跳过");
             return;
         }
 
@@ -99,7 +92,7 @@ public class LicenseStartupValidator {
 
             // 双重保险：即使 status 字段被误设为 NORMAL，只要 token 为空就拒绝启动
             // 防止"未加载 token 却因默认值错误通过校验"的情况
-            if (licenseService.getToken() == null && !(LicenseMode.DEV && properties.isTestMode())) {
+            if (licenseService.getToken() == null) {
                 log.error("[LicenseStartupValidator] 未检测到有效 token，拒绝启动");
                 restrictedMode.trigger("T4_NOT_ACTIVATED", "未检测到有效 token");
                 shutdownApplication();
@@ -107,15 +100,10 @@ public class LicenseStartupValidator {
             }
 
             if (status == LicenseStatusEnum.NOT_ACTIVATED) {
-                if (LicenseMode.DEV && properties.isTestMode()) {
-                    // testMode 软失败：允许启动后调用激活接口（联调场景）
-                    log.warn("[LicenseStartupValidator] test 模式：尚未激活，等待调用激活接口（软失败）");
-                } else {
-                    log.error("[LicenseStartupValidator] 尚未激活，拒绝启动");
-                    restrictedMode.trigger("T4_NOT_ACTIVATED", "尚未激活");
-                    shutdownApplication();
-                    return;
-                }
+                log.error("[LicenseStartupValidator] 尚未激活，拒绝启动");
+                restrictedMode.trigger("T4_NOT_ACTIVATED", "尚未激活");
+                shutdownApplication();
+                return;
             } else if (status == LicenseStatusEnum.EXPIRED || licenseService.isTokenExpired()) {
                 // 双重保险：status==EXPIRED 或 token 实际过期（exp 或 licenseExpireAt）
                 // decodeToken 只校验 JWT exp，自定义 licenseExpireAt 过期需在此拦截

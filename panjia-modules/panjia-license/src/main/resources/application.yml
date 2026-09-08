@@ -8,10 +8,6 @@ panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
-    # 预置 dev token（开发环境用，生产环境为空）
-    dev-token: ${PANJIA_DEV_TOKEN:}
-    # 测试模式：dev 环境下也执行远程 License 校验（连本地授权服务）
-    test-mode: ${PANJIA_TEST_MODE:false}
     # 授权码（首次部署时由管理后台生成，激活后作废）
     auth-code: ${PANJIA_AUTH_CODE:}
     # 产品版本号（激活时上报）

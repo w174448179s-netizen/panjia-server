@@ -31,7 +31,7 @@ import java.time.OffsetDateTime;
  * LicenseService 实现。
  * 调用授权服务器接口，管理激活/心跳/校验全流程。
  *
- * dev 模式下使用预置 dev token 初始化，跳过远程调用。
+ * dev 模式下心跳和 check 跳过远程调用（编译时常量死代码消除）。
  */
 @Slf4j
 @Service
@@ -62,12 +62,44 @@ public class LicenseServiceImpl implements LicenseService {
     }
 
     /**
-     * 启动初始化：优先从磁盘加载已持久化的 token，其次使用 dev token。
-     * 所有模式均执行磁盘加载（dev/test/prod），确保重启后自动恢复。
+     * 启动初始化。
+     *
+     * dev 模式：内置假 token，零配置直接启动（prod 构建时编译器消除此分支）。
+     * prod 模式：优先从磁盘加载已持久化的 token，否则用 authCode 自动激活。
      */
     @PostConstruct
     public void initOnStartup() {
-        // 1. 所有模式：尝试从磁盘加载已持久化的 token
+        // dev 模式：内置授权，零配置启动（prod 构建时死代码消除）
+        if (LicenseMode.DEV) {
+            LicenseContent devLicense = LicenseContent.builder()
+                    .authCode("DEV-MODE")
+                    .customerNo("DEV")
+                    .company("开发环境")
+                    .plan("dev")
+                    .maxStores(9999)
+                    .maxUsers(9999)
+                    .capabilities(java.util.List.of("salary", "attendance", "backup", "upgrade"))
+                    .startDate(java.time.LocalDate.now())
+                    .endDate(java.time.LocalDate.of(2099, 12, 31))
+                    .keyVersion(1)
+                    .licenseVersion(1)
+                    .issuedAt(java.time.Instant.now())
+                    .expiresAt(java.time.Instant.ofEpochMilli(Long.MAX_VALUE / 2))
+                    .licenseExpireAt(java.time.Instant.ofEpochMilli(Long.MAX_VALUE / 2))
+                    .clientMode(ClientModeEnum.NORMAL.name())
+                    .build();
+            context.setLicense(devLicense, "dev-mode-builtin-token");
+            try {
+                context.setFingerprint(fingerprintService.getCurrentFingerprint());
+            } catch (Exception e) {
+                log.warn("[initOnStartup] dev 模式指纹采集失败（不影响启动）: {}", e.getMessage());
+            }
+            context.setNetworkReachable(true);
+            log.info("[initOnStartup] dev 模式：内置授权已加载，零配置启动");
+            return;
+        }
+
+        // 1. 尝试从磁盘加载已持久化的 token
         String persistedToken = fileUtils.readFirstLine(properties.getFile().getToken());
         if (persistedToken != null && !persistedToken.isEmpty()) {
             try {
@@ -83,23 +115,9 @@ public class LicenseServiceImpl implements LicenseService {
             }
         }
 
-        // 2. DEV 模式：使用 dev token（prod 构建时编译器消除此分支）
-        if (LicenseMode.DEV && !properties.isTestMode() && !properties.getDevToken().isEmpty()) {
-            try {
-                LicenseContent content = licenseVerifier.decodeToken(properties.getDevToken());
-                context.setLicense(content, properties.getDevToken());
-                context.setNetworkReachable(true);
-                context.setFingerprint(fingerprintService.getCurrentFingerprint());
-                log.info("[initOnStartup] dev 模式初始化完成，authCode={}", content.getAuthCode());
-            } catch (Exception e) {
-                log.error("[initOnStartup] dev token 解析失败: {}", e.getMessage());
-            }
-            return;
-        }
-
-        // 3. authCode 自动激活（prod 或 dev+testMode，且 authCode 已配置）
+        // 2. authCode 自动激活
         // 硬失败：激活失败直接抛异常阻止 Spring 上下文刷新（@PostConstruct 抛异常 = 启动失败）
-        if ((!LicenseMode.DEV || properties.isTestMode()) && !properties.getAuthCode().isEmpty()) {
+        if (!properties.getAuthCode().isEmpty()) {
             try {
                 log.info("[initOnStartup] 检测到 authCode，开始自动激活");
                 HardwareFingerprint fp = fingerprintService.getCurrentFingerprint();
@@ -179,7 +197,7 @@ public class LicenseServiceImpl implements LicenseService {
         String req = LicenseRequestContext.currentRequestId();
 
         // dev 模式：跳过远程心跳（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
-        if (LicenseMode.DEV && !properties.isTestMode()) {
+        if (LicenseMode.DEV) {
             log.debug("[req={}] [heartbeat] dev 模式，跳过远程心跳", req);
             return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
         }
@@ -322,7 +340,7 @@ public class LicenseServiceImpl implements LicenseService {
         OperationEnum op = OperationEnum.valueOf(operation);
 
         // dev 模式：直接放行所有操作（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
-        if (LicenseMode.DEV && !properties.isTestMode()) {
+        if (LicenseMode.DEV) {
             return new CheckResult(true, "dev 模式，操作允许", CheckResultEnum.ALLOWED.getCode());
         }
 

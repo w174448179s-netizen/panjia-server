@@ -43,8 +43,10 @@ user:
     lockTime: 10
 
 # License 授权校验配置
-# enabled 默认 true（生产环境强制开启，代码级保护不可关闭）
-# 本地开发请在 application-dev.yml / application-local.yml 中设置 enabled: false
+# 所有环境均执行 License 校验，无运行时开关。
+# dev 构建：本地校验，跳过远程调用（心跳/check 不打远程）
+# prod 构建：完整远程校验
+# 首次启动需配置 PANJIA_AUTH_CODE 环境变量进行自动激活
 panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
