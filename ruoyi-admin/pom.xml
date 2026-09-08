@@ -97,17 +97,19 @@
             <artifactId>ruoyi-job</artifactId>
         </dependency>
 
-        <!-- AI业务模块 -->
+        <!-- AI业务模块（非生产所需，已移除）
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-ai</artifactId>
         </dependency>
+        -->
 
-        <!--  demo模块  -->
+        <!--  demo模块（非生产所需，已移除）
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-demo</artifactId>
         </dependency>
+        -->
 
         <!--  工作流模块  -->
         <dependency>
@@ -161,7 +163,7 @@
 
 
     <profiles>
-        <!-- 仅在激活 'gen' profile 时，才引入代码生成模块 -->
+        <!-- 仅在激活 'gen' profile 时，才引入代码生成模块；非生产所需，默认不激活 -->
         <profile>
             <id>gen</id>
             <dependencies>
@@ -172,8 +174,7 @@
                 </dependency>
             </dependencies>
             <activation>
-                <!-- 默认激活 -->
-                <activeByDefault>true</activeByDefault>
+                <activeByDefault>false</activeByDefault>
             </activation>
         </profile>
     </profiles>

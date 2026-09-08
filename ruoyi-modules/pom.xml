@@ -16,9 +16,11 @@
     </description>
 
     <modules>
+        <!-- 非生产所需，不随主应用打包
         <module>ruoyi-demo</module>
         <module>ruoyi-gen</module>
         <module>ruoyi-ai</module>
+        -->
         <module>ruoyi-job</module>
         <module>ruoyi-system</module>
         <module>ruoyi-workflow</module>
