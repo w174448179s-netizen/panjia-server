@@ -33,10 +33,8 @@
     public *** *(...);
 }
 
-# 保留 @ConfigurationProperties 类的字段名（配置绑定）
--keepclassmembers class com.panjia.license.config.** {
-    <fields>;
-}
+# 保留 @ConfigurationProperties 类的所有方法（Lombok @Data 生成的 equals/hashCode/toString 混淆易出 VerifyError）
+-keep class com.panjia.license.config.** { *; }
 
 # 保留 LicenseMode（编译时常量，混淆无意义且 IntegrityChecker 校验）
 -keep class com.panjia.license.LicenseMode { *; }
@@ -70,8 +68,7 @@
 # 不优化（避免优化破坏反射）
 -dontoptimize
 
-# 不预校验（Java 21 不需要）
--dontpreverify
+# 预验证生成 StackMapTable，Java 7+ 必须，否则 JVM 类加载 VerifyError
 
 # 混淆时保留源文件和行号（方便排查问题，安全与可维护性权衡）
 -keepattributes SourceFile,LineNumberTable
