@@ -242,6 +242,31 @@
             </properties>
             <build>
                 <plugins>
+                    <!-- ★ P0-C 构建门禁：prod 构建断言 LicenseMode.DEV 必须为 false。
+                         防止 templating 插件配置漂移 / profile 失效导致发布"授权校验关闭"的产物。
+                         检查点：生成源码中的常量 DEV = false（编译器据此做死代码消除）。 -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-antrun-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>verify-license-mode-prod</id>
+                                <phase>process-sources</phase>
+                                <goals><goal>run</goal></goals>
+                                <configuration>
+                                    <target>
+                                        <loadfile property="license.mode.src"
+                                                  srcFile="${project.build.directory}/generated-sources/license/com/panjia/license/LicenseMode.java"/>
+                                        <condition property="license.mode.is.prod">
+                                            <contains string="${license.mode.src}" substring="DEV = false"/>
+                                        </condition>
+                                        <fail unless="license.mode.is.prod"
+                                              message="[P0-C 构建门禁] 生产构建校验失败：LicenseMode.DEV != false（当前生成值见 target/generated-sources/license）。此产物授权校验处于关闭状态，禁止发布。请检查 templating-maven-plugin 配置与 license.dev 属性。"/>
+                                    </target>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-compiler-plugin</artifactId>

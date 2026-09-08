@@ -82,10 +82,19 @@ public class NetworkReachableChecker {
             // connect() 超时 → 同上，服务端不可达 → reachable = true
             log.debug("[NetworkReachableChecker] TCP 连接超时，判定 reachable=true（服务端不可达）");
             return true;
-        } catch (Exception e) {
-            // 其他异常（IOException 等）→ 视为网络不可达 → reachable = false
-            log.warn("[NetworkReachableChecker] 网络异常: {}", e.getMessage());
-            return false;
+        } catch (java.net.SocketException e) {
+            // 其他 Socket 异常（如连接被重置）→ IP 可达、协议层异常，仍算 reachable=true
+            log.debug("[NetworkReachableChecker] Socket 异常，判定 reachable=true: {}", e.getMessage());
+            return true;
+        } catch (java.io.IOException e) {
+            // ★ 按 §2.4 铁律 10：IOException（SSL 握手失败、读取超时等）→ 服务端应用层故障
+            //    仅"TCP 无法建立"才视为断网，IOException 归为 reachable=true
+            log.debug("[NetworkReachableChecker] IO 异常（应用层故障），判定 reachable=true: {}", e.getMessage());
+            return true;
+        } catch (RuntimeException e) {
+            // 非受检异常（如 SecurityException）：视为网络可达，安全降级
+            log.warn("[NetworkReachableChecker] 运行时异常，判定 reachable=true: {}", e.getMessage());
+            return true;
         }
     }
 

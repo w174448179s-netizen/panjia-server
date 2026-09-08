@@ -42,6 +42,14 @@ public class MonotonicClock {
     /** 系统启动时刻（/proc/stat btime，毫秒） */
     private volatile long bootTimeMs = 0;
 
+    /**
+     * 篡改标志：运行期单调文件被删除（WatchService 检测到）即置位。
+     * 置位后 trustedNow 恒为 Long.MAX_VALUE（token 视为已过期 → 锁死），
+     * verifyAndUpdate 直接抛异常，仅重启进程可清除（重启后 initialize 仍会因
+     * "token 在而单调文件不在" 再次拒绝，形成双保险）。
+     */
+    private volatile boolean tampered = false;
+
     public MonotonicClock(LicenseProperties properties, LicenseFileUtils fileUtils) {
         this.properties = properties;
         this.fileUtils = fileUtils;
@@ -62,16 +70,30 @@ public class MonotonicClock {
         if (fileUtils.exists(fileName)) {
             String content = fileUtils.readFirstLine(fileName);
             if (content == null || content.trim().isEmpty()) {
+                tampered = true;
                 throw new MonotonicException("单调时钟文件为空，视为严重异常");
             }
             this.lastTrustedTimeMs = parseTrustedTime(content.trim());
         } else {
-            // 铁律 9：文件缺失 = 严重异常，禁止自动重建
-            // 仅当刚启动、尚无任何可信基准时，允许创建初始基准（首次运行）
-            boolean created = createInitialBaseline();
-            if (!created) {
-                throw new MonotonicException(".panjia_monotonic 缺失且无法自动创建，进入离线锁死。请联系运维通过 mTLS 通道执行 LicenseDiagnosticCli --rebuild-monotonic");
+            // ★ 铁律 9（S-1 修复）：单调文件缺失时的处理分两种：
+            //   a) token 文件也不存在 → 真正的首次部署（或全新数据卷）→ 允许建立初始基准；
+            //   b) token 存在而单调文件缺失 → 疑似"删文件+回拨时钟"篡改 → 拒绝启动（锁死）。
+            //      恢复路径：运维删除 token 文件后重新激活，或通过诊断通道重建。
+            boolean tokenExists = fileUtils.exists(properties.getFile().getToken());
+            if (tokenExists) {
+                // 先置篡改标志再抛：即使上层 catch 了异常（如 HeartbeatScheduler 只记日志），
+                // trustedNow 也已恒为极值，token 判过期 → 整体锁死，攻击链失效
+                tampered = true;
+                log.error("[MonotonicClock] 单调时钟文件缺失但 token 文件存在，疑似篡改（删文件+回拨时钟），进入锁死");
+                throw new MonotonicException(
+                        ".panjia_monotonic 缺失但 .panjia_token 存在（铁律 9）。疑似时钟篡改，"
+                                + "请联系服务商运维：删除 .panjia_token 后重新激活，或执行重建流程");
             }
+            long trustedNow = getCurrentTrustedTime();
+            this.lastTrustedTimeMs = trustedNow;
+            writeBaseline(trustedNow);
+            log.warn("[MonotonicClock] 单调时钟文件缺失（首次部署），已建立初始基准: {}",
+                    Instant.ofEpochMilli(trustedNow));
         }
 
         // 3. 注册文件删除监听（防运行时被删）
@@ -89,6 +111,10 @@ public class MonotonicClock {
      * @throws MonotonicException 文件被删等异常
      */
     public boolean verifyAndUpdate() {
+        // ★ S-1 修复：篡改状态下直接拒绝，任何后续时间判断不再有意义
+        if (tampered) {
+            throw new MonotonicException("单调时钟文件已被删除（运行期检测到），疑似篡改，离线锁死");
+        }
         long trustedNow = getCurrentTrustedTime();
         long last = lastTrustedTimeMs;
 
@@ -116,13 +142,50 @@ public class MonotonicClock {
 
     /**
      * 获取当前可信时间。
-     * trustedNow = max(系统时间, bootTime + uptime)
+     * trustedNow = max(系统时间, bootTime + 真实uptime)
+     * <p>
+     * P1-C 修复：原实现 uptime = System.currentTimeMillis() - bootTimeMs，
+     * 数学上恒等于系统时间（双源退化为单源），回拨系统时钟即可绕过。
+     * 现改读 /proc/uptime（内核维护，不受用户态改时间影响），
+     * bootTime + uptime 得到"真实的墙上时间"，回拨后仍能算出真实时刻。
      */
     public long getCurrentTrustedTime() {
+        // ★ S-1 修复：篡改标志置位后返回极值 → token 视为已过期 → 整体锁死
+        if (tampered) {
+            return Long.MAX_VALUE;
+        }
         long systemTime = System.currentTimeMillis();
-        long uptime = System.currentTimeMillis() - bootTimeMs; // 近似 uptime
-        long bootTimePlusUptime = bootTimeMs + uptime;
+        if (bootTimeMs <= 0) {
+            // btime 不可读（非 Linux 容器/降级路径）→ 仅系统时间（防护弱化但不阻断）
+            return systemTime;
+        }
+        long uptimeMs = readUptimeMs();
+        if (uptimeMs < 0) {
+            return systemTime;
+        }
+        long bootTimePlusUptime = bootTimeMs + uptimeMs;
         return Math.max(systemTime, bootTimePlusUptime);
+    }
+
+    /**
+     * 读取 /proc/uptime 的真实 uptime（毫秒）。
+     * /proc/uptime 由内核维护，用户态修改系统时钟不影响其计数。
+     *
+     * @return uptime 毫秒数；读取失败返回 -1
+     */
+    private long readUptimeMs() {
+        try {
+            Path uptimeFile = Path.of("/proc/uptime");
+            if (!java.nio.file.Files.exists(uptimeFile)) {
+                return -1;
+            }
+            String content = new String(java.nio.file.Files.readAllBytes(uptimeFile)).trim();
+            // 格式："12345.67 23456.78"（第一列为 uptime 秒）
+            String uptimeSeconds = content.split("\\s+")[0];
+            return (long) (Double.parseDouble(uptimeSeconds) * 1000);
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /**
@@ -172,16 +235,6 @@ public class MonotonicClock {
     }
 
     /**
-     * 创建初始基准（仅首次运行，无历史可信时间时）。
-     * 有历史记录时绝不重建（防删文件+拨时间绕过）。
-     */
-    private boolean createInitialBaseline() {
-        // 仅当数据目录完全空（首次部署）时创建初始基准
-        // 已有任何状态文件存在 → 说明不是首次 → 不创建（视为缺失异常）
-        return false; // 统一走异常路径，由调用方决定锁死或心跳重建
-    }
-
-    /**
      * 写基准文件（原子写）。
      */
     private void writeBaseline(long trustedTimeMs) {
@@ -217,7 +270,12 @@ public class MonotonicClock {
                             if (event.kind() == java.nio.file.StandardWatchEventKinds.ENTRY_DELETE
                                     && event.context() != null
                                     && event.context().toString().equals(properties.getFile().getMonotonic())) {
-                                log.error("[MonotonicClock] 警告：.panjia_monotonic 被删除！立即进入离线锁死状态，禁止自动重建");
+                                // ★ S-1 修复：置篡改标志（不再是"只打日志"）。
+                                // 置位后 trustedNow = Long.MAX_VALUE（token 全部判过期 → 锁死），
+                                // verifyAndUpdate 抛异常（心跳持续失败）。
+                                tampered = true;
+                                log.error("[MonotonicClock] 警告：.panjia_monotonic 被删除！已置篡改标志，"
+                                        + "受信时间恒为极值（token 判过期，整体锁死），禁止自动重建");
                             }
                         }
                         key.reset();
@@ -242,5 +300,12 @@ public class MonotonicClock {
 
     public long getBootTimeMs() {
         return bootTimeMs;
+    }
+
+    /**
+     * 是否检测到运行期篡改（单调文件被删）。
+     */
+    public boolean isTampered() {
+        return tampered;
     }
 }

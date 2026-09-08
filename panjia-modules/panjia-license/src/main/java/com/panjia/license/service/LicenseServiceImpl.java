@@ -15,8 +15,11 @@ import com.panjia.license.enums.CheckResultEnum;
 import com.panjia.license.enums.LicenseStatusEnum;
 import com.panjia.license.enums.OperationEnum;
 import com.panjia.license.exception.LicenseException;
+import com.panjia.license.exception.MonotonicException;
+import com.panjia.license.starter.MonotonicClock;
 import com.panjia.license.starter.NetworkReachableChecker;
 import com.panjia.license.util.LicenseFileUtils;
+import com.panjia.license.util.LicenseRequestContext;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -41,11 +44,13 @@ public class LicenseServiceImpl implements LicenseService {
     private final FingerprintService fingerprintService;
     private final KeyStore keyStore;
     private final NetworkReachableChecker networkReachableChecker;
+    private final MonotonicClock monotonicClock;
 
     public LicenseServiceImpl(LicenseProperties properties, LicenseContext context,
                               LicenseVerifier licenseVerifier, LicenseFileUtils fileUtils,
                               FingerprintService fingerprintService, KeyStore keyStore,
-                              NetworkReachableChecker networkReachableChecker) {
+                              NetworkReachableChecker networkReachableChecker,
+                              MonotonicClock monotonicClock) {
         this.properties = properties;
         this.context = context;
         this.licenseVerifier = licenseVerifier;
@@ -53,6 +58,7 @@ public class LicenseServiceImpl implements LicenseService {
         this.fingerprintService = fingerprintService;
         this.keyStore = keyStore;
         this.networkReachableChecker = networkReachableChecker;
+        this.monotonicClock = monotonicClock;
     }
 
     /**
@@ -108,7 +114,9 @@ public class LicenseServiceImpl implements LicenseService {
 
     @Override
     public ActivateResult activate(String authCode, HardwareFingerprint fingerprint, String productVersion) {
-        log.info("[activate] 开始激活，authCode={}, fpHash={}", maskAuthCode(authCode), fingerprint.calculateHash());
+        LicenseRequestContext.generateAndSet();
+        String req = LicenseRequestContext.currentRequestId();
+        log.info("[req={}] [activate] 开始激活，authCode={}, fpHash={}", req, maskAuthCode(authCode), fingerprint.calculateHash());
 
         String url = properties.getServerUrl() + "/api/auth/activate";
         JSONObject body = new JSONObject();
@@ -116,6 +124,9 @@ public class LicenseServiceImpl implements LicenseService {
         body.set("fingerprint", fingerprint.calculateHash());
         body.set("productVersion", productVersion);
         body.set("instanceId", fingerprint.getInstanceId());
+        // P2 修复：携带 requestId，激活服务端 (authCode|requestId) 幂等缓存才能生效，
+        // 网络超时重试不会造成二次绑定/状态误转
+        body.set("requestId", req);
 
         HttpResponse resp = HttpRequest.post(url)
                 .body(body.toString())
@@ -124,7 +135,7 @@ public class LicenseServiceImpl implements LicenseService {
                 .execute();
 
         if (!resp.isOk()) {
-            log.warn("[activate] 授权服务器返回非 2xx: {}", resp.getStatus());
+            log.warn("[req={}] [activate] 授权服务器返回非 2xx: {}", req, resp.getStatus());
             throw new LicenseException("激活失败：授权服务器返回 " + resp.getStatus());
         }
 
@@ -146,27 +157,30 @@ public class LicenseServiceImpl implements LicenseService {
         // 处理 clientMode 指令
         if (ClientModeEnum.RESTRICT.name().equals(clientMode)) {
             context.setRestricted(ClientModeEnum.RESTRICT);
-            log.warn("[activate] 服务端下发受限模式指令，clientMode=RESTRICT");
+            log.warn("[req={}] [activate] 服务端下发受限模式指令，clientMode=RESTRICT", req);
         }
 
         // 持久化 token 到磁盘，重启后自动恢复
         try {
             fileUtils.ensureDataDir();
             fileUtils.atomicWrite(properties.getFile().getToken(), token);
-            log.info("[activate] token 已持久化到磁盘");
+            log.info("[req={}] [activate] token 已持久化到磁盘", req);
         } catch (Exception e) {
-            log.error("[activate] token 持久化失败: {}", e.getMessage());
+            log.error("[req={}] [activate] token 持久化失败: {}", req, e.getMessage());
         }
 
-        log.info("[activate] 激活成功");
+        log.info("[req={}] [activate] 激活成功", req);
         return new ActivateResult(token, offlineExpireAt, clientMode);
     }
 
     @Override
     public HeartbeatResult heartbeat() {
+        LicenseRequestContext.generateAndSet();
+        String req = LicenseRequestContext.currentRequestId();
+
         // dev 模式：跳过远程心跳（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
         if (LicenseMode.DEV && !properties.isTestMode()) {
-            log.debug("[heartbeat] dev 模式，跳过远程心跳");
+            log.debug("[req={}] [heartbeat] dev 模式，跳过远程心跳", req);
             return new HeartbeatResult("NORMAL", 0L, ClientModeEnum.NORMAL.name());
         }
 
@@ -220,7 +234,17 @@ public class LicenseServiceImpl implements LicenseService {
         context.clearServerUnavailable(); // 心跳成功说明服务器恢复，清除 check 短路标记
         if (context.getStatus() == LicenseStatusEnum.OFFLINE_GRACE) {
             context.setRestricted(ClientModeEnum.NORMAL); // setRestricted(NORMAL) 会把 status 置回 NORMAL
-            log.info("[heartbeat] 从离线宽限期恢复为正常模式");
+            log.info("[req={}] [heartbeat] 从离线宽限期恢复为正常模式", req);
+        }
+
+        // ★ P1-C 修复：心跳成功后执行单调时钟回拨校验（T4/T5 威慑闭环）。
+        //   离线期间回拨系统时钟延长宽限期的行为在此被拦截：超容忍回拨 → 离线锁死。
+        try {
+            monotonicClock.verifyAndUpdate();
+        } catch (MonotonicException e) {
+            log.error("[req={}] [heartbeat] 单调时钟校验失败（疑似时间回拨），进入离线锁死: {}", req, e.getMessage());
+            context.setOfflineLock();
+            return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
         }
 
         // 处理 clientMode
@@ -235,7 +259,7 @@ public class LicenseServiceImpl implements LicenseService {
             renewToken(newToken);
         }
 
-        log.info("[heartbeat] 心跳成功，clientMode={}, renewed={}", clientMode, newToken != null);
+        log.info("[req={}] [heartbeat] 心跳成功，clientMode={}, renewed={}", req, clientMode, newToken != null);
         return new HeartbeatResult("NORMAL", offlineExpireAt, clientMode, newToken);
     }
 
@@ -244,6 +268,7 @@ public class LicenseServiceImpl implements LicenseService {
      * 客户无需重启服务，续签无感完成。
      */
     private void renewToken(String newToken) {
+        String req = LicenseRequestContext.currentRequestId();
         try {
             LicenseContent content = licenseVerifier.decodeToken(newToken);
             verifyFingerprint(content); // L2 机器指纹比对：续签 token 必须仍是同一台机器
@@ -252,10 +277,10 @@ public class LicenseServiceImpl implements LicenseService {
             // 持久化到磁盘，重启后自动加载新 token
             fileUtils.ensureDataDir();
             fileUtils.atomicWrite(properties.getFile().getToken(), newToken);
-            log.info("[renewToken] token 自动续签成功，新过期时间={}", content.getExpiresAt());
+            log.info("[req={}] [renewToken] token 自动续签成功，新过期时间={}", req, content.getExpiresAt());
         } catch (Exception e) {
             // 新 token 验签失败 → 不更新，继续用旧 token（安全降级）
-            log.error("[renewToken] 新 token 验签失败，续签取消，继续使用旧 token: {}", e.getMessage());
+            log.error("[req={}] [renewToken] 新 token 验签失败，续签取消，继续使用旧 token: {}", req, e.getMessage());
         }
     }
 
@@ -264,17 +289,18 @@ public class LicenseServiceImpl implements LicenseService {
      * 设计原则：服务器挂了不影响客户操作，只在 token 过期时才锁死。
      */
     private HeartbeatResult handleHeartbeatFailure(String reason) {
+        String req = LicenseRequestContext.currentRequestId();
         // 缺陷1修复：心跳失败时探测网络可达性并回写 context
         boolean reachable = networkReachableChecker.isNetworkReachable();
         context.setNetworkReachable(reachable);
 
         // 连续失败计数（用于监控/诊断，不再触发操作拒绝）
         int failures = context.incrementHeartbeatFailure();
-        log.warn("[heartbeat] 心跳失败（第 {} 次），networkReachable={}，原因={}", failures, reachable, reason);
+        log.warn("[req={}] [heartbeat] 心跳失败（第 {} 次），networkReachable={}，原因={}", req, failures, reachable, reason);
 
         // 只有 token 过期才进入离线锁死，服务器挂了不锁死
         if (isTokenExpired() && context.getStatus() != LicenseStatusEnum.OFFLINE_LOCK) {
-            log.error("[heartbeat] token 已过期，进入离线锁死");
+            log.error("[req={}] [heartbeat] token 已过期，进入离线锁死", req);
             context.setOfflineLock();
             return new HeartbeatResult("FAILED", 0L, ClientModeEnum.NORMAL.name());
         }
@@ -282,7 +308,7 @@ public class LicenseServiceImpl implements LicenseService {
         // 连续失败达到阈值 → 进入离线宽限期（仅状态标记，不拒绝操作）
         if (failures >= properties.getHeartbeatFailureGraceThreshold()
                 && context.getStatus() == LicenseStatusEnum.NORMAL) {
-            log.warn("[heartbeat] 连续心跳失败 {} 次，进入离线宽限期（不影响操作）", failures);
+            log.warn("[req={}] [heartbeat] 连续心跳失败 {} 次，进入离线宽限期（不影响操作）", req, failures);
             context.setOfflineGrace();
         }
 
@@ -291,6 +317,8 @@ public class LicenseServiceImpl implements LicenseService {
 
     @Override
     public CheckResult check(String operation) {
+        LicenseRequestContext.generateAndSet();
+        String req = LicenseRequestContext.currentRequestId();
         OperationEnum op = OperationEnum.valueOf(operation);
 
         // dev 模式：直接放行所有操作（LicenseMode.DEV 是编译时常量，prod 构建时此分支被消除）
@@ -301,7 +329,7 @@ public class LicenseServiceImpl implements LicenseService {
         // 1. token 过期检查（运行中过期）→ 拒绝
         // token 是 JWT + RSA 签名，本地可验签。过期说明授权到期，必须连服务器续签。
         if (isTokenExpired()) {
-            log.error("[check] token 已过期，操作被拒: {}", operation);
+            log.error("[req={}] [check] token 已过期，操作被拒: {}", req, operation);
             if (context.getStatus() != LicenseStatusEnum.OFFLINE_LOCK) {
                 context.setOfflineLock();
             }
@@ -314,28 +342,31 @@ public class LicenseServiceImpl implements LicenseService {
             try {
                 String currentFpHash = fingerprintService.getCurrentFingerprint().calculateHash();
                 if (!context.getLicenseContent().getFingerprintHash().equals(currentFpHash)) {
-                    log.error("[check] 机器指纹不匹配，疑似授权迁移，操作被拒: {}", operation);
+                    log.error("[req={}] [check] 机器指纹不匹配，疑似授权迁移，操作被拒: {}", req, operation);
                     context.setRestricted(ClientModeEnum.RESTRICT);
                     return new CheckResult(false, "机器指纹不匹配，授权已锁定", CheckResultEnum.OPERATION_DENIED.getCode());
                 }
             } catch (Exception e) {
-                log.warn("[check] 运行时指纹采集失败: {}", e.getMessage());
+                log.warn("[req={}] [check] 运行时指纹采集失败: {}", req, e.getMessage());
             }
         }
 
-        // 2. 受限模式（服务端明确下发的 clientMode=RESTRICT）→ 核心操作禁止
-        // 注意：即使服务器不可达，restricted 状态保留，因为这是服务端的明确指令
+        // 2. 受限模式（服务端明确下发的 clientMode=RESTRICT）→ 放行但标记
+        // ★ P0-5 修复：不再锁死核心操作。
+        //   设计意图（V1.3 §5.1）：受限模式下业务侧需在算薪前后注入"偏移"逻辑，
+        //   让结果"错得明显、可复现"，而不是直接锁死给破解者"这是被锁了"的明确反馈。
+        //   此处只负责告知调用方 clientMode=RESTRICT，由调用方在算薪前/后注入偏移。
         if (context.isRestricted()) {
-            if (op == OperationEnum.EXPORT) {
-                // 受限模式下允许导出核对（不阻止客户自查）
-                return new CheckResult(true, "受限模式，导出允许", "ALLOWED");
-            }
-            return new CheckResult(false, "授权受限，核心功能不可用，请联系服务商", CheckResultEnum.OPERATION_DENIED.getCode());
+            log.warn("[req={}] [check] 受限模式放行 op={}，clientMode=RESTRICT（业务侧需注入算薪偏移）", req, operation);
+            return new CheckResult(true,
+                    "受限模式，操作允许（业务侧需注入算薪偏移）",
+                    CheckResultEnum.ALLOWED.getCode(),
+                    "RESTRICT");
         }
 
         // 3. 服务器不可用短路期内 → 信任本地 token 放行，不发 HTTP 请求
         if (context.isServerUnavailable()) {
-            log.debug("[check] 服务器不可用短路期内，信任本地 token 放行，操作={}", operation);
+            log.debug("[req={}] [check] 服务器不可用短路期内，信任本地 token 放行，操作={}", req, operation);
             return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
         }
 
@@ -346,6 +377,9 @@ public class LicenseServiceImpl implements LicenseService {
     /**
      * 判断本地 token 是否已过期。
      * 优先用 JWT 的 expiresAt，其次用 licenseExpireAt。
+     * <p>
+     * ★ P1-C 修复：时间基准改用 MonotonicClock 的受信时间
+     * （max(系统时间, btime + 真实uptime)），离线回拨系统时钟无法让过期 token"复活"。
      */
     @Override
     public boolean isTokenExpired() {
@@ -353,7 +387,7 @@ public class LicenseServiceImpl implements LicenseService {
         if (content == null) {
             return true;
         }
-        long now = System.currentTimeMillis();
+        long now = monotonicClock.currentTimeMillis();
         if (content.getExpiresAt() != null && content.getExpiresAt().toEpochMilli() < now) {
             return true;
         }
@@ -367,6 +401,7 @@ public class LicenseServiceImpl implements LicenseService {
      * 调用服务端 /check 接口。
      */
     private CheckResult doRemoteCheck(OperationEnum op) {
+        String req = LicenseRequestContext.currentRequestId();
         String url = properties.getServerUrl() + "/api/auth/check";
         JSONObject body = new JSONObject();
         body.set("productVersion", properties.getProductVersion());
@@ -383,8 +418,8 @@ public class LicenseServiceImpl implements LicenseService {
             // 连接异常（超时/被拒/网络不通）→ 信任本地 token 放行
             // 设置短路窗口，后续 check 不再发 HTTP 请求
             context.setServerUnavailableUntil(System.currentTimeMillis() + properties.getCheckFailureBackoffMs());
-            log.warn("[check] 服务端连接异常（{}），短路 {}ms，信任本地 token 放行，操作={}",
-                    e.getMessage(), properties.getCheckFailureBackoffMs(), op.name());
+            log.warn("[req={}] [check] 服务端连接异常（{}），短路 {}ms，信任本地 token 放行，操作={}",
+                    req, e.getMessage(), properties.getCheckFailureBackoffMs(), op.name());
             return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
         }
 
@@ -405,8 +440,8 @@ public class LicenseServiceImpl implements LicenseService {
 
         // 服务端 5xx → 信任本地 token 放行
         context.setServerUnavailableUntil(System.currentTimeMillis() + properties.getCheckFailureBackoffMs());
-        log.warn("[check] 服务端不可达（5xx），短路 {}ms，信任本地 token 放行，操作={}",
-                properties.getCheckFailureBackoffMs(), op.name());
+        log.warn("[req={}] [check] 服务端不可达（5xx），短路 {}ms，信任本地 token 放行，操作={}",
+                req, properties.getCheckFailureBackoffMs(), op.name());
         return new CheckResult(true, "服务器不可达，信任本地授权", CheckResultEnum.CACHE_FALLBACK.getCode());
     }
 

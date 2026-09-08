@@ -44,6 +44,11 @@ public class LicenseFileUtils {
 
     /**
      * 原子写入状态文件（先写临时文件再 rename，保证不半写）。
+     * <p>
+     * ★ S-3 修复：写后强制收紧为属主读写（600）。
+     * .panjia_token 是可自续签的 bearer 凭证，.panjia_instance_id / .panjia_monotonic
+     * 均为防护状态文件——默认 644 等于把凭证暴露给同宿主机所有用户/进程。
+     * 非 POSIX 文件系统（如 Windows）降级跳过，不影响写入。
      */
     public void atomicWrite(String fileName, String content) {
         Path dir = getDataDir();
@@ -51,10 +56,29 @@ public class LicenseFileUtils {
         Path tmp = dir.resolve(fileName + ".tmp");
         try {
             Files.write(tmp, content.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            restrictPermissions(tmp);
             Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                     java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            restrictPermissions(target);
         } catch (IOException e) {
             throw new LicenseException("写入状态文件失败: " + fileName + " -> " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 收紧文件权限为属主读写（rw-------）。
+     * POSIX 环境生效；tmp 文件在 rename 前收紧，防止权限窗口期被读取。
+     */
+    private void restrictPermissions(Path path) {
+        try {
+            java.nio.file.attribute.PosixFileAttributeView view =
+                    Files.getFileAttributeView(path, java.nio.file.attribute.PosixFileAttributeView.class);
+            if (view != null) {
+                view.setPermissions(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+            }
+        } catch (Exception e) {
+            // 非 POSIX 文件系统或权限设置失败：降级跳过（不阻断主流程）
+            log.debug("设置文件权限 600 失败（可能为非 POSIX 文件系统）: {} -> {}", path, e.getMessage());
         }
     }
 

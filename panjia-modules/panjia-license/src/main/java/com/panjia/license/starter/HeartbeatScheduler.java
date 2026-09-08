@@ -37,12 +37,24 @@ public class HeartbeatScheduler {
     @PostConstruct
     public void start() {
         if (LicenseMode.DEV && !properties.isTestMode()) {
+            // P0-C 运行期兜底：DEV 构建大声告警。生产构建（-P prod）LicenseMode.DEV=false，
+            // 此分支被编译器消除；若生产环境出现此日志，说明发布了 dev 构建产物，必须立即回滚。
+            log.error("[HeartbeatScheduler] !!! 安全告警：LicenseMode.DEV=true，License 授权校验已全部关闭 !!!"
+                    + " 此构建禁止用于生产环境，请检查构建命令是否遗漏 -P prod");
             log.info("[HeartbeatScheduler] dev 模式，跳过远程心跳调度");
             return;
         }
 
         if (LicenseMode.DEV && properties.isTestMode()) {
             log.info("[HeartbeatScheduler] test 模式，启用远程心跳调度（连本地授权服务）");
+        }
+
+        // P1-C 修复：初始化单调时钟（读 btime / 单调基准文件 / 注册删除监听）。
+        // 初始化失败不阻断启动（调度器只是监控组件），回拨防护由 verifyAndUpdate 在心跳路径兜底。
+        try {
+            monotonicClock.initialize();
+        } catch (Exception e) {
+            log.error("[HeartbeatScheduler] 单调时钟初始化失败（回拨防护降级）: {}", e.getMessage());
         }
 
         long interval = properties.getHeartbeatIntervalMs();

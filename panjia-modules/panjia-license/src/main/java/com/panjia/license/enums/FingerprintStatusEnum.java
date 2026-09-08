@@ -10,7 +10,7 @@ public enum FingerprintStatusEnum {
     ACTIVE("活跃"),
 
     /** 已标记失效（换机流程同步生效） */
-    REVOKED("已失效"),
+    INVALIDATED("已失效"),
 
     /** 已被拉黑（多实例并发被自动捕获） */
     BLACKLISTED("已拉黑"),

@@ -43,10 +43,15 @@ public class LicenseProperties {
     /** 心跳连续失败次数阈值，达到后进入离线宽限期（OFFLINE_GRACE），默认 3 次 */
     private int heartbeatFailureGraceThreshold = 3;
 
-    /** check 失败后服务器不可用短路窗口（毫秒），默认 60 秒。
+    /** check 失败后服务器不可用短路窗口（毫秒），默认 30 分钟。
      *  在此期间 check 不再发 HTTP 请求，直接走缓存/拒绝，避免每次操作等 TCP 超时。
-     *  窗口过后下次 check 会再试一次探测服务器是否恢复。 */
-    private long checkFailureBackoffMs = 60_000L;
+     *  窗口过后下次 check 会再试一次探测服务器是否恢复。
+     *  按 V1.3 §2.5 设计，应与 checkCacheTtlMs 对齐，避免缓存外的请求穿透造成雪崩。 */
+    private long checkFailureBackoffMs = 1_800_000L;
+
+    /** JWT 时钟偏差容忍（秒），默认 60 秒。
+     *  双端需保持一致配置，避免客户端/服务端时钟漂移导致 token 被误判过期。 */
+    private int clockSkewSeconds = 60;
 
     /** 单调时钟 TCP 连接超时（毫秒） */
     private int tcpTimeoutMs = 5000;

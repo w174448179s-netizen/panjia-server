@@ -121,20 +121,31 @@ public interface LicenseService {
 
     /**
      * /check 结果载体。
+     * <p>
+     * ★ P0-5 修复：增加 clientMode 字段，让调用方在受限模式下也能感知"当前是 RESTRICT 但放行"，
+     *   业务侧根据 clientMode=RESTRICT 自行决定是否注入"算薪偏移"（V1.3 §5.1）。
      */
     class CheckResult {
         private final boolean allowed;
         private final String reason;
         private final String code;
+        private final String clientMode;
 
         public CheckResult(boolean allowed, String reason, String code) {
+            this(allowed, reason, code, "NORMAL");
+        }
+
+        public CheckResult(boolean allowed, String reason, String code, String clientMode) {
             this.allowed = allowed;
             this.reason = reason;
             this.code = code;
+            this.clientMode = clientMode == null ? "NORMAL" : clientMode;
         }
 
         public boolean isAllowed() { return allowed; }
         public String getReason() { return reason; }
         public String getCode() { return code; }
+        public String getClientMode() { return clientMode; }
+        public boolean isRestricted() { return "RESTRICT".equals(clientMode); }
     }
 }

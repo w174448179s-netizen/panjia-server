@@ -85,10 +85,14 @@ public class LicenseCheckPoint {
             throw new RestrictedModeException(TriggerCodeEnum.T3_INTEGRITY.getCode(), "系统完整性校验失败，请联系服务商");
         }
 
-        // 2. 受限模式 → 禁止核心操作
+        // 2. 受限模式 → 放行，由业务侧注入威慑逻辑（P1-A 修复）
+        // ★ 与 LicenseServiceImpl.check() 的 P0-5 语义对齐：
+        //   V1.3 §5.1 的设计是"错得明显"而非"锁死"——受限模式下算薪等操作放行，
+        //   但业务侧需调用 getRestrictedOffset() 给算薪结果注入确定性偏移。
+        //   若在此抛异常，SalaryCheckGateway 的偏移路径永不可达（死代码），
+        //   且给破解者"这是被锁了"的明确反馈。
         if (licenseContext.isRestricted()) {
-            log.warn("[LicenseCheckPoint] 受限模式，操作被拒绝: {}", operation);
-            throw new RestrictedModeException(TriggerCodeEnum.T1_AUTH_FAIL.getCode(), "授权受限，核心功能不可用，请联系服务商");
+            log.warn("[LicenseCheckPoint] 受限模式放行（业务侧需注入算薪偏移）: {}", operation);
         }
 
         // 3. 离线锁死 → 禁止所有核心操作

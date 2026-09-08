@@ -1,5 +1,6 @@
 package com.panjia.license.crypto.verify;
 
+import com.panjia.license.config.LicenseProperties;
 import com.panjia.license.domain.LicenseContent;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
@@ -13,7 +14,6 @@ import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.time.Instant;
 import java.util.Date;
 
 /**
@@ -30,10 +30,17 @@ import java.util.Date;
 @Component
 public class LicenseVerifier {
 
-    private final PublicKey publicKey;
+    /** 时钟偏差兜底默认值（秒）。防止 LicenseProperties 未注入时 JWTS 把 token 当场判过期 */
+    private static final int DEFAULT_CLOCK_SKEW_SECONDS = 60;
 
-    public LicenseVerifier() {
+    private final PublicKey publicKey;
+    private final int clockSkewSeconds;
+
+    public LicenseVerifier(LicenseProperties properties) {
         this.publicKey = loadPublicKey();
+        this.clockSkewSeconds = properties != null && properties.getClockSkewSeconds() > 0
+                ? properties.getClockSkewSeconds()
+                : DEFAULT_CLOCK_SKEW_SECONDS;
     }
 
     /**
@@ -56,17 +63,37 @@ public class LicenseVerifier {
 
     /**
      * 解码并验证 token 签名（RSA 验签）。
-     * @throws JwtException 签名无效/过期时抛出
+     *
+     * ★ P2-3 显式锁 RS256：jjwt 0.12 在 verifyWith(publicKey) 时会按公钥类型拒绝
+     *   alg confusion 攻击（RSA 公钥 + alg=HS256 的 token 会被拒绝），但这是隐式
+     *   行为。纵深防御：parseSignedClaims 后显式校验 header.alg == RS256，等于
+     *   在 jjwt 自身防御之上再加一道显式断言，未来如果 jjwt 升级或换库不会留缺口。
+     *
+     * @throws JwtException 签名无效/过期/算法不符时抛出
      */
     public LicenseContent decodeToken(String token) {
         try {
             Jws<Claims> claimsJws = Jwts.parser()
                     .verifyWith(publicKey)
                     .clock(() -> new Date(System.currentTimeMillis()))
+                    .clockSkewSeconds(clockSkewSeconds)
                     .build()
                     .parseSignedClaims(token);
+
+            // ★ P2-3 显式算法断言：防御 alg confusion 攻击
+            String alg = claimsJws.getHeader().getAlgorithm();
+            if (!"RS256".equalsIgnoreCase(alg)) {
+                log.warn("[LicenseVerifier] 拒绝非 RS256 算法 token: alg={}", alg);
+                throw new io.jsonwebtoken.security.SecurityException(
+                        "Unsupported JWT algorithm: " + alg + " (expected RS256)");
+            }
+
             Claims claims = claimsJws.getPayload();
-            return toLicenseContent(claims);
+            // P1-E 修复：统一走 LicenseContent.fromClaims（P2-2 完整实现，19 个字段全量填充）。
+            // 原先这里的私有 toLicenseContent 只填 8 个字段，导致运行时
+            // customerNo/plan/capabilities/maxStores/endDate/keyVersion 等业务字段恒为 null，
+            // 业务侧按能力位/配额做操作粒度控制全部落空。
+            return LicenseContent.fromClaims(claims);
         } catch (JwtException e) {
             log.warn("[LicenseVerifier] token 验证失败: {}", e.getMessage());
             throw e;
@@ -83,26 +110,5 @@ public class LicenseVerifier {
         } catch (JwtException e) {
             return false;
         }
-    }
-
-    private LicenseContent toLicenseContent(Claims claims) {
-        LicenseContent.LicenseContentBuilder builder = LicenseContent.builder()
-                .authCode(claims.get("authCode", String.class))
-                .fingerprintHash(claims.get("fingerprintHash", String.class))
-                .minVersion(claims.get("minVersion", String.class))
-                .maxVersion(claims.get("maxVersion", String.class))
-                .issuedAt(toInstant(claims.getIssuedAt()))
-                .expiresAt(toInstant(claims.getExpiration()))
-                .offlineExpireAt(toInstant(claims.get("offlineExpireAt", Date.class)))
-                .clientMode(claims.get("clientMode", String.class));
-
-        if (claims.get("licenseExpireAt", Date.class) != null) {
-            builder.licenseExpireAt(toInstant(claims.get("licenseExpireAt", Date.class)));
-        }
-        return builder.build();
-    }
-
-    private Instant toInstant(Date date) {
-        return date != null ? date.toInstant() : null;
     }
 }
