@@ -119,7 +119,7 @@ comment on column sys_dept.update_time  is '更新时间';
 -- ----------------------------
 -- 初始化-部门表数据
 -- ----------------------------
-insert into sys_dept values(1761000000000000100, 0, '0', '盘家智管', null, 0, null, null, null, '0', '0', null, null, null, null, null);
+insert into sys_dept values(1761000000000000100, 0, '0', 'tenant_name', null, 0, null, null, null, '0', '0', null, null, null, null, null);
 
 -- ----------------------------
 -- 2、用户信息表

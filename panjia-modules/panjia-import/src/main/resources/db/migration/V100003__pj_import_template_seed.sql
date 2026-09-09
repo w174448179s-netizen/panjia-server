@@ -217,7 +217,7 @@ VALUES (
             {"field":"bizType","rule":"dict_in:panjia_biz_type","message":"业务类型非法，允许值：{allowed}"}
         ]
     }'::jsonb,
-    '手动录入占位模板，供算薪人员手动补充非贝壳来源的业绩数据。',
+    '手动录入占位模板，供财务手动补充非贝壳来源的业绩数据。',
     NULL,
     true,
     '2026-09-01'::date,

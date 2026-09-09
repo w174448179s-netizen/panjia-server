@@ -48,6 +48,9 @@ user:
 # prod 构建：完整远程校验
 # 首次启动需配置 PANJIA_AUTH_CODE 环境变量进行自动激活
 panjia:
+  # 员工域：客户根部门 ID（岗位挂该节点下，导入自动建部门树的父节点）
+  tenant:
+    root-dept-id: ${PANJIA_TENANT_ROOT_DEPT_ID:1761000000000000100}
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}

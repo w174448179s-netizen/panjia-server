@@ -44,10 +44,6 @@
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-common-mybatis</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.dromara</groupId>
-            <artifactId>ruoyi-common-excel</artifactId>
-        </dependency>
 
         <!-- 底座 Web（@RestController / @SaCheckPermission） -->
         <dependency>

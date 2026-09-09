@@ -4,12 +4,12 @@ import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * panjia-people MyBatis 扫描配置。
+ * panjia-people MyBatis Mapper 扫描配置。
  * <p>
- * 底座默认 mapperPackage 为 {@code org.dromara.**.mapper}，不覆盖 com.panjia 包，
- * 故显式扫描 people 域 Mapper 所在包（infrastructure.repository）。
+ * 底座 MybatisPlusConfig 的 @MapperScan 只扫描 {@code org.dromara.**.mapper}，
+ * 因此本模块自建扫描配置，覆盖 {@code com.panjia.people.mapper} 包下的 Mapper。
  */
 @Configuration
-@MapperScan("com.panjia.people.infrastructure.repository")
+@MapperScan("com.panjia.people.mapper")
 public class PeopleMybatisConfig {
 }

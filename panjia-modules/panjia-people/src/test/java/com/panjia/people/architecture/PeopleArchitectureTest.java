@@ -10,56 +10,55 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 
 /**
- * 员工域（people）架构守护测试（CI P1 门禁）。
- * <p>
- * 对应详细设计铁律：
+ * 员工域架构守护（V5.2 六边形 Port-Adapter）。
  * <ul>
- *   <li>规则1：Employee 聚合根禁止离开 people 域 —— 外部域只通过
- *       EmployeeQueryPort / EmployeeSnapshot / Long 访问，禁止直接引用领域聚合根</li>
- *   <li>规则2：people 域不反向依赖 payroll / commission 等其他业务域（依赖方向单向向内）</li>
+ *   <li>规则1：只有 adapter 包可以依赖 org.dromara.system.*（sys_user/sys_dept/sys_post 底座细节）；
+ *       domain/service/port/dto/controller 只能面向端口与 org.dromara.common.* 通用件编程。</li>
+ *   <li>规则2：people 域禁止依赖兄弟业务域（import/payroll/outbox 等），跨域协作只走 contracts 端口。</li>
  * </ul>
- * <p>
- * 实现说明：用 {@link ClassFileImporter} 手动导入 classpath 上的 com.panjia 类，
- * 用标准 JUnit5 @Test 调用 ArchRule.check，确保 surefire 能发现测试。
  */
 @Tag("dev")
 class PeopleArchitectureTest {
 
-    /** com.panjia 全部类（test classpath 含 people / contracts / common） */
-    private final JavaClasses panjiaClasses =
-        new ClassFileImporter().importPackages("com.panjia");
+    /** 员工域全部类 */
+    private final JavaClasses peopleClasses =
+        new ClassFileImporter().importPackages("com.panjia.people");
 
     /**
-     * 规则1：Employee 聚合根（com.panjia.people.domain.Employee）
-     * 禁止被 people 域以外的类引用。
+     * 规则1：org.dromara.system.* 仅 adapter 包可依赖。
      * <p>
-     * payroll / commission 等外部域只能依赖 contracts 的
-     * EmployeeQueryPort / EmployeeSnapshot，不能持有 Employee 聚合根。
+     * sys_user / sys_dept / sys_post / sys_role 的读写细节收敛在 RuoYi*Adapter，
+     * service 层只依赖 people.port 端口，保证业务逻辑与底座解耦。
      */
     @Test
-    void employee_aggregate_must_not_leave_people_domain() {
-        ArchRule rule = noClasses().that().resideOutsideOfPackage("com.panjia.people..")
-            .should().dependOnClassesThat()
-            .haveFullyQualifiedName("com.panjia.people.domain.Employee")
-            .because("Employee 聚合根禁止离开 people 域，外部域只通过 EmployeeQueryPort/EmployeeSnapshot/Long 访问");
-        assertDoesNotThrow(() -> rule.check(panjiaClasses));
+    void only_adapter_may_depend_on_ruoyi_system() {
+        ArchRule rule = noClasses()
+            .that().resideOutsideOfPackage("com.panjia.people.adapter..")
+            .should().dependOnClassesThat().resideInAnyPackage("org.dromara.system..")
+            .because("sys_user/sys_dept/sys_post 等底座细节只能由 adapter 包访问，"
+                + "service/domain/port 必须面向 people.port 端口编程");
+        assertDoesNotThrow(() -> rule.check(peopleClasses));
     }
 
     /**
-     * 规则2：people 域禁止依赖 payroll / commission 等其他业务域。
+     * 规则2：people 禁止依赖任何兄弟业务域实现。
      * <p>
-     * 依赖方向单向向内：其他域 → contracts/people，people 不反向依赖任何兄弟业务域。
+     * 跨域协作只允许走 com.panjia.contracts（PeopleQueryPort / EventPort 等），
+     * 禁止 import com.panjia.import / payroll / outbox 等域实现包。
      */
     @Test
-    void people_must_not_depend_on_other_business_domains() {
-        ArchRule rule = noClasses().that().resideInAPackage("com.panjia.people..")
+    void people_must_not_depend_on_sibling_domains() {
+        ArchRule rule = noClasses()
+            .that().resideInAPackage("com.panjia.people..")
             .should().dependOnClassesThat().resideInAnyPackage(
-                "com.panjia.payroll..",
-                "com.panjia.commission..",
+                "com.panjia.import..",
                 "com.panjia.performance..",
+                "com.panjia.commission..",
+                "com.panjia.payroll..",
                 "com.panjia.ledger..",
-                "com.panjia.outbox..")
-            .because("people 域不反向依赖兄弟业务域，依赖方向单向向内（外部域 → contracts/people）");
-        assertDoesNotThrow(() -> rule.check(panjiaClasses));
+                "com.panjia.outbox..",
+                "com.panjia.backup..")
+            .because("people 与兄弟域协作只能走 com.panjia.contracts 端口，禁止依赖域实现包");
+        assertDoesNotThrow(() -> rule.check(peopleClasses));
     }
 }

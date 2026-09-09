@@ -1,7 +1,6 @@
 package com.panjia.people.domain;
 
 import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
@@ -9,19 +8,17 @@ import lombok.Data;
 
 import java.io.Serial;
 import java.io.Serializable;
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.List;
 
 /**
- * 员工聚合根 —— people 域核心领域对象（对应 pj_people_employee）。
+ * 员工主数据（对应 pj_people_employee 表，一人一行）。
  * <p>
- * 聚合边界：Employee 是聚合根，{@link EmployeeLevel} / {@link SocialInsuranceProfile}
- * 是其组成部分；{@link MentorRelation} 是独立实体（独立生命周期）。
+ * V5.2 约定：不存岗位/角色——岗位角色全部走 sys_user_post / sys_user_role，
+ * Employee 只存归属部门 dept_id 与关联账户 user_id。
  * <p>
- * 🚨 铁律：Employee 聚合根不得离开 people 域。外部域只能通过
- * {@code EmployeeSnapshot}（快照）或 Long（员工 ID）引用。
+ * 不继承 RuoYi BaseEntity：本表无 create_by/update_by 审计列，
+ * create_time/update_time 由数据库默认值填充。
  */
 @Data
 @TableName("pj_people_employee")
@@ -30,185 +27,53 @@ public class Employee implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** 主键，雪花 ID（应用层 ASSIGN_ID 生成） */
+    /** 员工 ID，雪花 ID */
     @TableId(type = IdType.ASSIGN_ID)
-    private Long id;
+    private Long employeeId;
 
-    /** 关联 sys_user.id（单向引用，可空=无登录账号） */
-    private Long userId;
-
-    /** 工号（业务唯一标识，导入匹配键） */
+    /** 工号（唯一，= sys_user.user_name） */
     private String employeeCode;
 
     /** 姓名 */
-    private String name;
+    private String employeeName;
 
-    /** 手机号 */
-    private String phone;
-
-    /** 身份证号（加密存储） */
-    private String idCardNo;
-
-    /** 所属门店/部门 ID = sys_dept.dept_id */
+    /** 归属部门 ID（= sys_user.dept_id） */
     private Long deptId;
 
-    /** 岗位 ID = sys_post.post_id（可空） */
-    private Long postId;
+    /** 电话 */
+    private String phone;
 
-    /** 人员角色：AGENT / STORE_MANAGER / DIRECTOR（DB 列名 employee_role，非 role） */
-    @TableField("employee_role")
-    private EmployeeRoleEnum role;
+    /** 身份证号（AES 加密存储） */
+    private String idCard;
 
-    /** 兼职状态 */
-    private PartTimeStatusEnum partTimeStatus;
+    /** 报道时间 */
+    private LocalDate reportDate;
 
-    /** 员工状态 */
-    private EmployeeStatusEnum status;
-
-    /** 入职日期 */
+    /** 入职时间（fact 生效日） */
     private LocalDate hireDate;
 
-    /** 离职日期（status=RESIGNED 时有值） */
-    private LocalDate resignDate;
+    /** 离职时间（null=未离职） */
+    private LocalDate leaveDate;
 
-    /** 是否缴纳社保（兼职=false） */
-    private boolean socialInsuranceEnabled;
+    /** 状态：ACTIVE/PARTTIME/LEFT/PENDING */
+    private EmployeeStatus status;
 
-    /** 公积金自缴金额 */
-    private BigDecimal housingFundAmount;
-
-    /** 是否购买商业保险 */
-    private boolean commercialInsurance;
-
-    /** 是否住宿舍 */
-    private boolean dormitoryEnabled;
+    /** 师傅员工 ID（null=无师傅） */
+    private Long mentorEmployeeId;
 
     /** 备注 */
     private String remark;
 
-    /** 创建人 login_name（应用层填充） */
-    private String createdBy;
+    /** 关联 sys_user.user_id（建账户后回填） */
+    private Long userId;
 
-    /** 创建时间（应用层填充，无触发器） */
-    private LocalDateTime createdAt;
-
-    /** 更新人 login_name */
-    private String updatedBy;
-
-    /** 更新时间（应用层填充，无触发器） */
-    private LocalDateTime updatedAt;
-
-    /** 乐观锁版本号（MP @Version） */
+    /** 乐观锁版本号 */
     @Version
-    private Integer optLockVersion;
+    private Integer version;
 
-    /** 职级历史（非表字段，由 Mapper 联查装配，按 effectiveFrom 倒序） */
-    @TableField(exist = false)
-    private List<EmployeeLevel> levelHistory;
+    /** 创建时间（DB 默认填充） */
+    private LocalDateTime createTime;
 
-    /** 当前社保档案（非表字段，由 Mapper 装配） */
-    @TableField(exist = false)
-    private SocialInsuranceProfile socialInsurance;
-
-    /**
-     * 变更职级 —— 关闭当前有效记录，追加一条新记录。
-     *
-     * @param newLevel      新职级记录（已填 levelCode/effectiveFrom/changeReason）
-     * @param effectiveDate 生效日期（必须 >= hireDate）
-     * @throws IllegalStateException 员工已离职或日期不合法
-     */
-    public void changeLevel(EmployeeLevel newLevel, LocalDate effectiveDate) {
-        if (status != EmployeeStatusEnum.ACTIVE) {
-            throw new IllegalStateException("离职员工不可变更职级");
-        }
-        if (effectiveDate.isBefore(hireDate)) {
-            throw new IllegalStateException("职级生效日期不能早于入职日期");
-        }
-        EmployeeLevel current = getCurrentLevel();
-        // 新生效日必须严格晚于当前职级生效日：
-        // 1) 等于当天 → 违反 uk_level_employee_effective 唯一约束；
-        // 2) 早于当前生效日（倒签）→ 旧记录 effective_to < effective_from 违反 CHECK 约束。
-        if (current != null && !effectiveDate.isAfter(current.getEffectiveFrom())) {
-            throw new IllegalStateException("职级生效日期(" + effectiveDate
-                + ")必须晚于当前职级的生效日期(" + current.getEffectiveFrom() + ")");
-        }
-        // 关闭当前有效记录：旧记录失效日 = 新记录生效日
-        if (current != null) {
-            current.setEffectiveTo(effectiveDate);
-        }
-        levelHistory.add(newLevel);
-    }
-
-    /**
-     * 获取指定时点的有效职级。
-     *
-     * @param pointInTime 历史时点（如算薪月份的最后一天）
-     * @return 该时点有效的职级
-     * @throws IllegalStateException 找不到有效职级
-     */
-    public EmployeeLevel getLevelAt(LocalDate pointInTime) {
-        return levelHistory.stream()
-            .filter(l -> !l.getEffectiveFrom().isAfter(pointInTime))
-            .filter(l -> l.getEffectiveTo() == null || !l.getEffectiveTo().isBefore(pointInTime))
-            .findFirst()
-            .orElseThrow(() -> new IllegalStateException(
-                "员工 " + employeeCode + " 在 " + pointInTime + " 无有效职级"));
-    }
-
-    /**
-     * 离职处理 —— 设置状态 + 离职日 + 关闭当前职级记录。
-     *
-     * @param resignDate 离职日期
-     * @throws IllegalStateException 已离职或日期不合法
-     */
-    public void resign(LocalDate resignDate) {
-        if (status == EmployeeStatusEnum.RESIGNED) {
-            throw new IllegalStateException("员工已离职，不可重复操作");
-        }
-        if (resignDate.isBefore(hireDate)) {
-            throw new IllegalStateException("离职日期不能早于入职日期");
-        }
-        this.status = EmployeeStatusEnum.RESIGNED;
-        this.resignDate = resignDate;
-        // 关闭当前职级
-        EmployeeLevel current = getCurrentLevel();
-        if (current != null && current.getEffectiveTo() == null) {
-            current.setEffectiveTo(resignDate);
-        }
-    }
-
-    /**
-     * 是否兼职。
-     *
-     * @return true 表示兼职
-     */
-    public boolean isPartTime() {
-        return partTimeStatus == PartTimeStatusEnum.PART_TIME;
-    }
-
-    /**
-     * 是否参与社保扣款。
-     * <p>
-     * 规则：全职 + socialInsuranceEnabled=true → 参与。
-     *
-     * @return true 表示应扣社保
-     */
-    public boolean shouldDeductSocial() {
-        return !isPartTime() && socialInsuranceEnabled;
-    }
-
-    /**
-     * 获取当前有效职级（effectiveTo 为 null 的记录）。
-     *
-     * @return 当前职级，无则 null
-     */
-    public EmployeeLevel getCurrentLevel() {
-        if (levelHistory == null) {
-            return null;
-        }
-        return levelHistory.stream()
-            .filter(l -> l.getEffectiveTo() == null)
-            .findFirst()
-            .orElse(null);
-    }
+    /** 更新时间（DB 默认填充） */
+    private LocalDateTime updateTime;
 }

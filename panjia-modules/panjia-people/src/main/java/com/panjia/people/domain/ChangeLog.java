@@ -7,12 +7,14 @@ import lombok.Data;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 /**
- * 员工变更日志实体（对应 pj_people_change_log）。
+ * 员工变更审计日志（对应 pj_people_change_log 表，一变更一行）。
  * <p>
- * 员工档案任何写操作必须写日志（谁/何时/改了什么/旧值→新值），应用层显式写入（无触发器）。
+ * 入职初始化时 change_field='ALL'；后续每次 changeFact 写一条，
+ * 记录前后值、生效日与操作人。
  */
 @Data
 @TableName("pj_people_change_log")
@@ -21,58 +23,31 @@ public class ChangeLog implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** 主键，雪花 ID */
+    /** 日志 ID，雪花 ID */
     @TableId(type = IdType.ASSIGN_ID)
-    private Long id;
+    private Long logId;
 
-    /** 关联员工 ID */
+    /** 员工 ID */
     private Long employeeId;
 
-    /** 变更类型（EmployeeChangeTypeEnum 枚举名） */
-    private String changeType;
+    /** 变更项（fact_type 编码 / ALL） */
+    private String changeField;
 
-    /** 变更字段名（UPDATE 时） */
-    private String fieldName;
+    /** 变更前值 */
+    private String beforeValue;
 
-    /** 旧值（JSON 序列化） */
-    private String oldValue;
+    /** 变更后值 */
+    private String afterValue;
 
-    /** 新值（JSON 序列化） */
-    private String newValue;
+    /** 生效日期 */
+    private LocalDate effectiveDate;
 
-    /** 变更原因 */
-    private String changeReason;
+    /** 该变更记录的结束时间（被下一次变更闭区间时回填） */
+    private LocalDate expireDate;
 
-    /** 操作人 login_name */
-    private String operator;
+    /** 操作人 ID（sys_user.user_id） */
+    private Long operatorId;
 
-    /** 操作时间 */
-    private LocalDateTime operatedAt;
-
-    /**
-     * 工厂方法：构造变更日志。
-     *
-     * @param employeeId   员工 ID
-     * @param changeType   变更类型枚举
-     * @param fieldName    变更字段名（可空）
-     * @param oldValue     旧值（可空）
-     * @param newValue     新值（可空）
-     * @param changeReason 变更原因
-     * @param operator     操作人
-     * @return 变更日志实例
-     */
-    public static ChangeLog create(Long employeeId, EmployeeChangeTypeEnum changeType,
-                                   String fieldName, String oldValue, String newValue,
-                                   String changeReason, String operator) {
-        ChangeLog log = new ChangeLog();
-        log.setEmployeeId(employeeId);
-        log.setChangeType(changeType.name());
-        log.setFieldName(fieldName);
-        log.setOldValue(oldValue);
-        log.setNewValue(newValue);
-        log.setChangeReason(changeReason);
-        log.setOperator(operator);
-        log.setOperatedAt(LocalDateTime.now());
-        return log;
-    }
+    /** 创建时间（DB 默认填充） */
+    private LocalDateTime createTime;
 }
