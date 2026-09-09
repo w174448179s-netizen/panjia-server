@@ -134,6 +134,7 @@ Section "主程序" SecMain
 
     SetOutPath "$INSTDIR\nginx"
     File "config\nginx.conf"
+    File /r "nginx\error\*.*"
 
     ; 释放脚本
     SetOutPath "$INSTDIR\scripts"

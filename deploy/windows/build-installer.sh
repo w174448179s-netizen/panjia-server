@@ -413,6 +413,7 @@ mkdir -p "$BUILD_NSI_DIR"
 
 # 复制所有文件到构建目录
 cp -R "$INSTALLER_DIR"/config "$BUILD_NSI_DIR/" 2>/dev/null || true
+cp -R "$INSTALLER_DIR"/nginx "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/scripts "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/web "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/images "$BUILD_NSI_DIR/" 2>/dev/null || true

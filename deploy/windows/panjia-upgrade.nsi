@@ -89,6 +89,7 @@ Section "升级盘家智管" SecUpgrade
 
     SetOutPath "$INSTDIR\nginx"
     File "config\nginx.conf"
+    File /r "nginx\error\*.*"
 
     SetOutPath "$INSTDIR\scripts"
     File "scripts\upgrade.ps1"

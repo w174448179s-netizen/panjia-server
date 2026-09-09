@@ -218,6 +218,7 @@ rm -rf "$BUILD_NSI_DIR"
 mkdir -p "$BUILD_NSI_DIR"
 
 cp -R "$INSTALLER_DIR"/config "$BUILD_NSI_DIR/" 2>/dev/null || true
+cp -R "$INSTALLER_DIR"/nginx "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/scripts "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/web "$BUILD_NSI_DIR/" 2>/dev/null || true
 cp -R "$INSTALLER_DIR"/images "$BUILD_NSI_DIR/" 2>/dev/null || true
