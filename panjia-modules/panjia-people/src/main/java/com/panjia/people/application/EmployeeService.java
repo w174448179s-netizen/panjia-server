@@ -8,6 +8,7 @@ import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.exception.BizCode;
 import com.panjia.people.application.dto.EmployeeCreateDTO;
 import com.panjia.people.application.dto.EmployeeDTO;
+import com.panjia.people.application.dto.EmployeeOptionDTO;
 import com.panjia.people.application.dto.EmployeeUpdateDTO;
 import com.panjia.people.domain.ChangeLog;
 import com.panjia.people.domain.Employee;
@@ -197,6 +198,30 @@ public class EmployeeService {
     }
 
     /**
+     * 员工下拉搜索（按工号或姓名关键词模糊匹配，返回前 20 条）。
+     *
+     * @param keyword 关键词（可空）
+     * @return 员工选项列表
+     */
+    @Transactional(readOnly = true)
+    public List<EmployeeOptionDTO> searchOptions(String keyword) {
+        LambdaQueryWrapper<Employee> wrapper = new LambdaQueryWrapper<>();
+        if (keyword != null && !keyword.isBlank()) {
+            wrapper.and(w -> w.like(Employee::getEmployeeCode, keyword)
+                .or().like(Employee::getName, keyword));
+        }
+        wrapper.last("LIMIT 20");
+        List<Employee> employees = employeeMapper.selectList(wrapper);
+        return employees.stream().map(e -> {
+            EmployeeOptionDTO dto = new EmployeeOptionDTO();
+            dto.setId(e.getId());
+            dto.setEmployeeCode(e.getEmployeeCode());
+            dto.setName(e.getName());
+            return dto;
+        }).toList();
+    }
+
+    /**
      * 分页查询员工档案。
      *
      * @param pageQuery 分页参数
@@ -219,7 +244,23 @@ public class EmployeeService {
             .eq(roleEnum != null, Employee::getRole, roleEnum)
             .orderByDesc(Employee::getId);
         Page<Employee> page = employeeMapper.selectPage(pageQuery.build(), wrapper);
-        List<EmployeeDTO> list = page.getRecords().stream().map(EmployeeConverter::toDTO).toList();
+        List<Employee> records = page.getRecords();
+        if (!records.isEmpty()) {
+            List<Long> ids = records.stream().map(Employee::getId).toList();
+            List<EmployeeLevel> allLevels = levelMapper.selectByEmployeeIds(ids);
+            List<SocialInsuranceProfile> allSocial = socialInsuranceMapper.selectByEmployeeIds(ids);
+            for (Employee emp : records) {
+                List<EmployeeLevel> levels = allLevels.stream()
+                    .filter(l -> l.getEmployeeId().equals(emp.getId()))
+                    .toList();
+                emp.setLevelHistory(levels);
+                allSocial.stream()
+                    .filter(s -> s.getEmployeeId().equals(emp.getId()))
+                    .findFirst()
+                    .ifPresent(emp::setSocialInsurance);
+            }
+        }
+        List<EmployeeDTO> list = records.stream().map(EmployeeConverter::toDTO).toList();
         return PageResult.build(list, page.getTotal());
     }
 

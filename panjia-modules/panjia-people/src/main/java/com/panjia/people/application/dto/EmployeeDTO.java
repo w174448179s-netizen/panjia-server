@@ -69,4 +69,25 @@ public class EmployeeDTO implements Serializable {
 
     /** 当前职级编码（由职级历史装配） */
     private String currentLevelCode;
+
+    /** 当前职级名称 */
+    private String currentLevelName;
+
+    /** 底薪 */
+    private BigDecimal baseSalary;
+
+    /** 佣金比例 */
+    private BigDecimal commissionRate;
+
+    /** 社保个人比例（来自职级） */
+    private BigDecimal socialInsuranceRatio;
+
+    /** 社保基数（来自社保档案） */
+    private BigDecimal socialBaseAmount;
+
+    /** 社保个人比例（来自社保档案） */
+    private BigDecimal personalSocialRatio;
+
+    /** 社保公司比例（来自社保档案） */
+    private BigDecimal companySocialRatio;
 }

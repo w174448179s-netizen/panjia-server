@@ -8,6 +8,7 @@ import com.panjia.people.domain.EmployeeLevel;
 import com.panjia.people.domain.EmployeeRoleEnum;
 import com.panjia.people.domain.EmployeeStatusEnum;
 import com.panjia.people.domain.PartTimeStatusEnum;
+import com.panjia.people.domain.SocialInsuranceProfile;
 
 /**
  * 员工 Domain ↔ DTO 转换器。
@@ -117,6 +118,16 @@ public final class EmployeeConverter {
         EmployeeLevel current = employee.getCurrentLevel();
         if (current != null) {
             dto.setCurrentLevelCode(current.getLevelCode());
+            dto.setCurrentLevelName(current.getLevelName());
+            dto.setBaseSalary(current.getBaseSalary());
+            dto.setCommissionRate(current.getCommissionRate());
+            dto.setSocialInsuranceRatio(current.getSocialInsuranceRatio());
+        }
+        SocialInsuranceProfile si = employee.getSocialInsurance();
+        if (si != null) {
+            dto.setSocialBaseAmount(si.getSocialBaseAmount());
+            dto.setPersonalSocialRatio(si.getPersonalRatio());
+            dto.setCompanySocialRatio(si.getCompanyRatio());
         }
         return dto;
     }
