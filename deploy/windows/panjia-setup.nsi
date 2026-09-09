@@ -295,6 +295,10 @@ Section "Uninstall"
     nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-Location ''$INSTDIR\config''; docker compose down 2>&1 | Out-Null"'
     Pop $0
 
+    ; 删除开机自启计划任务
+    DetailPrint "清理开机自启任务..."
+    nsExec::ExecToLog 'schtasks /Delete /TN "PanjiaAutoStart" /F 2>&1'
+
     ; 删除开始菜单
     Delete "$SMPROGRAMS\${APPNAME}\启动盘家智管.lnk"
     Delete "$SMPROGRAMS\${APPNAME}\停止盘家智管.lnk"

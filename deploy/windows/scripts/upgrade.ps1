@@ -128,6 +128,18 @@ if (Test-Path $ddExeForRun) {
     }
 }
 
+# ==================== 步骤 3.5：应用容器开机自启兜底（老版本升级补充） ====================
+$startAppScript = "$InstallDir\scripts\start-app.ps1"
+$taskName = "PanjiaAutoStart"
+$taskCmd = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startAppScript`" -InstallDir `"$InstallDir`" -AutoStart"
+schtasks /Query /TN $taskName 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    schtasks /Create /TN $taskName /TR $taskCmd /SC ONLOGON /RL HIGHEST /F 2>&1 | Out-Null
+    Write-Log "已注册应用容器开机自启（计划任务）"
+} else {
+    Write-Log "应用容器开机自启已存在"
+}
+
 # ==================== 步骤 4：加载新后端镜像 ====================
 $imageTar = "$InstallDir\images\panjia-server.tar"
 if (Test-Path $imageTar) {

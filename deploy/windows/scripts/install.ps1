@@ -827,6 +827,60 @@ if (Test-Path $ddExeForRun) {
     }
 }
 
+# ==================== 应用容器开机自启（计划任务，幂等） ====================
+# Docker Desktop 的 Run 键只保证 Docker 引擎启动，
+# 但容器（restart: unless-stopped）在 Docker 重启后可能因 depends_on
+# 健康检查顺序问题未全部拉起。创建计划任务在登录时确保容器全部运行。
+$startAppScript = "$InstallDir\scripts\start-app.ps1"
+$taskName = "PanjiaAutoStart"
+$taskCmd = "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startAppScript`" -InstallDir `"$InstallDir`" -AutoStart"
+
+# 删除旧任务（如果存在），再重新创建（确保路径和参数最新）
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    schtasks /Query /TN $taskName 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
+        Write-Log "  已删除旧的计划任务"
+    }
+} catch {}
+$ErrorActionPreference = $prevEap
+
+# 创建计划任务：用户登录时触发，延迟 30 秒（等 Docker Desktop 先启动）
+schtasks /Create /TN $taskName /TR $taskCmd /SC ONLOGON /RL HIGHEST /F 2>&1 | ForEach-Object {
+    Write-Log "  $_"
+}
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Log "已注册应用容器开机自启（计划任务：用户登录时，延迟 30 秒）"
+    # schtasks /Create 不支持直接设延迟，用 XML 方式补充
+    # 导出当前任务 XML，添加延迟，再重新导入
+    $taskXmlFile = "$env:TEMP\panjia-task.xml"
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    schtasks /Query /TN $taskName /XML 2>&1 | Out-File -FilePath $taskXmlFile -Encoding UTF8
+    $ErrorActionPreference = $prevEap
+    if (Test-Path $taskXmlFile) {
+        $xml = Get-Content $taskXmlFile -Raw
+        # 在 Tasks 节点下添加 Delay
+        if ($xml -notmatch '<Delay>') {
+            $xml = $xml -replace '(<TimeTrigger>.*?)(</TimeTrigger>)', '$1<Delay>PT30S</Delay>$2'
+            $xml | Out-File -FilePath $taskXmlFile -Encoding UTF8 -Force
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            schtasks /Delete /TN $taskName /F 2>&1 | Out-Null
+            schtasks /Create /TN $taskName /XML "$taskXmlFile" 2>&1 | Out-Null
+            $ErrorActionPreference = $prevEap
+            Write-Log "  已设置启动延迟 30 秒（等待 Docker Desktop 先就绪）"
+        }
+        Remove-Item $taskXmlFile -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Log "注册计划任务失败（退出码 $LASTEXITCODE），应用不会开机自启" "WARN"
+    Write-Log "  可手动创建：schtasks /Create /TN PanjiaAutoStart /TR `"$taskCmd`" /SC ONLOGON /RL HIGHEST" "WARN"
+}
+
 # ==================== 步骤 6：启动服务并验证激活 ====================
 # 注意：激活验证合并到本步骤（不再有独立步骤 7）。原理：
 #   1. docker compose up -d 把容器跑起来

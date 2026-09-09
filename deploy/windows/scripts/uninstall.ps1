@@ -21,10 +21,16 @@ Write-Host "停止盘家智管服务..."
 if (Test-Path "$InstallDir\config\docker-compose.yml") {
     Set-Location "$InstallDir\config"
     docker compose down 2>&1 | Out-Null
-    Write-Host " ✓ 服务已停止"
+    Write-Host " 服务已停止"
 } else {
     Write-Host " 未找到服务配置，跳过"
 }
+
+# 删除开机自启计划任务
+Write-Host ""
+Write-Host "清理开机自启任务..."
+schtasks /Delete /TN "PanjiaAutoStart" /F 2>&1 | Out-Null
+Write-Host " 计划任务已清理"
 
 # 删除 Docker 镜像（可选，节省空间）
 Write-Host ""
