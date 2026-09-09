@@ -22,10 +22,14 @@
             <artifactId>ruoyi-common-core</artifactId>
         </dependency>
 
-        <!-- Jackson（@JsonValue 序列化 OutboxStatusEnum） -->
+        <!-- Jackson 注解（@JsonValue 序列化 OutboxStatusEnum）。
+             注意：Jackson 3 仅 jackson-core/jackson-databind 迁移到 tools.jackson 包，
+             注解包仍为 com.fasterxml.jackson.annotation（jackson-databind 3.x 自身依赖本坐标）。
+             本模块只需注解，禁止引入 jackson-databind 2.x（会把 Jackson 2 的
+             com.fasterxml.jackson.databind.ObjectMapper 带入编译类路径，误用后容器无此 Bean）。 -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <artifactId>jackson-annotations</artifactId>
         </dependency>
 
         <!-- Lombok（@Data） -->

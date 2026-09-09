@@ -133,6 +133,21 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-salary</artifactId>
         </dependency>
+        <!-- 员工域（人事档案/职级/师徒/角色联动） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-people</artifactId>
+        </dependency>
+        <!-- 导入域（导入模板） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-import</artifactId>
+        </dependency>
+        <!-- 事件外发域（outbox） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-outbox</artifactId>
+        </dependency>
 
         <!-- Spring Boot Admin 客户端 -->
         <dependency>

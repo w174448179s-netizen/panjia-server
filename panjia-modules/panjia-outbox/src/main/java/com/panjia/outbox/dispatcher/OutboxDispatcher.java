@@ -3,6 +3,7 @@ package com.panjia.outbox.dispatcher;
 import com.aizuda.snailjob.client.job.core.annotation.JobExecutor;
 import com.aizuda.snailjob.client.job.core.dto.JobArgs;
 import com.aizuda.snailjob.model.dto.ExecuteResult;
+import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.OutboxStatusEnum;
 import com.panjia.outbox.entity.OutboxEvent;
 import com.panjia.outbox.entity.OutboxIdempotent;
@@ -16,6 +17,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Outbox 事件投递 Dispatcher（SnailJob 任务）。
@@ -60,6 +63,22 @@ public class OutboxDispatcher {
     @Autowired
     private OutboxIdempotentMapper outboxIdempotentMapper;
 
+    /** 事件处理器映射表：eventType → handler（Spring 自动收集所有 DomainEventHandler Bean） */
+    @Autowired(required = false)
+    private List<DomainEventHandler> handlers;
+
+    private Map<String, DomainEventHandler> handlerMap;
+
+    /**
+     * 初始化 handler 路由表。
+     */
+    @jakarta.annotation.PostConstruct
+    void initHandlerMap() {
+        handlerMap = handlers == null ? Map.of()
+            : handlers.stream().collect(Collectors.toMap(DomainEventHandler::eventType, h -> h, (a, b) -> a));
+        log.info("Outbox event handlers registered: {}", handlerMap.keySet());
+    }
+
     /**
      * SnailJob 任务入口：批量拉取待投递事件并处理。
      *
@@ -68,7 +87,8 @@ public class OutboxDispatcher {
      */
     public ExecuteResult jobExecute(JobArgs jobArgs) {
         LocalDateTime now = LocalDateTime.now();
-        List<OutboxEvent> pending = outboxEventMapper.selectPending(now, BATCH_LIMIT);
+        // 只拉取 PENDING（进行中）事件，终态 PROCESSED/FAILED 不再扫描
+        List<OutboxEvent> pending = outboxEventMapper.selectPending(OutboxStatusEnum.PENDING, now, BATCH_LIMIT);
         int processed = 0;
         int skipped = 0;
         int failed = 0;
@@ -77,7 +97,8 @@ public class OutboxDispatcher {
                 if (markConsumed(event)) {
                     // 投递目标（消息 / HTTP）由下游确定，V1 骨架仅完成状态流转
                     dispatchToTarget(event);
-                    outboxEventMapper.markProcessed(event.getId(), LocalDateTime.now());
+                    // 流转到 PROCESSED（终态），error_message 置空清除重试期残留
+                    outboxEventMapper.updateStatus(event.getId(), OutboxStatusEnum.PROCESSED, null, LocalDateTime.now());
                     processed++;
                 } else {
                     skipped++;
@@ -112,16 +133,22 @@ public class OutboxDispatcher {
     }
 
     /**
-     * 投递到外部目标（消息队列 / HTTP）。
+     * 按 event_type 路由到注册的 DomainEventHandler。
      * <p>
-     * V1 骨架：投递目标由下游确定（见任务卡 04 §八），此处为占位方法。
-     * 下游实现时替换为真实投递逻辑。
+     * 无对应 handler 的事件仅记录日志（如未来域事件尚未实现处理器）。
      *
      * @param event 待投递事件
      */
     private void dispatchToTarget(OutboxEvent event) {
-        // 投递目标待下游确定（消息 / HTTP），V1 骨架仅完成状态流转
-        log.debug("Dispatch outbox event: eventId={}, type={}", event.getEventId(), event.getEventType());
+        DomainEventHandler handler = handlerMap.get(event.getEventType());
+        if (handler != null) {
+            log.debug("Dispatch outbox event: eventId={}, type={}, handler={}",
+                event.getEventId(), event.getEventType(), handler.getClass().getName());
+            handler.handle(event.getEventId(), event.getPayload());
+        } else {
+            log.debug("No handler for outbox event: eventId={}, type={}",
+                event.getEventId(), event.getEventType());
+        }
     }
 
     /**
@@ -138,8 +165,8 @@ public class OutboxDispatcher {
         String errMsg = cause.getMessage();
         int currentRetry = event.getRetryCount() == null ? 0 : event.getRetryCount();
         if (currentRetry + 1 >= MAX_RETRY) {
-            // 达上限，标记 FAILED，不再重试
-            outboxEventMapper.markFailed(event.getId(), errMsg, now);
+            // 达上限，流转到 FAILED（终态），不再重试
+            outboxEventMapper.updateStatus(event.getId(), OutboxStatusEnum.FAILED, errMsg, now);
             log.warn("Outbox event marked FAILED (retry>={}): eventId={}", MAX_RETRY, event.getEventId());
         } else {
             // 指数退避：min(30 * 2^retryCount, 600) 秒

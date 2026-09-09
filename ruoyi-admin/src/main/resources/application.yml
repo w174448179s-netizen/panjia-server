@@ -78,7 +78,7 @@ spring:
     placeholder-replacement: false
     # V1 基线脚本已做预生产垃圾清理，与已入库的旧 checksum 不一致，开发环境关闭校验
     # 生产环境首次部署为空库，无此问题；若生产库需升级，应通过 flyway repair 修复 checksum
-    validate-on-migrate: false
+    validate-on-migrate: true
   threads:
     # 开启虚拟线程 仅jdk21可用
     virtual:

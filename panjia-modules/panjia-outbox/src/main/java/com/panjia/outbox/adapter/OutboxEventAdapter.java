@@ -1,7 +1,5 @@
 package com.panjia.outbox.adapter;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.panjia.contracts.event.DomainEvent;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.OutboxStatusEnum;
@@ -13,6 +11,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -67,6 +67,10 @@ public class OutboxEventAdapter implements EventPort {
      * 用 Jackson 序列化 DomainEvent 为 payload JSON 字符串。
      * <p>
      * 序列化失败为系统异常，抛 ServiceException（不吞掉，不破坏事务原子性）。
+     * <p>
+     * 注意：Spring Boot 4 起底座升级到 Jackson 3（包名 {@code tools.jackson}），
+     * 容器中注册的是 Jackson 3 的 ObjectMapper/JsonMapper Bean；
+     * {@link JacksonException} 在 Jackson 3 中为非受检异常。
      *
      * @param event 领域事件
      * @return payload JSON 字符串
@@ -74,7 +78,7 @@ public class OutboxEventAdapter implements EventPort {
     private String serializePayload(DomainEvent event) {
         try {
             return objectMapper.writeValueAsString(event);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             // 序列化失败视为系统异常，抛业务异常让事务回滚
             throw new ServiceException("Outbox payload 序列化失败: " + e.getMessage(), e);
         }

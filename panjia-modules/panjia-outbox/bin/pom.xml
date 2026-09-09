@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-outbox</artifactId>
+
+    <description>
+        panjia-outbox 事务性 Outbox（事件存储 + Dispatcher 投递骨架）
+    </description>
+
+    <dependencies>
+        <!-- 盘家契约层（EventPort / DomainEvent / OutboxStatusEnum） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-contracts</artifactId>
+        </dependency>
+
+        <!-- 盘家公共模块（传递引入 mybatis-plus / jackson） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- SnailJob 任务核心（@JobExecutor） -->
+        <dependency>
+            <groupId>com.aizuda</groupId>
+            <artifactId>snail-job-client-job-core</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+</project>

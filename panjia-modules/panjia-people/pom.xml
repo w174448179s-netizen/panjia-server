@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-people</artifactId>
+
+    <description>
+        panjia-people 员工域（员工档案 / 职级 / 社保 / 师徒 / 快照供给）
+    </description>
+
+    <dependencies>
+        <!-- 盘家契约层（EmployeeSnapshot / EmployeeQueryPort / BizCode）叶子模块 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-contracts</artifactId>
+        </dependency>
+
+        <!-- 盘家公共模块（PanjiaBaseEntity / Port / 异常处理） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- 注意：不依赖 panjia-outbox。people 只面向 contracts 的 EventPort /
+             DomainEventHandler 端口编程；outbox 适配器实现由 ruoyi-admin
+             在运行时装配（fat jar 同时包含两个模块）。编译期不依赖可从物理上
+             杜绝 people → outbox 的反向依赖（ArchUnit 规则 people_must_not_depend_on_other_business_domains）。 -->
+
+        <!-- 底座公共核心（R / ServiceException） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 MyBatis-Plus（BaseMapperPlus / PageQuery / PageResult / @Version） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-mybatis</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController / @SaCheckPermission） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（@SaCheckPermission / LoginHelper 传递引入） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- RuoYi 系统模块（SysUserMapper / SysUser，仅只读引用） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-system</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ArchUnit 架构守护测试 -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- JUnit5（surefire 发现 @Test） -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

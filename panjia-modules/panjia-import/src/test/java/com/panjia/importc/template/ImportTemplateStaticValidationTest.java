@@ -1,11 +1,11 @@
 package com.panjia.importc.template;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.panjia.contracts.constant.NormalizedRecordFields;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -59,7 +59,7 @@ class ImportTemplateStaticValidationTest {
     private static final Pattern SHEET_NAME_PATTERN =
         Pattern.compile("sheet_name,.*?VALUES\\s*\\(", Pattern.DOTALL);
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final JsonMapper MAPPER = new JsonMapper();
 
     private static String seedSql;
 

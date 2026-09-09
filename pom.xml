@@ -498,6 +498,11 @@
                 <artifactId>panjia-outbox</artifactId>
                 <version>${panjia.version}</version>
             </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>panjia-people</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
 
             <!-- ArchUnit 架构测试（CI 校验：依赖图 / 事件 payload / @Value 拦截） -->
             <dependency>
