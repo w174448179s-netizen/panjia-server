@@ -151,7 +151,7 @@ VALUES (1761300000000000011, '店长', 'manager', 11, '3', true, true, '0', '0',
 
 -- 财务（全量数据权限）
 INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000012, '财务', 'payroll_clerk', 12, '1', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '财务角色（全量数据，全部操作）');
+VALUES (1761300000000000012, '财务', 'finance', 12, '1', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '财务角色（全量数据，全部操作）');
 
 -- 人事（本部门数据权限）
 INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
