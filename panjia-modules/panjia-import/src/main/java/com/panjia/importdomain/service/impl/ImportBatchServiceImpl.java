@@ -14,7 +14,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.InputStream;
 import java.util.List;
 
 /**
@@ -30,9 +29,9 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final ImportIssueMapper issueMapper;
 
     @Override
-    public Long importFromFile(ImportSourceType sourceType, InputStream inputStream,
+    public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
-        return importEngine.importFromFile(sourceType, inputStream, fileName, period, operatorId, deptId);
+        return importEngine.importFromFile(sourceType, content, fileName, period, operatorId, deptId);
     }
 
     @Override

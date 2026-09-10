@@ -11,10 +11,10 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
- * 归一化记录（业绩类专用，V1.4 §3.3）。
+ * 归一化记录（五类交易单据归一化产物：业绩/考勤/积分/费用，V2.0）。
  * <p>
- * EMPLOYEE 不产 NormalizedRecord，走 EmployeeImportSink。
  * 不含业务语义字段（提成/折算），只有结构化数据 + 关联键 + 金额原值。
+ * 员工主数据不产生归一化记录，员工导入由 people 域内部承接。
  */
 @Data
 @TableName("pj_normalized_record")

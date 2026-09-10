@@ -1,30 +1,27 @@
 package com.panjia.importdomain.datasource;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportIssueType;
-import com.panjia.importdomain.domain.raw.RawData;
+import com.panjia.importutil.dto.ParsedRow;
 import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 数据源抽象基类：封装行号、rawJson 序列化、问题构造与类型解析。
+ * 数据源抽象基类：封装问题构造、rawJson 序列化与类型读取。
+ * <p>
+ * V2.0 起类型转换由 common-import-util 完成（ParsedRow.values 为转换后值，
+ * rawValues 为原始字符串），本基类只做读取，不再自行解析类型。
  */
 @Slf4j
 public abstract class AbstractDataSource implements DataSource {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final DateTimeFormatter[] DATE_FORMATS = {
-        DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-        DateTimeFormatter.ofPattern("yyyy/MM/dd"),
-        DateTimeFormatter.ofPattern("yyyyMMdd"),
-    };
+    private static final JsonMapper OBJECT_MAPPER = new JsonMapper();
 
     protected ImportIssue issue(Integer rowNo, ImportIssueType type, String field, String rawValue, String msg) {
         ImportIssue issue = new ImportIssue();
@@ -37,61 +34,44 @@ public abstract class AbstractDataSource implements DataSource {
         return issue;
     }
 
-    protected String toRawJson(Map<String, Object> row) {
+    /** 以原始字符串行（field→raw）序列化 raw_json */
+    protected String toRawJson(ParsedRow row) {
         try {
-            return OBJECT_MAPPER.writeValueAsString(row);
+            // rawValues 是 field→String，按 audit 锚点落库；空值不写入
+            Map<String, Object> json = new LinkedHashMap<>();
+            row.getRawValues().forEach((k, v) -> {
+                if (v != null && !v.isBlank()) {
+                    json.put(k, v);
+                }
+            });
+            return OBJECT_MAPPER.writeValueAsString(json);
         } catch (Exception e) {
             log.warn("rawJson 序列化失败", e);
             return "{}";
         }
     }
 
-    protected String str(Map<String, Object> row, String field) {
-        Object v = row.get(field);
-        return v == null ? null : v.toString().trim();
+    /** 取原始字符串（trim 后） */
+    protected String str(ParsedRow row, String field) {
+        String v = row.getRawValues().get(field);
+        return v == null ? null : v.trim();
     }
 
-    protected Integer intVal(Map<String, Object> row, String field) {
-        String s = str(row, field);
-        if (s == null || s.isEmpty()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(s);
-        } catch (NumberFormatException e) {
-            return null;
-        }
+    /** 取转换后的整数值（data_type=INT） */
+    protected Integer integer(ParsedRow row, String field) {
+        Object v = row.getValues().get(field);
+        return v instanceof Integer i ? i : null;
     }
 
-    protected BigDecimal decimal(Map<String, Object> row, String field) {
-        String s = str(row, field);
-        if (s == null || s.isEmpty()) {
-            return null;
-        }
-        try {
-            return new BigDecimal(s);
-        } catch (NumberFormatException e) {
-            return null;
-        }
+    /** 取转换后的数值（data_type=DECIMAL） */
+    protected BigDecimal decimal(ParsedRow row, String field) {
+        Object v = row.getValues().get(field);
+        return v instanceof BigDecimal d ? d : null;
     }
 
-    protected LocalDate date(Map<String, Object> row, String field) {
-        String s = str(row, field);
-        if (s == null || s.isEmpty()) {
-            return null;
-        }
-        for (DateTimeFormatter fmt : DATE_FORMATS) {
-            try {
-                return LocalDate.parse(s, fmt);
-            } catch (DateTimeParseException ignored) {
-            }
-        }
-        return null;
-    }
-
-    /** 构造 RawData 公共字段（batchId/rowNo/rawJson/createTime） */
-    protected void fillRawBase(RawData raw, ImportContext ctx, int rowNo, Map<String, Object> row) {
-        // 公共字段由各实现通过 setter 设置；此方法作为约定占位
-        // createTime 由 MyBatis-Plus 自动填充
+    /** 取转换后的日期（data_type=DATE） */
+    protected LocalDate date(ParsedRow row, String field) {
+        Object v = row.getValues().get(field);
+        return v instanceof LocalDate d ? d : null;
     }
 }

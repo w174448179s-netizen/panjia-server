@@ -12,9 +12,7 @@ public enum ImportIssueType {
     COLUMN_TYPE_ERR("列类型错误"),
     REQUIRED_MISSING("必填缺失"),
     DUPLICATE_KEY("重复键"),
-    PERIOD_MISMATCH("跨月不一致"),
-    DEPT_NOT_MATCH("部门路径解析失败"),
-    POST_NOT_MATCH("岗位名未匹配");
+    PERIOD_MISMATCH("跨月不一致");
 
     @EnumValue
     private final String code;

@@ -4,7 +4,7 @@ import com.baomidou.mybatisplus.annotation.EnumValue;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 归一化记录类型（业绩类专用，不含 EMPLOYEE）。
+ * 归一化记录类型（五类交易单据：结佣/新签/考勤/积分/手工费用）。
  */
 public enum NormalizedRecordType {
 

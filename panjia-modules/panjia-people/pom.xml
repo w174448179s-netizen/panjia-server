@@ -28,6 +28,19 @@
             <artifactId>panjia-common</artifactId>
         </dependency>
 
+        <!-- 盘家导入工具层（文件解析 / 模板模型 / 文件归档 / 基础格式校验，纯技术无业务依赖）。
+             V6.0 员工导入回迁本域：仅复用工具层，不依赖 panjia-import 域实现。 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>common-import-util</artifactId>
+        </dependency>
+
+        <!-- 底座 JSON（Jackson 3 tools.jackson，模板 column_json 解析用） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
+        </dependency>
+
         <!-- 注意：不依赖 panjia-outbox。people 只面向 contracts 的 EventPort /
              DomainEventHandler 端口编程；outbox 适配器实现由 ruoyi-admin
              在运行时装配（fat jar 同时包含两个模块）。编译期不依赖可从物理上

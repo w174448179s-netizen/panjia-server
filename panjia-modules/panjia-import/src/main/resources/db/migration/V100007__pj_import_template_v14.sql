@@ -1,8 +1,8 @@
 -- ============================================================
--- 导入域 V1.4 模板种子（对齐 V1.4 source_type 与 NormalizedRecord 字段）
--- 依据：盘家智管_导入域详细设计_V1.4.md §一、§6.5
--- 说明：V100003 为旧版种子（SHELL/ATTENDANCE/SCORE/MANUAL/COST），
---       本脚本新增 V1.4 六类数据源模板，source_type 与 §一 对齐。
+-- 导入域 V2.0 模板种子（五类交易业务单据，对齐 RawData 实体字段）
+-- 依据：导入域详细设计_V2.0.md
+-- 说明：员工主数据模板已迁至 people 域（员工导入模板表）；
+--       V100003 为旧版种子（SHELL/ATTENDANCE/SCORE/MANUAL/COST），保留不删。
 -- ============================================================
 
 BEGIN;
@@ -155,46 +155,6 @@ VALUES (
     NULL,
     true, '2026-09-01'::date, NULL,
     'V1.4 手工录入模板', 'admin', now(), NULL, now()
-);
-
--- 6. 员工主数据（EMPLOYEE）
-INSERT INTO pj_import_template (id, template_code, template_version, template_name, source_type, file_type, sheet_name, header_row, data_start_row, column_mapping, validation_rules, description, source_file_version, is_active, effective_from, effective_to, remark, created_by, created_at, updated_by, updated_at)
-VALUES (
-    1761500000000000016,
-    'EMPLOYEE',
-    'V205',
-    '员工主数据导入模板',
-    'EMPLOYEE',
-    'EXCEL',
-    NULL, 1, 2,
-    '[
-        {"source_column":"A","source_header":"工号","target_field":"employeeCode","data_type":"STRING","required":true,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"B","source_header":"姓名","target_field":"name","data_type":"STRING","required":true,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"C","source_header":"手机号","target_field":"phone","data_type":"STRING","required":false,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"D","source_header":"身份证号","target_field":"idCard","data_type":"STRING","required":false,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"E","source_header":"部门路径","target_field":"deptPath","data_type":"STRING","required":true,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"F","source_header":"岗位","target_field":"postNames","data_type":"STRING","required":true,"default_value":null,"transform":"split:/","header_match_mode":"TRIM"},
-        {"source_column":"G","source_header":"职级","target_field":"level","data_type":"STRING","required":true,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"H","source_header":"社保","target_field":"socialInsured","data_type":"STRING","required":false,"default_value":"否","transform":"bool:是/否","header_match_mode":"TRIM"},
-        {"source_column":"I","source_header":"公积金","target_field":"housingInsured","data_type":"STRING","required":false,"default_value":"否","transform":"bool:是/否","header_match_mode":"TRIM"},
-        {"source_column":"J","source_header":"商业保险","target_field":"commerceInsurance","data_type":"DECIMAL","required":false,"default_value":"0","transform":null,"header_match_mode":"TRIM"},
-        {"source_column":"K","source_header":"宿舍","target_field":"dormitory","data_type":"STRING","required":false,"default_value":"无","transform":"bool:有/无","header_match_mode":"TRIM"},
-        {"source_column":"L","source_header":"兼职","target_field":"partTime","data_type":"STRING","required":false,"default_value":"否","transform":"bool:是/否","header_match_mode":"TRIM"},
-        {"source_column":"M","source_header":"师傅工号","target_field":"master","data_type":"STRING","required":false,"default_value":null,"transform":"trim","header_match_mode":"TRIM"},
-        {"source_column":"N","source_header":"入职日期","target_field":"entryDate","data_type":"DATE","required":true,"default_value":null,"transform":"date_format:yyyy-MM-dd","header_match_mode":"TRIM"}
-    ]'::jsonb,
-    '{
-        "file_level": [{"rule":"max_rows:5000","message":"单次导入不超过5000行"}],
-        "row_level": [
-            {"field":"employeeCode","rule":"not_blank","message":"工号不能为空"},
-            {"field":"name","rule":"not_blank","message":"姓名不能为空"},
-            {"field":"deptPath","rule":"not_blank","message":"部门路径不能为空"}
-        ]
-    }'::jsonb,
-    '员工主数据导入模板。EMPLOYEE 不产 NormalizedRecord，走 EmployeeImportSink 落地 people 域业务对象。',
-    NULL,
-    true, '2026-09-01'::date, NULL,
-    'V1.4 员工导入模板', 'admin', now(), NULL, now()
 );
 
 COMMIT;

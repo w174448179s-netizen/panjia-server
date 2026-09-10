@@ -1,21 +1,18 @@
 package com.panjia.importdomain.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
 import com.panjia.contracts.port.PeopleQueryPort;
-import com.panjia.importdomain.config.ImportProperties;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportIssueType;
 import com.panjia.importdomain.domain.ImportSourceType;
-import com.panjia.importdomain.domain.ImportTemplate;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
 import com.panjia.importdomain.domain.raw.RawData;
-import com.panjia.importdomain.domain.raw.RawEmployee;
 import com.panjia.importdomain.domain.raw.RawManual;
 import com.panjia.importdomain.domain.raw.RawNewSign;
 import com.panjia.importdomain.domain.raw.RawPoints;
@@ -28,50 +25,49 @@ import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.ImportIssueMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
-import com.panjia.importdomain.mapper.RawEmployeeMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
 import com.panjia.importdomain.mapper.RawNewSignMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
-import com.panjia.importdomain.template.ExcelReader;
-import com.panjia.importdomain.template.TemplateEngine;
-import com.panjia.people.dto.ValidatedEmployeeRow;
-import com.panjia.people.port.EmployeeImportSink;
+import com.panjia.importdomain.template.ImportTemplateBridge;
+import com.panjia.importutil.archive.ArchiveResult;
+import com.panjia.importutil.archive.FileArchiver;
+import com.panjia.importutil.dto.ParsedSheet;
+import com.panjia.importutil.parser.ParserFactory;
+import com.panjia.importutil.template.model.ImportTemplate;
+import com.panjia.importutil.validate.BasicValidator;
+import com.panjia.importutil.validate.FieldError;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.InputStream;
+import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
- * 导入引擎（V1.4 §3.8）。
+ * 导入引擎（V2.0：交易业务单据域）。
  * <p>
- * 两段式事务：
+ * 文件解析/归档/基础格式校验由 common-import-util 提供，本引擎只做：
  * <ul>
- *   <li>事务 A：解析 + 落 RawData / ImportIssue（insert-only）</li>
- *   <li>事务 B：归一化（业绩类 → NormalizedRecord；EMPLOYEE → EmployeeImportSink）</li>
+ *   <li>事务 A：落批次 + RawData（insert-only）+ ImportIssue</li>
+ *   <li>事务 B：归一化产 NormalizedRecord（业绩/考勤/积分/费用五类单据）</li>
  * </ul>
+ * 员工主数据导入已迁至 people 域，本域不再处理 EMPLOYEE。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ImportEngine {
 
-    private final TemplateEngine templateEngine;
-    private final ExcelReader excelReader;
+    private final ImportTemplateBridge templateBridge;
+    private final FileArchiver fileArchiver;
+    private final ParserFactory parserFactory;
+    private final BasicValidator basicValidator;
     private final List<DataSource> dataSources;
     private final List<SourceKeyGenerator> sourceKeyGenerators;
     private final ImportBatchMapper batchMapper;
@@ -82,34 +78,46 @@ public class ImportEngine {
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
-    private final RawEmployeeMapper rawEmployeeMapper;
     private final PeopleQueryPort peopleQueryPort;
-    private final EmployeeImportSink employeeImportSink;
-    private final ImportProperties importProperties;
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final JsonMapper OBJECT_MAPPER = new JsonMapper();
 
     /**
-     * 从文件流执行完整导入流程。
+     * 从文件字节执行完整导入流程。
      *
-     * @param sourceType  数据源类型
-     * @param inputStream 文件流
-     * @param fileName    原始文件名
-     * @param period      归属月（YYYY-MM）
-     * @param operatorId  操作人 ID
+     * @param sourceType 数据源类型（五类交易单据）
+     * @param content    文件字节内容
+     * @param fileName   原始文件名
+     * @param period     归属月（YYYY-MM）
+     * @param operatorId 操作人 ID
      * @param deptId      部门 ID
      * @return 批次 ID
      */
-    public Long importFromFile(ImportSourceType sourceType, InputStream inputStream,
+    public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
-        // 1. 取激活模板
-        ImportTemplate template = templateEngine.getActiveTemplate(sourceType);
+        // 1. 解析激活模板（工具层内存模型）
+        ImportTemplate template = templateBridge.resolve(sourceType.getCode());
 
-        // 2. 事务 A：解析 + 落 RawData / Issue
-        ImportBatch batch = doParsePhase(sourceType, inputStream, fileName, period,
-            operatorId, deptId, template);
+        // 2. 原始文件归档（审计锚点）
+        ArchiveResult archived = fileArchiver.archive(content, fileName, "import");
 
-        // 3. 事务 B：归一化
+        // 3. 文件解析（纯内存，不落库）
+        ParsedSheet sheet;
+        try (ByteArrayInputStream in = new ByteArrayInputStream(content)) {
+            sheet = parserFactory.parse(in, template, fileName);
+        } catch (Exception e) {
+            log.error("文件解析失败: {}", fileName, e);
+            throw new IllegalStateException("文件解析失败: " + e.getMessage(), e);
+        }
+
+        // 4. 基础格式校验（必填/类型/枚举/正则/长度）
+        List<FieldError> fieldErrors = basicValidator.validate(sheet, template);
+
+        // 5. 事务 A：落批次 + RawData + Issue
+        ImportBatch batch = doParsePhase(sourceType, sheet, fieldErrors, fileName, period,
+            operatorId, deptId, template, archived);
+
+        // 6. 事务 B：归一化
         try {
             doNormalizePhase(batch.getId(), sourceType, period);
         } catch (Exception e) {
@@ -120,18 +128,20 @@ public class ImportEngine {
         return batch.getId();
     }
 
-    // ==================== 事务 A：解析 ====================
+    // ==================== 事务 A：解析落库 ====================
 
     @Transactional(rollbackFor = Exception.class)
-    public ImportBatch doParsePhase(ImportSourceType sourceType, InputStream inputStream,
-                                    String fileName, String period, Long operatorId,
-                                    Long deptId, ImportTemplate template) {
+    public ImportBatch doParsePhase(ImportSourceType sourceType, ParsedSheet sheet,
+                                    List<FieldError> fieldErrors, String fileName, String period,
+                                    Long operatorId, Long deptId, ImportTemplate template,
+                                    ArchiveResult archived) {
         // 创建批次
         ImportBatch batch = new ImportBatch();
         batch.setSourceType(sourceType);
         batch.setTemplateVersion(template.getTemplateVersion());
         batch.setFileName(fileName);
         batch.setOriginalFileName(fileName);
+        batch.setStoragePath(archived.getStoragePath());
         batch.setPeriod(period);
         batch.setStatus(ImportBatchStatus.PARSING);
         batch.setOperatorId(operatorId);
@@ -139,38 +149,27 @@ public class ImportEngine {
         batch.setBatchNo(generateBatchNo(sourceType, period));
         batchMapper.insert(batch);
 
-        // 读 Excel 原始行
-        int headerRow = template.getHeaderRow() == null ? 0 : template.getHeaderRow();
-        List<Map<String, Object>> excelRows = excelReader.read(inputStream, headerRow);
-
-        // 行数上限
-        if (excelRows.size() > importProperties.getMaxRowsPerBatch()) {
-            throw new IllegalStateException("单批次行数超过上限: " + importProperties.getMaxRowsPerBatch());
-        }
-
-        // 列映射规整
-        List<com.panjia.importdomain.template.ColumnMapping> mappings =
-            templateEngine.parseColumnMapping(template);
-        List<Map<String, Object>> standardizedRows = templateEngine.mapColumns(mappings, excelRows);
-
-        // 选 DataSource 解析
+        // 选 DataSource 转 RawData
         DataSource ds = findDataSource(sourceType);
         ImportContext ctx = new ImportContext(batch.getId(), batch.getBatchNo(), period, template.getTemplateVersion());
-        ParseResult parseResult = ds.parse(standardizedRows, ctx);
+        ParseResult parseResult = ds.parse(sheet, ctx);
 
         // 批量落 RawData
         batchInsertRawData(sourceType, parseResult.getRows());
 
-        // 落 ImportIssue
+        // 落 ImportIssue：基础校验错误 + DataSource 结构错误
+        for (FieldError fe : fieldErrors) {
+            issueMapper.insert(toIssue(batch.getId(), fe));
+        }
         for (ImportIssue issue : parseResult.getIssues()) {
             issue.setBatchId(batch.getId());
             issueMapper.insert(issue);
         }
 
-        // 更新批次统计
-        batch.setTotalRows(parseResult.rowCount());
-        batch.setFailedRows(parseResult.issueCount());
-        batch.setSuccessRows(parseResult.rowCount() - parseResult.issueCount());
+        int issueCount = fieldErrors.size() + parseResult.getIssues().size();
+        batch.setTotalRows(sheet.getTotalRows());
+        batch.setFailedRows(issueCount);
+        batch.setSuccessRows(Math.max(0, sheet.getTotalRows() - sheet.getErrorRows()));
         batch.setStatus(ImportBatchStatus.NORMALIZING);
         batchMapper.updateById(batch);
 
@@ -191,14 +190,7 @@ public class ImportEngine {
         issueMapper.deleteByBatchId(batchId);
 
         List<ImportIssue> issues = new ArrayList<>();
-
-        if (sourceType == ImportSourceType.EMPLOYEE) {
-            // EMPLOYEE：走 Sink
-            normalizeEmployee(batchId, issues);
-        } else {
-            // 业绩类：产 NormalizedRecord
-            normalizePerformance(batchId, sourceType, period, issues);
-        }
+        normalizePerformance(batchId, sourceType, period, issues);
 
         // 落新 issue
         for (ImportIssue issue : issues) {
@@ -234,7 +226,7 @@ public class ImportEngine {
 
             // 反序列化 rawJson 取标准化字段
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
-            String externalCode = extractExternalCode(sourceType, jsonMap);
+            String externalCode = extractExternalCode(jsonMap);
 
             // 员工匹配
             if (externalCode != null && codeToId.containsKey(externalCode)) {
@@ -258,25 +250,33 @@ public class ImportEngine {
         }
     }
 
-    private void normalizeEmployee(Long batchId, List<ImportIssue> issues) {
-        List<RawEmployee> rawRows = rawEmployeeMapper.selectList(
-            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<RawEmployee>()
-                .eq(RawEmployee::getBatchId, batchId)
-                .orderByAsc(RawEmployee::getRowNo));
+    // ==================== 辅助方法 ====================
 
-        List<ValidatedEmployeeRow> validRows = new ArrayList<>();
-        for (RawEmployee raw : rawRows) {
-            Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
-            ValidatedEmployeeRow row = toValidatedEmployeeRow(raw, jsonMap);
-            // 基础校验在 DataSource.parse 已做，此处直接入 Sink
-            validRows.add(row);
-        }
-        if (!validRows.isEmpty()) {
-            employeeImportSink.apply(validRows);
-        }
+    private ImportIssue toIssue(Long batchId, FieldError fe) {
+        ImportIssue issue = new ImportIssue();
+        issue.setBatchId(batchId);
+        issue.setRowNo(fe.getRowNo());
+        issue.setIssueType(mapIssueType(fe.getReason()));
+        issue.setFieldName(fe.getField());
+        issue.setRawValue(truncate(fe.getRawValue(), 500));
+        issue.setMessage(truncate(fe.getMessage(), 1000));
+        issue.setStatus(ImportIssueStatus.OPEN);
+        return issue;
     }
 
-    // ==================== 辅助方法 ====================
+    private ImportIssueType mapIssueType(String reason) {
+        return switch (reason == null ? "" : reason) {
+            case "REQUIRED_MISSING" -> ImportIssueType.REQUIRED_MISSING;
+            default -> ImportIssueType.COLUMN_TYPE_ERR;
+        };
+    }
+
+    private String truncate(String s, int max) {
+        if (s == null) {
+            return null;
+        }
+        return s.length() <= max ? s : s.substring(0, max);
+    }
 
     private String generateBatchNo(ImportSourceType type, String period) {
         String ts = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
@@ -325,11 +325,6 @@ public class ImportEngine {
                     rawManualMapper.insert((RawManual) r);
                 }
             }
-            case EMPLOYEE -> {
-                for (RawData r : rows) {
-                    rawEmployeeMapper.insert((RawEmployee) r);
-                }
-            }
         }
     }
 
@@ -340,7 +335,6 @@ public class ImportEngine {
             case ATTENDANCE -> rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId));
             case POINTS -> rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId));
             case OTHERS -> rawManualMapper.selectList(byBatch(RawManual::getBatchId, batchId));
-            case EMPLOYEE -> rawEmployeeMapper.selectList(byBatch(RawEmployee::getBatchId, batchId));
         };
     }
 
@@ -352,7 +346,7 @@ public class ImportEngine {
 
     private Map<String, Long> matchEmployees(List<? extends RawData> rawRows) {
         List<String> codes = rawRows.stream()
-            .map(r -> extractExternalCode(r))
+            .map(this::extractExternalCode)
             .filter(c -> c != null && !c.isEmpty())
             .distinct()
             .toList();
@@ -363,20 +357,10 @@ public class ImportEngine {
     }
 
     private String extractExternalCode(RawData raw) {
-        Map<String, Object> json = parseRawJson(raw.getRawJson());
-        // 标准化字段中 employeeCode / roleSysNo 都是匹配键
-        Object code = json.get("employeeCode");
-        if (code != null) {
-            return code.toString().trim();
-        }
-        Object roleSysNo = json.get("roleSysNo");
-        if (roleSysNo != null) {
-            return roleSysNo.toString().trim();
-        }
-        return null;
+        return extractExternalCode(parseRawJson(raw.getRawJson()));
     }
 
-    private String extractExternalCode(ImportSourceType type, Map<String, Object> jsonMap) {
+    private String extractExternalCode(Map<String, Object> jsonMap) {
         Object code = jsonMap.get("employeeCode");
         if (code != null) {
             return code.toString().trim();
@@ -421,37 +405,6 @@ public class ImportEngine {
         }
     }
 
-    private ValidatedEmployeeRow toValidatedEmployeeRow(RawEmployee raw, Map<String, Object> json) {
-        ValidatedEmployeeRow row = new ValidatedEmployeeRow();
-        row.setEmployeeCode(raw.getEmployeeCode());
-        row.setEmployeeName(raw.getName());
-        row.setPhone(raw.getPhone());
-        row.setIdCard(raw.getIdCard());
-        row.setDeptFull(raw.getDeptPath());
-        // 岗位名 / 分隔
-        if (raw.getPostNames() != null && !raw.getPostNames().isEmpty()) {
-            row.setPostNames(Arrays.stream(raw.getPostNames().split("/"))
-                .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList()));
-        }
-        row.setLevelCode(raw.getLevel());
-        row.setSocialInsured(parseBool(raw.getSocialInsured()));
-        row.setHousingInsured(parseBool(raw.getHousingInsured()));
-        row.setCommercialInsured(raw.getCommerceInsurance() != null
-            && raw.getCommerceInsurance().compareTo(BigDecimal.ZERO) > 0);
-        row.setDormitory("有".equals(raw.getDormitory()));
-        row.setParttime(parseBool(raw.getPartTime()));
-        row.setMentorCode(raw.getMaster());
-        row.setHireDate(raw.getEntryDate());
-        return row;
-    }
-
-    private static Boolean parseBool(String s) {
-        if (s == null) {
-            return null;
-        }
-        return "是".equals(s.trim());
-    }
-
     private NormalizedRecordType toRecordType(ImportSourceType type) {
         return switch (type) {
             case KE_SIGNED -> NormalizedRecordType.SIGNED;
@@ -459,7 +412,6 @@ public class ImportEngine {
             case ATTENDANCE -> NormalizedRecordType.ATTENDANCE;
             case POINTS -> NormalizedRecordType.POINTS;
             case OTHERS -> NormalizedRecordType.MANUAL;
-            case EMPLOYEE -> null;
         };
     }
 

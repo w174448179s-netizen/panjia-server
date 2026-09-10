@@ -25,6 +25,12 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- 盘家公共导入工具层（文件解析/模板解析/归档/基础校验） -->
+            <dependency>
+                <groupId>com.panjia</groupId>
+                <artifactId>common-import-util</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <!-- JJWT（License JWT token 解析） -->
             <dependency>
                 <groupId>io.jsonwebtoken</groupId>
@@ -45,6 +51,7 @@
     </dependencyManagement>
 
     <modules>
+        <module>common-import-util</module>
         <module>panjia-common</module>
         <module>panjia-salary</module>
         <module>panjia-license</module>

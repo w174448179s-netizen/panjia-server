@@ -101,7 +101,8 @@ spring:
         master:
           type: ${spring.datasource.type}
           driverClassName: org.postgresql.Driver
-          url: jdbc:postgresql://localhost:5432/postgres?useUnicode=true&characterEncoding=utf8&useSSL=true&autoReconnect=true&reWriteBatchedInserts=true
+          # stringtype=unspecified：允许 MyBatis 以 String 绑定 JSONB 列（panjia 导入域 raw_json/column_json 等）
+          url: jdbc:postgresql://localhost:5432/postgres?useUnicode=true&characterEncoding=utf8&useSSL=true&autoReconnect=true&reWriteBatchedInserts=true&stringtype=unspecified
           username: root
           password: root
 #        # 从库数据源

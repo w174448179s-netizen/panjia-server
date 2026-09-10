@@ -44,4 +44,14 @@ public class ImportTemplate implements Serializable {
     private String validationRules;
 
     private Boolean isActive;
+
+    private String description;
+    private String sourceFileVersion;
+    private java.time.LocalDate effectiveFrom;
+    private java.time.LocalDate effectiveTo;
+    private String remark;
+    private String createdBy;
+    private java.time.LocalDateTime createdAt;
+    private String updatedBy;
+    private java.time.LocalDateTime updatedAt;
 }

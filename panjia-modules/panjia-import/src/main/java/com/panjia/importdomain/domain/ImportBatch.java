@@ -38,7 +38,7 @@ public class ImportBatch implements Serializable {
     private String originalFileName;
     private String storagePath;
 
-    /** 归属月 YYYY-MM（EMPLOYEE 可空） */
+    /** 归属月 YYYY-MM */
     private String period;
 
     private Integer totalRows;

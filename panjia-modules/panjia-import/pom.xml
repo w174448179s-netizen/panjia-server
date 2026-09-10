@@ -34,28 +34,28 @@
             <artifactId>ruoyi-common-mybatis</artifactId>
         </dependency>
 
-        <!-- 契约层（NormalizedRecordFields 白名单） -->
+        <!-- 契约层（PeopleQueryPort 员工匹配端口 / NormalizedRecordFields 白名单） -->
         <dependency>
             <groupId>com.panjia</groupId>
             <artifactId>panjia-contracts</artifactId>
         </dependency>
 
-        <!-- 员工域（仅 Port：EmployeeImportSink 受控写 + 部门查询） -->
+        <!-- 公共导入工具层（文件解析/模板解析/归档/基础校验，V2.0） -->
         <dependency>
             <groupId>com.panjia</groupId>
-            <artifactId>panjia-people</artifactId>
+            <artifactId>common-import-util</artifactId>
+        </dependency>
+
+        <!-- 底座 JSON（Jackson ObjectMapper：rawJson/extraJson 序列化） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
         </dependency>
 
         <!-- 底座 Web（@RestController / @SaCheckPermission） -->
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-common-web</artifactId>
-        </dependency>
-
-        <!-- 底座 Excel（EasyExcel） -->
-        <dependency>
-            <groupId>org.dromara</groupId>
-            <artifactId>ruoyi-common-excel</artifactId>
         </dependency>
 
         <!-- 底座 sa-token（权限注解 + LoginHelper） -->

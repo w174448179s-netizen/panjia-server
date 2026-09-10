@@ -5,10 +5,14 @@ import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportSourceType;
 import com.panjia.importdomain.service.ImportBatchService;
+import com.panjia.importdomain.template.ImportTemplateBridge;
+import com.panjia.importutil.export.TemplateExporter;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,6 +21,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -29,6 +37,7 @@ import java.util.List;
 public class ImportController {
 
     private final ImportBatchService importBatchService;
+    private final ImportTemplateBridge templateBridge;
 
     /**
      * 文件上传导入。
@@ -47,7 +56,7 @@ public class ImportController {
             return R.fail("未知数据源类型: " + sourceType);
         }
         try {
-            Long batchId = importBatchService.importFromFile(type, file.getInputStream(),
+            Long batchId = importBatchService.importFromFile(type, file.getBytes(),
                 file.getOriginalFilename(), period, LoginHelper.getUserId(), LoginHelper.getDeptId());
             return R.ok(batchId);
         } catch (Exception e) {
@@ -66,6 +75,43 @@ public class ImportController {
         @RequestParam(value = "period", required = false) String period) {
         ImportSourceType type = sourceType == null ? null : ImportSourceType.fromCode(sourceType);
         return R.ok(importBatchService.list(type, period));
+    }
+
+    /**
+     * 下载导入模板（根据 sourceType 从模板表生成 Excel，含表头 + 示例行）。
+     *
+     * @param sourceType 数据源类型 code
+     * @param response   HTTP 响应
+     */
+    @SaCheckPermission("import:batch:upload")
+    @GetMapping("/template/{sourceType}")
+    public void downloadTemplate(@PathVariable String sourceType, HttpServletResponse response) {
+        ImportSourceType type = ImportSourceType.fromCode(sourceType);
+        if (type == null) {
+            try {
+                response.sendError(400, "未知数据源类型: " + sourceType);
+            } catch (IOException ignored) {
+            }
+            return;
+        }
+        com.panjia.importutil.template.model.ImportTemplate template = templateBridge.resolve(sourceType);
+        int colCount = template.getColumns() == null ? 0 : template.getColumns().size();
+        log.info("导入模板: code={}, columns={}", sourceType, colCount);
+        byte[] excel = TemplateExporter.toExcel(template);
+        log.info("Excel 模板生成: {} bytes", excel.length);
+        String fileName = URLEncoder.encode(type.getCode() + "_导入模板.xlsx", StandardCharsets.UTF_8);
+        response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+        response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setContentLength(excel.length);
+        try (OutputStream out = response.getOutputStream()) {
+            out.write(excel);
+            out.flush();
+        } catch (IOException e) {
+            log.warn("模板下载写入失败", e);
+        }
     }
 
     /**

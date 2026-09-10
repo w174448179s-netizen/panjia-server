@@ -4,7 +4,6 @@ import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportSourceType;
 
-import java.io.InputStream;
 import java.util.List;
 
 /**
@@ -14,8 +13,10 @@ public interface ImportBatchService {
 
     /**
      * 执行文件导入。
+     *
+     * @param content 文件字节内容（归档 + 解析均消费内存字节）
      */
-    Long importFromFile(ImportSourceType sourceType, InputStream inputStream,
+    Long importFromFile(ImportSourceType sourceType, byte[] content,
                         String fileName, String period, Long operatorId, Long deptId);
 
     /**
