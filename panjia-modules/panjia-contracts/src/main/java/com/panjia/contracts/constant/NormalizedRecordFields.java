@@ -18,18 +18,29 @@ public final class NormalizedRecordFields {
      * 对应 NormalizedRecord 归一化后的属性名。
      */
     public static final Set<String> WHITELIST = Set.of(
-        "employeeCode",       // 工号
-        "agentName",          // 经纪人姓名
-        "performanceAmount",  // 业绩金额
-        "signDate",           // 签约日期
-        "bizType",            // 业务类型
-        "attendanceDays",     // 出勤天数
-        "lateCount",          // 迟到次数
-        "absentDays",         // 旷工天数
-        "scoreValue",         // 积分值
-        "grade",              // 等级（A/B/C）
-        "sourceType",         // 来源类型（SHELL/ATTENDANCE/SCORE/MANUAL/COST）
-        "importBatchId"       // 导入批次 ID
+        // ===== V1.4 归一化记录字段（业绩类专用） =====
+        "period",                // 归属月 YYYY-MM
+        "employeeId",            // 关联 Employee.id
+        "employeeExternalCode",  // 外部编码（系统号/工号）
+        "sourceKey",             // 业务唯一键（订单号/合同号/考勤日期）
+        "bizType",               // 业务类型
+        "receivableAmount",      // 应收业绩（原值）
+        "receivedAmount",        // 实收业绩（原值）
+        "shareRatio",            // 业绩比例
+        "roleType",              // 角色类型
+        "rawDataId",             // 对应 RawData 行 ID
+        // ===== 历史字段（V100003 种子兼容，V1.4 已不用，保留至种子迁移完成） =====
+        "employeeCode",
+        "agentName",
+        "performanceAmount",
+        "signDate",
+        "attendanceDays",
+        "lateCount",
+        "absentDays",
+        "scoreValue",
+        "grade",
+        "sourceType",
+        "importBatchId"
     );
 
     private NormalizedRecordFields() {

@@ -62,6 +62,10 @@ panjia:
     offline-grace-ms: 604800000
     # 持久化数据目录（必须在持久化卷上，铁律 14）
     data-dir: ${PANJIA_LICENSE_DATA_DIR:/data/panjia-license}
+  # 导入域
+  import:
+    batch-insert-size: 300
+    max-rows-per-batch: 5000
 
 # Spring配置
 spring:

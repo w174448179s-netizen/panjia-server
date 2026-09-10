@@ -63,16 +63,33 @@ class ImportTemplateStaticValidationTest {
 
     private static String seedSql;
 
+    /** 与 columnMappings 一一对应的 source_type 列表 */
+    private static List<String> mappingSourceTypes = new ArrayList<>();
+
     @BeforeAll
     static void loadSeed() throws IOException {
-        Path sqlPath = Paths.get("src/main/resources/db/migration/V100003__pj_import_template_seed.sql");
-        if (!Files.exists(sqlPath)) {
-            // 兼容模块构建目录
-            sqlPath = Paths.get("panjia-modules/panjia-import/src/main/resources/db/migration/V100003__pj_import_template_seed.sql");
+        // 扫描 db/migration 下所有模板种子 SQL（V*template*seed*.sql / V*template*v14.sql）
+        Path dir = Paths.get("src/main/resources/db/migration");
+        if (!Files.exists(dir)) {
+            dir = Paths.get("panjia-modules/panjia-import/src/main/resources/db/migration");
         }
-        assertTrue(Files.exists(sqlPath), "种子 SQL 文件必须存在: " + sqlPath);
-        seedSql = Files.readString(sqlPath, StandardCharsets.UTF_8);
-        assertFalse(seedSql.isBlank(), "种子 SQL 不能为空");
+        assertTrue(Files.exists(dir), "迁移目录必须存在: " + dir);
+        StringBuilder sb = new StringBuilder();
+        try (var stream = Files.list(dir)) {
+            stream.filter(p -> {
+                String name = p.getFileName().toString();
+                return name.endsWith(".sql")
+                    && (name.contains("template") && (name.contains("seed") || name.contains("v14")));
+            }).sorted().forEach(p -> {
+                try {
+                    sb.append(Files.readString(p, StandardCharsets.UTF_8)).append("\n");
+                } catch (IOException e) {
+                    throw new RuntimeException("读取失败: " + p, e);
+                }
+            });
+        }
+        seedSql = sb.toString();
+        assertFalse(seedSql.isBlank(), "模板种子 SQL 不能为空");
     }
 
     @Test
@@ -88,7 +105,10 @@ class ImportTemplateStaticValidationTest {
                 Map<String, Object> col = columns.get(j);
                 String context = String.format("column_mapping[%d][%d]", i, j);
                 validateSourceColumn(col, context);
-                validateTargetField(col, context);
+                // EMPLOYEE 不产 NormalizedRecord，target_field 不走 NormalizedRecord 白名单
+                if (!isEmployeeMapping(i)) {
+                    validateTargetField(col, context);
+                }
                 validateLookupDictType(col, context);
                 validateDefaultValue(col, context);
                 validateSourceHeader(col, context);
@@ -119,11 +139,42 @@ class ImportTemplateStaticValidationTest {
      */
     private List<String> extractColumnMappings() {
         List<String> result = new ArrayList<>();
-        Matcher matcher = COLUMN_MAPPING_PATTERN.matcher(seedSql);
-        while (matcher.find()) {
-            result.add(matcher.group(1));
+        mappingSourceTypes.clear();
+        // 逐条 INSERT 解析，同时提取 source_type 与 column_mapping
+        Pattern insertPattern = Pattern.compile(
+            "INSERT INTO pj_import_template.*?VALUES\\s*\\((.*?)\\);", Pattern.DOTALL);
+        Matcher insertMatcher = insertPattern.matcher(seedSql);
+        while (insertMatcher.find()) {
+            String valuesPart = insertMatcher.group(1);
+            // 提取 source_type（单引号字符串）
+            Matcher stMatcher = Pattern.compile("'([A-Z_]+)'").matcher(valuesPart);
+            String sourceType = null;
+            while (stMatcher.find()) {
+                String candidate = stMatcher.group(1);
+                if (candidate.equals("KE_SIGNED") || candidate.equals("KE_NEW_SIGN")
+                    || candidate.equals("ATTENDANCE") || candidate.equals("POINTS")
+                    || candidate.equals("OTHERS") || candidate.equals("EMPLOYEE")
+                    || candidate.equals("EXCEL")) {
+                    // 第一个匹配的非 EXCEL 值即为 source_type
+                    if (!"EXCEL".equals(candidate) && sourceType == null) {
+                        sourceType = candidate;
+                    }
+                }
+            }
+            // 提取 column_mapping JSON
+            Matcher cmMatcher = COLUMN_MAPPING_PATTERN.matcher(valuesPart);
+            while (cmMatcher.find()) {
+                result.add(cmMatcher.group(1));
+                mappingSourceTypes.add(sourceType);
+            }
         }
         return result;
+    }
+
+    /** 判断第 index 个 column_mapping 是否属于 EMPLOYEE 类型 */
+    private boolean isEmployeeMapping(int index) {
+        return index < mappingSourceTypes.size()
+            && "EMPLOYEE".equals(mappingSourceTypes.get(index));
     }
 
     /**

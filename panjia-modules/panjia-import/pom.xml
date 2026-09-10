@@ -40,10 +40,48 @@
             <artifactId>panjia-contracts</artifactId>
         </dependency>
 
+        <!-- 员工域（仅 Port：EmployeeImportSink 受控写 + 部门查询） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-people</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController / @SaCheckPermission） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 Excel（EasyExcel） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-excel</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（权限注解 + LoginHelper） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- JUnit5（CI: check-import-template-static 校验种子数据） -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- ArchUnit 架构守护测试 -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

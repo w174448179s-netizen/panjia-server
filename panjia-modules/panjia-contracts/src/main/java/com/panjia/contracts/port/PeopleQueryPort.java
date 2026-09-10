@@ -18,6 +18,16 @@ import java.util.Map;
 public interface PeopleQueryPort {
 
     /**
+     * 按员工工号（外部编码）批量查员工 ID。
+     * <p>
+     * 导入域归一化时用于 employee_external_code → employee.id 匹配。
+     *
+     * @param codes 员工工号集合
+     * @return employeeCode → employeeId
+     */
+    Map<String, Long> findEmployeeIdsByCodes(Collection<String> codes);
+
+    /**
      * 取单个员工指定月份的算薪事实快照。
      *
      * @param employeeId   员工 ID

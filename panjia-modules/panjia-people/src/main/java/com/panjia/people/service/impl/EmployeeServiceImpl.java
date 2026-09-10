@@ -330,6 +330,21 @@ public class EmployeeServiceImpl implements EmployeeService {
         return result;
     }
 
+    @Override
+    public Map<String, Long> findEmployeeIdsByCodes(Collection<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return Map.of();
+        }
+        List<Employee> list = employeeMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Employee>()
+                .in(Employee::getEmployeeCode, codes));
+        Map<String, Long> map = new java.util.LinkedHashMap<>();
+        for (Employee e : list) {
+            map.put(e.getEmployeeCode(), e.getEmployeeId());
+        }
+        return map;
+    }
+
     // ==================== 内部方法 ====================
 
     /**
