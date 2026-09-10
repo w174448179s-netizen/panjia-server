@@ -15,12 +15,20 @@ import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import com.panjia.importdomain.template.ColumnMapping;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.json.JsonMapper;
+
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 
 /**
  * 导入模板管理控制器。
@@ -36,6 +44,8 @@ public class TemplateController {
 
     private final ImportTemplateMapper templateMapper;
     private final ImportTemplateBridge templateBridge;
+
+    private static final JsonMapper MAPPER = new JsonMapper();
 
     /**
      * 模板列表（可按 sourceType 筛选）。
@@ -215,6 +225,166 @@ public class TemplateController {
             out.flush();
         } catch (IOException e) {
             log.warn("模板下载写入失败", e);
+        }
+    }
+
+    /**
+     * 获取列映射列表（解析 column_mapping JSONB）。
+     */
+    @SaCheckPermission("import:template:list")
+    @GetMapping("/{id}/columns")
+    public R<List<ColumnMapping>> getColumns(@PathVariable Long id) {
+        ImportTemplate entity = templateMapper.selectById(id);
+        if (entity == null) {
+            return R.fail("模板不存在: id=" + id);
+        }
+        try {
+            List<ColumnMapping> mappings = MAPPER.readValue(entity.getColumnMapping(),
+                    new TypeReference<List<ColumnMapping>>() {});
+            return R.ok(mappings);
+        } catch (Exception e) {
+            return R.fail("列映射解析失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 保存列映射（整体替换 column_mapping）。
+     */
+    @SaCheckPermission("import:template:edit")
+    @PutMapping("/{id}/columns")
+    @Transactional(rollbackFor = Exception.class)
+    public R<Void> saveColumns(@PathVariable Long id, @RequestBody List<ColumnMapping> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return R.fail("列映射不能为空");
+        }
+        ImportTemplate entity = templateMapper.selectById(id);
+        if (entity == null) {
+            return R.fail("模板不存在: id=" + id);
+        }
+        if (Boolean.TRUE.equals(entity.getIsActive())) {
+            return R.fail("已激活的模板不允许直接编辑，请先停用或复制为新版本");
+        }
+        try {
+            String json = MAPPER.writeValueAsString(columns);
+            entity.setColumnMapping(json);
+            String operator = LoginHelper.getLoginUser().getUsername();
+            entity.setUpdatedBy(operator);
+            entity.setUpdatedAt(LocalDateTime.now());
+            templateMapper.updateById(entity);
+            log.info("保存导入模板列映射: id={}, columns={}, operator={}",
+                    id, columns.size(), operator);
+            return R.ok();
+        } catch (Exception e) {
+            return R.fail("保存失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 版本对比（返回两个模板的列映射差异）。
+     */
+    @SaCheckPermission("import:template:list")
+    @GetMapping("/compare")
+    public R<List<TemplateColumnDiff>> compare(@RequestParam Long sourceId,
+                                               @RequestParam Long targetId) {
+        ImportTemplate source = templateMapper.selectById(sourceId);
+        ImportTemplate target = templateMapper.selectById(targetId);
+        if (source == null || target == null) {
+            return R.fail("模板不存在");
+        }
+        try {
+            List<ColumnMapping> sourceCols = MAPPER.readValue(source.getColumnMapping(),
+                    new TypeReference<List<ColumnMapping>>() {});
+            List<ColumnMapping> targetCols = MAPPER.readValue(target.getColumnMapping(),
+                    new TypeReference<List<ColumnMapping>>() {});
+            return R.ok(ColumnMappingDiffUtils.compare(sourceCols, targetCols));
+        } catch (Exception e) {
+            return R.fail("对比失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 列差异条目。
+     */
+    @lombok.Data
+    public static class TemplateColumnDiff {
+        private String field;
+        private String changeType; // ADDED / REMOVED / MODIFIED / UNCHANGED
+        private String sourceHeader;
+        private String targetHeader;
+        private String sourceType;
+        private String targetType;
+        private Boolean sourceRequired;
+        private Boolean targetRequired;
+        private String diffDetail;
+    }
+
+    /**
+     * 列映射对比工具类。
+     */
+    static class ColumnMappingDiffUtils {
+        static List<TemplateColumnDiff> compare(List<ColumnMapping> source, List<ColumnMapping> target) {
+            List<TemplateColumnDiff> result = new ArrayList<>();
+            Map<String, ColumnMapping> sourceMap = new LinkedHashMap<>();
+            Map<String, ColumnMapping> targetMap = new LinkedHashMap<>();
+            for (ColumnMapping c : source) sourceMap.put(c.getTargetField(), c);
+            for (ColumnMapping c : target) targetMap.put(c.getTargetField(), c);
+
+            // 遍历 target，找新增和修改
+            for (ColumnMapping tCol : target) {
+                TemplateColumnDiff diff = new TemplateColumnDiff();
+                diff.setField(tCol.getTargetField());
+                diff.setTargetHeader(tCol.getSourceHeader());
+                diff.setTargetType(tCol.getType());
+                diff.setTargetRequired(tCol.getRequired());
+                ColumnMapping sCol = sourceMap.get(tCol.getTargetField());
+                if (sCol == null) {
+                    diff.setChangeType("ADDED");
+                    diff.setDiffDetail("新增列");
+                } else {
+                    StringBuilder detail = new StringBuilder();
+                    if (!Objects.equals(sCol.getSourceHeader(), tCol.getSourceHeader())) {
+                        detail.append("表头: ").append(sCol.getSourceHeader())
+                                .append(" → ").append(tCol.getSourceHeader()).append("; ");
+                    }
+                    if (!Objects.equals(sCol.getType(), tCol.getType())) {
+                        detail.append("类型: ").append(sCol.getType())
+                                .append(" → ").append(tCol.getType()).append("; ");
+                    }
+                    if (!Objects.equals(sCol.getRequired(), tCol.getRequired())) {
+                        detail.append("必填: ").append(sCol.getRequired())
+                                .append(" → ").append(tCol.getRequired()).append("; ");
+                    }
+                    if (!Objects.equals(sCol.getTransform(), tCol.getTransform())) {
+                        detail.append("转换: ").append(sCol.getTransform())
+                                .append(" → ").append(tCol.getTransform()).append("; ");
+                    }
+                    diff.setSourceHeader(sCol.getSourceHeader());
+                    diff.setSourceType(sCol.getType());
+                    diff.setSourceRequired(sCol.getRequired());
+                    if (detail.length() > 0) {
+                        diff.setChangeType("MODIFIED");
+                        diff.setDiffDetail(detail.toString());
+                    } else {
+                        diff.setChangeType("UNCHANGED");
+                        diff.setDiffDetail("无变化");
+                    }
+                }
+                result.add(diff);
+            }
+            // 遍历 source，找删除的
+            for (ColumnMapping sCol : source) {
+                if (!targetMap.containsKey(sCol.getTargetField())) {
+                    TemplateColumnDiff diff = new TemplateColumnDiff();
+                    diff.setField(sCol.getTargetField());
+                    diff.setSourceHeader(sCol.getSourceHeader());
+                    diff.setSourceType(sCol.getType());
+                    diff.setSourceRequired(sCol.getRequired());
+                    diff.setChangeType("REMOVED");
+                    diff.setDiffDetail("删除列");
+                    result.add(diff);
+                }
+            }
+            return result;
         }
     }
 }

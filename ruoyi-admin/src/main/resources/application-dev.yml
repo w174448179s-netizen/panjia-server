@@ -331,3 +331,8 @@ justauth:
       client-id: 10**********6
       client-secret: 1f7d08**********5b7**********29e
       redirect-uri: ${justauth.address}/social-callback?source=gitea
+--- # License 授权校验配置 / 员工域租户配置
+panjia:
+  # 员工域：客户根部门 ID（岗位挂该节点下，导入自动建部门树的父节点）
+  tenant:
+    root-dept-id: ${PANJIA_TENANT_ROOT_DEPT_ID:1761000000000000100}

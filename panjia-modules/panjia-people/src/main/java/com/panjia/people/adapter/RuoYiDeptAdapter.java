@@ -44,6 +44,9 @@ public class RuoYiDeptAdapter implements DeptPort {
     private final SysDeptMapper sysDeptMapper;
     private final PeopleProperties peopleProperties;
 
+    /** 根部门默认占位名称（Flyway 初始化时设置，首次导入时会被替换为大区名） */
+    private static final String DEFAULT_ROOT_DEPT_NAME = "tenant_name";
+
     @Override
     public Long ensureDept(String deptFull) {
         if (deptFull == null || deptFull.isBlank()) {
@@ -53,10 +56,29 @@ public class RuoYiDeptAdapter implements DeptPort {
         if (root == null) {
             throw new ServiceException("客户根部门不存在，rootDeptId={}", peopleProperties.getRootDeptId());
         }
+
+        String[] parts = deptFull.split(DEPT_PATH_SEPARATOR);
+        int startIdx = 0;
+        String firstPart = parts.length > 0 ? parts[0].trim() : "";
+
+        if (!firstPart.isEmpty()) {
+            // 1. 根部门仍是占位符 → 用第一个大区名重命名，大区直接作为根部门
+            if (DEFAULT_ROOT_DEPT_NAME.equals(root.getDeptName())) {
+                root.setDeptName(firstPart);
+                sysDeptMapper.updateById(root);
+                startIdx = 1;
+            }
+            // 2. 根部门名与大区名相同 → 大区就是根部门，跳过第一级
+            else if (firstPart.equals(root.getDeptName())) {
+                startIdx = 1;
+            }
+            // 3. 根部门名与大区名不同（多大区场景）→ 大区作为根的子部门，正常建树
+        }
+
         Long parentId = root.getDeptId();
         String parentAncestors = root.getAncestors();
-        for (String part : deptFull.split(DEPT_PATH_SEPARATOR)) {
-            String name = part.trim();
+        for (int i = startIdx; i < parts.length; i++) {
+            String name = parts[i].trim();
             if (name.isEmpty()) {
                 continue;
             }
@@ -104,7 +126,7 @@ public class RuoYiDeptAdapter implements DeptPort {
         }
         Long rootId = peopleProperties.getRootDeptId();
         List<String> names = new ArrayList<>();
-        // 祖级链 + 自身，跳过根节点与根节点以上（0）
+        // 祖级链 + 自身，跳过 0（顶级虚拟节点）
         List<Long> chain = new ArrayList<>();
         if (dept.getAncestors() != null && !dept.getAncestors().isBlank()) {
             for (String id : dept.getAncestors().split(ANCESTORS_SEPARATOR)) {
@@ -113,11 +135,15 @@ public class RuoYiDeptAdapter implements DeptPort {
         }
         chain.add(dept.getDeptId());
         for (Long id : chain) {
-            if (id.equals(rootId) || id == 0L) {
+            if (id == 0L) {
                 continue;
             }
             SysDept node = sysDeptMapper.selectById(id);
             if (node != null) {
+                // 跳过占位名称的根部门
+                if (id.equals(rootId) && DEFAULT_ROOT_DEPT_NAME.equals(node.getDeptName())) {
+                    continue;
+                }
                 names.add(node.getDeptName());
             }
         }
@@ -147,7 +173,15 @@ public class RuoYiDeptAdapter implements DeptPort {
     @Override
     public List<DeptNode> listDeptTree() {
         Long rootId = peopleProperties.getRootDeptId();
-        // 从根节点向下 BFS 逐层查子部门（门店 → 组别），DB 无关
+        SysDept root = sysDeptMapper.selectById(rootId);
+        if (root == null) {
+            return new ArrayList<>();
+        }
+        // 根部门仍为占位名称时，跳过根节点，直接展示子部门（大区→门店→小组）
+        // 根部门已被重命名为实际大区名时，以根为树的根节点展示（大区→门店→小组）
+        boolean rootHasRealName = !DEFAULT_ROOT_DEPT_NAME.equals(root.getDeptName());
+
+        // BFS 逐层查子部门
         Map<Long, DeptNode> nodes = new HashMap<>();
         List<Long> parentIds = new ArrayList<>();
         parentIds.add(rootId);
@@ -168,13 +202,29 @@ public class RuoYiDeptAdapter implements DeptPort {
         }
 
         List<DeptNode> roots = new ArrayList<>();
-        for (DeptNode node : nodes.values()) {
-            if (rootId.equals(node.getParentId())) {
-                roots.add(node);
-            } else {
-                DeptNode parent = nodes.get(node.getParentId());
-                if (parent != null) {
-                    parent.getChildren().add(node);
+        if (rootHasRealName) {
+            // 根部门就是大区，作为树的根
+            DeptNode rootNode = new DeptNode();
+            rootNode.setDeptId(root.getDeptId());
+            rootNode.setDeptName(root.getDeptName());
+            rootNode.setParentId(root.getParentId());
+            // 挂载一级子节点
+            for (DeptNode node : nodes.values()) {
+                if (rootId.equals(node.getParentId())) {
+                    rootNode.getChildren().add(node);
+                }
+            }
+            roots.add(rootNode);
+        } else {
+            // 根部门仍是占位符，跳过根，直接以子节点为根
+            for (DeptNode node : nodes.values()) {
+                if (rootId.equals(node.getParentId())) {
+                    roots.add(node);
+                } else {
+                    DeptNode parent = nodes.get(node.getParentId());
+                    if (parent != null) {
+                        parent.getChildren().add(node);
+                    }
                 }
             }
         }

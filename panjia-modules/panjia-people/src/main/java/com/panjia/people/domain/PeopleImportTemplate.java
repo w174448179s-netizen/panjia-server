@@ -22,8 +22,8 @@ public class PeopleImportTemplate implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** 模板 ID */
-    @TableId(type = IdType.INPUT)
+    /** 模板 ID（雪花 ID） */
+    @TableId(type = IdType.ASSIGN_ID)
     private Long id;
 
     /** 模板编码（EMPLOYEE） */
