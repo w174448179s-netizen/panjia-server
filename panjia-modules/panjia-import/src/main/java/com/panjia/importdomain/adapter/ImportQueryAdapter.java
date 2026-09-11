@@ -72,16 +72,19 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     }
 
     /**
-     * V2.0 简化映射：仅映射已有字段；businessDate / employeeName / deptFullName 留 null
-     * 并打日志，等待 V2.1 / PeopleSnapshotAdapter 接入后补齐。
+     * V2.0 简化映射：仅映射已有字段；employeeName / deptFullName 留 null，
+     * 等待 V2.1 / PeopleSnapshotAdapter 接入后补齐。
+     * <p>
+     * businessDate 用归属月初填充：月度归集的导入业绩业务日期精确到月已足够，
+     * 且 pj_perf_fact.business_date / effective_date 为 NOT NULL，null 会让
+     * 消费侧事实 INSERT 直接炸掉（derivePeriod(月初) == period，语义自洽）。
      */
     private NormalizedRecordDTO toDTO(NormalizedRecord r, String sourceType) {
         NormalizedRecordDTO dto = new NormalizedRecordDTO();
         dto.setId(r.getId());
         dto.setBatchId(r.getBatchId());
         dto.setSourceType(sourceType);
-        // businessDate V2.0 暂未在归一化落库，留 null。
-        dto.setBusinessDate(null);
+        dto.setBusinessDate(periodStartDate(r.getPeriod()));
         dto.setPeriod(r.getPeriod());
         dto.setEmployeeCode(r.getEmployeeExternalCode());
         dto.setEmployeeName(null);  // TODO: 待 PeopleSnapshotAdapter 接入后填充
@@ -93,5 +96,19 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setRoleType(r.getRoleType());
         dto.setExtJson(r.getExtraJson());
         return dto;
+    }
+
+    /** "YYYY-MM" → 该月 1 号；period 为空或非法返回 null（消费侧 fail fast） */
+    private java.time.LocalDate periodStartDate(String period) {
+        if (period == null || period.length() != 7) {
+            return null;
+        }
+        try {
+            return java.time.LocalDate.of(
+                Integer.parseInt(period.substring(0, 4)),
+                Integer.parseInt(period.substring(5, 7)), 1);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

@@ -78,8 +78,10 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
         } catch (Exception e) {
             log.error("[业绩消费] 归档事件处理失败：batchId={}, eventId={}",
                 event.getBatchId(), eventId, e);
-            // Dispatcher 已在调用前做幂等检查（pj_outbox_idempotent），本方法抛异常
-            // 会让 OutboxDispatcher 进退避重试；这里不抛由 Dispatcher 走 FAILED 终态。
+            // 原事务已回滚（RUNNING 日志行不复存在），在事务外补记一条 FAILED 审计日志，
+            // message 为根因摘要；随后 rethrow 交 OutboxDispatcher 退避重试
+            performanceEngine.markConsumeFailed(event.getBatchId(), eventId, "IMPORT_BATCH_ARCHIVED",
+                event.getSourceType(), event.getPeriod(), null, e);
             throw e;
         }
     }

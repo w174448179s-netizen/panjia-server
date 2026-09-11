@@ -19,6 +19,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -139,103 +140,112 @@ public class PerformanceEngine {
         }
 
         // ========== 3. 分页拉取归一化记录，逐行生成业绩事实 ==========
-        // 注意：importQueryPort 当前为空实现（抛 UnsupportedOperationException），
-        // 跨域调用联调后此处将真正执行分页拉取逻辑。
+        // ★ 事务语义：本方法 @Transactional，PostgreSQL 下任何一条 SQL 失败整个事务即 aborted，
+        //   "单条失败跳过继续"是伪命题（后续 SQL 全部 25P02，根因还被吞掉）。
+        //   因此这里不做逐条 catch：任何一行失败 → 异常直接传播 → 整批回滚，
+        //   handler 在事务外用 markConsumeFailed 补记 FAILED 日志（Outbox 退避重试）。
         int successCount = 0;
-        int failedCount = 0;
         int totalCount = 0;
         String derivedPeriod = null;
 
-        try {
-            // 统计总记录数（用于 totalRows）
-            totalCount = (int) importQueryPort.countByBatchId(batchId);
-            consumeLog.setTotalRows(totalCount);
+        // 统计总记录数（用于 totalRows）
+        totalCount = (int) importQueryPort.countByBatchId(batchId);
+        consumeLog.setTotalRows(totalCount);
 
-            // 分页拉取并处理
-            // 端口契约位于 panjia-contracts（叶子模块，不依赖 ruoyi-common-mybatis），
-            // 此处用基础 int 参数调用，避免把 PageQuery 牵入跨域契约。
-            int pageNum = 1;
-            int pageSize = ImportNormalizedRecordQueryPort.DEFAULT_PAGE_SIZE;
+        // 分页拉取并处理
+        // 端口契约位于 panjia-contracts（叶子模块，不依赖 ruoyi-common-mybatis），
+        // 此处用基础 int 参数调用，避免把 PageQuery 牵入跨域契约。
+        int pageNum = 1;
+        int pageSize = ImportNormalizedRecordQueryPort.DEFAULT_PAGE_SIZE;
 
-            PageResult<NormalizedRecordDTO> pageResult;
-            do {
-                // 调用跨域端口拉取归一化记录
-                pageResult = importQueryPort.listByBatchId(batchId, pageNum, pageSize);
+        PageResult<NormalizedRecordDTO> pageResult;
+        do {
+            pageResult = importQueryPort.listByBatchId(batchId, pageNum, pageSize);
 
-                if (pageResult != null && pageResult.getRows() != null) {
-                    for (NormalizedRecordDTO record : pageResult.getRows()) {
-                        try {
-                            // 从记录中推导期间（取第一条记录的期间作为消费日志的期间）
-                            if (derivedPeriod == null && record.getBusinessDate() != null) {
-                                derivedPeriod = derivePeriod(record.getBusinessDate());
-                            } else if (derivedPeriod == null && record.getPeriod() != null) {
-                                derivedPeriod = record.getPeriod();
-                            }
-
-                            // 构建单条业绩事实
-                            FactType factType = FactType.fromCode(properties.getDefaultFactType());
-                            buildSingleFact(record, factType, operatorId);
-                            successCount++;
-                        } catch (Exception e) {
-                            // 单条失败不影响整体，记录失败数
-                            log.error("[业绩消费] 单条事实构建失败：recordId={}, batchId={}",
-                                    record.getId(), batchId, e);
-                            failedCount++;
-                        }
+            if (pageResult != null && pageResult.getRows() != null) {
+                for (NormalizedRecordDTO record : pageResult.getRows()) {
+                    if (derivedPeriod == null && record.getBusinessDate() != null) {
+                        derivedPeriod = derivePeriod(record.getBusinessDate());
+                    } else if (derivedPeriod == null && record.getPeriod() != null) {
+                        derivedPeriod = record.getPeriod();
                     }
+
+                    FactType factType = FactType.fromCode(properties.getDefaultFactType());
+                    buildSingleFact(record, factType, operatorId);
+                    successCount++;
                 }
-                pageNum++;
-            } while (pageResult != null && pageResult.getRows() != null
-                    && !pageResult.getRows().isEmpty()
-                    && successCount + failedCount < totalCount);
-
-        } catch (UnsupportedOperationException e) {
-            // 跨域端口未实现，记录日志并标记为失败
-            // 此为开发阶段预期行为，联调后将移除该分支
-            log.warn("[业绩消费] 跨域查询端口暂未实现，消费流程骨架已就绪：batchId={}", batchId);
-            consumeLog.setMessage("跨域查询端口暂未实现，待联调");
-            consumeLog.setStatus(ConsumeStatus.FAILED);
-            consumeLogMapper.updateById(consumeLog);
-            return consumeLog;
-
-        } catch (Exception e) {
-            // 整体异常，标记为失败
-            log.error("[业绩消费] 批次消费异常：batchId={}", batchId, e);
-            consumeLog.setMessage("消费异常：" + e.getMessage());
-            consumeLog.setStatus(ConsumeStatus.FAILED);
-            consumeLog.setSuccessRows(successCount);
-            consumeLog.setFailedRows(failedCount);
-            consumeLogMapper.updateById(consumeLog);
-            return consumeLog;
-        }
+            }
+            pageNum++;
+        } while (pageResult != null && pageResult.getRows() != null
+                && !pageResult.getRows().isEmpty()
+                && successCount < totalCount);
 
         // ========== 4. 统计并更新消费日志状态 ==========
+        // 走到这里即整批成功（任何失败都会在上方传播出去）
         consumeLog.setSuccessRows(successCount);
-        consumeLog.setFailedRows(failedCount);
+        consumeLog.setFailedRows(0);
         // 事件未携带 period 时用首条记录推导兜底；已有值则保留事件口径（批次归属月）
         if (consumeLog.getPeriod() == null) {
             consumeLog.setPeriod(derivedPeriod);
         }
-
+        consumeLog.setStatus(ConsumeStatus.SUCCESS);
         if (totalCount == 0) {
-            consumeLog.setStatus(ConsumeStatus.SUCCESS);
             consumeLog.setMessage("批次无数据");
-        } else if (failedCount == 0) {
-            consumeLog.setStatus(ConsumeStatus.SUCCESS);
-        } else if (successCount == 0) {
-            consumeLog.setStatus(ConsumeStatus.FAILED);
-            consumeLog.setMessage("全部失败");
-        } else {
-            consumeLog.setStatus(ConsumeStatus.PARTIAL);
-            consumeLog.setMessage("部分成功");
         }
 
         consumeLogMapper.updateById(consumeLog);
 
-        log.info("[业绩消费] 批次消费完成：batchId={}, total={}, success={}, failed={}, status={}",
-                batchId, totalCount, successCount, failedCount, consumeLog.getStatus());
+        log.info("[业绩消费] 批次消费完成：batchId={}, total={}, success={}, status={}",
+                batchId, totalCount, successCount, consumeLog.getStatus());
 
         return consumeLog;
+    }
+
+    /**
+     * 消费失败落 FAILED 日志（供 handler 在原事务回滚后调用）。
+     * <p>
+     * buildFromBatch 的 @Transactional 已回滚——RUNNING 行不复存在，此处以新事务
+     * 插入一条 FAILED 记录作为失败审计；同一 eventId 的历史 FAILED 行先清除，
+     * 只保留最新一条（Outbox 退避重试会多次触发本方法）。
+     * <p>
+     * REQUIRES_NEW：防止未来调用方（如 OutboxDispatcher）包事务时把本写入拖回滚。
+     *
+     * @param cause 消费失败根因（message 取链首原因摘要，防超长截断）
+     */
+    @Transactional(rollbackFor = Exception.class, propagation = Propagation.REQUIRES_NEW)
+    public void markConsumeFailed(Long batchId, String eventId, String eventType,
+                                  String sourceType, String period, Long operatorId, Throwable cause) {
+        consumeLogMapper.delete(new LambdaQueryWrapper<PerformanceConsumeLog>()
+            .eq(PerformanceConsumeLog::getEventId, eventId)
+            .eq(PerformanceConsumeLog::getStatus, ConsumeStatus.FAILED));
+
+        PerformanceConsumeLog failedLog = new PerformanceConsumeLog();
+        failedLog.setBatchId(batchId);
+        failedLog.setEventId(eventId);
+        failedLog.setEventType(eventType);
+        failedLog.setPeriod(period);
+        failedLog.setSourceType(sourceType);
+        failedLog.setStatus(ConsumeStatus.FAILED);
+        failedLog.setOperatorId(operatorId);
+        failedLog.setTotalRows(0);
+        failedLog.setSuccessRows(0);
+        failedLog.setFailedRows(0);
+        failedLog.setMessage(rootMessage(cause));
+        consumeLogMapper.insert(failedLog);
+
+        log.error("[业绩消费] 已记录消费失败日志：batchId={}, eventId={}, reason={}",
+                batchId, eventId, failedLog.getMessage());
+    }
+
+    /** 取异常链最深层原因的 message 摘要（防 null / 超长，message 列 VARCHAR(500)） */
+    private String rootMessage(Throwable cause) {
+        Throwable t = cause;
+        while (t.getCause() != null && t.getCause() != t) {
+            t = t.getCause();
+        }
+        String msg = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+        String full = "消费失败：" + msg;
+        return full.length() > 500 ? full.substring(0, 500) : full;
     }
 
     /**
@@ -290,6 +300,12 @@ public class PerformanceEngine {
         }
 
         // ========== 4. 构建并保存业绩事实 ==========
+        // NOT NULL 防线：businessDate/period 由 adapter 以归属月初保证；缺失即脏数据，fail fast
+        LocalDate businessDate = record.getBusinessDate();
+        if (businessDate == null || record.getPeriod() == null) {
+            throw new IllegalStateException(
+                "归一化记录缺少业务日期/归属月，拒绝构建业绩事实：recordId=" + record.getId());
+        }
         PerformanceFact fact = new PerformanceFact();
         fact.setFactType(factType);
         fact.setPeriod(derivePeriod(record.getBusinessDate()));

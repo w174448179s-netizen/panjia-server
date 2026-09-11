@@ -36,9 +36,11 @@ VALUES (1761400000000002611, '业绩查询', 1761400000000002610, 1, NULL, NULL,
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002612, '重新消费', 1761400000000002610, 2, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:fact:build', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');
 
--- 调整单管理（reparent 2600 → 2200）
+-- 业绩调整（reparent 2600 → 2200）
+-- 注：path=adjustment——V100001 的 2203「结佣调整」(commission/adjust/index) 已占用
+--     /performance/adjust，同 path 会让两个菜单点谁都路由到同一个页面
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002620, '调整单管理', 1761400000000002200, 5, 'adjust', 'performance/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:adjust:list', 'Edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩调整单管理');
+VALUES (1761400000000002620, '业绩调整', 1761400000000002200, 5, 'adjustment', 'performance/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:adjust:list', 'Edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩调整单管理');
 
 -- 调整单按钮权限
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
