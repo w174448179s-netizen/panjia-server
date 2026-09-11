@@ -1,5 +1,6 @@
 -- ============================================================
 -- 员工域 V6.0：员工导入回迁（本域自建 4 张导入表 + EMPLOYEE 模板种子）
+-- 段位：V110004（2026-09-11 由 V100018 重命名）
 -- 依据：盘家智管_员工域详细设计_V6.0.md §1.5~§1.8、§五
 -- 说明：
 --   1) 员工导入从导入域回迁 people 域：导入域只做交易业务单据
@@ -10,7 +11,15 @@
 --      pj_people_import_raw（原始行，insert-only 审计锚点）
 --      pj_people_import_issue（问题清单）
 --      pj_people_import_template（ColumnDef[] 模板，工具层消费）；
---   4) 菜单按钮 people:employee:import 已由 V100017 播种，本脚本仅修正备注。
+--   4) 菜单按钮 people:employee:import 已由 V110003 播种，本脚本仅修正备注。
+--
+-- 设计决定（2026-09-11 段位重整确认）：
+--   pj_people_import_* 与 panjia-import 域的 pj_import_* 是两套并行的批次表，
+--   这是有意的领域边界设计——员工导入的业务语义与单据导入不同：
+--     - 员工导入是「主数据写入」，需要事务强一致 + 状态机严格
+--     - 单据导入是「事实追加」，insert-only 归档 + 标准化
+--   pj_people_import_template 复用 common-import-util 工具层，但不与 pj_import_template
+--   表共享数据（schema 不同：员工模板是 ColumnDef[]，单据模板是 column_mapping JSONB）。
 -- ============================================================
 
 BEGIN;

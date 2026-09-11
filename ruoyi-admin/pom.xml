@@ -128,11 +128,7 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-license</artifactId>
         </dependency>
-        <!-- 薪酬业务 -->
-        <dependency>
-            <groupId>com.panjia</groupId>
-            <artifactId>panjia-salary</artifactId>
-        </dependency>
+        <!-- 薪酬业务（panjia-salary 已删除 2026-09-11；未来薪酬域 SQL 走 V100001 段位，依赖通过 panjia-people 传递） -->
         <!-- 员工域（人事档案/职级/师徒/角色联动） -->
         <dependency>
             <groupId>com.panjia</groupId>

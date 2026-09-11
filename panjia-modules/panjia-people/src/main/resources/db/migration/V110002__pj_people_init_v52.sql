@@ -1,5 +1,6 @@
 -- ============================================================
 -- 员工域 V5.2 重建：事实数据模型（员工主数据 + 算薪事实）
+-- 段位：V110002（2026-09-11 由 V100016 重命名）
 -- 依据：盘家智管_员工域详细设计_V5.2.md 附录 A
 -- 说明：
 --   1) 旧 V1.4 表（employee/level/social_insurance/mentor_relation/
@@ -9,8 +10,7 @@
 --      pj_people_salary_fact（★算薪事实，闭开区间 [effective_date, expire_date)）
 --      pj_people_change_log（变更审计）
 --   3) 岗位/角色不进员工表，走 sys_user_post/sys_user_role（Port-Adapter 同步）；
---   4) 字典：职级 A0~A5/S1/S2（去掉旧 DIRECTOR），新增员工状态字典；
---      旧"人员角色/兼职状态"字典废弃删除。
+--   4) 字典：职级 A0~A5/S1/S2（去掉旧 DIRECTOR），新增员工状态字典。
 -- ============================================================
 
 BEGIN;
@@ -99,9 +99,17 @@ CREATE INDEX idx_changelog_emp ON pj_people_change_log(employee_id, effective_da
 COMMENT ON TABLE pj_people_change_log IS '员工变更审计日志';
 
 -- ---------- 六、字典对齐 V5.2 ----------
--- 6.1 删除旧模型字典：人员角色（岗位角色现走 sys_post/sys_role）、兼职状态（并入员工状态）
-DELETE FROM sys_dict_data WHERE dict_type IN ('panjia_employee_role', 'panjia_part_time_status');
-DELETE FROM sys_dict_type WHERE dict_type IN ('panjia_employee_role', 'panjia_part_time_status');
+-- 6.1 旧模型字典说明（2026-09-11 段位重整时清理）
+-- 原 V100016 代码包含：
+--   DELETE FROM sys_dict_data WHERE dict_type IN ('panjia_employee_role', 'panjia_part_time_status');
+--   DELETE FROM sys_dict_type WHERE dict_type IN ('panjia_employee_role', 'panjia_part_time_status');
+-- 这两个字典在 V110002 执行前已被清理（岗位角色走 sys_post/sys_role，
+-- 兼职状态并入 pj_people_employee.status 员工状态）。DELETE 属于幂等无害的脏代码，
+-- 且存在未来误删风险（若重新引入同名字典会被静默删除），已在本版删除。
+-- 注：未来若需要"人员角色"或"兼职状态"维度，必须改用：
+--     - 人员角色 → sys_post（岗位）/ sys_role（角色）
+--     - 兼职状态 → pj_people_employee.status（ACTIVE/PARTTIME/LEFT/PENDING）
+-- ============================================================
 
 -- 6.2 员工职级字典（A0~A5/S1/S2；旧 DIRECTOR 职级废弃——总监是岗位/角色不是职级）
 INSERT INTO sys_dict_type (dict_id, dict_name, dict_type, create_dept, create_by, create_time, remark)

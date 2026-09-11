@@ -1,8 +1,12 @@
 -- ============================================================
--- 导入域 V2.0 模板种子（五类交易业务单据，对齐 RawData 实体字段）
+-- 导入域 V2.0 模板种子（四类交易业务单据 V100 版本：KE_NEW_SIGN/ATTENDANCE/POINTS/OTHERS）
+-- 段位：V120005（2026-09-11 由 V100007 重命名）
 -- 依据：导入域详细设计_V2.0.md
 -- 说明：员工主数据模板已迁至 people 域（员工导入模板表）；
---       V100003 为旧版种子（SHELL/ATTENDANCE/SCORE/MANUAL/COST），保留不删。
+--       V120003 为旧版 STORE_COST 保留种子，其余旧模板（SHELL/ATTENDANCE_MONTHLY/SCORE/MANUAL/TEST）
+--       已在 V120003 顶部 DELETE 兜底清理，其业务由本脚本 V100 版本与 V120007 V200 版本替代。
+-- 注：本脚本仅插入 KE_NEW_SIGN/ATTENDANCE/POINTS/OTHERS 四类 V100 模板；
+--     KE_SIGNED V100 已由 V120007 用 V200 替代（V120007 顶部 UPDATE is_active=false）。
 -- ============================================================
 
 BEGIN;

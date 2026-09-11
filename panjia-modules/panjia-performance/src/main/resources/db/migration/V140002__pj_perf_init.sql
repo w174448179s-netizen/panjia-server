@@ -1,5 +1,6 @@
 -- ============================================================
 -- 业绩域 V1.0 核心表结构
+-- 段位：V140002（2026-09-11 由 V100020 重命名）
 -- 包含：pj_perf_fact（业绩事实）+ pj_perf_adjust（调整单）+ pj_perf_consume_log（消费日志）+ pj_perf_period_close（期间封账）
 -- 说明：
 --   1) 主键用 BIGINT（雪花 ID，应用层 ASSIGN_ID 生成），非 BIGSERIAL；

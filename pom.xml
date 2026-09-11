@@ -458,11 +458,7 @@
                 <artifactId>panjia-common</artifactId>
                 <version>${panjia.version}</version>
             </dependency>
-            <dependency>
-                <groupId>com.panjia</groupId>
-                <artifactId>panjia-salary</artifactId>
-                <version>${panjia.version}</version>
-            </dependency>
+            <!-- panjia-salary 已删除（2026-09-11 段位重整，仅保留 pom 占位决定删除） -->
             <dependency>
                 <groupId>com.panjia</groupId>
                 <artifactId>panjia-license</artifactId>

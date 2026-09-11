@@ -53,7 +53,7 @@
     <modules>
         <module>common-import-util</module>
         <module>panjia-common</module>
-        <module>panjia-salary</module>
+        <!-- panjia-salary 已删除（2026-09-11 段位重整，空模块清理） -->
         <module>panjia-license</module>
         <module>panjia-backup</module>
         <module>panjia-im-core</module>
