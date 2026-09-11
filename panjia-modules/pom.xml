@@ -61,6 +61,7 @@
         <module>panjia-contracts</module>
         <module>panjia-outbox</module>
         <module>panjia-people</module>
+        <module>panjia-performance</module>
         <!-- 以下预留，按需取消注释 -->
         <!-- <module>panjia-im-dingtalk</module> -->
         <!-- <module>panjia-im-wecom</module> -->

@@ -28,4 +28,7 @@ public class ImportTemplate implements Serializable {
 
     /** 列定义 */
     private List<ColumnDef> columns;
+
+    /** Excel sheet 名称（null 表示取第一个 sheet） */
+    private String sheetName;
 }

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-performance</artifactId>
+
+    <description>
+        业绩域（业绩事实 / 调整单 / 期间封账 / 消费引擎）
+    </description>
+
+    <dependencies>
+        <!-- 盘家契约层（端口 / 事件 / 业务异常码）叶子模块 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-contracts</artifactId>
+        </dependency>
+
+        <!-- 盘家公共模块（PanjiaBaseEntity / Port / 异常处理） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- 底座 JSON（Jackson） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
+        </dependency>
+
+        <!-- 底座公共核心（R / ServiceException） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 MyBatis-Plus（BaseMapperPlus / PageQuery / PageResult / @Version） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-mybatis</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController / @SaCheckPermission） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（@SaCheckPermission / LoginHelper 传递引入） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- RuoYi 系统模块（SysUserMapper / SysUser，仅只读引用） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-system</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ArchUnit 架构守护测试 -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- JUnit5（surefire 发现 @Test） -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

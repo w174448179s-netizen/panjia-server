@@ -70,7 +70,10 @@ public class ImportTemplateBridge implements TemplateResolver {
             new com.panjia.importutil.template.model.ImportTemplate();
         tool.setTemplateCode(entity.getTemplateCode());
         tool.setTemplateVersion(entity.getTemplateVersion());
-        tool.setHeaderRow(entity.getHeaderRow() == null ? 0 : entity.getHeaderRow());
+        // DB 层 header_row 为 1-based（约束 >= 1），工具层 XlsxFileParser 按 fesod 0-based rowIndex 匹配，
+        // 此处统一转换为 0-based：header_row=1 → 首行为表头；header_row=2 → 两行表头取第 2 行。
+        tool.setHeaderRow(entity.getHeaderRow() == null ? 0 : Math.max(0, entity.getHeaderRow() - 1));
+        tool.setSheetName(entity.getSheetName());
         tool.setColumns(toColumnDefs(entity.getColumnMapping()));
         return tool;
     }

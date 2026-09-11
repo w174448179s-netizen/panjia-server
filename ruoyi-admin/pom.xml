@@ -138,6 +138,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-people</artifactId>
         </dependency>
+        <!-- 业绩域（业绩事实/调整单/期间封账/消费引擎） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-performance</artifactId>
+        </dependency>
         <!-- 导入域（导入模板） -->
         <dependency>
             <groupId>com.panjia</groupId>

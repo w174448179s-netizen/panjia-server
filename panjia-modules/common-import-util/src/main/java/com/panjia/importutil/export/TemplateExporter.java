@@ -42,7 +42,9 @@ public final class TemplateExporter {
         try (Workbook wb = new XSSFWorkbook();
              ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
 
-            Sheet sheet = wb.createSheet("导入模板");
+            Sheet sheet = wb.createSheet(
+                (template.getSheetName() != null && !template.getSheetName().isBlank())
+                    ? template.getSheetName() : "导入模板");
 
             // 表头样式：加粗
             CellStyle headerStyle = wb.createCellStyle();

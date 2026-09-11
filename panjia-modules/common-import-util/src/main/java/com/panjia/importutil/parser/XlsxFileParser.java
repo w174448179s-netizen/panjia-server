@@ -59,7 +59,7 @@ public class XlsxFileParser implements FileParser {
 
         int headerRow = template.getHeaderRow();
 
-        FesodSheet.read(in, new AnalysisEventListener<Map<Integer, String>>() {
+        AnalysisEventListener<Map<Integer, String>> listener = new AnalysisEventListener<>() {
             private final List<String> headers = new ArrayList<>();
             private int dataSeq = 0;
 
@@ -112,7 +112,18 @@ public class XlsxFileParser implements FileParser {
                 log.debug("Excel 解析完成: {} 行, {} 个类型错误",
                     sheet.getRows().size(), sheet.getErrors().size());
             }
-        }).sheet().doRead();
+        };
+
+        // 指定 sheet 名称时读取对应 sheet，否则读取第一个 sheet。
+        // headRowNumber 必须覆盖 0..headerRow，否则 headerRow>0 的行会被当作数据行跳过
+        // （fesod 默认 headRowNumber=1，仅第 0 行进 invokeHead）。
+        if (template.getSheetName() != null && !template.getSheetName().isBlank()) {
+            FesodSheet.read(in, listener).sheet(template.getSheetName().trim())
+                .headRowNumber(headerRow + 1).doRead();
+        } else {
+            FesodSheet.read(in, listener).sheet()
+                .headRowNumber(headerRow + 1).doRead();
+        }
 
         return sheet;
     }
