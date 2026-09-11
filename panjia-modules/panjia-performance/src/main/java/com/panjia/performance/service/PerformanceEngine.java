@@ -268,16 +268,9 @@ public class PerformanceEngine {
      */
     public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId) {
         // ========== 1. 员工归属查询 ==========
-        // 注意：employeeQueryPort 当前为空实现（抛 UnsupportedOperationException），
-        // 跨域联调后将真正查询员工信息并填充 employeeId / deptId 等字段。
-        EmployeeSnapshotDTO employeeSnapshot = null;
-        try {
-            employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
-        } catch (UnsupportedOperationException e) {
-            // 开发阶段：端口未实现，员工信息暂留空，联调后补充
-            log.debug("[业绩构建] 员工快照端口暂未实现，跳过员工归属查询：employeeCode={}",
-                    record.getEmployeeCode());
-        }
+        // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
+        // 员工不存在（脏数据/已删）返回 null，下方 else 分支以 employeeCode 兜底
+        EmployeeSnapshotDTO employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
 
         // ========== 2. 计算业绩金额 ==========
         BigDecimal originAmount = record.getOriginAmount();

@@ -3,6 +3,8 @@ package com.panjia.performance.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
@@ -24,6 +26,9 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 业绩查询服务实现。
@@ -35,6 +40,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     private final PerformanceFactMapper factMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     @Override
     public PageResult<PerformanceFactDTO> listFacts(FactQuery query, PageQuery pageQuery) {
@@ -45,13 +51,55 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         List<PerformanceFactDTO> dtoList = page.getRecords().stream()
             .map(this::toDTO)
             .toList();
+        fillEmployeeInfo(dtoList);
         return PageResult.build(dtoList, page.getTotal());
+    }
+
+    /**
+     * 批量补齐员工姓名/部门名（列表页展示）。
+     * <p>
+     * 统一按 employee_code 关联（历史事实行 employee_id/dept_id 为空也能补上），
+     * 一次 IN 查询 + 一次部门名批量查询，无 N+1。
+     */
+    private void fillEmployeeInfo(List<PerformanceFactDTO> dtoList) {
+        if (dtoList == null || dtoList.isEmpty()) {
+            return;
+        }
+        Set<String> codes = dtoList.stream()
+            .map(PerformanceFactDTO::getEmployeeCode)
+            .filter(StringUtils::isNotBlank)
+            .collect(Collectors.toSet());
+        if (codes.isEmpty()) {
+            return;
+        }
+        Map<String, EmployeeMainDataDTO> mainMap = employeeMainDataQueryPort.listByCodes(codes);
+        for (PerformanceFactDTO dto : dtoList) {
+            EmployeeMainDataDTO main = mainMap.get(dto.getEmployeeCode());
+            if (main == null) {
+                continue;
+            }
+            dto.setEmployeeName(main.getEmployeeName());
+            if (dto.getDeptName() == null) {
+                dto.setDeptName(main.getDeptName());
+            }
+            if (dto.getEmployeeId() == null) {
+                dto.setEmployeeId(main.getEmployeeId());
+            }
+            if (dto.getDeptId() == null) {
+                dto.setDeptId(main.getDeptId());
+            }
+        }
     }
 
     @Override
     public PerformanceFactDTO getFact(Long id) {
         PerformanceFact fact = factMapper.selectById(id);
-        return fact != null ? toDTO(fact) : null;
+        if (fact == null) {
+            return null;
+        }
+        PerformanceFactDTO dto = toDTO(fact);
+        fillEmployeeInfo(List.of(dto));
+        return dto;
     }
 
     @Override
