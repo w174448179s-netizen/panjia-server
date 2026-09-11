@@ -39,6 +39,14 @@ public class RuoYiAccountAdapter implements AccountPort {
     /** 新建员工账户的初始密码（HR 交付后由员工自行修改） */
     private static final String DEFAULT_INITIAL_PASSWORD = "123456";
 
+    /**
+     * 初始密码 BCrypt 哈希（类加载时一次性计算）。
+     * <p>
+     * BCrypt 单次约 60-100ms，员工导入 1000 人时逐次 hashpw 纯耗 1 分钟以上；
+     * 所有新建账户本就共享同一初始密码，复用同一哈希结果（同一 salt）无实际安全损失。
+     */
+    private static final String DEFAULT_INITIAL_PASSWORD_HASH = BCrypt.hashpw(DEFAULT_INITIAL_PASSWORD);
+
     /** RuoYi 系统用户类型 */
     private static final String USER_TYPE_SYS = "sys_user";
 
@@ -54,7 +62,7 @@ public class RuoYiAccountAdapter implements AccountPort {
         user.setUserName(username);
         user.setNickName(nickname);
         user.setDeptId(deptId);
-        user.setPassword(BCrypt.hashpw(DEFAULT_INITIAL_PASSWORD));
+        user.setPassword(DEFAULT_INITIAL_PASSWORD_HASH);
         user.setStatus(UserStatus.OK.getCode());
         user.setUserType(USER_TYPE_SYS);
         sysUserMapper.insert(user);

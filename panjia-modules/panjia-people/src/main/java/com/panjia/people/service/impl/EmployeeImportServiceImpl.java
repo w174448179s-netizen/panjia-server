@@ -42,6 +42,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -186,23 +187,27 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         batch.setOperatorId(operatorId);
         batchMapper.insert(batch);
 
-        // 逐行落原始归档（raw_json = 全量原始字符串）
+        // 逐行落原始归档（raw_json = 全量原始字符串），批量插入
+        List<PeopleImportRaw> raws = new ArrayList<>(sheet.getRows().size());
         for (ParsedRow row : sheet.getRows()) {
             PeopleImportRaw raw = new PeopleImportRaw();
             raw.setBatchId(batch.getId());
             raw.setRowNo(row.getRowNo());
             raw.setRawJson(toJson(row.getRawValues()));
-            rawMapper.insert(raw);
+            raws.add(raw);
+        }
+        if (!raws.isEmpty()) {
+            rawMapper.insertBatch(raws);
         }
 
-        // 问题清单：基础格式 issue + 业务校验 issue
+        // 问题清单：基础格式 issue + 业务校验 issue，批量插入
         List<PeopleImportIssue> issues = new ArrayList<>();
         for (FieldError fe : fieldErrors) {
             issues.add(toIssue(batch.getId(), fe));
         }
         issues.addAll(businessValidate(batch.getId(), sheet, deptCols));
-        for (PeopleImportIssue issue : issues) {
-            issueMapper.insert(issue);
+        if (!issues.isEmpty()) {
+            issueMapper.insertBatch(issues);
         }
 
         boolean blocked = issues.stream().anyMatch(i -> i.getIssueType().isBlocking());
@@ -302,8 +307,11 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         batchMapper.updateById(batch);
 
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
+        // 部门路径 → deptId 文件内缓存：导入文件同部门重复率极高（一个门店几十人），
+        // ensureDept 内部逐级查询+建树，不缓存则每行重复 2-4 条 SQL
+        Map<String, Long> deptIdCache = new HashMap<>();
         for (ParsedRow row : sheet.getRows()) {
-            EmployeeCreateDTO dto = toCreateDTO(row, deptCols);
+            EmployeeCreateDTO dto = toCreateDTO(row, deptCols, deptIdCache);
             employeeService.createEmployee(dto, operator);
         }
 
@@ -317,9 +325,9 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     /**
      * 解析行 → 新增员工 DTO（映射规则与旧 EmployeeImportSink 一致）。
      */
-    private EmployeeCreateDTO toCreateDTO(ParsedRow row, List<ColumnDef> deptCols) {
+    private EmployeeCreateDTO toCreateDTO(ParsedRow row, List<ColumnDef> deptCols, Map<String, Long> deptIdCache) {
         String deptFull = assembleDeptPath(row, deptCols);
-        Long deptId = deptPort.ensureDept(deptFull);
+        Long deptId = deptIdCache.computeIfAbsent(deptFull, deptPort::ensureDept);
 
         EmployeeCreateDTO dto = new EmployeeCreateDTO();
         dto.setDeptId(deptId);
