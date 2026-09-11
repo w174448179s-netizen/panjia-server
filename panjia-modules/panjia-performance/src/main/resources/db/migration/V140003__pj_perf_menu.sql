@@ -11,7 +11,8 @@
 --   * 删除原 2600「业绩管理（运维侧）」中间层（与 V100001 创建的 2200「业绩管理」
 --     顶级菜单重复，构成"数据管理-业绩管理" 与 顶级"业绩管理" 双菜单树）
 --   * 2610/2620/2630 直接挂到顶级 2200 下，与业务侧 2201/2202/2203 并列
---   * 2610 重命名为「业绩概览」避免与 2201「业绩明细」重名
+--   * 2201「业绩明细」业务侧残留已从 V100001 删除（其 perms=performance:fact:* 后端不存在），
+--     2610 为唯一「业绩明细」菜单；业务角色（店长/财务/经纪人）在 V100001 中直接绑 2610/2611
 --   * 数据管理 (2530) 顶级保留，供未来 import/outbox/people 等运维菜单挂载
 --   * sys_role_menu 中绑定 2600 的行整行删除（2600 不再存在）
 -- =====================================================
@@ -22,10 +23,9 @@ BEGIN;
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002530, '数据管理', 0, 80, 'data', NULL, NULL, 'N', 'Y', 'M', '0', '0', '', 'DataBoard', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '数据管理顶级目录（运维聚合，import/outbox/people 等挂载点）');
 
--- 业绩明细（运维侧，原 2600「业绩管理」中间层已删除；直接挂顶级 2200 下）
--- 注：与 V100001 的 2201「业绩明细」业务侧同名，但 perm/sys_role_menu 独立
--- 业务侧 (2201): perms=performance:fact:list，绑业务角色 (10/11/12/14)
--- 运维侧 (2610): perms=perf:fact:list，绑运维角色 (1/总监)
+-- 业绩明细（唯一版本，原 V100001 的 2201 业务侧残留已删除；直接挂顶级 2200 下）
+-- perms=perf:fact:* 与 PerformanceFactController 对齐；
+-- 超管/总监授权见本文件底部，业务角色（店长/财务/经纪人）授权在 V100001 的 sys_role_menu 段
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002610, '业绩明细', 1761400000000002200, 1, 'fact', 'performance/fact/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'List', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩事实明细列表');
 
