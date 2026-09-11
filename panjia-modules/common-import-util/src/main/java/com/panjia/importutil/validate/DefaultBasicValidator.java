@@ -187,14 +187,21 @@ public class DefaultBasicValidator implements BasicValidator {
                                 "RULE_FORMAT_ERR", "规则表达式非法: " + r));
                             continue;
                         }
+                        // 优先用解析阶段转换后的值：量纲与落库一致（transform=percent 列
+                        // 转换后是 0.05，阈值比较不能用 raw 的 5），拿不到再退回 raw 解析
                         BigDecimal actual;
-                        try {
-                            // 与 TypeConverter 同一套解析：支持 "5.00%" 百分比 / 千分位，
-                            // 否则带 % 的合法值会因解析失败静默跳过范围校验
-                            actual = TypeConverter.parseDecimal(raw);
-                        } catch (NumberFormatException nfe) {
-                            // 非数字 — 留给类型校验（解析阶段已经记），这里跳过
-                            continue;
+                        Object converted = row.getValues().get(field);
+                        if (converted instanceof BigDecimal bd) {
+                            actual = bd;
+                        } else {
+                            try {
+                                // 与 TypeConverter 同一套解析：支持 "5.00%" 百分比 / 千分位，
+                                // 否则带 % 的合法值会因解析失败静默跳过范围校验
+                                actual = TypeConverter.parseDecimal(raw);
+                            } catch (NumberFormatException nfe) {
+                                // 非数字 — 留给类型校验（解析阶段已经记），这里跳过
+                                continue;
+                            }
                         }
                         boolean ok = r.startsWith("gte:")
                             ? actual.compareTo(threshold) >= 0

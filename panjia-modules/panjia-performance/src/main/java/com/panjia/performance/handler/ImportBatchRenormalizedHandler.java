@@ -75,7 +75,9 @@ public class ImportBatchRenormalizedHandler implements DomainEventHandler {
                 eventId,
                 "IMPORT_BATCH_RENORMALIZED",
                 null,
-                Collections.emptyList());
+                Collections.emptyList(),
+                event.getSourceType(),
+                event.getPeriod());
             log.info("[业绩重归一化] 重新生成完成：batchId={}", event.getBatchId());
         } catch (Exception e) {
             log.error("[业绩重归一化] 事件处理失败：batchId={}, eventId={}",

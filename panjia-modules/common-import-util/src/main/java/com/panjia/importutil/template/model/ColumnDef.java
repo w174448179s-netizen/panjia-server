@@ -67,6 +67,19 @@ public class ColumnDef implements Serializable {
     private String dateFormat;
 
     /**
+     * 转换规则（可空，模板 column_mapping.transform 原样透传）。
+     * <p>
+     * 逗号分隔多段，当前支持：
+     * <ul>
+     *   <li>{@code percent} — 百分数列：{@code 5.00%} / {@code 5.00} 统一落 0.05
+     *       （量纲对齐下游乘法公式，如 shareRatio）。配置了 percent 的列，
+     *       输入约定为百分比形式，裸小数 0.05 会被当作 5% 落成 0.0005</li>
+     *   <li>{@code date_format:yyyy-MM-dd} — 日期格式</li>
+     * </ul>
+     */
+    private String transform;
+
+    /**
      * 部门层级（可空）。
      * <p>
      * 标识此列为部门路径的第几级（1 表示大区、2 表示门店 …）。

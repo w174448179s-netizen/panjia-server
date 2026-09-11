@@ -79,8 +79,9 @@ public class PerformanceFactController extends BaseController {
     @PostMapping("/build/{batchId}")
     public R<Void> build(@PathVariable Long batchId) {
         String eventId = "MANUAL_BUILD_" + batchId + "_" + System.currentTimeMillis();
+        // MANUAL_BUILD 无事件上下文，sourceType/period 传 null（RUNNING 日志允许空，消费完成后兜底推导）
         performanceEngine.buildFromBatch(batchId, eventId, "MANUAL_BUILD",
-            LoginHelper.getUserId(), Collections.emptyList());
+            LoginHelper.getUserId(), Collections.emptyList(), null, null);
         return R.ok();
     }
 

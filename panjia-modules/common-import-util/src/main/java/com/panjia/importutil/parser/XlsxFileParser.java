@@ -95,7 +95,7 @@ public class XlsxFileParser implements FileParser {
                     String raw = data.get(i);
                     String rawTrimmed = raw == null ? null : raw.trim();
                     try {
-                        Object value = TypeConverter.convert(rawTrimmed, col.getType(), col.getDateFormat());
+                        Object value = TypeConverter.convert(rawTrimmed, col.getType(), col.getDateFormat(), col.getTransform());
                         row.putValue(col.getField(), value, rawTrimmed);
                     } catch (ImportUtilException e) {
                         row.setValid(false);

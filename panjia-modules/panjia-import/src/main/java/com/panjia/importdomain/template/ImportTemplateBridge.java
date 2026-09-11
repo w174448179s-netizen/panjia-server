@@ -100,6 +100,7 @@ public class ImportTemplateBridge implements TemplateResolver {
             def.setField(m.getTargetField());
             def.setType(m.getType() == null ? "STRING" : m.getType().trim().toUpperCase());
             def.setRequired(Boolean.TRUE.equals(m.getRequired()));
+            def.setTransform(m.getTransform());
             def.setDateFormat(extractDateFormat(m.getTransform()));
             defs.add(def);
         }

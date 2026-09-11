@@ -84,7 +84,7 @@ public class CsvFileParser implements FileParser {
                     String raw = i < cells.size() ? cells.get(i) : null;
                     String rawTrimmed = raw == null ? null : raw.trim();
                     try {
-                        Object value = TypeConverter.convert(rawTrimmed, col.getType(), col.getDateFormat());
+                        Object value = TypeConverter.convert(rawTrimmed, col.getType(), col.getDateFormat(), col.getTransform());
                         row.putValue(col.getField(), value, rawTrimmed);
                     } catch (ImportUtilException e) {
                         row.setValid(false);

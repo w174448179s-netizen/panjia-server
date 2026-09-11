@@ -70,7 +70,9 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
                 eventId,
                 "IMPORT_BATCH_ARCHIVED",
                 null,
-                supersededIds);
+                supersededIds,
+                event.getSourceType(),
+                event.getPeriod());
 
             log.info("[业绩消费] 归档批次消费完成：batchId={}", event.getBatchId());
         } catch (Exception e) {

@@ -6,16 +6,16 @@
 -- 整改内容（2026-09-11）：
 --   1) 删除旧版 6 个模板种子（SHELL_PERFORMANCE V2/V1、ATTENDANCE_MONTHLY、
 --      SCORE_MONTHLY、MANUAL_ENTRY、SHELL_PERFORMANCE_TEST），其业务概念已被
---      V120005（V100 模板）和 V120007（V200 模板）的更新版本替代；
+--      V120005（KE_SIGNED V200 + 其余四类 V100 模板）的更新版本替代；
 --   2) 仅保留 STORE_COST 模板（门店成本录入占位，与其他模板无业务重叠）；
 --   3) 顶部 DELETE 用于幂等兜底（重整期间可能多次执行）。
 -- ============================================================
 
 BEGIN;
 
--- 兜底清理：删除旧模板（幂等无害；新版本模板由 V120005/V120007 提供）
+-- 兜底清理：删除旧模板（幂等无害；新版本模板由 V120005 提供）
 DELETE FROM pj_import_template WHERE template_code IN (
-    'SHELL_PERFORMANCE',       -- V120007 提供 V200 KE_SIGNED 替代
+    'SHELL_PERFORMANCE',       -- V120005 提供 V200 KE_SIGNED 替代
     'ATTENDANCE_MONTHLY',      -- V120005 提供 V100 ATTENDANCE 替代
     'SCORE_MONTHLY',           -- V120005 提供 V100 POINTS 替代
     'MANUAL_ENTRY',            -- V120005 提供 V100 OTHERS 替代

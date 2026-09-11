@@ -82,11 +82,14 @@ public class PerformanceEngine {
      * @param eventType           事件类型（IMPORT_BATCH_ARCHIVED / IMPORT_BATCH_RENORMALIZED）
      * @param operatorId          操作人 ID
      * @param supersededBatchIds  被本批 supersede 的旧批次 ID 列表（CR-1，可空）
+     * @param sourceType          数据源类型（事件携带，可空；MANUAL_BUILD 无事件上下文传 null）
+     * @param period              归属月（事件携带，可空；RUNNING 日志创建时即回填，缺失时消费完成后从记录推导）
      * @return 消费日志记录
      */
     @Transactional(rollbackFor = Exception.class)
     public PerformanceConsumeLog buildFromBatch(Long batchId, String eventId, String eventType,
-                                                Long operatorId, List<Long> supersededBatchIds) {
+                                                Long operatorId, List<Long> supersededBatchIds,
+                                                String sourceType, String period) {
         // ========== 1. 幂等检查 ==========
         // 查询是否已有相同 batchId + eventType 的成功/部分成功记录
         LambdaQueryWrapper<PerformanceConsumeLog> idempotentWrapper = new LambdaQueryWrapper<>();
@@ -101,10 +104,14 @@ public class PerformanceEngine {
         }
 
         // ========== 2. 创建消费日志（RUNNING） ==========
+        // period/sourceType 在创建时即从事件回填：批次归属月是事件上下文，不该等到消费完才推导；
+        // 事件缺失时（历史空 period 批次 / MANUAL_BUILD）留空，消费完成后兜底推导（period 列可空）
         PerformanceConsumeLog consumeLog = new PerformanceConsumeLog();
         consumeLog.setBatchId(batchId);
         consumeLog.setEventId(eventId);
         consumeLog.setEventType(eventType);
+        consumeLog.setPeriod(period);
+        consumeLog.setSourceType(sourceType);
         consumeLog.setStatus(ConsumeStatus.RUNNING);
         consumeLog.setOperatorId(operatorId);
         consumeLog.setTotalRows(0);
@@ -137,7 +144,7 @@ public class PerformanceEngine {
         int successCount = 0;
         int failedCount = 0;
         int totalCount = 0;
-        String period = null;
+        String derivedPeriod = null;
 
         try {
             // 统计总记录数（用于 totalRows）
@@ -159,10 +166,10 @@ public class PerformanceEngine {
                     for (NormalizedRecordDTO record : pageResult.getRows()) {
                         try {
                             // 从记录中推导期间（取第一条记录的期间作为消费日志的期间）
-                            if (period == null && record.getBusinessDate() != null) {
-                                period = derivePeriod(record.getBusinessDate());
-                            } else if (period == null && record.getPeriod() != null) {
-                                period = record.getPeriod();
+                            if (derivedPeriod == null && record.getBusinessDate() != null) {
+                                derivedPeriod = derivePeriod(record.getBusinessDate());
+                            } else if (derivedPeriod == null && record.getPeriod() != null) {
+                                derivedPeriod = record.getPeriod();
                             }
 
                             // 构建单条业绩事实
@@ -205,7 +212,10 @@ public class PerformanceEngine {
         // ========== 4. 统计并更新消费日志状态 ==========
         consumeLog.setSuccessRows(successCount);
         consumeLog.setFailedRows(failedCount);
-        consumeLog.setPeriod(period);
+        // 事件未携带 period 时用首条记录推导兜底；已有值则保留事件口径（批次归属月）
+        if (consumeLog.getPeriod() == null) {
+            consumeLog.setPeriod(derivedPeriod);
+        }
 
         if (totalCount == 0) {
             consumeLog.setStatus(ConsumeStatus.SUCCESS);

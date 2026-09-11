@@ -60,6 +60,11 @@ public class ImportController {
         if (type == null) {
             return R.fail("未知数据源类型: " + sourceType);
         }
+        // 归属月必填：批次/消费日志/业绩事实都按 period 组织，空 period 会导致
+        // 事件 period=null 在下游 NOT NULL 列上炸掉
+        if (period == null || period.isBlank()) {
+            return R.fail("归属月不能为空，请选择导入归属月后再上传");
+        }
         try {
             Long batchId = importBatchService.importFromFile(type, file.getBytes(),
                 file.getOriginalFilename(), period, LoginHelper.getUserId(), LoginHelper.getDeptId());

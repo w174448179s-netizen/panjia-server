@@ -14,7 +14,7 @@
 | `V1` | 基线 | `ruoyi-admin` | `V1__ruoyi_baseline.sql` | 官方 PostgreSQL 全量脚本（**不可变**） |
 | `V10xxxx` | **盘家全业务种子** | `ruoyi-admin` | `V100001__panjia_menu_seed.sql` | 盘家业务菜单 + 角色 + 工作流定义 + 系统参数 |
 | `V11xxxx` | **people 域** | `panjia-modules/panjia-people` | `V110002`-`V110005` | 员工主数据 / 算薪事实 / 字典 / 员工导入回迁 |
-| `V12xxxx` | **import 域** | `panjia-modules/panjia-import` | `V120002`-`V120007` | 导入模板 / 批次表 / 模板管理菜单 |
+| `V12xxxx` | **import 域** | `panjia-modules/panjia-import` | `V120002`-`V120006` | 导入模板 / 批次表 / 模板管理菜单 |
 | `V13xxxx` | **outbox 域** | `panjia-modules/panjia-outbox` | `V130001`-`V130002` | 事件 outbox + 幂等键 |
 | `V14xxxx` | **performance 域** | `panjia-modules/panjia-performance` | `V140002`-`V140003` | 业绩事实表 + 业绩域菜单 |
 | `V15xxxx` | customer 域 | `panjia-modules/panjia-customer` | （预留）| 客户账号 / 设备 / 在线状态 |

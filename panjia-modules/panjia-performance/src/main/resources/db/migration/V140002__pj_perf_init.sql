@@ -134,7 +134,7 @@ CREATE TABLE pj_perf_consume_log (
     batch_id        BIGINT,
     event_type      VARCHAR(50)            NOT NULL,
     event_id        VARCHAR(64)            NOT NULL,
-    period          VARCHAR(7)             NOT NULL,
+    period          VARCHAR(7),
     source_type     VARCHAR(30),
     status          VARCHAR(20)            NOT NULL DEFAULT 'RUNNING',
     total_rows      INT                    NOT NULL DEFAULT 0,
@@ -149,6 +149,9 @@ CREATE TABLE pj_perf_consume_log (
 CREATE UNIQUE INDEX uk_pcl_batch_event ON pj_perf_consume_log(batch_id, event_type);
 CREATE UNIQUE INDEX uk_pcl_event_id    ON pj_perf_consume_log(event_id);
 CREATE INDEX idx_pcl_period            ON pj_perf_consume_log(period);
+-- period 放宽为可空：RUNNING 日志"先插后补 period"（消费完从归一化记录推导归属月），
+-- 插入时若事件未携带 period（历史空 period 批次 / MANUAL_BUILD），强行 NOT NULL 会直接炸
+COMMENT ON COLUMN pj_perf_consume_log.period IS '归属月 YYYY-MM；RUNNING 阶段可空，消费完成后回填';
 
 COMMENT ON TABLE  pj_perf_consume_log IS '消费日志';
 COMMENT ON COLUMN pj_perf_consume_log.batch_id IS '导入批次ID';
