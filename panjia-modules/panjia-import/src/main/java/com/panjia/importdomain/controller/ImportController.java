@@ -4,14 +4,18 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportSourceType;
+import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.service.ImportBatchService;
+import com.panjia.importdomain.service.RawDataQueryService;
 import com.panjia.importdomain.template.ImportTemplateBridge;
 import com.panjia.importutil.export.TemplateExporter;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -38,6 +42,7 @@ public class ImportController {
 
     private final ImportBatchService importBatchService;
     private final ImportTemplateBridge templateBridge;
+    private final RawDataQueryService rawDataQueryService;
 
     /**
      * 文件上传导入。
@@ -59,6 +64,11 @@ public class ImportController {
             Long batchId = importBatchService.importFromFile(type, file.getBytes(),
                 file.getOriginalFilename(), period, LoginHelper.getUserId(), LoginHelper.getDeptId());
             return R.ok(batchId);
+        } catch (DataIntegrityViolationException e) {
+            // 唯一索引冲突：通常出现在手工绕过 SUPERSEDED 流程的并发或脏数据场景。
+            // 业务文案：避免把 PSQLException 整段塞给前端。
+            log.warn("导入冲突 (sourceType={}, period={}): {}", sourceType, period, e.getMostSpecificCause().getMessage());
+            return R.fail("该归属月已存在归档批次，本次导入未能完成。请刷新批次列表确认状态，或联系管理员处理");
         } catch (Exception e) {
             log.error("导入失败", e);
             return R.fail("导入失败: " + e.getMessage());
@@ -67,14 +77,36 @@ public class ImportController {
 
     /**
      * 批次列表。
+     * <p>
+     * 支持两种过滤方式：
+     * <ul>
+     *     <li>{@code sourceType}（兼容旧版）：单值精确匹配，e.g. {@code ATTENDANCE}</li>
+     *     <li>{@code sourceTypes}（推荐）：多值 IN 过滤，e.g. {@code KE_SIGNED,KE_NEW_SIGN}，
+     *         适合「贝壳业绩」菜单同时展示结佣+新签两类批次</li>
+     * </ul>
+     * 两个参数同时给出时，优先用 {@code sourceTypes}。
      */
     @SaCheckPermission("import:batch:list")
     @GetMapping("/batches")
     public R<List<ImportBatch>> list(
         @RequestParam(value = "sourceType", required = false) String sourceType,
+        @RequestParam(value = "sourceTypes", required = false) java.util.List<String> sourceTypes,
         @RequestParam(value = "period", required = false) String period) {
-        ImportSourceType type = sourceType == null ? null : ImportSourceType.fromCode(sourceType);
-        return R.ok(importBatchService.list(type, period));
+        // 优先 sourceTypes 数组；空数组/单元素都视作未传
+        java.util.List<ImportSourceType> types = null;
+        if (sourceTypes != null && !sourceTypes.isEmpty()) {
+            types = sourceTypes.stream()
+                .map(ImportSourceType::fromCode)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+            if (types.isEmpty()) {
+                types = null;
+            }
+        }
+        if (types == null && sourceType != null && !sourceType.isBlank()) {
+            types = java.util.List.of(ImportSourceType.fromCode(sourceType));
+        }
+        return R.ok(importBatchService.listBySourceTypes(types, period));
     }
 
     /**
@@ -160,5 +192,59 @@ public class ImportController {
     public R<Void> ignoreIssue(@PathVariable Long id) {
         importBatchService.ignoreIssue(id);
         return R.ok();
+    }
+
+    /**
+     * 批次原始数据列表（用于审计/追溯：按 row_no 倒序，分页）。
+     */
+    @SaCheckPermission("import:batch:list")
+    @GetMapping("/batches/{id}/raw")
+    public R<PageResult<RawData>> listRaw(@PathVariable Long id,
+                                          @RequestParam(defaultValue = "1") Integer pageNum,
+                                          @RequestParam(defaultValue = "50") Integer pageSize) {
+        ImportBatch batch = importBatchService.getById(id);
+        if (batch == null) {
+            return R.fail("批次不存在: " + id);
+        }
+        // MyBatis-Plus 通过 EnumValue 把 source_type varchar 字段直接反序列化为
+        // ImportSourceType 枚举，无需再 fromCode 转一次。
+        return R.ok(rawDataQueryService.listRaw(batch.getSourceType(), id, pageNum, pageSize));
+    }
+
+    /**
+     * 下载批次上传时的原文件（审计/追溯入口：用户下载后可直接用 Excel/Numbers/WPS 打开看）。
+     * <p>
+     * 归档时存的是 {@code storagePath}（local 相对路径或 minio 对象 key），由
+     * {@link com.panjia.importutil.archive.FileArchiver#load(String)} 统一解释，
+     * local 走磁盘、minio 走 S3 GetObject。
+     */
+    @SaCheckPermission("import:batch:list")
+    @GetMapping("/batches/{id}/file")
+    public void downloadOriginalFile(@PathVariable Long id, HttpServletResponse response) {
+        byte[] content;
+        String originalName;
+        try {
+            content = importBatchService.loadOriginalFile(id);
+            originalName = importBatchService.getOriginalFileName(id);
+        } catch (Exception e) {
+            log.warn("下载原文件失败 batchId={}: {}", id, e.getMessage());
+            try {
+                response.sendError(404, e.getMessage());
+            } catch (IOException ignored) {
+            }
+            return;
+        }
+        try {
+            String encoded = URLEncoder.encode(originalName, StandardCharsets.UTF_8).replace("+", "%20");
+            response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            response.setHeader("Content-Disposition", "attachment; filename=\"" + encoded + "\"; filename*=UTF-8''" + encoded);
+            response.setContentLength(content.length);
+            try (OutputStream out = response.getOutputStream()) {
+                out.write(content);
+                out.flush();
+            }
+        } catch (IOException e) {
+            log.warn("原文件下载写入失败 batchId={}: {}", id, e.getMessage());
+        }
     }
 }

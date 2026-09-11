@@ -1,6 +1,8 @@
 package com.panjia.performance.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.dto.NormalizedRecordDTO;
+import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.performance.config.PerformanceProperties;
 import com.panjia.performance.domain.ConsumeStatus;
 import com.panjia.performance.domain.FactStatus;
@@ -9,22 +11,20 @@ import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.dto.EmployeeSnapshotDTO;
-import com.panjia.performance.dto.NormalizedRecordDTO;
 import com.panjia.performance.engine.ConversionEngine;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
-import com.panjia.performance.port.ImportNormalizedRecordQueryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
-import org.dromara.common.mybatis.core.page.PageQuery;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 /**
  * 业绩消费引擎。
@@ -51,12 +51,10 @@ public class PerformanceEngine {
     private final PerformanceProperties properties;
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final EmployeeSnapshotQueryPort employeeQueryPort;
+    private final ReverseService reverseService;
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
-
-    /** 分页大小 */
-    private static final int PAGE_SIZE = 500;
 
     /**
      * 从导入批次构建业绩事实。
@@ -65,6 +63,8 @@ public class PerformanceEngine {
      * <ol>
      *   <li><b>幂等检查</b>：若 batchId + eventType 已存在成功记录，直接返回（防止重复消费）</li>
      *   <li><b>创建消费日志</b>：状态为 RUNNING，记录开始时间</li>
+     *   <li><b>冲销旧批次（CR-1，supersede 链路）</b>：supersededBatchIds 非空时，按 SUPERSEDE
+     *       reason 冲销每个旧批次下的全部 ACTIVE 事实</li>
      *   <li><b>分页拉取归一化记录</b>：通过 importQueryPort 按批次分页读取</li>
      *   <li><b>逐行生成业绩事实</b>：调用 {@link #buildSingleFact} 构建每条事实</li>
      *   <li><b>统计并更新消费日志</b>：成功数 / 失败数 / 最终状态</li>
@@ -77,14 +77,16 @@ public class PerformanceEngine {
      *   <li>全部失败 → FAILED</li>
      * </ul>
      *
-     * @param batchId    导入批次 ID
-     * @param eventId    事件 ID（幂等锚点）
-     * @param eventType  事件类型
-     * @param operatorId 操作人 ID
+     * @param batchId             导入批次 ID
+     * @param eventId             事件 ID（幂等锚点）
+     * @param eventType           事件类型（IMPORT_BATCH_ARCHIVED / IMPORT_BATCH_RENORMALIZED）
+     * @param operatorId          操作人 ID
+     * @param supersededBatchIds  被本批 supersede 的旧批次 ID 列表（CR-1，可空）
      * @return 消费日志记录
      */
     @Transactional(rollbackFor = Exception.class)
-    public PerformanceConsumeLog buildFromBatch(Long batchId, String eventId, String eventType, Long operatorId) {
+    public PerformanceConsumeLog buildFromBatch(Long batchId, String eventId, String eventType,
+                                                Long operatorId, List<Long> supersededBatchIds) {
         // ========== 1. 幂等检查 ==========
         // 查询是否已有相同 batchId + eventType 的成功/部分成功记录
         LambdaQueryWrapper<PerformanceConsumeLog> idempotentWrapper = new LambdaQueryWrapper<>();
@@ -110,6 +112,25 @@ public class PerformanceEngine {
         consumeLog.setFailedRows(0);
         consumeLogMapper.insert(consumeLog);
 
+        // ========== 2.5 冲销旧批次（CR-1，supersede 链路） ==========
+        // supersededBatchIds 非空时，按 SUPERSEDE reason 冲销每个旧批次下全部 ACTIVE 事实，
+        // 与本批次的"重建"在同一事务内执行（all-or-nothing）。空列表（首次导入）跳过。
+        if (supersededBatchIds != null && !supersededBatchIds.isEmpty()) {
+            int totalReversed = 0;
+            for (Long oldBatchId : supersededBatchIds) {
+                try {
+                    int reversed = reverseService.reverseBySupersede(oldBatchId, operatorId);
+                    totalReversed += reversed;
+                    log.info("[业绩supersede] 冲销旧批次事实：oldBatchId={}, 冲销数={}", oldBatchId, reversed);
+                } catch (Exception e) {
+                    log.error("[业绩supersede] 旧批次冲销失败：oldBatchId={}", oldBatchId, e);
+                    throw e;
+                }
+            }
+            log.info("[业绩supersede] 旧批次冲销汇总：totalBatchIds={}, totalReversedFacts={}",
+                supersededBatchIds.size(), totalReversed);
+        }
+
         // ========== 3. 分页拉取归一化记录，逐行生成业绩事实 ==========
         // 注意：importQueryPort 当前为空实现（抛 UnsupportedOperationException），
         // 跨域调用联调后此处将真正执行分页拉取逻辑。
@@ -124,16 +145,15 @@ public class PerformanceEngine {
             consumeLog.setTotalRows(totalCount);
 
             // 分页拉取并处理
+            // 端口契约位于 panjia-contracts（叶子模块，不依赖 ruoyi-common-mybatis），
+            // 此处用基础 int 参数调用，避免把 PageQuery 牵入跨域契约。
             int pageNum = 1;
-            PageQuery pageQuery = new PageQuery();
-            pageQuery.setPageNum(pageNum);
-            pageQuery.setPageSize(PAGE_SIZE);
+            int pageSize = ImportNormalizedRecordQueryPort.DEFAULT_PAGE_SIZE;
 
             PageResult<NormalizedRecordDTO> pageResult;
             do {
-                pageQuery.setPageNum(pageNum);
-                // 调用跨域端口拉取归一化记录（当前为空实现，联调后生效）
-                pageResult = importQueryPort.listByBatchId(batchId, pageQuery);
+                // 调用跨域端口拉取归一化记录
+                pageResult = importQueryPort.listByBatchId(batchId, pageNum, pageSize);
 
                 if (pageResult != null && pageResult.getRows() != null) {
                     for (NormalizedRecordDTO record : pageResult.getRows()) {

@@ -22,7 +22,8 @@ import java.util.List;
  * 支持以下冲销场景：
  * <ul>
  *   <li><b>替换冲销</b>（{@link #supersede}）：新版本事实替换旧版本，旧事实 expire</li>
- *   <li><b>重归一化冲销</b>（{@link #reverseByReNormalize}）：批次重新导入时冲销旧事实</li>
+ *   <li><b>重归一化冲销</b>（{@link #reverseByReNormalize}）：批次重新导入时冲销旧事实（reason=RENORMALIZE，CR-5）</li>
+ *   <li><b>替换冲销-批次维度</b>（{@link #reverseBySupersede}）：同维度 supersede 时批量冲销旧批次全部事实（reason=SUPERSEDE，CR-1）</li>
  *   <li><b>调整单冲销</b>（{@link #reverseByAdjust}）：调整单执行时冲销原事实</li>
  *   <li><b>期间作废冲销</b>（{@link #reverseByPeriodVoid}）：期间作废时批量冲销</li>
  * </ul>
@@ -88,10 +89,12 @@ public class ReverseService {
     }
 
     /**
-     * 重归一化冲销。
+     * 重归一化冲销（CR-5）。
      * <p>
-     * 将指定批次的所有 ACTIVE 事实全部冲销。
-     * 典型场景：批次重新导入前，先冲销该批次之前生成的所有业绩事实。
+     * 将指定批次的所有 ACTIVE 事实全部冲销，{@code reversed_reason = RENORMALIZE}。
+     * 典型场景：批次重新导入前，先冲销该批次之前生成的所有业绩事实再重建。
+     * <p>
+     * 与 {@link #reverseBySupersede} 复用同一闭循环（仅 reason 不同，审计可区分）。
      *
      * @param batchId    批次 ID
      * @param operatorId 操作人 ID
@@ -99,31 +102,60 @@ public class ReverseService {
      */
     @Transactional(rollbackFor = Exception.class)
     public int reverseByReNormalize(Long batchId, Long operatorId) {
-        // 1. 查询该批次下所有 ACTIVE 状态的事实
+        return reverseByReason(batchId, ReversedReason.RENORMALIZE, operatorId);
+    }
+
+    /**
+     * 替换冲销（CR-1）。
+     * <p>
+     * 将指定批次的所有 ACTIVE 事实全部冲销，{@code reversed_reason = SUPERSEDE}。
+     * 典型场景：同维度（sourceType+period+deptId）下，旧批次被新批次废弃后，
+     * 业绩域收到 ImportBatchArchivedEvent.supersededBatchIds 列表，依此冲销旧批次全部事实。
+     * <p>
+     * 与 {@link #reverseByReNormalize} 复用同一闭循环（仅 reason 不同）。
+     *
+     * @param oldBatchId 被 supersede 的旧批次 ID
+     * @param operatorId 操作人 ID
+     * @return 冲销的事实条数
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int reverseBySupersede(Long oldBatchId, Long operatorId) {
+        return reverseByReason(oldBatchId, ReversedReason.SUPERSEDE, operatorId);
+    }
+
+    /**
+     * 通用内部：按指定 reason 冲销批次下所有 ACTIVE 事实。
+     *
+     * @param batchId    批次 ID
+     * @param reason     冲销原因（ReversedReason.RENORMALIZE / SUPERSEDE）
+     * @param operatorId 操作人 ID
+     * @return 冲销的事实条数
+     */
+    private int reverseByReason(Long batchId, ReversedReason reason, Long operatorId) {
         LambdaQueryWrapper<PerformanceFact> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(PerformanceFact::getBatchId, batchId)
                 .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE);
         List<PerformanceFact> facts = factMapper.selectList(queryWrapper);
 
         if (facts.isEmpty()) {
-            log.info("[冲销-重归一化] 批次无待冲销事实：batchId={}", batchId);
+            log.info("[冲销-{}] 批次无待冲销事实：batchId={}", reason.getCode(), batchId);
             return 0;
         }
 
-        // 2. 逐条冲销（逐条校验状态，确保只有 ACTIVE 的才被冲销）
         int reversedCount = 0;
         for (PerformanceFact fact : facts) {
             try {
-                checkAndReverse(fact, ReversedReason.RENORMALIZE, operatorId);
+                checkAndReverse(fact, reason, operatorId);
                 factMapper.updateById(fact);
                 reversedCount++;
             } catch (Exception e) {
-                log.warn("[冲销-重归一化] 单条事实冲销失败：factId={}, batchId={}",
-                        fact.getId(), batchId, e);
+                log.warn("[冲销-{}] 单条事实冲销失败：factId={}, batchId={}",
+                        reason.getCode(), fact.getId(), batchId, e);
             }
         }
 
-        log.info("[冲销-重归一化] 批次冲销完成：batchId={}, 冲销数={}", batchId, reversedCount);
+        log.info("[冲销-{}] 批次冲销完成：batchId={}, 冲销数={}",
+                reason.getCode(), batchId, reversedCount);
         return reversedCount;
     }
 

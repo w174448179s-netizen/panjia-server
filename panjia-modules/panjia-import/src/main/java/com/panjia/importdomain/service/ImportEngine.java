@@ -2,6 +2,8 @@ package com.panjia.importdomain.service;
 
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
+import com.panjia.contracts.event.EventPort;
+import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
@@ -39,12 +41,15 @@ import com.panjia.importutil.validate.BasicValidator;
 import com.panjia.importutil.validate.FieldError;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +84,30 @@ public class ImportEngine {
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
     private final PeopleQueryPort peopleQueryPort;
+    private final EventPort eventPort;
+
+    /**
+     * 自身代理引用（绕过同类内部方法调用的代理拦截问题）。
+     * <p>
+     * Spring AOP / CGLIB 代理只拦截外部 bean 进入本对象的入口；本类内部
+     * {@code this.doParsePhase(...)} / {@code this.doNormalizePhase(...)}
+     * 会绕过代理，导致方法上的 {@code @Transactional} 完全失效。
+     * 注入自身代理引用（{@code self}），让内部调用走代理，使事务注解生效。
+     * <p>
+     * 字段标 {@code @Autowired @Lazy} 且非 final：
+     * <ul>
+     *   <li>{@code @Lazy} 解决「构造器注入自我引用」的循环依赖（提前暴露半成品代理）</li>
+     *   <li>非 final 字段不进 Lombok {@code @RequiredArgsConstructor} 生成的构造器</li>
+     * </ul>
+     * <p>
+     * 历史教训：本字段是 L1 修复「{@code No existing transaction found for transaction marked with
+     * propagation 'mandatory'}」运行时异常时新增的——事件发布前置要求 MANDATORY 事务上下文，
+     * 而 {@code @Transactional} 失效会导致所有 mapper 操作走 auto-commit（数据能落库），
+     * 但 {@code eventPort.emit()} 直接抛 IllegalTransactionStateException。
+     */
+    @Autowired
+    @Lazy
+    private ImportEngine self;
 
     private static final JsonMapper OBJECT_MAPPER = new JsonMapper();
 
@@ -114,12 +143,14 @@ public class ImportEngine {
         List<FieldError> fieldErrors = basicValidator.validate(sheet, template);
 
         // 5. 事务 A：落批次 + RawData + Issue
-        ImportBatch batch = doParsePhase(sourceType, sheet, fieldErrors, fileName, period,
+        // 走 self 代理：this.doParsePhase 会绕过 Spring AOP 代理 → @Transactional 失效 → 无事务上下文
+        // → 后续 eventPort.emit() (MANDATORY) 会抛 IllegalTransactionStateException。
+        ImportBatch batch = self.doParsePhase(sourceType, sheet, fieldErrors, fileName, period,
             operatorId, deptId, template, archived);
 
         // 6. 事务 B：归一化
         try {
-            doNormalizePhase(batch.getId(), sourceType, period);
+            self.doNormalizePhase(batch.getId(), sourceType, period);
         } catch (Exception e) {
             log.error("归一化失败 batchId={}", batch.getId(), e);
             markFailed(batch.getId());
@@ -202,7 +233,69 @@ public class ImportEngine {
         batch.finishNormalize(!issues.isEmpty());
         batch.setFailedRows(issues.size());
         batch.setSuccessRows(batch.getTotalRows() - issues.size());
+
+        // ★ V2.0 §5.5 重复导入（SUPERSEDED）：同 (sourceType, period, deptId) 若已存在
+        //   ARCHIVED 且未被废弃的旧批次，须先回填 superseded_by_batch_id，才不撞
+        //   uk_import_batch_type_period_dept 唯一索引。新批次进入 ARCHIVED 在本事务末尾
+        //   执行（status=3 触发唯一索引），所以 marker 必须抢在此之前 commit。
+        //   整个 doNormalizePhase 是单个事务，与 batch.updateById 一起 all-or-nothing。
+        if (ImportBatchStatus.ARCHIVED.equals(batch.getStatus())) {
+            supersedeIfDuplicate(batch);
+            // ★ 自动归档路径发 ImportBatchArchivedEvent（同一事务内 Outbox INSERT 与业务表
+            //   UPDATE 原子提交，EventPort 强制要求 MANDATORY 事务上下文）。
+            //   supersedeIfDuplicate 已在本事务内完成 markSuperseded 回填，
+            //   selectSupersededBatchIds 在同一事务可读到被本批 supersede 的旧批次。
+            emitArchivedEvent(batch);
+        }
+
         batchMapper.updateById(batch);
+    }
+
+    /**
+     * 构造并发布 ImportBatchArchivedEvent（自动归档路径，doNormalizePhase 内调用）。
+     * <p>
+     * supersededBatchIds 取本事务内 markSuperseded 回填的旧批次（同维度唯一索引约束下
+     * 一般 0~1 个）；与 ImportBatchServiceImpl.archive 手动归档路径共用同一 emit 语义。
+     *
+     * @param batch 当前进入 ARCHIVED 的批次
+     */
+    private void emitArchivedEvent(ImportBatch batch) {
+        List<Long> supersededIds = batchMapper.selectSupersededBatchIds(batch.getId());
+        List<String> supersededStrIds = (supersededIds == null || supersededIds.isEmpty())
+            ? Collections.emptyList()
+            : supersededIds.stream().map(String::valueOf).toList();
+
+        ImportBatchArchivedEvent event = new ImportBatchArchivedEvent();
+        event.setBatchId(batch.getId());
+        event.setSourceType(batch.getSourceType() == null ? null : batch.getSourceType().getCode());
+        event.setPeriod(batch.getPeriod());
+        event.setSupersededBatchIds(supersededStrIds);
+        eventPort.emit(event);
+
+        log.info("[导入归档事件] 发布 ImportBatchArchivedEvent(自动归档): batchId={}, sourceType={}, period={}, supersededBatchIds={}",
+            batch.getId(), event.getSourceType(), event.getPeriod(), supersededStrIds);
+    }
+
+    /**
+     * 同 (sourceType, period, deptId) 唯一索引范围内，把已存在的 ARCHIVED
+     * 未被废弃的旧批次标记为被本批次废弃，避免新批次转入 ARCHIVED 时撞唯一索引。
+     * <p>
+     * 设计依据：V2.0 §5.5 / §6.1 / ADR-IMP-004（单据逻辑失效）。
+     */
+    private void supersedeIfDuplicate(ImportBatch newBatch) {
+        ImportBatch old = batchMapper.selectOne(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportBatch>()
+            .eq(ImportBatch::getSourceType, newBatch.getSourceType())
+            .eq(ImportBatch::getPeriod, newBatch.getPeriod())
+            .eq(ImportBatch::getDeptId, newBatch.getDeptId())
+            .eq(ImportBatch::getStatus, ImportBatchStatus.ARCHIVED)
+            .isNull(ImportBatch::getSupersededByBatchId)
+            .ne(ImportBatch::getId, newBatch.getId())
+            .last("LIMIT 1"));
+        if (old != null) {
+            log.info("重复导入归档标记 SUPERSEDED: oldBatchId={} -> newBatchId={} (sourceType={}, period={}, deptId={})",
+                old.getId(), newBatch.getId(), newBatch.getSourceType(), newBatch.getPeriod(), newBatch.getDeptId());
+            batchMapper.markSuperseded(old.getId(), newBatch.getId());
+        }
     }
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,

@@ -14,9 +14,18 @@ import java.util.List;
  * <p>
  * 通过 panjia-contracts 中的 {@link PeopleQueryPort} 跨域查询员工信息。
  * <p>
- * 注：当前 PeopleQueryPort 提供算薪事实快照能力，与 EmployeeSnapshotDTO 所需的
- * 员工主数据字段（部门、姓名、状态等）尚未完全对齐，因此本适配器先以
- * {@link UnsupportedOperationException} 占位，待 people 域补充对应查询端口后再完善实现。
+ * TODO（V2.1 跨域扩 port 专项）：
+ * <ul>
+ *   <li>PeopleQueryPort.getSnapshotAt 返回 Map&lt;fact_type, value&gt;（8 类算薪事实：DEPT/POST/GRADE 等），
+ *       与 {@link EmployeeSnapshotDTO} 字段（employeeId/employeeCode/employeeName/deptId/deptName/status/userId）不对齐</li>
+ *   <li>需在 panjia-contracts 新增 {@code EmployeeMainDataQueryPort}（按 id/code 批量查员工主数据），
+ *       由 panjia-people EmployeeService 实现</li>
+ *   <li>本适配器实现 getByEmployeeId / getByEmployeeCode / listByDeptId 时：
+ *       先调 EmployeeMainDataQueryPort 拿主数据，再用 PeopleQueryPort.getSnapshotAt 拿算薪快照取数日</li>
+ * </ul>
+ * <p>
+ * 在 EmployeeMainDataQueryPort 落地前，本适配器三个方法均抛 {@link UnsupportedOperationException}。
+ * PerformanceEngine.buildSingleFact 现有 catch 分支可兜底（员工字段留空，事实仍生成）。
  */
 @Slf4j
 @Service

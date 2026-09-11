@@ -23,6 +23,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 
 /**
  * 业绩事实管理。
@@ -66,6 +67,9 @@ public class PerformanceFactController extends BaseController {
 
     /**
      * 手工触发批次消费（重新生成业绩）。
+     * <p>
+     * 手工重跑语义：不携带 supersede 信息（supersede 链路由 import 域归档事件驱动），
+     * 这里传空列表，跳过 §2.5 旧批次冲销。
      *
      * @param batchId 批次 ID
      * @return 操作结果
@@ -75,7 +79,8 @@ public class PerformanceFactController extends BaseController {
     @PostMapping("/build/{batchId}")
     public R<Void> build(@PathVariable Long batchId) {
         String eventId = "MANUAL_BUILD_" + batchId + "_" + System.currentTimeMillis();
-        performanceEngine.buildFromBatch(batchId, eventId, "MANUAL_BUILD", LoginHelper.getUserId());
+        performanceEngine.buildFromBatch(batchId, eventId, "MANUAL_BUILD",
+            LoginHelper.getUserId(), Collections.emptyList());
         return R.ok();
     }
 

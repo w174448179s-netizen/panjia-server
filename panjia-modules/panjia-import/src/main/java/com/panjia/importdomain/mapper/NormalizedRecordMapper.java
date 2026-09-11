@@ -37,4 +37,38 @@ public interface NormalizedRecordMapper extends BaseMapper<NormalizedRecord> {
         "WHERE n.period = #{period} " +
         "AND b.status = 3 AND b.superseded_by_batch_id IS NULL")
     List<NormalizedRecord> selectActiveByPeriod(@Param("period") String period);
+
+    /**
+     * 按批次分页查询归一化记录（仅 ARCHIVED 且未被 supersede 的批次）。
+     * <p>
+     * 用于业绩域按 ImportNormalizedRecordQueryPort.listByBatchId 拉取（V2.0 §4.1 ⑤）。
+     * 过滤条件：批次 status='ARCHIVED' AND superseded_by_batch_id IS NULL，
+     * 避免把已废弃旧批次的归一化记录算成业绩。
+     *
+     * @param batchId 批次 ID
+     * @param offset  偏移
+     * @param limit   每页条数
+     * @return 归一化记录列表
+     */
+    @Select("SELECT n.* FROM pj_normalized_record n " +
+        "JOIN pj_import_batch b ON n.batch_id = b.id " +
+        "WHERE n.batch_id = #{batchId} " +
+        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL " +
+        "ORDER BY n.id ASC " +
+        "LIMIT #{offset}, #{limit}")
+    List<NormalizedRecord> selectPageByBatchId(@Param("batchId") Long batchId,
+                                               @Param("offset") int offset,
+                                               @Param("limit") int limit);
+
+    /**
+     * 按批次统计归一化记录数（仅 ARCHIVED 且未被 supersede 的批次）。
+     *
+     * @param batchId 批次 ID
+     * @return 归一化记录总数
+     */
+    @Select("SELECT COUNT(*) FROM pj_normalized_record n " +
+        "JOIN pj_import_batch b ON n.batch_id = b.id " +
+        "WHERE n.batch_id = #{batchId} " +
+        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL")
+    long countByBatchIdActive(@Param("batchId") Long batchId);
 }

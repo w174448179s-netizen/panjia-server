@@ -66,6 +66,23 @@ panjia:
   import:
     batch-insert-size: 300
     max-rows-per-batch: 5000
+  # 导入工具层（公共导入文件归档）
+  import-util:
+    # 归档存储类型：minio（推荐，生产/dev 一致）/ local（兜底，本地磁盘）
+    storage-type: ${PANJIA_IMPORT_STORAGE_TYPE:minio}
+    # 本地归档根目录（storage-type=local 时生效；minio 时忽略）
+    local-base-dir: ${PANJIA_IMPORT_LOCAL_BASE_DIR:/data/panjia-import}
+    # MinIO 配置（storage-type=minio 时必填；与 script/docker/docker-compose.yml 里的 MINIO_ROOT_USER/PASSWORD 保持一致）
+    minio:
+      endpoint: ${PANJIA_IMPORT_MINIO_ENDPOINT:http://127.0.0.1:9000}
+      access-key: ${PANJIA_IMPORT_MINIO_ACCESS_KEY:ruoyi}
+      secret-key: ${PANJIA_IMPORT_MINIO_SECRET_KEY:ruoyi123}
+      bucket-name: ${PANJIA_IMPORT_MINIO_BUCKET:panjia-archive}
+      region: us-east-1
+      is-https: N
+      access-policy: "1"
+      # 业务对象键前缀（最终路径：{key-prefix}/{bizDir}/{yyyyMMdd}/{uuid}_{filename}）
+      key-prefix: panjia-import
 
 # Spring配置
 spring:
