@@ -55,7 +55,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -233,18 +232,24 @@ public class ImportEngine {
         normalizedRecordMapper.deleteByBatchId(batchId);
         issueMapper.deleteNormalizePhaseByBatchId(batchId);
 
-        // 解析阶段已判无效的行：不归一化、不进事实表（行级 issue 已在事务 A 落库展示）
-        Set<Integer> invalidRowNos = issueMapper.selectList(
-                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportIssue>()
-                    .eq(ImportIssue::getBatchId, batchId)
-                    .eq(ImportIssue::getPhase, ImportIssuePhase.PARSE))
-            .stream()
-            .map(ImportIssue::getRowNo)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toSet());
+        // 格式类硬错误（必填缺失/类型错误等行级校验不过）：批次直接 FAILED 终态。
+        // 「待确认」只保留给可修复的归一化问题（员工未匹配 → 重归一化）；
+        // 格式错误无法在系统内修复，停在 PENDING_CONFIRM 只会让用户误以为可以"确认"。
+        long parseIssueCount = issueMapper.selectCount(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportIssue>()
+                .eq(ImportIssue::getBatchId, batchId)
+                .eq(ImportIssue::getPhase, ImportIssuePhase.PARSE));
+        if (parseIssueCount > 0) {
+            batch.fail();
+            batch.setFailedRows((int) parseIssueCount);
+            batch.setSuccessRows(0);
+            batch.setRemark("格式校验未通过（" + parseIssueCount + " 处），请查看问题清单，修正后重新导入");
+            batchMapper.updateById(batch);
+            return;
+        }
 
         List<ImportIssue> issues = new ArrayList<>();
-        normalizePerformance(batchId, sourceType, period, issues, invalidRowNos);
+        normalizePerformance(batchId, sourceType, period, issues);
 
         // 落新 issue
         for (ImportIssue issue : issues) {
@@ -252,21 +257,11 @@ public class ImportEngine {
             issueMapper.insert(issue);
         }
 
-        // 更新批次状态：解析阶段 issue + 归一化阶段 issue 一起决定 PENDING_CONFIRM / ARCHIVED。
-        // ★ 修复：此前 finishNormalize 只看归一化 issue 且 failedRows 被覆盖，
-        //   基础校验错误被完全忽略，坏行照样归档"成功"。
-        // ★ V2.0 §3.4 取消"未匹配整批 FAILED"硬约束 — 业务硬约束挪到模板层：
-        //   - "员工号为空" → 模板 required + 服务端 BasicValidator 双保险
-        //   - "员工号未匹配" → 走 issue，批次进入 PENDING_CONFIRM 由人工/重归一化修复
-        // 归一化层不再充当"主数据匹配的最后一道关卡"。
-        long parseIssueCount = issueMapper.selectCount(
-            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportIssue>()
-                .eq(ImportIssue::getBatchId, batchId)
-                .eq(ImportIssue::getPhase, ImportIssuePhase.PARSE));
-        int failedRows = (int) parseIssueCount + issues.size();
-        batch.finishNormalize(failedRows > 0);
-        batch.setFailedRows(failedRows);
-        batch.setSuccessRows(Math.max(0, batch.getTotalRows() - failedRows));
+        // 更新批次状态：归一化 issue（员工未匹配等可修复问题）→ PENDING_CONFIRM 人工处理；
+        // 无任何 issue → ARCHIVED 自动对外可见。
+        batch.finishNormalize(!issues.isEmpty());
+        batch.setFailedRows(issues.size());
+        batch.setSuccessRows(Math.max(0, batch.getTotalRows() - issues.size()));
 
         // ★ V2.0 §5.5 重复导入（SUPERSEDED）：同 (sourceType, period, deptId) 若已存在
         //   ARCHIVED 且未被废弃的旧批次，须先回填 superseded_by_batch_id，才不撞
@@ -333,25 +328,18 @@ public class ImportEngine {
     }
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,
-                                     String period, List<ImportIssue> issues, Set<Integer> invalidRowNos) {
+                                     String period, List<ImportIssue> issues) {
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
         // 批量匹配员工（未匹配 → issue，不写归一化记录；该行不进 fact 表）
-        // ★ 校验失败行（invalidRowNos）跳过匹配：issue 已在解析阶段落库，这里不重复报
-        Map<String, Long> codeToId = matchEmployees(
-            rawRows.stream().filter(r -> !invalidRowNos.contains(r.getRowNo())).toList());
+        Map<String, Long> codeToId = matchEmployees(rawRows);
 
         // sourceKey 生成器
         SourceKeyGenerator keyGen = findSourceKeyGenerator(sourceType);
         NormalizedRecordType recordType = toRecordType(sourceType);
 
         for (RawData raw : rawRows) {
-            // 校验失败行：不归一化（不进事实表），行级 issue 已在解析阶段落库
-            if (raw.getRowNo() != null && invalidRowNos.contains(raw.getRowNo())) {
-                continue;
-            }
-
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
             String externalCode = extractExternalCode(jsonMap);
 

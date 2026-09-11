@@ -5,6 +5,7 @@ import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.contracts.event.ImportBatchRenormalizedEvent;
 import com.panjia.importdomain.domain.ImportBatch;
+import com.panjia.importdomain.domain.ImportBatchStatus;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportSourceType;
@@ -79,8 +80,15 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         batch.reNormalize();
         batchMapper.updateById(batch);
         importEngine.doNormalizePhase(batchId, batch.getSourceType(), batch.getPeriod());
+        // 重归一化后批次可能因残留格式类硬错误进入 FAILED 终态——此时不发下游事件，
+        // 否则业绩域会基于一个已失败批次做重算冲销
+        ImportBatch latest = requireBatch(batchId);
+        if (latest.getStatus() == ImportBatchStatus.FAILED) {
+            log.info("重归一化后批次为 FAILED，跳过 Renormalized 事件: batchId={}", batchId);
+            return;
+        }
         // 重归一化完成后发事件（同一事务内 Outbox INSERT 与业务表 UPDATE 原子提交）
-        emitRenormalizedEvent(batch);
+        emitRenormalizedEvent(latest);
     }
 
     @Override
