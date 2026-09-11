@@ -143,12 +143,14 @@ CREATE TABLE pj_import_issue (
     field_name  VARCHAR(64),
     raw_value   VARCHAR(500),
     message     VARCHAR(1000),
-    status      SMALLINT     NOT NULL DEFAULT 0  -- 0 OPEN 1 RESOLVED 2 IGNORED
+    status      SMALLINT     NOT NULL DEFAULT 0,  -- 0 OPEN 1 RESOLVED 2 IGNORED
+    phase       VARCHAR(16)  NOT NULL DEFAULT 'PARSE'  -- PARSE=解析/基础校验，NORMALIZE=归一化
 );
 CREATE INDEX idx_issue_batch ON pj_import_issue(batch_id);
 
-COMMENT ON TABLE pj_import_issue IS '批次级校验/归一化失败问题清单';
+COMMENT ON TABLE  pj_import_issue IS '批次级校验/归一化失败问题清单';
 COMMENT ON COLUMN pj_import_issue.status IS '0 OPEN 1 RESOLVED 2 IGNORED';
+COMMENT ON COLUMN pj_import_issue.phase IS '问题来源阶段：PARSE=解析/基础校验，NORMALIZE=归一化';
 
 -- ---------- 四、归一化记录（五类交易单据归一化产物） ----------
 CREATE TABLE pj_normalized_record (

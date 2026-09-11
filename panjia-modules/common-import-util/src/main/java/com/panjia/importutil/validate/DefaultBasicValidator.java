@@ -1,5 +1,6 @@
 package com.panjia.importutil.validate;
 
+import com.panjia.importutil.convert.TypeConverter;
 import com.panjia.importutil.dict.DictDataPort;
 import com.panjia.importutil.dto.ParsedRow;
 import com.panjia.importutil.dto.ParsedSheet;
@@ -188,7 +189,9 @@ public class DefaultBasicValidator implements BasicValidator {
                         }
                         BigDecimal actual;
                         try {
-                            actual = new BigDecimal(raw.trim());
+                            // 与 TypeConverter 同一套解析：支持 "5.00%" 百分比 / 千分位，
+                            // 否则带 % 的合法值会因解析失败静默跳过范围校验
+                            actual = TypeConverter.parseDecimal(raw);
                         } catch (NumberFormatException nfe) {
                             // 非数字 — 留给类型校验（解析阶段已经记），这里跳过
                             continue;

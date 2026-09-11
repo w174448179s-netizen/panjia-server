@@ -54,10 +54,33 @@ public final class TypeConverter {
 
     private static BigDecimal toDecimal(String raw) {
         try {
-            return new BigDecimal(raw.trim().replace(",", ""));
+            return parseDecimal(raw);
         } catch (NumberFormatException e) {
             throw new ImportUtilException("无法转换为数值: " + raw);
         }
+    }
+
+    /**
+     * 解析数值输入，支持：
+     * <ul>
+     *   <li>千分位逗号：{@code 1,234.5}</li>
+     *   <li>百分号后缀：{@code 5.00%} → 0.05（Excel 百分比格式单元格 /
+     *       文本百分号统一按「% 表示除以 100」处理，下游字段如 shareRatio
+     *       以小数量纲参与乘法运算）</li>
+     * </ul>
+     * 不带 % 的纯数字量纲不变（{@code 5.00} → 5.00）。
+     *
+     * @param raw 原始字符串（未 trim）
+     * @return 数值
+     * @throws NumberFormatException 非法数字
+     */
+    public static BigDecimal parseDecimal(String raw) {
+        String v = raw.trim().replace(",", "");
+        if (v.endsWith("%")) {
+            return new BigDecimal(v.substring(0, v.length() - 1).trim())
+                .divide(BigDecimal.valueOf(100));
+        }
+        return new BigDecimal(v);
     }
 
     private static final DateTimeFormatter[] FALLBACK_DATE_FORMATS = {

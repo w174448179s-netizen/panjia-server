@@ -340,8 +340,8 @@ ROLE_BIND_COUNT=0
 ROLE_BIND_FILES=()
 for sql in "${SQL_FILES[@]}"; do
     fname=$(basename "$sql")
-    if grep -qE "INSERT INTO sys_role_menu" "$sql" 2>/dev/null && \
-       grep -qE "VALUES[[:space:]]*\([[:space:]]*1," "$sql" 2>/dev/null; then
+    if grep -q "INSERT INTO sys_role_menu" "$sql" 2>/dev/null && \
+       grep -q "(1," "$sql" 2>/dev/null; then
         ROLE_BIND_COUNT=$((ROLE_BIND_COUNT + 1))
         ROLE_BIND_FILES+=("$fname")
     fi

@@ -32,4 +32,7 @@ public class ImportIssue implements Serializable {
 
     /** 0 OPEN 1 RESOLVED 2 IGNORED */
     private ImportIssueStatus status;
+
+    /** 来源阶段：PARSE=解析/基础校验，NORMALIZE=归一化 */
+    private ImportIssuePhase phase;
 }

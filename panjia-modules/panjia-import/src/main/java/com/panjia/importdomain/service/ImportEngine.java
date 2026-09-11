@@ -8,6 +8,7 @@ import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
 import com.panjia.importdomain.domain.ImportIssue;
+import com.panjia.importdomain.domain.ImportIssuePhase;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportIssueType;
 import com.panjia.importdomain.domain.ImportSourceType;
@@ -36,6 +37,7 @@ import com.panjia.importutil.archive.ArchiveResult;
 import com.panjia.importutil.archive.FileArchiver;
 import com.panjia.importutil.dto.ParsedSheet;
 import com.panjia.importutil.parser.ParserFactory;
+import com.panjia.importutil.template.model.ColumnDef;
 import com.panjia.importutil.template.model.ImportTemplate;
 import com.panjia.importutil.validate.BasicValidator;
 import com.panjia.importutil.validate.FieldError;
@@ -53,6 +55,9 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 导入引擎（V2.0：交易业务单据域）。
@@ -139,6 +144,11 @@ public class ImportEngine {
             throw new IllegalStateException("文件解析失败: " + e.getMessage(), e);
         }
 
+        // 3.5 文件形态防呆：表头与模板完全不匹配 / 没有数据行 → 直接拦截，不创建批次。
+        // 此前随机文件会解析出 0 行（或表头全对不上的空行）静默走完归一化并 ARCHIVED，
+        // 前端显示"上传成功"，用户误以为导入成功。
+        validateSheetShape(sheet, template);
+
         // 4. 基础格式校验（必填/类型/枚举/正则/长度）
         List<FieldError> fieldErrors = basicValidator.validate(sheet, template);
 
@@ -216,12 +226,25 @@ public class ImportEngine {
             throw new IllegalStateException("批次不存在: " + batchId);
         }
 
-        // 清旧归一化结果（重归一化场景）
+        // 清旧归一化结果（重归一化场景）。
+        // ★ 只清 NORMALIZE 阶段 issue：PARSE 阶段的基础校验 issue（REQUIRED_MISSING 等）
+        //   是模板 required / validation_rules 的校验产物，此前全量 deleteByBatchId
+        //   把它们删掉，导致模板校验"看起来没生效"。
         normalizedRecordMapper.deleteByBatchId(batchId);
-        issueMapper.deleteByBatchId(batchId);
+        issueMapper.deleteNormalizePhaseByBatchId(batchId);
+
+        // 解析阶段已判无效的行：不归一化、不进事实表（行级 issue 已在事务 A 落库展示）
+        Set<Integer> invalidRowNos = issueMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportIssue>()
+                    .eq(ImportIssue::getBatchId, batchId)
+                    .eq(ImportIssue::getPhase, ImportIssuePhase.PARSE))
+            .stream()
+            .map(ImportIssue::getRowNo)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
 
         List<ImportIssue> issues = new ArrayList<>();
-        normalizePerformance(batchId, sourceType, period, issues);
+        normalizePerformance(batchId, sourceType, period, issues, invalidRowNos);
 
         // 落新 issue
         for (ImportIssue issue : issues) {
@@ -229,14 +252,21 @@ public class ImportEngine {
             issueMapper.insert(issue);
         }
 
-        // 更新批次状态：是否有 issue 决定 PENDING_CONFIRM / ARCHIVED。
+        // 更新批次状态：解析阶段 issue + 归一化阶段 issue 一起决定 PENDING_CONFIRM / ARCHIVED。
+        // ★ 修复：此前 finishNormalize 只看归一化 issue 且 failedRows 被覆盖，
+        //   基础校验错误被完全忽略，坏行照样归档"成功"。
         // ★ V2.0 §3.4 取消"未匹配整批 FAILED"硬约束 — 业务硬约束挪到模板层：
         //   - "员工号为空" → 模板 required + 服务端 BasicValidator 双保险
         //   - "员工号未匹配" → 走 issue，批次进入 PENDING_CONFIRM 由人工/重归一化修复
         // 归一化层不再充当"主数据匹配的最后一道关卡"。
-        batch.finishNormalize(!issues.isEmpty());
-        batch.setFailedRows(issues.size());
-        batch.setSuccessRows(Math.max(0, batch.getTotalRows() - issues.size()));
+        long parseIssueCount = issueMapper.selectCount(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportIssue>()
+                .eq(ImportIssue::getBatchId, batchId)
+                .eq(ImportIssue::getPhase, ImportIssuePhase.PARSE));
+        int failedRows = (int) parseIssueCount + issues.size();
+        batch.finishNormalize(failedRows > 0);
+        batch.setFailedRows(failedRows);
+        batch.setSuccessRows(Math.max(0, batch.getTotalRows() - failedRows));
 
         // ★ V2.0 §5.5 重复导入（SUPERSEDED）：同 (sourceType, period, deptId) 若已存在
         //   ARCHIVED 且未被废弃的旧批次，须先回填 superseded_by_batch_id，才不撞
@@ -303,18 +333,25 @@ public class ImportEngine {
     }
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,
-                                     String period, List<ImportIssue> issues) {
+                                     String period, List<ImportIssue> issues, Set<Integer> invalidRowNos) {
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
         // 批量匹配员工（未匹配 → issue，不写归一化记录；该行不进 fact 表）
-        Map<String, Long> codeToId = matchEmployees(rawRows);
+        // ★ 校验失败行（invalidRowNos）跳过匹配：issue 已在解析阶段落库，这里不重复报
+        Map<String, Long> codeToId = matchEmployees(
+            rawRows.stream().filter(r -> !invalidRowNos.contains(r.getRowNo())).toList());
 
         // sourceKey 生成器
         SourceKeyGenerator keyGen = findSourceKeyGenerator(sourceType);
         NormalizedRecordType recordType = toRecordType(sourceType);
 
         for (RawData raw : rawRows) {
+            // 校验失败行：不归一化（不进事实表），行级 issue 已在解析阶段落库
+            if (raw.getRowNo() != null && invalidRowNos.contains(raw.getRowNo())) {
+                continue;
+            }
+
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
             String externalCode = extractExternalCode(jsonMap);
 
@@ -372,6 +409,7 @@ public class ImportEngine {
         issue.setRawValue(truncate(fe.getRawValue(), 500));
         issue.setMessage(truncate(fe.getMessage(), 1000));
         issue.setStatus(ImportIssueStatus.OPEN);
+        issue.setPhase(ImportIssuePhase.PARSE);
         return issue;
     }
 
@@ -534,7 +572,35 @@ public class ImportEngine {
         issue.setRawValue(rawValue);
         issue.setMessage(msg);
         issue.setStatus(ImportIssueStatus.OPEN);
+        issue.setPhase(ImportIssuePhase.NORMALIZE);
         return issue;
+    }
+
+    /**
+     * 文件形态防呆：表头与模板列完全无匹配、或没有可读数据行时直接拦截。
+     * <p>
+     * 随机文件此前会静默解析出「表头全对不上」的空行甚至 0 行，一路走完
+     * 归一化后批次 ARCHIVED，前端显示"上传成功"。表头一个都对不上基本
+     * 可以断定用错了文件/模板，直接报错比落一个 0 行批次更直观。
+     *
+     * @param sheet    解析结果
+     * @param template 激活模板
+     */
+    private void validateSheetShape(ParsedSheet sheet, ImportTemplate template) {
+        Set<String> templateHeaders = template.getColumns().stream()
+            .map(ColumnDef::getColName)
+            .filter(h -> h != null && !h.isBlank())
+            .map(String::trim)
+            .collect(Collectors.toSet());
+        long matchedHeaders = sheet.getHeaders().stream()
+            .filter(h -> h != null && templateHeaders.contains(h.trim()))
+            .count();
+        if (sheet.getHeaders().isEmpty() || matchedHeaders == 0) {
+            throw new IllegalArgumentException("表头与导入模板不匹配，请下载模板并按模板格式填写后再上传");
+        }
+        if (sheet.getRows().isEmpty()) {
+            throw new IllegalArgumentException("文件中没有可导入的数据行，请检查文件内容");
+        }
     }
 
     private Map<String, Object> parseRawJson(String rawJson) {
