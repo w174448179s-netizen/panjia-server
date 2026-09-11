@@ -55,7 +55,9 @@ public interface NormalizedRecordMapper extends BaseMapper<NormalizedRecord> {
         "WHERE n.batch_id = #{batchId} " +
         "AND b.status = 3 AND b.superseded_by_batch_id IS NULL " +
         "ORDER BY n.id ASC " +
-        "LIMIT #{offset}, #{limit}")
+        // 标准 SQL 分页语法（LIMIT n OFFSET m），PG/MySQL 双兼容；
+        // MySQL 方言的 "LIMIT offset, limit" 在 PG 直接报语法错
+        "LIMIT #{limit} OFFSET #{offset}")
     List<NormalizedRecord> selectPageByBatchId(@Param("batchId") Long batchId,
                                                @Param("offset") int offset,
                                                @Param("limit") int limit);
