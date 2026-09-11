@@ -8,6 +8,11 @@
 target/
 !.mvn/wrapper/maven-wrapper.jar
 
+# 模块下的 bin/ 幽灵目录（Eclipse 工作区副本，含 .class + 重复 SQL/migration）
+# 保留根目录的 bin/ 和 script/bin/（RuoYi 运维脚本目录）
+/panjia-modules/*/bin/
+/panjia-modules/**/bin/
+
 ######################################################################
 # IDE
 
