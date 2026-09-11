@@ -5,7 +5,10 @@
 -- 说明：
 --   1) 主键用 BIGINT（雪花 ID，应用层 ASSIGN_ID 生成），非 BIGSERIAL；
 --   2) 金额用 NUMERIC(18,2)；
---   3) 时间用 TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP；
+--   3) 时间用 TIMESTAMP DEFAULT CURRENT_TIMESTAMP；
+--      ★ 禁用 TIMESTAMP WITH TIME ZONE：与 RuoYi 基线（sys_user 等，TIMESTAMP 不带时区）保持一致，
+--        PG JDBC 42.7+ 对 timestamptz → LocalDateTime 的 getObject 直接抛
+--        "Cannot convert the column of type TIMESTAMPTZ"（有歧义转换），查询页会炸；
 --   4) 所有表/列均加 COMMENT。
 -- ============================================================
 
@@ -37,8 +40,8 @@ CREATE TABLE pj_perf_fact (
     reversed_reason         VARCHAR(30),
     operator_id             BIGINT,
     version                 INT                    NOT NULL DEFAULT 0,
-    create_time             TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_time             TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP
+    create_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 幂等锚点：同一 fact_type + source_key 只允许一条 ACTIVE 记录
@@ -95,11 +98,11 @@ CREATE TABLE pj_perf_adjust (
     process_instance_id VARCHAR(64),
     applicant_id        BIGINT                 NOT NULL,
     approver_id         BIGINT,
-    approve_time        TIMESTAMP WITH TIME ZONE,
+    approve_time        TIMESTAMP,
     operator_id         BIGINT,
-    execute_time        TIMESTAMP WITH TIME ZONE,
-    create_time         TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_time         TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP
+    execute_time        TIMESTAMP,
+    create_time         TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time         TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX uk_padj_no ON pj_perf_adjust(adjust_no);
@@ -142,8 +145,8 @@ CREATE TABLE pj_perf_consume_log (
     failed_rows     INT                    NOT NULL DEFAULT 0,
     message         TEXT,
     operator_id     BIGINT,
-    create_time     TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_time     TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP
+    create_time     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX uk_pcl_batch_event ON pj_perf_consume_log(batch_id, event_type);
@@ -176,9 +179,9 @@ CREATE TABLE pj_perf_period_close (
     close_reason    VARCHAR(500),
     ref_batch_id    BIGINT,
     operator_id     BIGINT                 NOT NULL,
-    close_time      TIMESTAMP WITH TIME ZONE,
-    create_time     TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_time     TIMESTAMP WITH TIME ZONE  NOT NULL DEFAULT CURRENT_TIMESTAMP
+    close_time      TIMESTAMP,
+    create_time     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time     TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX uk_ppc_period ON pj_perf_period_close(period);
