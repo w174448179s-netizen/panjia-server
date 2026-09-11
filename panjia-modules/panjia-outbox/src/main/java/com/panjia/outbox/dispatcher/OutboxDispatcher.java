@@ -6,14 +6,11 @@ import com.aizuda.snailjob.model.dto.ExecuteResult;
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.OutboxStatusEnum;
 import com.panjia.outbox.entity.OutboxEvent;
-import com.panjia.outbox.entity.OutboxIdempotent;
 import com.panjia.outbox.mapper.OutboxEventMapper;
 import com.panjia.outbox.mapper.OutboxIdempotentMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -29,13 +26,17 @@ import java.util.stream.Collectors;
  * 分布式约束：注册为 SnailJob 任务并在控制台开启分布式锁，
  * 保证集群同一时刻仅一个实例投递，防止重复消费（锁由 SnailJob 服务端管理）。
  * <p>
- * 骨架范围（只写以下内容，不扩展）：
+ * 投递时序（关键，不容颠倒）：
  * <ol>
- *   <li>SELECT PENDING 事件批量</li>
- *   <li>逐条幂等检查（pj_outbox_idempotent 主键冲突 = 已消费 = 跳过）</li>
- *   <li>投递目标下游定（消息 / HTTP），V1 骨架仅完成状态流转</li>
- *   <li>成功 → PROCESSED + 插入幂等记录；失败 → 指数退避 / 达上限 FAILED</li>
+ *   <li>{@link #selectPending} 拉取 PENDING 事件</li>
+ *   <li>先调用 {@link #dispatchToTarget}（dispatch 抛异常 → handleFailure 退避）</li>
+ *   <li>dispatch 成功后 INSERT 幂等记录（{@code ON CONFLICT DO NOTHING}）+ UPDATE 状态为 PROCESSED</li>
  * </ol>
+ * <p>
+ * <b>幂等语义</b>：pj_outbox_idempotent 是「成功消费」标记，仅在 dispatch 成功路径上写入。
+ * 若 dispatch 失败，<b>不</b>写幂等记录，下一轮重试可再次调用 handler（handler 自身需幂等，
+ * 参见 {@link com.panjia.performance.handler.ImportBatchArchivedHandler} 内部
+ * PerformanceEngine.buildFromBatch 的去重逻辑）。
  * <p>
  * 指数退避参数（固化）：next_retry_at = now + min(30 * 2^retry_count, 600) 秒；
  * 基础 30s，上限 10min；retry_count &gt;= 10 → 直接 FAILED，不再计算退避。
@@ -81,6 +82,16 @@ public class OutboxDispatcher {
 
     /**
      * SnailJob 任务入口：批量拉取待投递事件并处理。
+     * <p>
+     * 投递时序（先 dispatch 再 mark consumed，确保失败可重试）：
+     * <ol>
+     *   <li>dispatchToTarget：先调用 handler，让 handler 抛异常可走 handleFailure 退避</li>
+     *   <li>handler 成功 → INSERT 幂等记录（ON CONFLICT 静默跳过）+ UPDATE 状态为 PROCESSED</li>
+     * </ol>
+     * <p>
+     * <b>不再使用「insert idempotent → dispatch → update」旧顺序</b>：
+     * 旧实现下若 dispatch 失败，幂等记录已写入，下一轮重试 INSERT 冲突被 catch 跳过，
+     * handler 永远不会被再次调用，事件卡死在 PENDING。
      *
      * @param jobArgs 任务参数
      * @return 执行结果
@@ -94,13 +105,17 @@ public class OutboxDispatcher {
         int failed = 0;
         for (OutboxEvent event : pending) {
             try {
-                if (markConsumed(event)) {
-                    // 投递目标（消息 / HTTP）由下游确定，V1 骨架仅完成状态流转
-                    dispatchToTarget(event);
-                    // 流转到 PROCESSED（终态），error_message 置空清除重试期残留
-                    outboxEventMapper.updateStatus(event.getId(), OutboxStatusEnum.PROCESSED, null, LocalDateTime.now());
+                // 1. 投递目标（dispatch 先于幂等写入，保证失败时可重试 handler）
+                dispatchToTarget(event);
+                // 2. 投递成功后插入幂等记录（ON CONFLICT 处理重入：上次 dispatch 成功但状态未流转）
+                //    影响行数 0 表示已存在，正常情况不应发生，仅极端崩溃场景兜底
+                boolean firstConsume = markConsumed(event);
+                // 3. 流转到 PROCESSED（终态），error_message 置空清除重试期残留
+                outboxEventMapper.updateStatus(event.getId(), OutboxStatusEnum.PROCESSED, null, now);
+                if (firstConsume) {
                     processed++;
                 } else {
+                    // 重入场景：handler 已成功投递过一次（崩溃前），本轮 dispatch 实际未跑业务（handler 幂等也无副作用）
                     skipped++;
                 }
             } catch (Exception e) {
@@ -113,23 +128,26 @@ public class OutboxDispatcher {
     }
 
     /**
-     * 幂等检查：插入 pj_outbox_idempotent，主键冲突 = 已消费 = 跳过。
+     * 幂等记录：原子 INSERT ... ON CONFLICT DO NOTHING（PostgreSQL 9.5+）。
+     * <p>
+     * 返回值语义：
+     * <ul>
+     *   <li>true = 本次首次消费（affected = 1）</li>
+     *   <li>false = 主键冲突，记录已存在（affected = 0）</li>
+     * </ul>
+     * <p>
+     * 与旧 {@code INSERT + catch DuplicateKeyException} 实现对比：
+     * <ul>
+     *   <li>无异常抛出，无 DuplicateKeyException 日志噪音</li>
+     *   <li>避免 PostgreSQL aborted transaction 状态对事务边界的副作用</li>
+     *   <li>单条 SQL 完成 check-and-insert，原子、无 TOCTOU 竞态</li>
+     * </ul>
      *
      * @param event 待投递事件
-     * @return true 表示本次可投递（首次消费）；false 表示已消费过，跳过
+     * @return true 表示本次为首次写入；false 表示记录已存在
      */
-    @Transactional(rollbackFor = Exception.class)
     public boolean markConsumed(OutboxEvent event) {
-        OutboxIdempotent record = new OutboxIdempotent();
-        record.setEventId(event.getEventId());
-        record.setConsumedAt(LocalDateTime.now());
-        try {
-            outboxIdempotentMapper.insert(record);
-            return true;
-        } catch (DuplicateKeyException e) {
-            // 主键冲突 = 已消费 = 幂等跳过
-            return false;
-        }
+        return outboxIdempotentMapper.insertIgnore(event.getEventId(), LocalDateTime.now()) > 0;
     }
 
     /**

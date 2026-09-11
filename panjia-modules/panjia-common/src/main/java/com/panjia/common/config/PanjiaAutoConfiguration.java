@@ -2,6 +2,7 @@ package com.panjia.common.config;
 
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.context.annotation.ComponentScan;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 盘家智管自动配置
@@ -14,8 +15,14 @@ import org.springframework.context.annotation.ComponentScan;
  *   <li>全局异常处理 GlobalExceptionHandler</li>
  *   <li>License 拦截器链</li>
  * </ul>
+ *
+ * <p>{@link EnableScheduling}：启用 Spring 内置调度器（{@code @Scheduled}），
+ * 用于本地开发环境 SnailJob 禁用时的 OutboxDispatcher 轮询 fallback（见
+ * {@code com.panjia.outbox.dispatcher.OutboxDevFallbackScheduler}）。
+ * 生产环境 {@code snail-job.enabled=true} 时，SnailJob 仍是主调度器。
  */
 @AutoConfiguration
 @ComponentScan(basePackages = "com.panjia")
+@EnableScheduling
 public class PanjiaAutoConfiguration {
 }

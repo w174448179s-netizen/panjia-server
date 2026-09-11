@@ -30,8 +30,32 @@ public class ColumnDef implements Serializable {
     /** 基础必填（非业务必填） */
     private boolean required;
 
-    /** 枚举白名单（可空） */
+    /**
+     * 枚举白名单（可空）。
+     * <p>
+     * 静态白名单：模板表里直接列出允许的值集合。Excel 客户端靠它生成下拉框，
+     * 服务端靠它做"基础格式校验"。即使字典中心变动，enumValues 仍按表里写死的值判断。
+     */
     private List<String> enumValues;
+
+    /**
+     * 字典属性（可空，与 enumValues 独立共存）。
+     * <p>
+     * 与 enumValues 是<b>两个独立维度</b>，不是互斥关系：
+     * <ul>
+     *   <li>{@code enumValues} — 静态白名单，用于客户端 Excel 下拉 + 服务端基础格式校验（防错位、防脏数据）</li>
+     *   <li>{@code dictType} — 字典中心 sys_dict_data 实时值集合，用于服务端业务级校验
+     *       （如人员 level 必须落在 panjia_employee_level 的 A0-S2 内）</li>
+     * </ul>
+     * <p>
+     * 同时配置时的校验语义：<b>AND</b>——值必须同时落在 enumValues 和 dictType 对应字典值集合内，
+     * 任一不过都拦截。这把「模板表不允许的错值」和「字典中心已废弃的旧值」双重过滤。
+     * <p>
+     * 仅配 dictType、不配 enumValues 时：纯走字典实时校验（适合字典频繁变更的字段）。
+     * <p>
+     * 仅配 enumValues、不配 dictType 时：纯静态校验（适合不会变的固定集合，如业务状态枚举）。
+     */
+    private String dictType;
 
     /** 正则校验（可空） */
     private String pattern;

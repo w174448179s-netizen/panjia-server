@@ -31,7 +31,7 @@ VALUES (
       {"colName":"小组","field":"dept_level3","type":"STRING","required":true,"deptLevel":3},
       {"colName":"工号","field":"employee_code","type":"STRING","required":true,"maxLength":32},
       {"colName":"姓名","field":"employee_name","type":"STRING","required":true,"maxLength":64},
-      {"colName":"职级","field":"level","type":"STRING","required":true,"enumValues":["A0","A1","A2","A3","A4","A5","S1","S2"]},
+      {"colName":"职级","field":"level","type":"STRING","required":true,"dictType":"panjia_employee_level"},
       {"colName":"职位","field":"post_names","type":"STRING","required":true},
       {"colName":"电话","field":"phone","type":"STRING","required":false,"maxLength":20},
       {"colName":"身份证","field":"id_card","type":"STRING","required":false,"maxLength":64},

@@ -229,10 +229,14 @@ public class ImportEngine {
             issueMapper.insert(issue);
         }
 
-        // 更新批次状态
+        // 更新批次状态：是否有 issue 决定 PENDING_CONFIRM / ARCHIVED。
+        // ★ V2.0 §3.4 取消"未匹配整批 FAILED"硬约束 — 业务硬约束挪到模板层：
+        //   - "员工号为空" → 模板 required + 服务端 BasicValidator 双保险
+        //   - "员工号未匹配" → 走 issue，批次进入 PENDING_CONFIRM 由人工/重归一化修复
+        // 归一化层不再充当"主数据匹配的最后一道关卡"。
         batch.finishNormalize(!issues.isEmpty());
         batch.setFailedRows(issues.size());
-        batch.setSuccessRows(batch.getTotalRows() - issues.size());
+        batch.setSuccessRows(Math.max(0, batch.getTotalRows() - issues.size()));
 
         // ★ V2.0 §5.5 重复导入（SUPERSEDED）：同 (sourceType, period, deptId) 若已存在
         //   ARCHIVED 且未被废弃的旧批次，须先回填 superseded_by_batch_id，才不撞
@@ -299,11 +303,11 @@ public class ImportEngine {
     }
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,
-                                      String period, List<ImportIssue> issues) {
+                                     String period, List<ImportIssue> issues) {
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
-        // 批量匹配员工
+        // 批量匹配员工（未匹配 → issue，不写归一化记录；该行不进 fact 表）
         Map<String, Long> codeToId = matchEmployees(rawRows);
 
         // sourceKey 生成器
@@ -311,23 +315,37 @@ public class ImportEngine {
         NormalizedRecordType recordType = toRecordType(sourceType);
 
         for (RawData raw : rawRows) {
+            Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
+            String externalCode = extractExternalCode(jsonMap);
+
+            Long matchedEmployeeId = null;
+            if (externalCode == null || externalCode.isEmpty()) {
+                // 员工号为空：理论上被模板层必填卡住（required + DataValidation +
+                // 服务端 BasicValidator 三道防线）；落到这里说明用户绕过了模板
+                // （如自行拼装 Excel）。记 REQUIRED_MISSING issue，不写归一化记录。
+                issues.add(buildIssue(raw.getRowNo(), ImportIssueType.REQUIRED_MISSING,
+                    "employeeCode", null, "员工号为空"));
+            } else if (!codeToId.containsKey(externalCode)) {
+                // 员工号未在主数据中匹配上：EMPLOYEE_NOT_MATCH issue
+                // 主数据不在导入域管辖，由 issue 提示用户去人事系统补录或清理后重归一化
+                issues.add(buildIssue(raw.getRowNo(), ImportIssueType.EMPLOYEE_NOT_MATCH,
+                    "employeeCode", externalCode, "员工未匹配: " + externalCode));
+            } else {
+                matchedEmployeeId = codeToId.get(externalCode);
+            }
+
+            // 未匹配行不写归一化记录：该行不参与 fact 表下沉；批次进入
+            // PENDING_CONFIRM 由人工决定后续动作（修复主数据、重归一化、整批关闭）
+            if (matchedEmployeeId == null) {
+                continue;
+            }
+
             NormalizedRecord nr = new NormalizedRecord();
             nr.setBatchId(batchId);
             nr.setRecordType(recordType);
             nr.setPeriod(period);
             nr.setRawDataId(raw.getId());
-
-            // 反序列化 rawJson 取标准化字段
-            Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
-            String externalCode = extractExternalCode(jsonMap);
-
-            // 员工匹配
-            if (externalCode != null && codeToId.containsKey(externalCode)) {
-                nr.setEmployeeId(codeToId.get(externalCode));
-            } else if (externalCode != null) {
-                issues.add(buildIssue(raw.getRowNo(), ImportIssueType.EMPLOYEE_NOT_MATCH,
-                    "employeeCode", externalCode, "员工未匹配: " + externalCode));
-            }
+            nr.setEmployeeId(matchedEmployeeId);
             nr.setEmployeeExternalCode(externalCode);
 
             // sourceKey
@@ -337,7 +355,7 @@ public class ImportEngine {
 
             // 金额/业务字段
             fillPerformanceFields(nr, sourceType, jsonMap);
-            nr.setValidationStatus(nr.getEmployeeId() != null ? 1 : 0);
+            nr.setValidationStatus(1);  // 走到此处必已匹配成功
 
             normalizedRecordMapper.insert(nr);
         }

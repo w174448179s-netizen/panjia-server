@@ -31,4 +31,12 @@ public class ImportTemplate implements Serializable {
 
     /** Excel sheet 名称（null 表示取第一个 sheet） */
     private String sheetName;
+
+    /**
+     * 行级校验规则（来自模板表的 validation_rules.row_level 数组）。
+     * <p>
+     * 注意：本字段是 V2.0 增量 — 让 {@code DefaultBasicValidator} 真正消费模板声明的规则，
+     * 避免 {@code not_blank} 等规则变成 JSONB 死代码。
+     */
+    private List<RuleDef> validationRules;
 }

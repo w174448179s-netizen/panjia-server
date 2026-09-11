@@ -13,7 +13,10 @@
 
     <description>
         common-import-util 公共导入工具层（文件解析/模板解析/归档/基础格式校验）。
-        纯技术工具：只输出内存 DTO，不落任何业务库表，不含业务语义。
+        工具层自带字典中心查询（DefaultSysDictDataAdapter 走 ISysDictDataService），
+        业务域无需再写 Adapter。V6.0.1 起打破「纯技术无业务依赖」约束，
+        ArchUnit 红线相应放宽：仅保留「不得依赖 importdomain / people 业务域」约束，
+        mybatis-plus 间接依赖（来自 ruoyi-system）允许通过。
     </description>
 
     <dependencies>
@@ -40,6 +43,18 @@
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-common-oss</artifactId>
+        </dependency>
+
+        <!--
+          RuoYi 系统模块（用于字典中心查询）。
+          V6.0.1 起 common-import-util 内置 DefaultSysDictDataAdapter 走 ISysDictDataService，
+          让 dict_in:DICT_TYPE 校验真正落到字典中心，业务域无需再写 Adapter。
+          注意：本模块不直接用 Mapper，只走 service 接口；mybatis-plus 是 ruoyi-system 的传递依赖，
+          ArchUnit 红线已相应放宽（保留「禁止依赖业务域」约束，删 mybatis/mybatis-plus 红线）。
+        -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-system</artifactId>
         </dependency>
 
         <!-- Lombok -->
