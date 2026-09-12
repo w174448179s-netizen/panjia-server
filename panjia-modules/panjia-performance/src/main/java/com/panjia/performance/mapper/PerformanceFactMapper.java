@@ -47,12 +47,29 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT f.employee_id AS "employeeId",
                e.employee_code AS "employeeCode",
                e.employee_name AS "employeeName",
+               MAX(
+                   CASE
+                       WHEN array_length(string_to_array(ed.ancestors, ','), 1) &gt;= 3 THEN
+                           CONCAT_WS('-',
+                               NULLIF(egp.dept_name, 'tenant_name'),
+                               NULLIF(ep.dept_name, 'tenant_name'),
+                               CASE WHEN ed.dept_name = ep.dept_name THEN NULL
+                                    ELSE NULLIF(ed.dept_name, 'tenant_name') END)
+                       ELSE
+                           CONCAT_WS('-',
+                               NULLIF(ep.dept_name, 'tenant_name'),
+                               NULLIF(ed.dept_name, 'tenant_name'))
+                   END
+               ) AS "deptPath",
                COALESCE(SUM(f.origin_amount), 0) AS "amount",
                COUNT(DISTINCT rs.contract_no) AS "contractCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        LEFT JOIN sys_dept ed ON ed.dept_id = e.dept_id
+        LEFT JOIN sys_dept ep ON ep.dept_id = ed.parent_id
+        LEFT JOIN sys_dept egp ON egp.dept_id = ep.parent_id
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id

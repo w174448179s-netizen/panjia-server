@@ -211,10 +211,15 @@ public class RuoYiDeptAdapter implements DeptPort {
             rootNode.setDeptId(root.getDeptId());
             rootNode.setDeptName(root.getDeptName());
             rootNode.setParentId(root.getParentId());
-            // 挂载一级子节点
+            // 逐层挂载：小组挂门店、门店挂大区，缺了这层树只会有两级
             for (DeptNode node : nodes.values()) {
                 if (rootId.equals(node.getParentId())) {
                     rootNode.getChildren().add(node);
+                } else {
+                    DeptNode parent = nodes.get(node.getParentId());
+                    if (parent != null) {
+                        parent.getChildren().add(node);
+                    }
                 }
             }
             roots.add(rootNode);

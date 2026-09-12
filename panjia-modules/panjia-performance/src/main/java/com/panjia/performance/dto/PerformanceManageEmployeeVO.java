@@ -26,6 +26,9 @@ public class PerformanceManageEmployeeVO {
     /** 员工姓名（签约人） */
     private String employeeName;
 
+    /** 门店/组别全路径（员工归属部门：大区-门店-组；组级与门店同名时只到两级） */
+    private String deptPath;
+
     /** 金额合计（PERF_EXPECT=应收 / PERF_REAL=实收） */
     private BigDecimal amount;
 
