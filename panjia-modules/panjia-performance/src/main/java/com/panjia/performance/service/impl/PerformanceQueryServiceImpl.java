@@ -14,6 +14,8 @@ import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
 import com.panjia.performance.dto.PerformanceManageDTO;
+import com.panjia.performance.dto.PerformanceManageEmployeeVO;
+import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.PerformanceQueryService;
@@ -150,12 +152,61 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public List<PerformanceManageDTO> listManage(String period, String factType, Long deptId,
-                                                 String bizType, Boolean settled) {
+    public PerformanceManagePageVO pageManage(String period, String factType, Long deptId,
+                                              String bizType, Boolean settled, String keyword,
+                                              Integer pageNum, Integer pageSize) {
+        PerformanceManagePageVO vo = new PerformanceManagePageVO();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
+            vo.setTotal(0);
+            vo.setRows(List.of());
+            PerformanceManagePageVO.Summary empty = new PerformanceManagePageVO.Summary();
+            empty.setTotalAmount(BigDecimal.ZERO);
+            vo.setSummary(empty);
+            return vo;
+        }
+        String kw = StringUtils.trimToNull(keyword);
+        int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
+        int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
+
+        long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw);
+        vo.setTotal(total);
+
+        List<PerformanceManageEmployeeVO> employees = List.of();
+        if (total > 0) {
+            long offset = (long) (page - 1) * size;
+            employees = factMapper.selectManagePageEmployees(
+                period, factType, deptId, bizType, settled, kw, offset, size);
+        }
+        vo.setRows(employees);
+        vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
+
+        Map<String, Object> stat = factMapper.selectManageSummary(
+            period, factType, deptId, bizType, settled, kw);
+        PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
+        summary.setEmployeeCount(total);
+        summary.setContractCount(toLong(stat.get("contractCount")));
+        summary.setDetailCount(toLong(stat.get("detailCount")));
+        summary.setUnsettledCount(toLong(stat.get("unsettledCount")));
+        Object sum = stat.get("totalAmount");
+        summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
+        vo.setSummary(summary);
+        return vo;
+    }
+
+    @Override
+    public List<PerformanceManageDTO> listManageDetails(String period, String factType, Long deptId,
+                                                        String bizType, Boolean settled, String keyword,
+                                                        List<Long> employeeIds) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)
+            || employeeIds == null || employeeIds.isEmpty()) {
             return List.of();
         }
-        return factMapper.selectManageList(period, factType, deptId, bizType, settled);
+        return factMapper.selectManageListByIds(
+            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), employeeIds);
+    }
+
+    private long toLong(Object v) {
+        return v == null ? 0L : ((Number) v).longValue();
     }
 
     @Override
