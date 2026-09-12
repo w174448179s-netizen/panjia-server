@@ -120,9 +120,13 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setDeptFullName(null);  // TODO: 待 PeopleSnapshotAdapter 接入后填充
         dto.setBizType(r.getBizType());
         dto.setSourceKey(r.getSourceKey());
-        // ★ 金额口径按记录类型区分（结佣域 C-12/C-16 锚点）：
-        //  SIGNED 结佣 → 当月实收业绩 receivedAmount（PERF_REAL，样本 192,556.89 / 剔除 52 条零实收）
-        //  NEW_SIGN 新签 → 当月应收业绩 receivableAmount（PERF_EXPECT，样本 206,274.04）
+        dto.setRecordType(r.getRecordType() == null ? null : r.getRecordType().name());
+        // ★ 双口径金额同时透传（V4.2 算薪对齐 / C-12 锚点）：
+        //  receivableAmount 当月应收 → PERF_EXPECT（新签业绩，样本 206,274.04 / 273 非零行）
+        //  receivedAmount   当月实收 → PERF_REAL（结佣计薪业绩，样本 192,556.89 / 266 非零行）
+        //  SIGNED 行两列并存，业绩引擎对其双发两条事实；originAmount 保留单口径默认值兼容旧消费方
+        dto.setReceivableAmount(r.getReceivableAmount());
+        dto.setReceivedAmount(r.getReceivedAmount());
         dto.setOriginAmount(resolveOriginAmount(r));
         dto.setShareRatio(r.getShareRatio());
         dto.setRoleType(r.getRoleType());

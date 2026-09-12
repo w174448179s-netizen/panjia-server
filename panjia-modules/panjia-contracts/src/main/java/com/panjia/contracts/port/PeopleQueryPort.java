@@ -1,5 +1,7 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.snapshot.EmployeeSnapshot;
+
 import java.time.LocalDate;
 import java.util.Collection;
 import java.util.Map;
@@ -44,4 +46,25 @@ public interface PeopleQueryPort {
      * @return employeeId → 快照 Map
      */
     Map<Long, Map<String, String>> getSnapshotsAt(Collection<Long> employeeIds, LocalDate pointInMonth);
+
+    /**
+     * 取单个员工指定月份的<b>强类型</b>算薪事实快照（§10.6 {@link EmployeeSnapshot}）。
+     * <p>
+     * 与 {@link #getSnapshotAt(Long, LocalDate)} 的 String Map 同源，身份字段取自员工主数据
+     * 当前行，事实字段取该月月末所在闭开区间切片；字段级契约供 payroll / commission 直接编码。
+     *
+     * @param employeeId   员工 ID
+     * @param pointInMonth 算薪月份内任意一天（取该月月末切片）
+     * @return 员工快照；员工不存在时返回 null
+     */
+    EmployeeSnapshot getEmployeeSnapshot(Long employeeId, LocalDate pointInMonth);
+
+    /**
+     * 批量取多个员工同一月份的强类型算薪事实快照（算薪批次用，避免逐人查库）。
+     *
+     * @param employeeIds  员工 ID 集合
+     * @param pointInMonth 算薪月份内任意一天
+     * @return employeeId → 员工快照（入参存在但员工已删除的 ID 不在结果中）
+     */
+    Map<Long, EmployeeSnapshot> getEmployeeSnapshots(Collection<Long> employeeIds, LocalDate pointInMonth);
 }

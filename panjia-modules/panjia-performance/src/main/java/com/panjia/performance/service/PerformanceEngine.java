@@ -5,14 +5,13 @@ import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.PerformanceFactCreatedEvent;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
-import com.panjia.performance.config.PerformanceProperties;
 import com.panjia.performance.domain.ConsumeStatus;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
-import com.panjia.performance.dto.EmployeeSnapshotDTO;
+import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.performance.engine.ConversionEngine;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
@@ -54,7 +53,6 @@ public class PerformanceEngine {
     private final PerformanceFactMapper factMapper;
     private final PerformanceConsumeLogMapper consumeLogMapper;
     private final ConversionEngine conversionEngine;
-    private final PerformanceProperties properties;
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final EmployeeSnapshotQueryPort employeeQueryPort;
     private final ReverseService reverseService;
@@ -165,8 +163,9 @@ public class PerformanceEngine {
         int pageSize = ImportNormalizedRecordQueryPort.DEFAULT_PAGE_SIZE;
 
         // 本批新建事实收集器（仅幂等 miss 才新建；用于事务内发布 FactCreated 事件）
+        // 一条 SIGNED 行双发 PERF_REAL + PERF_EXPECT 两条事实，收集器内两种 factType 并存，
+        // 发事件前再按 factType 分组（结佣域只消费 PERF_REAL 事件，PERF_EXPECT 事件其直接忽略）
         List<PerformanceFact> createdFacts = new ArrayList<>();
-        FactType factType = FactType.fromCode(properties.getDefaultFactType());
 
         PageResult<NormalizedRecordDTO> pageResult;
         do {
@@ -180,7 +179,21 @@ public class PerformanceEngine {
                         derivedPeriod = record.getPeriod();
                     }
 
-                    buildSingleFact(record, factType, operatorId, createdFacts);
+                    // ★ 双口径分发（V4.2 算薪对齐 / C-12）：
+                    //  SIGNED 行 → PERF_REAL(实收) + PERF_EXPECT(应收) 双发
+                    //  NEW_SIGN 行 → PERF_EXPECT(应收) 单发
+                    //  其余类型 → 不产生业绩事实（handler 层已过滤，此处双保险）
+                    List<FactType> factTypes = factTypesForRecord(record);
+                    if (factTypes.isEmpty()) {
+                        log.debug("[业绩消费] 非业绩类记录跳过：recordId={}, recordType={}",
+                            record.getId(), record.getRecordType());
+                        continue;
+                    }
+                    for (FactType factType : factTypes) {
+                        buildSingleFact(record, factType, operatorId, createdFacts);
+                    }
+                    // 计数口径＝归一化行数（一行无论发几条事实都算处理成功 1 行），
+                    // 实际新建事实条数以 createdFacts / 库表为准并在完成日志中打印
                     successCount++;
                 }
             }
@@ -205,10 +218,12 @@ public class PerformanceEngine {
         consumeLogMapper.updateById(consumeLog);
 
         // ========== 5. 发布事实创建事件（结佣域联动；同一事务内 emit，Outbox 原子提交） ==========
-        emitFactCreated(batchId, consumeLog.getPeriod(), factType, createdFacts);
+        // 双口径事实按 factType 分组各发一个事件：结佣域 handler 仅消费 PERF_REAL，
+        // PERF_EXPECT 事件被其显式忽略（新签透传不走结佣明细）
+        emitFactCreatedEvents(batchId, consumeLog.getPeriod(), createdFacts);
 
-        log.info("[业绩消费] 批次消费完成：batchId={}, total={}, success={}, status={}",
-                batchId, totalCount, successCount, consumeLog.getStatus());
+        log.info("[业绩消费] 批次消费完成：batchId={}, totalRows={}, successRows={}, createdFacts={}, status={}",
+                batchId, totalCount, successCount, createdFacts.size(), consumeLog.getStatus());
 
         return consumeLog;
     }
@@ -217,16 +232,37 @@ public class PerformanceEngine {
      * 发布业绩事实创建事件（结佣域按 (period, deptId) 提示增量重拉；新签透传不依赖本事件）。
      * <p>
      * 只对本批<b>新建</b>的事实发布（幂等命中跳过的事实不算），且必须在业务写事务内调用。
+     * <p>
+     * 双口径分组：同一批可能同时产生 PERF_REAL / PERF_EXPECT 两类事实，
+     * 按 {@code factType} 分组各发一个事件（事件的 factType 字段为单值，禁止混合发布），
+     * 结佣域只认 PERF_REAL 事件，PERF_EXPECT 事件由其直接忽略。
      *
      * @param batchId      导入批次 ID
      * @param period       归属期间（事件缺失时由消费日志回填推导）
-     * @param factType     事实口径
-     * @param createdFacts 本批新建的事实列表
+     * @param createdFacts 本批新建的事实列表（可含两种 factType）
      */
-    private void emitFactCreated(Long batchId, String period, FactType factType, List<PerformanceFact> createdFacts) {
+    private void emitFactCreatedEvents(Long batchId, String period, List<PerformanceFact> createdFacts) {
         if (createdFacts == null || createdFacts.isEmpty()) {
             return;
         }
+        // 按 factType 分桶（保持插入顺序，REAL 先于 EXPECT）
+        java.util.Map<FactType, List<PerformanceFact>> grouped = new java.util.LinkedHashMap<>();
+        for (PerformanceFact fact : createdFacts) {
+            grouped.computeIfAbsent(fact.getFactType(), k -> new ArrayList<>()).add(fact);
+        }
+        grouped.forEach((factType, facts) -> emitOneFactCreatedEvent(batchId, period, factType, facts));
+    }
+
+    /**
+     * 发布单个口径的事实创建事件。
+     *
+     * @param batchId      导入批次 ID
+     * @param period       归属期间
+     * @param factType     事实口径（单值：PERF_REAL / PERF_EXPECT）
+     * @param createdFacts 本批新建且均为该口径的事实列表
+     */
+    private void emitOneFactCreatedEvent(Long batchId, String period, FactType factType,
+                                         List<PerformanceFact> createdFacts) {
         PerformanceFactCreatedEvent event = new PerformanceFactCreatedEvent();
         event.setBatchId(batchId == null ? 0L : batchId);
         event.setPeriod(period);
@@ -335,10 +371,13 @@ public class PerformanceEngine {
         // ========== 1. 员工归属查询 ==========
         // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
         // 员工不存在（脏数据/已删）返回 null，下方 else 分支以 employeeCode 兜底
-        EmployeeSnapshotDTO employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
+        EmployeeSnapshot employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
 
         // ========== 2. 计算业绩金额 ==========
-        BigDecimal originAmount = record.getOriginAmount();
+        // ★ 金额口径由 factType 决定（V4.2 / C-12 契约）：
+        //  PERF_REAL   → 当月实收 receivedAmount（结佣计薪业绩）
+        //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，店长/总监团队提成基数）
+        BigDecimal originAmount = resolveFactOriginAmount(record, factType);
         BigDecimal shareRatio = record.getShareRatio();
         // 折算系数：当前暂用默认值，后续可根据 bizType 从配置中获取专属系数
         BigDecimal conversionRate = null;
@@ -372,6 +411,8 @@ public class PerformanceEngine {
         fact.setNormalizedRecordId(record.getId());
         fact.setSourceKey(sourceKey);
         fact.setBizType(record.getBizType());
+        // 所属角色（KE 角色类型，如 客源成交人/VR拍摄人）：归一化记录已携带，构建事实时原样落库
+        fact.setRoleType(record.getRoleType());
 
         // 员工信息（联调后从 employeeSnapshot 填充）
         if (employeeSnapshot != null) {
@@ -438,5 +479,64 @@ public class PerformanceEngine {
         String sourceType = record.getSourceType() == null ? "" : record.getSourceType();
         String recordSourceKey = record.getSourceKey() == null ? "" : record.getSourceKey();
         return sourceType + "-" + recordSourceKey;
+    }
+
+    /** 归一化记录类型 code：已签（结佣）明细，同携当月应收 + 当月实收两列金额 */
+    public static final String RECORD_TYPE_SIGNED = "SIGNED";
+
+    /** 归一化记录类型 code：新签明细，携当月应收 */
+    public static final String RECORD_TYPE_NEW_SIGN = "NEW_SIGN";
+
+    /**
+     * 按归一化记录类型决定本条记录要生成的事实口径集合（V4.2 双口径契约，纯函数）。
+     * <p>
+     * <ul>
+     *   <li>{@code SIGNED}（经纪人业绩明细表）：同一条业务行双发
+     *       <b>PERF_REAL（实收，结佣计薪）+ PERF_EXPECT（应收，新签/团队基数）</b>；
+     *       两事实 sourceKey 相同、factType 不同，由部分唯一索引
+     *       {@code uk_perf_fact_source_key(fact_type, source_key, fact_status)} 保证共存不冲突；</li>
+     *   <li>{@code NEW_SIGN}（新签明细表）：仅发 <b>PERF_EXPECT（应收）</b>；</li>
+     *   <li>其余类型（考勤 / 积分 / 手工）：不产生业绩事实，返回空列表。</li>
+     * </ul>
+     * 顺序固定 REAL 在前 EXPECT 在后，保证事件发布顺序稳定可预期。
+     *
+     * @param record 归一化记录 DTO
+     * @return 需生成的事实口径列表（可能为空，永不为 null）
+     */
+    public static List<FactType> factTypesForRecord(NormalizedRecordDTO record) {
+        if (record == null || record.getRecordType() == null) {
+            return List.of();
+        }
+        return switch (record.getRecordType()) {
+            case RECORD_TYPE_SIGNED -> List.of(FactType.PERF_REAL, FactType.PERF_EXPECT);
+            case RECORD_TYPE_NEW_SIGN -> List.of(FactType.PERF_EXPECT);
+            default -> List.of();
+        };
+    }
+
+    /**
+     * 按事实口径解析本行原始金额（V4.2 / C-12 金额契约，纯函数）。
+     * <ul>
+     *   <li>{@code PERF_REAL}：取当月实收 {@code receivedAmount}；为空（历史单口径行）回退
+     *       {@code originAmount}（SIGNED 行其默认值即实收）；</li>
+     *   <li>{@code PERF_EXPECT}：取当月应收 {@code receivableAmount}；为空回退
+     *       {@code originAmount}（NEW_SIGN 行其默认值即应收）。</li>
+     * </ul>
+     *
+     * @param record   归一化记录 DTO
+     * @param factType 事实口径
+     * @return 该口径原始金额（可能为 null，交由 {@link ConversionEngine} 按 0 处理）
+     */
+    public static BigDecimal resolveFactOriginAmount(NormalizedRecordDTO record, FactType factType) {
+        if (record == null || factType == null) {
+            return null;
+        }
+        if (factType == FactType.PERF_EXPECT) {
+            return record.getReceivableAmount() != null
+                ? record.getReceivableAmount() : record.getOriginAmount();
+        }
+        // PERF_REAL 及其余口径默认实收
+        return record.getReceivedAmount() != null
+            ? record.getReceivedAmount() : record.getOriginAmount();
     }
 }

@@ -84,7 +84,7 @@ public class TemplateController {
     @PostMapping
     @Transactional(rollbackFor = Exception.class)
     public R<Long> add(@RequestBody ImportTemplate dto) {
-        String operator = LoginHelper.getLoginUser().getUsername();
+        String operator = LoginHelper.getUsername();
         dto.setId(null);
         dto.setIsActive(false);
         dto.setOptLockVersion(1);
@@ -113,7 +113,7 @@ public class TemplateController {
         if (source == null) {
             return R.fail("源模板不存在: id=" + sourceId);
         }
-        String operator = LoginHelper.getLoginUser().getUsername();
+        String operator = LoginHelper.getUsername();
         ImportTemplate copy = new ImportTemplate();
         copy.setTemplateCode(source.getTemplateCode());
         copy.setTemplateVersion(newVersion);
@@ -150,7 +150,7 @@ public class TemplateController {
         if (dto.getId() == null) {
             return R.fail("模板 ID 不能为空");
         }
-        String operator = LoginHelper.getLoginUser().getUsername();
+        String operator = LoginHelper.getUsername();
         dto.setUpdatedBy(operator);
         dto.setUpdatedAt(LocalDateTime.now());
         templateMapper.updateById(dto);
@@ -170,7 +170,7 @@ public class TemplateController {
         if (template == null) {
             return R.fail("模板不存在: id=" + id);
         }
-        String operator = LoginHelper.getLoginUser().getUsername();
+        String operator = LoginHelper.getUsername();
         String sourceType = template.getSourceType();
 
         // 先停用同 source_type 的所有激活模板
@@ -267,7 +267,7 @@ public class TemplateController {
         try {
             String json = MAPPER.writeValueAsString(columns);
             entity.setColumnMapping(json);
-            String operator = LoginHelper.getLoginUser().getUsername();
+            String operator = LoginHelper.getUsername();
             entity.setUpdatedBy(operator);
             entity.setUpdatedAt(LocalDateTime.now());
             templateMapper.updateById(entity);

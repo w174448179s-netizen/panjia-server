@@ -78,10 +78,11 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- JUnit5（surefire 发现 @Test） -->
+        <!-- JUnit5（纯逻辑单测 / 静态契约校验）；显式 5.x：JUnit 6 与 surefire 3.5.5 注入的 launcher 不兼容会 0 tests -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

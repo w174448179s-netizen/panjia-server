@@ -3,6 +3,7 @@ package com.panjia.performance.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.service.PerformanceEngine;
 import com.panjia.performance.service.PerformanceQueryService;
 import lombok.RequiredArgsConstructor;
@@ -102,5 +103,29 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) Long employeeId,
             @RequestParam(required = false) Long deptId) {
         return R.ok(queryService.sumPerformance(period, factType, employeeId, deptId));
+    }
+
+    /**
+     * 业绩管理明细查询（人 → 合同 → 明细 树表数据源）。
+     * <p>
+     * 不分页，返回指定期间+口径下的全部 ACTIVE 业绩事实（已关联订单号/合同号/房源地址/
+     * 门店店组/结佣状态）。前端按 employeeId → contractNo 聚合为三级树。
+     *
+     * @param period   归属期间（必填）
+     * @param factType 事实口径：PERF_REAL（结佣业绩/实收）或 PERF_EXPECT（新签业绩/应收）
+     * @param deptId   部门 ID（可选，含子部门）
+     * @param bizType  业务类型（可选）
+     * @param settled  是否已结算（可选）
+     * @return 业绩管理明细列表
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/manage")
+    public R<java.util.List<PerformanceManageDTO>> manage(
+            @RequestParam String period,
+            @RequestParam String factType,
+            @RequestParam(required = false) Long deptId,
+            @RequestParam(required = false) String bizType,
+            @RequestParam(required = false) Boolean settled) {
+        return R.ok(queryService.listManage(period, factType, deptId, bizType, settled));
     }
 }

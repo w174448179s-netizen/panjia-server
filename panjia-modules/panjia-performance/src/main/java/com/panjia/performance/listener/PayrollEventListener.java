@@ -22,20 +22,35 @@ public class PayrollEventListener {
 
     /**
      * 监听发薪锁定事件，自动封账对应期间。
+     * <p>
+     * 工资批次 LOCKED 即代表该归属月工资已发，业绩事实与结佣窗口必须同步终态关闭
+     * （架构 §2.1 业务事实链 / 结佣域 B16）。Outbox 可能重复投递，{@link PeriodCloseService#isClosed}
+     * 提供天然幂等：已 CLOSED 直接跳过，不重复写封账记录。
      *
-     * @param event 发薪锁定事件
+     * @param event 发薪锁定事件（V1.9.2 §7.3.1 契约，含 period）
      */
     @EventListener
     public void onPayrollLocked(PayrollLockedEvent event) {
         try {
-            log.info("[期间自动封账] 收到发薪锁定事件：batchId={}", event.getBatchId());
-            // TODO: PayrollLockedEvent 当前不含期间字段，需根据 batchId 查询对应期间
-            //  或后续增强事件 payload 增加 period 字段
-            //  此处暂留占位，待事件 payload 完善后补充期间解析逻辑
-            log.warn("[期间自动封账] PayrollLockedEvent 暂未提供期间字段，自动封账逻辑待完善：batchId={}",
-                    event.getBatchId());
+            String period = event.getPeriod();
+            if (period == null || period.isBlank()) {
+                // 契约升级后 period 必填；防御：缺失期间无法定位封账目标，仅告警不抛异常
+                log.warn("[期间自动封账] PayrollLockedEvent 缺少 period，跳过自动封账：eventId={}, batchId={}",
+                        event.getEventId(), event.getBatchId());
+                return;
+            }
+            if (periodCloseService.isClosed(period)) {
+                log.info("[期间自动封账] 期间已封账，幂等跳过：period={}, eventId={}, batchId={}",
+                        period, event.getEventId(), event.getBatchId());
+                return;
+            }
+            periodCloseService.closePeriod(period,
+                    "工资批次锁定自动封账 batchId=" + event.getBatchId(), null);
+            log.info("[期间自动封账] 自动封账完成：period={}, eventId={}, batchId={}",
+                    period, event.getEventId(), event.getBatchId());
         } catch (Exception e) {
-            log.error("[期间自动封账] 发薪锁定事件处理失败：batchId={}", event.getBatchId(), e);
+            log.error("[期间自动封账] 发薪锁定事件处理失败：eventId={}, batchId={}",
+                    event.getEventId(), event.getBatchId(), e);
         }
     }
 }

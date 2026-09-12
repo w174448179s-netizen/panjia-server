@@ -2,6 +2,7 @@ package com.panjia.performance.service;
 
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageDTO;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
@@ -67,4 +68,20 @@ public interface PerformanceQueryService {
      * @return true 表示已封账
      */
     boolean isPeriodClosed(String period);
+
+    /**
+     * 业绩管理明细查询（人 → 合同 → 明细 树表的明细层）。
+     * <p>
+     * 不分页（前端按员工/合同做内存聚合）。factType 决定金额口径：
+     * PERF_REAL=结佣业绩（当月实收），PERF_EXPECT=新签业绩（当月应收）。
+     *
+     * @param period   归属期间（必填）
+     * @param factType 事实口径（必填）
+     * @param deptId   部门 ID（可选，含子部门）
+     * @param bizType  业务类型（可选）
+     * @param settled  是否已结算（可选；null=全部）
+     * @return 业绩管理明细行列表
+     */
+    List<PerformanceManageDTO> listManage(String period, String factType, Long deptId,
+                                          String bizType, Boolean settled);
 }

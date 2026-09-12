@@ -331,6 +331,88 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public com.panjia.contracts.snapshot.EmployeeSnapshot getEmployeeSnapshot(
+            Long employeeId, LocalDate pointInMonth) {
+        if (employeeId == null) {
+            return null;
+        }
+        Employee emp = employeeMapper.selectById(employeeId);
+        if (emp == null) {
+            return null;
+        }
+        return assembleSnapshot(emp, getSnapshotAt(employeeId, pointInMonth), monthEnd(pointInMonth));
+    }
+
+    @Override
+    public Map<Long, com.panjia.contracts.snapshot.EmployeeSnapshot> getEmployeeSnapshots(
+            Collection<Long> employeeIds, LocalDate pointInMonth) {
+        if (employeeIds == null || employeeIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDate point = monthEnd(pointInMonth);
+        Map<Long, Map<String, String>> facts = getSnapshotsAt(employeeIds, pointInMonth);
+        List<Employee> employees = employeeMapper.selectList(
+            new LambdaQueryWrapper<Employee>().in(Employee::getEmployeeId, employeeIds));
+        Map<Long, com.panjia.contracts.snapshot.EmployeeSnapshot> result = new LinkedHashMap<>();
+        for (Employee emp : employees) {
+            result.put(emp.getEmployeeId(), assembleSnapshot(emp, facts.get(emp.getEmployeeId()), point));
+        }
+        return result;
+    }
+
+    /**
+     * 组装 §10.6 强类型快照：身份取员工主数据当前行，事实取月末闭开区间切片。
+     * <p>
+     * position / socialTag 当前无承载，恒 null（契约类注释已说明，待 P0 决策）。
+     */
+    private com.panjia.contracts.snapshot.EmployeeSnapshot assembleSnapshot(
+            Employee emp, Map<String, String> factValues, LocalDate point) {
+        com.panjia.contracts.snapshot.EmployeeSnapshot snap =
+            new com.panjia.contracts.snapshot.EmployeeSnapshot();
+        // 身份
+        snap.setEmployeeId(emp.getEmployeeId());
+        snap.setEmployeeCode(emp.getEmployeeCode());
+        snap.setEmployeeName(emp.getEmployeeName());
+        snap.setUserId(emp.getUserId());
+        snap.setDeptId(emp.getDeptId());
+        if (factValues != null) {
+            // 职级
+            snap.setLevelCode(factValues.get(FactType.LEVEL.getCode()));
+            // 开关类事实
+            snap.setSocialInsured(parseBoolFact(factValues.get(FactType.SOCIAL.getCode())));
+            snap.setHousingInsured(parseBoolFact(factValues.get(FactType.HOUSING.getCode())));
+            snap.setCommercialInsured(parseBoolFact(factValues.get(FactType.COMMERCIAL.getCode())));
+            snap.setDormitory(parseBoolFact(factValues.get(FactType.DORMITORY.getCode())));
+            snap.setIsPartTime(parseBoolFact(factValues.get(FactType.PARTTIME.getCode())));
+            // 师徒：空串/空白=无师傅；非数字防御性按无师傅处理
+            snap.setMentorId(parseMentorFact(factValues.get(FactType.MENTOR.getCode())));
+        }
+        snap.setSnapshotDate(point);
+        snap.setSnapshottedAt(java.time.LocalDateTime.now());
+        return snap;
+    }
+
+    /** 布尔事实值解析："true"→TRUE，"false"→FALSE，null/空→null（不臆造默认值） */
+    private Boolean parseBoolFact(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return Boolean.parseBoolean(value.trim());
+    }
+
+    /** MENTOR 事实值解析：空串/空白/非数字 → null（无师傅） */
+    private Long parseMentorFact(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    @Override
     public Map<String, Long> findEmployeeIdsByCodes(Collection<String> codes) {
         if (codes == null || codes.isEmpty()) {
             return Map.of();

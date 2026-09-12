@@ -106,7 +106,7 @@ public class PeopleTemplateController {
             entity.setColumnJson(json);
             templateMapper.updateById(entity);
             log.info("保存员工导入模板列定义: id={}, columns={}, operator={}",
-                    id, columns.size(), LoginHelper.getLoginUser().getUsername());
+                    id, columns.size(), LoginHelper.getUsername());
             return R.ok();
         } catch (Exception e) {
             return R.fail("保存失败: " + e.getMessage());
@@ -128,7 +128,7 @@ public class PeopleTemplateController {
         templateMapper.insert(dto);
         log.info("新增员工导入模板: code={}, version={}, operator={}",
                 dto.getTemplateCode(), dto.getTemplateVersion(),
-                LoginHelper.getLoginUser().getUsername());
+                LoginHelper.getUsername());
         return R.ok(dto.getId());
     }
 
@@ -154,7 +154,7 @@ public class PeopleTemplateController {
         templateMapper.insert(copy);
         log.info("复制员工导入模板: sourceId={}, newVersion={}, newId={}, operator={}",
                 sourceId, newVersion, copy.getId(),
-                LoginHelper.getLoginUser().getUsername());
+                LoginHelper.getUsername());
         return R.ok(copy.getId());
     }
 
@@ -169,7 +169,7 @@ public class PeopleTemplateController {
         if (template == null) {
             return R.fail("模板不存在: id=" + id);
         }
-        String operator = LoginHelper.getLoginUser().getUsername();
+        String operator = LoginHelper.getUsername();
         String code = template.getTemplateCode();
 
         // 先停用同 template_code 的所有启用模板

@@ -13,6 +13,7 @@ import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.PerformanceQueryService;
@@ -146,6 +147,20 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             new LambdaQueryWrapper<PerformancePeriodClose>()
                 .eq(PerformancePeriodClose::getPeriod, period));
         return record != null && record.getStatus() == PeriodCloseStatus.CLOSED;
+    }
+
+    @Override
+    public List<PerformanceManageDTO> listManage(String period, String factType, Long deptId,
+                                                 String bizType, Boolean settled) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
+            return List.of();
+        }
+        return factMapper.selectManageList(period, factType, deptId, bizType, settled);
+    }
+
+    @Override
+    public List<String> listManagePeriods() {
+        return factMapper.selectManagePeriods();
     }
 
     // ==================== 内部方法 ====================
