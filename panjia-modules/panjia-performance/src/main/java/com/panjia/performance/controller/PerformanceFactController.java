@@ -128,4 +128,15 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) Boolean settled) {
         return R.ok(queryService.listManage(period, factType, deptId, bizType, settled));
     }
+
+    /**
+     * 查询有业绩数据的期间列表（倒序），供业绩明细页默认选中最新期间。
+     *
+     * @return 期间列表（YYYY-MM）
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/manage/periods")
+    public R<java.util.List<String>> managePeriods() {
+        return R.ok(queryService.listManagePeriods());
+    }
 }

@@ -51,8 +51,8 @@ public class PerformanceProperties {
      * 旧版默认事实口径（已不再消费）。
      * <p>
      * 历史上整批事实只按此配置生成单一口径；V4.2 双口径改造后，事实口径由归一化记录类型
-     * 经 {@code PerformanceEngine.factTypesForRecord} 决定（SIGNED 双发 PERF_REAL+PERF_EXPECT，
-     * NEW_SIGN 单发 PERF_EXPECT），配置项保留仅为向后兼容，修改它不会产生任何效果。
+     * 经 {@code PerformanceEngine.factTypesForRecord} 决定（SIGNED 双发 PERF_REAL+PERF_EXPECT），
+     * 配置项保留仅为向后兼容，修改它不会产生任何效果。
      */
     @Deprecated
     private String defaultFactType = "PERF_REAL";

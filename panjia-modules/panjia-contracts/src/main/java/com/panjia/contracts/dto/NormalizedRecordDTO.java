@@ -26,13 +26,13 @@ public class NormalizedRecordDTO {
     /** 批次ID */
     private Long batchId;
 
-    /** 来源类型（ImportSourceType code：KE_SIGNED / KE_NEW_SIGN / ATTENDANCE / POINTS / OTHERS） */
+    /** 来源类型（ImportSourceType code：KE_SIGNED / ATTENDANCE / POINTS / OTHERS） */
     private String sourceType;
 
     /**
-     * 归一化记录类型（NormalizedRecordType code：SIGNED / NEW_SIGN / ATTENDANCE / POINTS / MANUAL）。
+     * 归一化记录类型（NormalizedRecordType code：SIGNED / ATTENDANCE / POINTS / MANUAL）。
      * <p>
-     * 业绩双口径分发的权威依据：SIGNED 双发 PERF_REAL+PERF_EXPECT，NEW_SIGN 单发 PERF_EXPECT。
+     * 业绩双口径分发的权威依据：SIGNED（贝壳业绩明细表，唯一业绩来源）双发 PERF_REAL+PERF_EXPECT。
      */
     private String recordType;
 
@@ -60,15 +60,15 @@ public class NormalizedRecordDTO {
     /**
      * 原始金额（兼容单口径消费方的默认金额）。
      * <p>
-     * 取值：SIGNED 行=当月实收（PERF_REAL 口径），NEW_SIGN 行=当月应收（PERF_EXPECT 口径）。
+     * 取值：SIGNED 行（贝壳业绩明细表）= 当月实收（PERF_REAL 口径）。
      * 双口径消费方应直接使用 {@link #receivedAmount} / {@link #receivableAmount}，勿依赖本字段猜口径。
      */
     private BigDecimal originAmount;
 
-    /** 当月应收金额（PERF_EXPECT 新签业绩口径，SIGNED / NEW_SIGN 行均有值） */
+    /** 当月应收金额（PERF_EXPECT 新签业绩口径，SIGNED 行有值） */
     private BigDecimal receivableAmount;
 
-    /** 当月实收金额（PERF_REAL 结佣计薪业绩口径，SIGNED 行有值；NEW_SIGN 批次可能为空） */
+    /** 当月实收金额（PERF_REAL 结佣计薪业绩口径，SIGNED 行有值） */
     private BigDecimal receivedAmount;
 
     /** 分摊比例 */

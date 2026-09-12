@@ -180,8 +180,7 @@ public class PerformanceEngine {
                     }
 
                     // ★ 双口径分发（V4.2 算薪对齐 / C-12）：
-                    //  SIGNED 行 → PERF_REAL(实收) + PERF_EXPECT(应收) 双发
-                    //  NEW_SIGN 行 → PERF_EXPECT(应收) 单发
+                    //  SIGNED 行（贝壳业绩明细表，唯一业绩来源）→ PERF_REAL(实收) + PERF_EXPECT(应收) 双发
                     //  其余类型 → 不产生业绩事实（handler 层已过滤，此处双保险）
                     List<FactType> factTypes = factTypesForRecord(record);
                     if (factTypes.isEmpty()) {
@@ -481,21 +480,17 @@ public class PerformanceEngine {
         return sourceType + "-" + recordSourceKey;
     }
 
-    /** 归一化记录类型 code：已签（结佣）明细，同携当月应收 + 当月实收两列金额 */
+    /** 归一化记录类型 code：贝壳业绩明细行，同携当月应收 + 当月实收两列金额 */
     public static final String RECORD_TYPE_SIGNED = "SIGNED";
-
-    /** 归一化记录类型 code：新签明细，携当月应收 */
-    public static final String RECORD_TYPE_NEW_SIGN = "NEW_SIGN";
 
     /**
      * 按归一化记录类型决定本条记录要生成的事实口径集合（V4.2 双口径契约，纯函数）。
      * <p>
      * <ul>
-     *   <li>{@code SIGNED}（经纪人业绩明细表）：同一条业务行双发
+     *   <li>{@code SIGNED}（贝壳·经纪人业绩明细表，唯一业绩来源）：同一条业务行双发
      *       <b>PERF_REAL（实收，结佣计薪）+ PERF_EXPECT（应收，新签/团队基数）</b>；
      *       两事实 sourceKey 相同、factType 不同，由部分唯一索引
      *       {@code uk_perf_fact_source_key(fact_type, source_key, fact_status)} 保证共存不冲突；</li>
-     *   <li>{@code NEW_SIGN}（新签明细表）：仅发 <b>PERF_EXPECT（应收）</b>；</li>
      *   <li>其余类型（考勤 / 积分 / 手工）：不产生业绩事实，返回空列表。</li>
      * </ul>
      * 顺序固定 REAL 在前 EXPECT 在后，保证事件发布顺序稳定可预期。
@@ -509,7 +504,6 @@ public class PerformanceEngine {
         }
         return switch (record.getRecordType()) {
             case RECORD_TYPE_SIGNED -> List.of(FactType.PERF_REAL, FactType.PERF_EXPECT);
-            case RECORD_TYPE_NEW_SIGN -> List.of(FactType.PERF_EXPECT);
             default -> List.of();
         };
     }
@@ -520,7 +514,7 @@ public class PerformanceEngine {
      *   <li>{@code PERF_REAL}：取当月实收 {@code receivedAmount}；为空（历史单口径行）回退
      *       {@code originAmount}（SIGNED 行其默认值即实收）；</li>
      *   <li>{@code PERF_EXPECT}：取当月应收 {@code receivableAmount}；为空回退
-     *       {@code originAmount}（NEW_SIGN 行其默认值即应收）。</li>
+     *       {@code originAmount}（SIGNED 行其默认值为实收）。</li>
      * </ul>
      *
      * @param record   归一化记录 DTO

@@ -5,11 +5,9 @@ import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
-import com.panjia.importdomain.domain.raw.RawNewSign;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
-import com.panjia.importdomain.mapper.RawNewSignMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -40,7 +38,6 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final ImportBatchMapper importBatchMapper;
     private final RawSignedMapper rawSignedMapper;
-    private final RawNewSignMapper rawNewSignMapper;
 
     @Override
     public PageResult<NormalizedRecordDTO> listByBatchId(Long batchId, int pageNum, int pageSize) {
@@ -87,14 +84,10 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         if (record == null || record.getRawDataId() == null) {
             return null;
         }
-        // 按记录类型路由到对应原始行表（业绩/新签两类才有原始行 JSON）
+        // 业绩记录统一路由到 SIGNED 原始行表（贝壳业绩明细表，唯一业绩来源）
         NormalizedRecordType type = record.getRecordType();
         if (type == NormalizedRecordType.SIGNED) {
             RawSigned raw = rawSignedMapper.selectById(record.getRawDataId());
-            return raw == null ? null : raw.getRawJson();
-        }
-        if (type == NormalizedRecordType.NEW_SIGN) {
-            RawNewSign raw = rawNewSignMapper.selectById(record.getRawDataId());
             return raw == null ? null : raw.getRawJson();
         }
         return null;
@@ -135,18 +128,12 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     }
 
     /**
-     * 按归一化记录类型解析业绩原值。
-     * <ul>
-     *   <li>{@link NormalizedRecordType#SIGNED}：结佣业绩（PERF_REAL）取<b>实收</b> receivedAmount；</li>
-     *   <li>{@link NormalizedRecordType#NEW_SIGN}：新签业绩（PERF_EXPECT）取<b>应收</b> receivableAmount；</li>
-     *   <li>其余类型（考勤/积分/手工）当前不产生金额型业绩事实，兜底取应收，保持旧行为。</li>
-     * </ul>
+     * 解析业绩原值：贝壳业绩明细表（SIGNED）同一行同时携应收/实收，
+     * originAmount 保留<b>实收</b>口径作为默认值，兼容旧消费方；
+     * 具体口径金额由业绩引擎按 receivableAmount / receivedAmount 双发。
+     * 其余类型（考勤/积分/手工）当前不产生金额型业绩事实，同样兜底取实收列。
      */
     private java.math.BigDecimal resolveOriginAmount(NormalizedRecord r) {
-        if (r.getRecordType() == NormalizedRecordType.NEW_SIGN) {
-            return r.getReceivableAmount();
-        }
-        // SIGNED 及其余类型默认走实收口径
         return r.getReceivedAmount();
     }
 

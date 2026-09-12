@@ -86,8 +86,8 @@ public class ImportController {
      * 支持两种过滤方式：
      * <ul>
      *     <li>{@code sourceType}（兼容旧版）：单值精确匹配，e.g. {@code ATTENDANCE}</li>
-     *     <li>{@code sourceTypes}（推荐）：多值 IN 过滤，e.g. {@code KE_SIGNED,KE_NEW_SIGN}，
-     *         适合「贝壳业绩」菜单同时展示结佣+新签两类批次</li>
+     *     <li>{@code sourceTypes}（推荐）：多值 IN 过滤，e.g. {@code KE_SIGNED}，
+     *         适合「贝壳业绩」菜单按来源筛选批次（业绩来源唯一：贝壳业绩明细表）</li>
      * </ul>
      * 两个参数同时给出时，优先用 {@code sourceTypes}。
      */

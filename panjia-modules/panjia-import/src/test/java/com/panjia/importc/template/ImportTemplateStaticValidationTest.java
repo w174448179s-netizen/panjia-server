@@ -54,7 +54,7 @@ class ImportTemplateStaticValidationTest {
      * 另含 V100003 旧版种子（is_active=false，已停用）的历史字段，保留至旧种子清理。
      */
     private static final Set<String> RAW_TARGET_FIELDS = Set.of(
-        // KE_SIGNED / KE_NEW_SIGN
+        // KE_SIGNED（贝壳业绩明细表，唯一业绩来源；KE_NEW_SIGN 种子已由 V120007 删除）
         "arriveMonth", "bizType", "orderNo", "contractNo",
         "roleSysNo", "roleName", "roleType", "shareRatio",
         "currentReceivable", "currentReceived",

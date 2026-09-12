@@ -103,6 +103,9 @@ spring:
     # V1 基线脚本已做预生产垃圾清理，与已入库的旧 checksum 不一致，开发环境关闭校验
     # 生产环境首次部署为空库，无此问题；若生产库需升级，应通过 flyway repair 修复 checksum
     validate-on-migrate: true
+    # 多模块共享同一迁移历史：各模块按段位编号（12=import/13=event/14=perf/15=commission），
+    # 旧段位追加迁移时版本号会低于已应用版本，允许乱序补执行
+    out-of-order: true
   threads:
     # 开启虚拟线程 仅jdk21可用
     virtual:

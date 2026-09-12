@@ -17,7 +17,6 @@ import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
 import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.domain.raw.RawManual;
-import com.panjia.importdomain.domain.raw.RawNewSign;
 import com.panjia.importdomain.domain.raw.RawPoints;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.datasource.DataSource;
@@ -29,7 +28,6 @@ import com.panjia.importdomain.mapper.ImportIssueMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
-import com.panjia.importdomain.mapper.RawNewSignMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.template.ImportTemplateBridge;
@@ -83,7 +81,6 @@ public class ImportEngine {
     private final ImportIssueMapper issueMapper;
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final RawSignedMapper rawSignedMapper;
-    private final RawNewSignMapper rawNewSignMapper;
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
@@ -442,11 +439,6 @@ public class ImportEngine {
                     rawSignedMapper.insert((RawSigned) r);
                 }
             }
-            case KE_NEW_SIGN -> {
-                for (RawData r : rows) {
-                    rawNewSignMapper.insert((RawNewSign) r);
-                }
-            }
             case ATTENDANCE -> {
                 for (RawData r : rows) {
                     rawAttendanceMapper.insert((RawAttendance) r);
@@ -468,7 +460,6 @@ public class ImportEngine {
     private List<? extends RawData> selectRawData(ImportSourceType type, Long batchId) {
         return switch (type) {
             case KE_SIGNED -> rawSignedMapper.selectList(byBatch(RawSigned::getBatchId, batchId));
-            case KE_NEW_SIGN -> rawNewSignMapper.selectList(byBatch(RawNewSign::getBatchId, batchId));
             case ATTENDANCE -> rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId));
             case POINTS -> rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId));
             case OTHERS -> rawManualMapper.selectList(byBatch(RawManual::getBatchId, batchId));
@@ -511,7 +502,7 @@ public class ImportEngine {
 
     private void fillPerformanceFields(NormalizedRecord nr, ImportSourceType type, Map<String, Object> json) {
         switch (type) {
-            case KE_SIGNED, KE_NEW_SIGN -> {
+            case KE_SIGNED -> {
                 nr.setBizType(str(json, "bizType"));
                 nr.setReceivableAmount(decimal(json, "currentReceivable"));
                 nr.setReceivedAmount(decimal(json, "currentReceived"));
@@ -545,7 +536,6 @@ public class ImportEngine {
     private NormalizedRecordType toRecordType(ImportSourceType type) {
         return switch (type) {
             case KE_SIGNED -> NormalizedRecordType.SIGNED;
-            case KE_NEW_SIGN -> NormalizedRecordType.NEW_SIGN;
             case ATTENDANCE -> NormalizedRecordType.ATTENDANCE;
             case POINTS -> NormalizedRecordType.POINTS;
             case OTHERS -> NormalizedRecordType.MANUAL;

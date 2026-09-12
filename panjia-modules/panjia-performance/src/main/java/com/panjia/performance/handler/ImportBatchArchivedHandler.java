@@ -31,8 +31,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ImportBatchArchivedHandler implements DomainEventHandler {
 
-    /** 仅处理这两类来源（业绩域只对 KE_SIGNED / KE_NEW_SIGN 生成业绩，§4.1 ①） */
-    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED", "KE_NEW_SIGN");
+    /** 唯一业绩来源：贝壳·经纪人业绩明细表（KE_SIGNED，一行双口径） */
+    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED");
 
     private final PerformanceEngine performanceEngine;
     private final ObjectMapper objectMapper;

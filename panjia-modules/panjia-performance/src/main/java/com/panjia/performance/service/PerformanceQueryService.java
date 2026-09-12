@@ -84,4 +84,11 @@ public interface PerformanceQueryService {
      */
     List<PerformanceManageDTO> listManage(String period, String factType, Long deptId,
                                           String bizType, Boolean settled);
+
+    /**
+     * 查询有 ACTIVE 业绩事实的期间（倒序），供前端默认选中最新数据期间。
+     *
+     * @return 期间列表（YYYY-MM）
+     */
+    List<String> listManagePeriods();
 }

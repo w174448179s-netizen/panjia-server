@@ -23,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>
  * 纯逻辑单测 + 迁移脚本静态扫描，无需 Spring 上下文。覆盖：
  * <ul>
- *   <li>SIGNED 行必须双发 REAL+EXPECT，NEW_SIGN 单发 EXPECT，其余类型不产事实；</li>
+ *   <li>SIGNED 行必须双发 REAL+EXPECT，其余类型不产事实（含已废弃的 NEW_SIGN）；</li>
  *   <li>金额按口径取数：REAL=实收 receivedAmount，EXPECT=应收 receivableAmount，缺列回退 originAmount；</li>
  *   <li>部分唯一索引 uk_perf_fact_source_key 必须以 fact_type 打头（双发同 sourceKey 共存前提）。</li>
  * </ul>
@@ -48,16 +48,9 @@ class PerformanceDualFactTest {
     }
 
     @Test
-    void newSignRecordEmitsExpectOnly() {
-        NormalizedRecordDTO newSign = new NormalizedRecordDTO();
-        newSign.setRecordType("NEW_SIGN");
-
-        assertEquals(List.of(FactType.PERF_EXPECT), PerformanceEngine.factTypesForRecord(newSign));
-    }
-
-    @Test
     void nonPerformanceRecordsEmitNothing() {
-        for (String type : List.of("ATTENDANCE", "POINTS", "MANUAL")) {
+        // NEW_SIGN 为已废弃的第二导入来源类型（现唯一来源 KE_SIGNED 双口径），历史脏值也不得产事实
+        for (String type : List.of("NEW_SIGN", "ATTENDANCE", "POINTS", "MANUAL")) {
             NormalizedRecordDTO dto = new NormalizedRecordDTO();
             dto.setRecordType(type);
             assertTrue(PerformanceEngine.factTypesForRecord(dto).isEmpty(),
@@ -88,7 +81,7 @@ class PerformanceDualFactTest {
 
     @Test
     void missingDedicatedAmountFallsBackToOrigin() {
-        // 历史单口径行 / NEW_SIGN 行无实收列时回退 originAmount，不得 NPE / 不得串口径
+        // 历史单口径行缺实收/应收列时回退 originAmount，不得 NPE / 不得串口径
         NormalizedRecordDTO legacy = new NormalizedRecordDTO();
         legacy.setOriginAmount(new BigDecimal("300.00"));
 
