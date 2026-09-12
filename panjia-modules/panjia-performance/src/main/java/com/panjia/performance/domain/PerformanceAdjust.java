@@ -1,6 +1,7 @@
 package com.panjia.performance.domain;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -86,4 +87,18 @@ public class PerformanceAdjust implements Serializable {
 
     /** 更新时间（DB 默认填充） */
     private LocalDateTime updateTime;
+
+    // ==================== 展示字段（不入库，列表查询时回填） ====================
+
+    /** 员工姓名（列表展示用，由 pj_people_employee 回填） */
+    @TableField(exist = false)
+    private String employeeName;
+
+    /** 原部门名称（列表展示用，由 sys_dept 回填） */
+    @TableField(exist = false)
+    private String deptName;
+
+    /** 目标部门名称（划转类展示用，由 sys_dept 回填） */
+    @TableField(exist = false)
+    private String targetDeptName;
 }

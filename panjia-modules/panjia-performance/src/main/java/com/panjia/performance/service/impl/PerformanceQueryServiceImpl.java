@@ -13,6 +13,7 @@ import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
@@ -24,6 +25,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -40,6 +42,9 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class PerformanceQueryServiceImpl implements PerformanceQueryService {
+
+    /** 经纪人角色 ID（仅本人业绩数据权限） */
+    private static final Long ROLE_AGENT = 1761300000000000014L;
 
     private final PerformanceFactMapper factMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
@@ -152,10 +157,10 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public PerformanceManagePageVO pageManage(String period, String factType, Long deptId,
+    public PerformanceManagePageVO<PerformanceManageEmployeeVO> pageManage(String period, String factType, Long deptId,
                                               String bizType, Boolean settled, String keyword,
                                               Integer pageNum, Integer pageSize) {
-        PerformanceManagePageVO vo = new PerformanceManagePageVO();
+        PerformanceManagePageVO<PerformanceManageEmployeeVO> vo = new PerformanceManagePageVO<>();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
             vo.setTotal(0);
             vo.setRows(List.of());
@@ -167,23 +172,24 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         String kw = StringUtils.trimToNull(keyword);
         int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
         int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
+        Long selfEmployeeId = resolveSelfEmployeeId();
 
-        long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw);
+        long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
         vo.setTotal(total);
 
         List<PerformanceManageEmployeeVO> employees = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             employees = factMapper.selectManagePageEmployees(
-                period, factType, deptId, bizType, settled, kw, offset, size);
+                period, factType, deptId, bizType, settled, kw, selfEmployeeId, offset, size);
         }
         vo.setRows(employees);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, bizType, settled, kw);
+            period, factType, deptId, bizType, settled, kw, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
-        summary.setEmployeeCount(total);
+        summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
         summary.setDetailCount(toLong(stat.get("detailCount")));
         summary.setUnsettledCount(toLong(stat.get("unsettledCount")));
@@ -202,11 +208,91 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             return List.of();
         }
         return factMapper.selectManageListByIds(
-            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), employeeIds);
+            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword),
+            resolveSelfEmployeeId(), employeeIds);
+    }
+
+    @Override
+    public PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
+                                              Long deptId, String bizType, Boolean settled, String keyword,
+                                              Integer pageNum, Integer pageSize) {
+        PerformanceManagePageVO<PerformanceManageContractVO> vo = new PerformanceManagePageVO<>();
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
+            vo.setTotal(0);
+            vo.setRows(List.of());
+            PerformanceManagePageVO.Summary empty = new PerformanceManagePageVO.Summary();
+            empty.setTotalAmount(BigDecimal.ZERO);
+            vo.setSummary(empty);
+            return vo;
+        }
+        String kw = StringUtils.trimToNull(keyword);
+        int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
+        int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
+        Long selfEmployeeId = resolveSelfEmployeeId();
+
+        long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
+        vo.setTotal(total);
+
+        List<PerformanceManageContractVO> contracts = List.of();
+        if (total > 0) {
+            long offset = (long) (page - 1) * size;
+            contracts = factMapper.selectManagePageContracts(
+                period, factType, deptId, bizType, settled, kw, selfEmployeeId, offset, size);
+        }
+        vo.setRows(contracts);
+        vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
+
+        Map<String, Object> stat = factMapper.selectManageSummary(
+            period, factType, deptId, bizType, settled, kw, selfEmployeeId);
+        PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
+        summary.setEmployeeCount(toLong(stat.get("employeeCount")));
+        summary.setContractCount(toLong(stat.get("contractCount")));
+        summary.setDetailCount(toLong(stat.get("detailCount")));
+        summary.setUnsettledCount(toLong(stat.get("unsettledCount")));
+        Object sum = stat.get("totalAmount");
+        summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
+        vo.setSummary(summary);
+        return vo;
+    }
+
+    @Override
+    public List<PerformanceManageDTO> listManageDetailsByContractNos(String period, String factType, Long deptId,
+                                                        String bizType, Boolean settled, String keyword,
+                                                        List<String> contractNos) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)
+            || contractNos == null || contractNos.isEmpty()) {
+            return List.of();
+        }
+        return factMapper.selectManageListByContractNos(
+            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
     }
 
     private long toLong(Object v) {
         return v == null ? 0L : ((Number) v).longValue();
+    }
+
+    /**
+     * 数据权限：经纪人角色只能查看本人业绩。
+     * <p>
+     * 返回当前登录用户对应的员工 ID；非经纪人角色返回 null（不限制）。
+     * 经纪人在合同列表中只看到自己参与的合同，但展开合同后可见该合同下所有人的分成
+     * （{@link #listManageDetailsByContractNos} 不传 selfEmployeeId）。
+     */
+    private Long resolveSelfEmployeeId() {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoleId() == null) {
+                return null;
+            }
+            if (!ROLE_AGENT.equals(loginUser.getRoleId())) {
+                return null;
+            }
+            EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(loginUser.getUserId());
+            return emp == null ? null : emp.getEmployeeId();
+        } catch (Exception e) {
+            log.warn("[performance] 解析经纪人数据权限失败，默认不限制", e);
+            return null;
+        }
     }
 
     @Override

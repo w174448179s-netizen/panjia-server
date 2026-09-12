@@ -476,11 +476,13 @@ public class PerformanceEngine {
     }
 
     /**
-     * 生成来源业务单号（幂等锚点）。
+     * 生成业绩事实的幂等锚点（sourceKey）。
      * <p>
-     * 格式：{sourceType}-{record.getSourceKey()}
+     * 由 sourceType + 归一化记录 sourceKey（订单|合同|角色|费项）+ 结算月 period 组成。
      * <p>
-     * 通过前缀 sourceType 区分不同来源系统的业务单号，避免不同来源间单号冲突。
+     * ★ period 必须纳入：同一订单同一角色在不同结算月各存独立事实（成交月正行 + 退单月负行），
+     * 退单以负数行按月流转自然抵扣，不触发回溯/追回/重算。
+     * 同期间重导由 batch supersede 冲销旧事实后重建，不受 period 纳入影响。
      *
      * @param record 归一化记录
      * @return 来源业务单号
@@ -491,7 +493,8 @@ public class PerformanceEngine {
         }
         String sourceType = record.getSourceType() == null ? "" : record.getSourceType();
         String recordSourceKey = record.getSourceKey() == null ? "" : record.getSourceKey();
-        return sourceType + "-" + recordSourceKey;
+        String period = record.getPeriod() == null ? "" : record.getPeriod();
+        return sourceType + "-" + recordSourceKey + "-" + period;
     }
 
     /** 归一化记录类型 code：贝壳业绩明细行，同携当月应收 + 当月实收两列金额 */

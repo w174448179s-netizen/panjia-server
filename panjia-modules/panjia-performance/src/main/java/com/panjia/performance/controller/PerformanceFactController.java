@@ -3,6 +3,7 @@ package com.panjia.performance.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.service.PerformanceEngine;
@@ -165,6 +166,48 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) String keyword) {
         return R.ok(queryService.listManageDetails(period, factType, deptId, bizType, settled,
             keyword, employeeIds));
+    }
+
+    /**
+     * 业绩管理合同维度分页查询（合同 → 人 → 明细 懒加载树表）。
+     * <p>
+     * 以合同号为分页维度：只返回当前页合同的聚合行（合同号/订单号/类型/房源地址/
+     * 签约日期/合同金额/涉及人数/明细数）、业务类型选项与跨页全局汇总；
+     * 合同下签约人明细由 {@link #manageContractDetails} 懒加载。
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/manage/contract")
+    public R<PerformanceManagePageVO<PerformanceManageContractVO>> manageContract(
+            @RequestParam String period,
+            @RequestParam String factType,
+            @RequestParam(required = false) Long deptId,
+            @RequestParam(required = false) String bizType,
+            @RequestParam(required = false) Boolean settled,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false, defaultValue = "1") Integer pageNum,
+            @RequestParam(required = false, defaultValue = "20") Integer pageSize) {
+        return R.ok(queryService.pageManageByContract(period, factType, deptId, bizType, settled,
+            keyword, pageNum, pageSize));
+    }
+
+    /**
+     * 按合同号集合查询业绩明细（合同维度树表懒加载）。
+     * <p>
+     * 展开单个合同时 contractNos 传 1 个；「全部展开」时传当前页全部合同号。
+     * 其余过滤条件与 {@link #manageContract} 一致。
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/manage/contract/details")
+    public R<List<PerformanceManageDTO>> manageContractDetails(
+            @RequestParam List<String> contractNos,
+            @RequestParam String period,
+            @RequestParam String factType,
+            @RequestParam(required = false) Long deptId,
+            @RequestParam(required = false) String bizType,
+            @RequestParam(required = false) Boolean settled,
+            @RequestParam(required = false) String keyword) {
+        return R.ok(queryService.listManageDetailsByContractNos(period, factType, deptId, bizType, settled,
+            keyword, contractNos));
     }
 
     /**

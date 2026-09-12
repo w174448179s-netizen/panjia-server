@@ -30,6 +30,14 @@ public interface EmployeeMainDataQueryPort {
     EmployeeMainDataDTO getByEmployeeId(Long employeeId);
 
     /**
+     * 按系统用户ID查员工主数据（用于经纪人等角色数据权限：登录用户 → 员工）。
+     *
+     * @param userId 系统用户ID（sys_user.user_id）
+     * @return 员工主数据；不存在返回 null
+     */
+    EmployeeMainDataDTO getByUserId(Long userId);
+
+    /**
      * 按工号集合批量查员工主数据（列表页关联展示用，避免 N+1）。
      *
      * @param employeeCodes 工号集合

@@ -29,6 +29,12 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 业绩调整单服务实现。
@@ -54,12 +60,58 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         wrapper.orderByDesc(PerformanceAdjust::getCreateTime);
 
         Page<PerformanceAdjust> page = adjustMapper.selectPage(pageQuery.build(), wrapper);
-        return PageResult.build(page.getRecords(), page.getTotal());
+        List<PerformanceAdjust> records = page.getRecords();
+        // 批量回填员工姓名 / 部门名称（含目标部门），避免列表显示裸 ID
+        fillDisplayNames(records);
+        return PageResult.build(records, page.getTotal());
+    }
+
+    /**
+     * 批量回填展示名称：员工姓名（pj_people_employee）、原部门名、目标部门名（sys_dept）。
+     * 空集合安全，两次 IN 查询无 N+1。
+     */
+    private void fillDisplayNames(List<PerformanceAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Set<Long> employeeIds = records.stream()
+            .map(PerformanceAdjust::getEmployeeId).filter(java.util.Objects::nonNull)
+            .collect(Collectors.toSet());
+        Set<Long> deptIds = new HashSet<>();
+        for (PerformanceAdjust r : records) {
+            if (r.getDeptId() != null) deptIds.add(r.getDeptId());
+            if (r.getTargetDeptId() != null) deptIds.add(r.getTargetDeptId());
+        }
+
+        Map<Long, String> empNameMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.employeeNames(employeeIds.stream().toList())) {
+            empNameMap.put(((Number) row.get("employeeId")).longValue(), String.valueOf(row.get("employeeName")));
+        }
+        Map<Long, String> deptNameMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.deptNames(deptIds.stream().toList())) {
+            deptNameMap.put(((Number) row.get("deptId")).longValue(), String.valueOf(row.get("deptName")));
+        }
+
+        for (PerformanceAdjust r : records) {
+            if (r.getEmployeeId() != null) {
+                r.setEmployeeName(empNameMap.get(r.getEmployeeId()));
+            }
+            if (r.getDeptId() != null) {
+                r.setDeptName(deptNameMap.get(r.getDeptId()));
+            }
+            if (r.getTargetDeptId() != null) {
+                r.setTargetDeptName(deptNameMap.get(r.getTargetDeptId()));
+            }
+        }
     }
 
     @Override
     public PerformanceAdjust getAdjust(Long id) {
-        return adjustMapper.selectById(id);
+        PerformanceAdjust adjust = adjustMapper.selectById(id);
+        if (adjust != null) {
+            fillDisplayNames(List.of(adjust));
+        }
+        return adjust;
     }
 
     @Override

@@ -2,7 +2,9 @@ package com.panjia.performance.service;
 
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
+import com.panjia.performance.dto.PerformanceManageEmployeeVO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -87,7 +89,7 @@ public interface PerformanceQueryService {
      * @param pageSize 每页人数
      * @return 人维度分页结果（人聚合行 + 总人数 + 业务类型集合 + 全局汇总）
      */
-    PerformanceManagePageVO pageManage(String period, String factType, Long deptId,
+    PerformanceManagePageVO<PerformanceManageEmployeeVO> pageManage(String period, String factType, Long deptId,
                                        String bizType, Boolean settled, String keyword,
                                        Integer pageNum, Integer pageSize);
 
@@ -109,6 +111,32 @@ public interface PerformanceQueryService {
     List<PerformanceManageDTO> listManageDetails(String period, String factType, Long deptId,
                                                  String bizType, Boolean settled, String keyword,
                                                  List<Long> employeeIds);
+
+    /**
+     * 业绩管理合同维度分页查询（懒加载树表：合同 → 人 → 明细）。
+     * <p>
+     * 后端按合同号分页，只返回当前页合同的聚合行（每合同一行：合同号/订单号/类型/
+     * 房源地址/签约日期/合同金额/涉及人数/明细数），合同下签约人明细通过
+     * {@link #listManageDetailsByContractNos} 按合同号懒加载。
+     *
+     * @return 合同维度分页结果（合同聚合行 + 总合同数 + 业务类型集合 + 全局汇总）
+     */
+    PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
+                                       Long deptId, String bizType, Boolean settled, String keyword,
+                                       Integer pageNum, Integer pageSize);
+
+    /**
+     * 按合同号集合查询业绩管理明细（合同维度树表懒加载数据源）。
+     * <p>
+     * 过滤条件与 {@link #pageManageByContract} 一致，返回这些合同下所有签约人的明细行，
+     * 前端按「合同 → 人 → 明细」组装树。
+     *
+     * @param contractNos 合同号集合（不能为空）
+     * @return 业绩明细行（按合同号/姓名/日期/角色排序）
+     */
+    List<PerformanceManageDTO> listManageDetailsByContractNos(String period, String factType, Long deptId,
+                                                 String bizType, Boolean settled, String keyword,
+                                                 List<String> contractNos);
 
     /**
      * 查询有 ACTIVE 业绩事实的期间（倒序），供前端默认选中最新数据期间。

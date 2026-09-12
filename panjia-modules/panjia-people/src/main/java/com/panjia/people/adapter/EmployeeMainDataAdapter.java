@@ -54,6 +54,16 @@ public class EmployeeMainDataAdapter implements EmployeeMainDataQueryPort {
     }
 
     @Override
+    public EmployeeMainDataDTO getByUserId(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        Employee emp = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+            .eq(Employee::getUserId, userId).last("LIMIT 1"));
+        return emp == null ? null : toDTO(emp);
+    }
+
+    @Override
     public Map<String, EmployeeMainDataDTO> listByCodes(Collection<String> employeeCodes) {
         if (CollectionUtils.isEmpty(employeeCodes)) {
             return Map.of();

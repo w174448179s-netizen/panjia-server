@@ -23,12 +23,11 @@ BEGIN;
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002530, '数据管理', 0, 80, 'data', NULL, NULL, 'N', 'Y', 'M', '0', '0', '', 'DataBoard', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '数据管理顶级目录（运维聚合，import/outbox/people 等挂载点）');
 
--- 业绩明细（唯一版本，原 V100001 的 2201 业务侧残留已删除；直接挂顶级 2200 下）
--- 页面：performance/manage/index（人→合同→明细 树表，新签/结佣双口径）
--- perms=perf:fact:* 与 PerformanceFactController 对齐；
--- 超管/总监授权见本文件底部，业务角色（店长/财务/经纪人）授权在 V100001 的 sys_role_menu 段
+-- 业绩明细（合同维度：合同→人→明细 树表，新签/结佣双口径）
+-- 统一以合同为视角：总监据此调整/结佣，经纪人可看到同一合同下其他人的分成
+-- perms=perf:fact:list 与 PerformanceFactController 对齐
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002610, '业绩明细', 1761400000000002200, 1, 'manage', 'performance/manage/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'list', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩明细（人→合同→明细 树表，新签/结佣双口径）');
+VALUES (1761400000000002610, '业绩明细', 1761400000000002200, 1, 'manage', 'performance/contract/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'list', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩明细（合同→人→明细 树表）');
 
 -- 业绩明细按钮权限
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
