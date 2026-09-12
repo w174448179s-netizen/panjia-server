@@ -33,6 +33,7 @@ import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.template.ImportTemplateBridge;
 import com.panjia.importutil.archive.ArchiveResult;
 import com.panjia.importutil.archive.FileArchiver;
+import com.panjia.importutil.convert.TypeConverter;
 import com.panjia.importutil.dto.ParsedSheet;
 import com.panjia.importutil.parser.ParserFactory;
 import com.panjia.importutil.template.model.ColumnDef;
@@ -612,7 +613,9 @@ public class ImportEngine {
             return null;
         }
         try {
-            return new BigDecimal(s);
+            // 复用导入基础转换器：裸数字量纲不变，并兼容「5.00%」→0.05、千分位逗号
+            // （归一化从 rawJson 原文重读，业绩比例等字段可能带百分号）
+            return TypeConverter.parseDecimal(s);
         } catch (NumberFormatException e) {
             return null;
         }
