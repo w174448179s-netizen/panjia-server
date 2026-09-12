@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-commission</artifactId>
+
+    <description>
+        结佣域（结佣申请单 / 结佣明细 / 调整单 / 冲销联动）
+    </description>
+
+    <dependencies>
+        <!-- 盘家契约层（端口 / 事件 / DTO）叶子模块 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-contracts</artifactId>
+        </dependency>
+
+        <!-- 盘家公共模块（Port / 异常处理） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- 底座 JSON（Jackson） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
+        </dependency>
+
+        <!-- 底座公共核心（R / ServiceException / PageResult） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 MyBatis-Plus（BaseMapperPlus / PageQuery / @Version） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-mybatis</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（@SaCheckPermission / LoginHelper） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- JUnit5（纯逻辑单测 / 静态契约校验）；显式 5.x：JUnit 6 与 surefire 3.5.5 注入的 launcher 不兼容会 0 tests -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

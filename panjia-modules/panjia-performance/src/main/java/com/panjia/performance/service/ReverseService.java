@@ -2,6 +2,8 @@ package com.panjia.performance.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.panjia.contracts.event.EventPort;
+import com.panjia.contracts.event.PerformanceFactReversedEvent;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
@@ -13,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -42,6 +45,7 @@ public class ReverseService {
 
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
+    private final EventPort eventPort;
 
     /**
      * 替换冲销。
@@ -81,6 +85,9 @@ public class ReverseService {
         // 4. 插入新事实
         newFact.setOperatorId(operatorId);
         factMapper.insert(newFact);
+
+        // 5. 发布冲销事件（结佣域按分治表联动；事务内 emit，Outbox 原子提交）
+        emitReversed(oldFact.getPeriod(), List.of(oldFact.getId()), ReversedReason.SUPERSEDE);
 
         log.info("[冲销-替换] 事实替换完成：oldFactId={}, newFactId={}, reason={}",
                 factId, newFact.getId(), ReversedReason.SUPERSEDE.getCode());
@@ -143,16 +150,21 @@ public class ReverseService {
         }
 
         int reversedCount = 0;
+        List<Long> reversedFactIds = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
             try {
                 checkAndReverse(fact, reason, operatorId);
                 factMapper.updateById(fact);
                 reversedCount++;
+                reversedFactIds.add(fact.getId());
             } catch (Exception e) {
                 log.warn("[冲销-{}] 单条事实冲销失败：factId={}, batchId={}",
                         reason.getCode(), fact.getId(), batchId, e);
             }
         }
+
+        // 冲销成功后发布事件（结佣域联动；事务内 emit）
+        emitReversed(facts.get(0).getPeriod(), reversedFactIds, reason);
 
         log.info("[冲销-{}] 批次冲销完成：batchId={}, 冲销数={}",
                 reason.getCode(), batchId, reversedCount);
@@ -187,6 +199,9 @@ public class ReverseService {
 
         factMapper.updateById(fact);
 
+        // 发布冲销事件（结佣域联动；事务内 emit）
+        emitReversed(fact.getPeriod(), List.of(factId), reason);
+
         log.info("[冲销-调整单] 事实冲销完成：factId={}, adjustId={}, reason={}",
                 factId, adjustId, reason.getCode());
     }
@@ -216,19 +231,50 @@ public class ReverseService {
 
         // 2. 逐条冲销
         int reversedCount = 0;
+        List<Long> reversedFactIds = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
             try {
                 checkAndReverse(fact, ReversedReason.PERIOD_VOID, operatorId);
                 factMapper.updateById(fact);
                 reversedCount++;
+                reversedFactIds.add(fact.getId());
             } catch (Exception e) {
                 log.warn("[冲销-期间作废] 单条事实冲销失败：factId={}, period={}",
                         fact.getId(), period, e);
             }
         }
 
+        // 冲销成功后发布事件（结佣域联动；事务内 emit）
+        emitReversed(period, reversedFactIds, ReversedReason.PERIOD_VOID);
+
         log.info("[冲销-期间作废] 期间冲销完成：period={}, 冲销数={}", period, reversedCount);
         return reversedCount;
+    }
+
+    /**
+     * 发布业绩事实冲销事件（结佣域按分治表联动：PENDING 明细随动作废、APPROVED 仅标记告警）。
+     * <p>
+     * 必须在冲销业务事务内调用（EventPort.emit 为 MANDATORY 传播，Outbox 与业务原子提交）。
+     *
+     * @param period   归属期间（取首条被冲销事实；可空）
+     * @param factIds  本次成功冲销的事实 ID 列表
+     * @param reason   冲销原因
+     */
+    private void emitReversed(String period, List<Long> factIds, ReversedReason reason) {
+        if (factIds == null || factIds.isEmpty()) {
+            return;
+        }
+        PerformanceFactReversedEvent event = new PerformanceFactReversedEvent();
+        event.setPeriod(period);
+        List<String> ids = new ArrayList<>(factIds.size());
+        for (Long id : factIds) {
+            ids.add(String.valueOf(id));
+        }
+        event.setFactIds(ids);
+        event.setReason(reason.getCode());
+        eventPort.emit(event);
+        log.info("[冲销-事件] 已发布事实冲销事件：period={}, factCount={}, reason={}",
+                period, ids.size(), reason.getCode());
     }
 
     /**

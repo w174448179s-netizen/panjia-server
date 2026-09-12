@@ -2,6 +2,8 @@ package com.panjia.performance.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
+import com.panjia.contracts.event.EventPort;
+import com.panjia.contracts.event.PerformanceFactCreatedEvent;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.performance.config.PerformanceProperties;
 import com.panjia.performance.domain.ConsumeStatus;
@@ -25,7 +27,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 业绩消费引擎。
@@ -53,6 +58,7 @@ public class PerformanceEngine {
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final EmployeeSnapshotQueryPort employeeQueryPort;
     private final ReverseService reverseService;
+    private final EventPort eventPort;
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
@@ -158,6 +164,10 @@ public class PerformanceEngine {
         int pageNum = 1;
         int pageSize = ImportNormalizedRecordQueryPort.DEFAULT_PAGE_SIZE;
 
+        // 本批新建事实收集器（仅幂等 miss 才新建；用于事务内发布 FactCreated 事件）
+        List<PerformanceFact> createdFacts = new ArrayList<>();
+        FactType factType = FactType.fromCode(properties.getDefaultFactType());
+
         PageResult<NormalizedRecordDTO> pageResult;
         do {
             pageResult = importQueryPort.listByBatchId(batchId, pageNum, pageSize);
@@ -170,8 +180,7 @@ public class PerformanceEngine {
                         derivedPeriod = record.getPeriod();
                     }
 
-                    FactType factType = FactType.fromCode(properties.getDefaultFactType());
-                    buildSingleFact(record, factType, operatorId);
+                    buildSingleFact(record, factType, operatorId, createdFacts);
                     successCount++;
                 }
             }
@@ -195,10 +204,48 @@ public class PerformanceEngine {
 
         consumeLogMapper.updateById(consumeLog);
 
+        // ========== 5. 发布事实创建事件（结佣域联动；同一事务内 emit，Outbox 原子提交） ==========
+        emitFactCreated(batchId, consumeLog.getPeriod(), factType, createdFacts);
+
         log.info("[业绩消费] 批次消费完成：batchId={}, total={}, success={}, status={}",
                 batchId, totalCount, successCount, consumeLog.getStatus());
 
         return consumeLog;
+    }
+
+    /**
+     * 发布业绩事实创建事件（结佣域按 (period, deptId) 提示增量重拉；新签透传不依赖本事件）。
+     * <p>
+     * 只对本批<b>新建</b>的事实发布（幂等命中跳过的事实不算），且必须在业务写事务内调用。
+     *
+     * @param batchId      导入批次 ID
+     * @param period       归属期间（事件缺失时由消费日志回填推导）
+     * @param factType     事实口径
+     * @param createdFacts 本批新建的事实列表
+     */
+    private void emitFactCreated(Long batchId, String period, FactType factType, List<PerformanceFact> createdFacts) {
+        if (createdFacts == null || createdFacts.isEmpty()) {
+            return;
+        }
+        PerformanceFactCreatedEvent event = new PerformanceFactCreatedEvent();
+        event.setBatchId(batchId == null ? 0L : batchId);
+        event.setPeriod(period);
+        event.setFactType(factType != null ? factType.getCode() : null);
+
+        List<String> factIds = new ArrayList<>(createdFacts.size());
+        Set<String> deptIds = new LinkedHashSet<>();
+        for (PerformanceFact fact : createdFacts) {
+            factIds.add(String.valueOf(fact.getId()));
+            if (fact.getDeptId() != null) {
+                deptIds.add(String.valueOf(fact.getDeptId()));
+            }
+        }
+        event.setFactIds(factIds);
+        event.setDeptIds(new ArrayList<>(deptIds));
+
+        eventPort.emit(event);
+        log.info("[业绩消费] 已发布事实创建事件：batchId={}, period={}, factCount={}, factType={}",
+                batchId, period, factIds.size(), factType != null ? factType.getCode() : null);
     }
 
     /**
@@ -267,6 +314,24 @@ public class PerformanceEngine {
      * @return 构建的业绩事实（若幂等命中则返回已存在的事实）
      */
     public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId) {
+        return buildSingleFact(record, factType, operatorId, null);
+    }
+
+    /**
+     * 构建单条业绩事实（带新建事实收集器）。
+     * <p>
+     * 与 {@link #buildSingleFact(NormalizedRecordDTO, FactType, Long)} 逻辑一致；
+     * 幂等命中（事实已存在）时不写入收集器，仅<b>本批真正新建</b>的事实进入 {@code createdCollector}，
+     * 供调用方在事务内发布 FactCreated 事件。
+     *
+     * @param record           归一化记录
+     * @param factType         事实口径
+     * @param operatorId       操作人 ID
+     * @param createdCollector 新建事实收集器（可空）
+     * @return 构建的业绩事实（若幂等命中则返回已存在的事实）
+     */
+    public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId,
+                                           List<PerformanceFact> createdCollector) {
         // ========== 1. 员工归属查询 ==========
         // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
         // 员工不存在（脏数据/已删）返回 null，下方 else 分支以 employeeCode 兜底
@@ -331,6 +396,11 @@ public class PerformanceEngine {
         fact.setOperatorId(operatorId);
 
         factMapper.insert(fact);
+
+        // 仅真正新建的事实进入收集器（供调用方在事务内发布 FactCreated 事件）
+        if (createdCollector != null) {
+            createdCollector.add(fact);
+        }
 
         log.debug("[业绩构建] 业绩事实已创建：factId={}, sourceKey={}, amount={}",
                 fact.getId(), sourceKey, performanceAmount);

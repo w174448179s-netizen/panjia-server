@@ -4,8 +4,13 @@ import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.NormalizedRecord;
+import com.panjia.importdomain.domain.NormalizedRecordType;
+import com.panjia.importdomain.domain.raw.RawNewSign;
+import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
+import com.panjia.importdomain.mapper.RawNewSignMapper;
+import com.panjia.importdomain.mapper.RawSignedMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -34,6 +39,8 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
 
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final ImportBatchMapper importBatchMapper;
+    private final RawSignedMapper rawSignedMapper;
+    private final RawNewSignMapper rawNewSignMapper;
 
     @Override
     public PageResult<NormalizedRecordDTO> listByBatchId(Long batchId, int pageNum, int pageSize) {
@@ -71,6 +78,28 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         return normalizedRecordMapper.countByBatchIdActive(batchId);
     }
 
+    @Override
+    public String getRawJsonByRecordId(Long recordId) {
+        if (recordId == null) {
+            return null;
+        }
+        NormalizedRecord record = normalizedRecordMapper.selectById(recordId);
+        if (record == null || record.getRawDataId() == null) {
+            return null;
+        }
+        // 按记录类型路由到对应原始行表（业绩/新签两类才有原始行 JSON）
+        NormalizedRecordType type = record.getRecordType();
+        if (type == NormalizedRecordType.SIGNED) {
+            RawSigned raw = rawSignedMapper.selectById(record.getRawDataId());
+            return raw == null ? null : raw.getRawJson();
+        }
+        if (type == NormalizedRecordType.NEW_SIGN) {
+            RawNewSign raw = rawNewSignMapper.selectById(record.getRawDataId());
+            return raw == null ? null : raw.getRawJson();
+        }
+        return null;
+    }
+
     /**
      * V2.0 简化映射：仅映射已有字段；employeeName / deptFullName 留 null，
      * 等待 V2.1 / PeopleSnapshotAdapter 接入后补齐。
@@ -91,11 +120,30 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setDeptFullName(null);  // TODO: 待 PeopleSnapshotAdapter 接入后填充
         dto.setBizType(r.getBizType());
         dto.setSourceKey(r.getSourceKey());
-        dto.setOriginAmount(r.getReceivableAmount()); // 业绩口径：取应收金额作为原值
+        // ★ 金额口径按记录类型区分（结佣域 C-12/C-16 锚点）：
+        //  SIGNED 结佣 → 当月实收业绩 receivedAmount（PERF_REAL，样本 192,556.89 / 剔除 52 条零实收）
+        //  NEW_SIGN 新签 → 当月应收业绩 receivableAmount（PERF_EXPECT，样本 206,274.04）
+        dto.setOriginAmount(resolveOriginAmount(r));
         dto.setShareRatio(r.getShareRatio());
         dto.setRoleType(r.getRoleType());
         dto.setExtJson(r.getExtraJson());
         return dto;
+    }
+
+    /**
+     * 按归一化记录类型解析业绩原值。
+     * <ul>
+     *   <li>{@link NormalizedRecordType#SIGNED}：结佣业绩（PERF_REAL）取<b>实收</b> receivedAmount；</li>
+     *   <li>{@link NormalizedRecordType#NEW_SIGN}：新签业绩（PERF_EXPECT）取<b>应收</b> receivableAmount；</li>
+     *   <li>其余类型（考勤/积分/手工）当前不产生金额型业绩事实，兜底取应收，保持旧行为。</li>
+     * </ul>
+     */
+    private java.math.BigDecimal resolveOriginAmount(NormalizedRecord r) {
+        if (r.getRecordType() == NormalizedRecordType.NEW_SIGN) {
+            return r.getReceivableAmount();
+        }
+        // SIGNED 及其余类型默认走实收口径
+        return r.getReceivedAmount();
     }
 
     /** "YYYY-MM" → 该月 1 号；period 为空或非法返回 null（消费侧 fail fast） */

@@ -45,4 +45,15 @@ public interface ImportNormalizedRecordQueryPort {
      * @return 记录总数
      */
     long countByBatchId(Long batchId);
+
+    /**
+     * 溯源：按归一化记录 ID 返回其关联导入原始行的全量 JSON（如贝壳原始行 raw_json）。
+     * <p>
+     * 供结佣域工资-结佣-业绩-原始行穿透链路（C-15）使用；手工录入（raw_data_id 为空）
+     * 或记录不存在时返回 null。
+     *
+     * @param recordId 归一化记录 ID
+     * @return 原始行 JSON 串；无关联原始行返回 null
+     */
+    String getRawJsonByRecordId(Long recordId);
 }

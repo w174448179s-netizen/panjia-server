@@ -139,6 +139,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-performance</artifactId>
         </dependency>
+        <!-- 结佣域（结佣申请单/结佣明细/调整单/冲销联动） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-commission</artifactId>
+        </dependency>
         <!-- 导入域（导入模板） -->
         <dependency>
             <groupId>com.panjia</groupId>
