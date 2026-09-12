@@ -29,11 +29,8 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class RuoYiDeptAdapter implements DeptPort {
 
-    /** 门店/组别的分隔符（模板约定：第一级=门店，第二级=组别） */
+    /** 部门路径分隔符（导入路径拼接 / 全路径展示统一使用） */
     private static final String DEPT_PATH_SEPARATOR = "-";
-
-    /** 展示全路径的分隔符 */
-    private static final String DISPLAY_PATH_SEPARATOR = "/";
 
     /** ancestors 祖级 ID 分隔符（RuoYi 约定） */
     private static final String ANCESTORS_SEPARATOR = ",";
@@ -144,10 +141,16 @@ public class RuoYiDeptAdapter implements DeptPort {
                 if (id.equals(rootId) && DEFAULT_ROOT_DEPT_NAME.equals(node.getDeptName())) {
                     continue;
                 }
-                names.add(node.getDeptName());
+                // 无组级时组级会被建成与门店同名的节点，展示时去重相邻同名，
+                // 避免「富房-西派少城店-西派少城店」，只保留「大区-门店」
+                String name = node.getDeptName();
+                if (!names.isEmpty() && names.get(names.size() - 1).equals(name)) {
+                    continue;
+                }
+                names.add(name);
             }
         }
-        return String.join(DISPLAY_PATH_SEPARATOR, names);
+        return String.join(DEPT_PATH_SEPARATOR, names);
     }
 
     @Override

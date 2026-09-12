@@ -60,11 +60,8 @@ public class PerformanceManageDTO {
     /** 工号 */
     private String employeeCode;
 
-    /** 门店名称（部门层级 depth=2） */
-    private String storeName;
-
-    /** 店组名称（部门层级 depth=3；员工直属门店时为 null） */
-    private String groupName;
+    /** 门店/组别全路径（大区-门店-组；组级与门店同名或为空时只到大区-门店两级） */
+    private String deptPath;
 
     /** 所属角色（角色类型编码，如 维护人/录入人/...） */
     private String roleType;

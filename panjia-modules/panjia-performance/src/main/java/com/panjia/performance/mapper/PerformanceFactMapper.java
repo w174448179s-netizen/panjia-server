@@ -175,17 +175,18 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.employee_id AS employeeId,
                e.employee_name AS employeeName,
                e.employee_code AS employeeCode,
-               COALESCE(rs.raw_json -&gt;&gt; 'storeName',
-                   CASE
-                       WHEN array_length(string_to_array(d.ancestors, ','), 1) = 2 THEN d.dept_name
-                       WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN p.dept_name
-                       ELSE d.dept_name
-                   END) AS storeName,
-               COALESCE(rs.raw_json -&gt;&gt; 'deptName',
-                   CASE
-                       WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN d.dept_name
-                       ELSE NULL
-                   END) AS groupName,
+               CASE
+                   WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
+                       CONCAT_WS('-',
+                           NULLIF(gp.dept_name, 'tenant_name'),
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           CASE WHEN d.dept_name = p.dept_name THEN NULL
+                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
+                   ELSE
+                       CONCAT_WS('-',
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           NULLIF(d.dept_name, 'tenant_name'))
+               END AS deptPath,
                COALESCE(nr.role_type, f.role_type) AS roleType,
                rs.role_name AS roleName,
                f.share_ratio AS shareRatio,
@@ -197,6 +198,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
+        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
