@@ -49,6 +49,15 @@ public class PerformanceAdjust implements Serializable {
     /** 调整类型：AMOUNT-金额调整 / VOID-业绩冲销 / TRANSFER-部门划转 */
     private AdjustType adjustType;
 
+    /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
+    private String adjustScope;
+
+    /** 合同号（合同级调整时填，用于定位该合同下全部明细事实） */
+    private String contractNo;
+
+    /** 事实口径：PERF_REAL-结佣业绩 / PERF_EXPECT-新签业绩 */
+    private String factType;
+
     /** 调整详情 JSON */
     private String payloadJson;
 

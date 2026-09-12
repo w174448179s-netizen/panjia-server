@@ -21,14 +21,14 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
  * 业绩调整单管理。
  * <p>
- * 提供调整单的分页查询、详情查询、发起、审批通过、审批拒绝、取消、执行等接口。
- * 调整类型支持：金额调整（AMOUNT）、业绩冲销（VOID）、部门划转（TRANSFER）。
+ * 审批全走 RuoYi 工作流（flowCode = perf_adjust）：
+ * 发起调整单时自动启动审批流程，审批通过后由工作流回调自动执行调整。
+ * 调整范围支持：合同级（按业绩比例分摊到各明细）、明细级（单条事实调整）。
  */
 @Slf4j
 @Validated
@@ -41,10 +41,6 @@ public class PerformanceAdjustController extends BaseController {
 
     /**
      * 分页查询调整单列表。
-     *
-     * @param query     筛选条件
-     * @param pageQuery 分页参数
-     * @return 调整单分页
      */
     @SaCheckPermission("perf:adjust:list")
     @GetMapping("/list")
@@ -54,9 +50,6 @@ public class PerformanceAdjustController extends BaseController {
 
     /**
      * 查询调整单详情。
-     *
-     * @param id 调整单 ID
-     * @return 调整单详情
      */
     @SaCheckPermission("perf:adjust:query")
     @GetMapping("/{id}")
@@ -65,7 +58,7 @@ public class PerformanceAdjustController extends BaseController {
     }
 
     /**
-     * 发起调整单。
+     * 发起调整单并启动审批流程。
      *
      * @param dto 调整单创建请求
      * @return 调整单 ID
@@ -75,43 +68,11 @@ public class PerformanceAdjustController extends BaseController {
     @PostMapping
     public R<Long> add(@Validated @RequestBody AdjustCreateDTO dto) {
         PerformanceAdjust adjust = adjustService.createAdjust(dto, LoginHelper.getUserId());
-        return R.ok("发起成功", adjust.getId());
+        return R.ok("发起成功，已提交审批", adjust.getId());
     }
 
     /**
-     * 审批通过调整单。
-     *
-     * @param id 调整单 ID
-     * @return 操作结果
-     */
-    @SaCheckPermission("perf:adjust:approve")
-    @Log(title = "业绩调整单审批", businessType = BusinessType.UPDATE)
-    @PutMapping("/approve/{id}")
-    public R<Void> approve(@PathVariable Long id) {
-        adjustService.approveAdjust(id, LoginHelper.getUserId());
-        return R.ok();
-    }
-
-    /**
-     * 审批拒绝调整单。
-     *
-     * @param id     调整单 ID
-     * @param reason 拒绝原因
-     * @return 操作结果
-     */
-    @SaCheckPermission("perf:adjust:approve")
-    @Log(title = "业绩调整单审批", businessType = BusinessType.UPDATE)
-    @PutMapping("/reject/{id}")
-    public R<Void> reject(@PathVariable Long id, @RequestParam String reason) {
-        adjustService.rejectAdjust(id, LoginHelper.getUserId(), reason);
-        return R.ok();
-    }
-
-    /**
-     * 取消调整单。
-     *
-     * @param id 调整单 ID
-     * @return 操作结果
+     * 取消调整单（仅进行中可取消）。
      */
     @SaCheckPermission("perf:adjust:edit")
     @Log(title = "业绩调整单", businessType = BusinessType.UPDATE)
@@ -122,10 +83,7 @@ public class PerformanceAdjustController extends BaseController {
     }
 
     /**
-     * 执行调整单。
-     *
-     * @param id 调整单 ID
-     * @return 操作结果
+     * 执行调整单（一般由工作流审批通过后自动触发，此接口供手动兜底）。
      */
     @SaCheckPermission("perf:adjust:execute")
     @Log(title = "业绩调整单执行", businessType = BusinessType.UPDATE)

@@ -38,6 +38,8 @@ CREATE TABLE pj_perf_fact (
     source                  VARCHAR(20)            NOT NULL DEFAULT 'IMPORT',
     adjust_id               BIGINT,
     reversed_reason         VARCHAR(30),
+    reversal_type           VARCHAR(20),
+    refund_of_fact_id       BIGINT,
     operator_id             BIGINT,
     version                 INT                    NOT NULL DEFAULT 0,
     create_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -53,6 +55,7 @@ CREATE INDEX idx_pfact_emp     ON pj_perf_fact(employee_id, period, fact_type);
 CREATE INDEX idx_pfact_dept    ON pj_perf_fact(dept_id, period, fact_type);
 CREATE INDEX idx_pfact_batch   ON pj_perf_fact(batch_id);
 CREATE INDEX idx_pfact_period  ON pj_perf_fact(period, fact_type);
+CREATE INDEX idx_pfact_refund  ON pj_perf_fact(refund_of_fact_id);
 
 COMMENT ON TABLE  pj_perf_fact IS '业绩事实表';
 COMMENT ON COLUMN pj_perf_fact.fact_type IS '事实口径 PERF_REAL=结佣业绩(实收) PERF_EXPECT=新签业绩(应收)';
@@ -76,6 +79,8 @@ COMMENT ON COLUMN pj_perf_fact.fact_status IS '事实状态 ACTIVE=有效 REVERS
 COMMENT ON COLUMN pj_perf_fact.source IS '来源 IMPORT=导入 MANUAL=手工';
 COMMENT ON COLUMN pj_perf_fact.adjust_id IS '关联调整单ID';
 COMMENT ON COLUMN pj_perf_fact.reversed_reason IS '冲销原因 SUPERSEDE=替换 RENORMALIZE=重归一化 MANUAL_ADJUST=手工调整 PERIOD_VOID=期间作废';
+COMMENT ON COLUMN pj_perf_fact.reversal_type IS '红冲类型 NULL=正常事实 REDINK_REFUND=退单红冲负事实(按原事实冻结口径镜像，归属退单月)';
+COMMENT ON COLUMN pj_perf_fact.refund_of_fact_id IS '红冲镜像的原正数事实ID(溯源链：退单负事实→成交月原事实)';
 COMMENT ON COLUMN pj_perf_fact.operator_id IS '操作人ID';
 COMMENT ON COLUMN pj_perf_fact.version IS '乐观锁版本号';
 COMMENT ON COLUMN pj_perf_fact.create_time IS '创建时间';
@@ -90,6 +95,9 @@ CREATE TABLE pj_perf_adjust (
     employee_id         BIGINT                 NOT NULL,
     dept_id             BIGINT                 NOT NULL,
     adjust_type         VARCHAR(20)            NOT NULL,
+    adjust_scope        VARCHAR(20)            NOT NULL DEFAULT 'DETAIL',
+    contract_no         VARCHAR(100),
+    fact_type           VARCHAR(20),
     payload_json        TEXT,
     delta_amount        NUMERIC(18,2)          DEFAULT 0,
     target_dept_id      BIGINT,
@@ -117,6 +125,9 @@ COMMENT ON COLUMN pj_perf_adjust.period IS '归属期间';
 COMMENT ON COLUMN pj_perf_adjust.employee_id IS '员工ID';
 COMMENT ON COLUMN pj_perf_adjust.dept_id IS '原部门ID';
 COMMENT ON COLUMN pj_perf_adjust.adjust_type IS '调整类型 AMOUNT=金额调整 VOID=冲销 TRANSFER=部门划转';
+COMMENT ON COLUMN pj_perf_adjust.adjust_scope IS '调整范围 CONTRACT=合同级 DETAIL=明细级';
+COMMENT ON COLUMN pj_perf_adjust.contract_no IS '合同号(合同级调整时填，用于定位该合同下全部明细)';
+COMMENT ON COLUMN pj_perf_adjust.fact_type IS '事实口径 PERF_REAL=结佣业绩 PERF_EXPECT=新签业绩';
 COMMENT ON COLUMN pj_perf_adjust.payload_json IS '调整详情JSON(不同类型结构不同)';
 COMMENT ON COLUMN pj_perf_adjust.delta_amount IS '金额变动值(正增负减)';
 COMMENT ON COLUMN pj_perf_adjust.target_dept_id IS '目标部门ID(划转类必填)';
@@ -195,5 +206,37 @@ COMMENT ON COLUMN pj_perf_period_close.operator_id IS '操作人ID';
 COMMENT ON COLUMN pj_perf_period_close.close_time IS '封账时间';
 COMMENT ON COLUMN pj_perf_period_close.create_time IS '创建时间';
 COMMENT ON COLUMN pj_perf_period_close.update_time IS '更新时间';
+
+-- ============================================================
+-- 业绩调整审批流程（perf_adjust）
+-- 链路：开始 → 申请人(${initiator}) → 总监审批(role:1761300000000000010) → 结束
+-- 审批通过后由 AdjustWorkflowListener 自动执行业绩调整
+-- ============================================================
+INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
+VALUES (1762400000000000801, 'perf_adjust', '业绩调整审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000810, 0, 1762400000000000801, 'perf_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000811, 1, 1762400000000000801, 'perf_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000812, 1, 1762400000000000801, 'perf_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
+VALUES (1762400000000000813, 2, 1762400000000000801, 'perf_end', '结束', NULL, '0.000', '720,200|720,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000820, 1762400000000000801, 'perf_start', 0, 'perf_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000821, 1762400000000000801, 'perf_applicant', 1, 'perf_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000822, 1762400000000000801, 'perf_director', 1, 'perf_end', 2, NULL, 'PASS', NULL, '590,200;700,200', now(), '1761100000000000001', '0', '000000');
+
+INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
+VALUES (1762400000000000823, 1762400000000000801, 'perf_director', 1, 'perf_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
 
 COMMIT;

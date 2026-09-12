@@ -27,6 +27,15 @@ public class AdjustCreateDTO {
     /** 调整类型：AMOUNT / VOID / TRANSFER */
     private String adjustType;
 
+    /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
+    private String adjustScope;
+
+    /** 合同号（合同级调整时必填，用于定位该合同下全部明细） */
+    private String contractNo;
+
+    /** 事实口径：PERF_REAL / PERF_EXPECT */
+    private String factType;
+
     /** 金额变动值（金额调整时使用） */
     private BigDecimal deltaAmount;
 

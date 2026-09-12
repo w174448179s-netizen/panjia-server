@@ -84,8 +84,7 @@ public enum AdjustStatus {
      * 判断是否可流转到目标状态。
      * <p>
      * 合法流转：
-     * SUBMITTED → APPROVED / REJECTED / CANCELLED；
-     * APPROVED → EXECUTED；
+     * SUBMITTED → EXECUTED（工作流审批通过后自动执行）/ REJECTED / CANCELLED；
      * 终态不可再流转，不允许自流转。
      *
      * @param target 目标状态
@@ -96,10 +95,7 @@ public enum AdjustStatus {
             return false;
         }
         if (this == SUBMITTED) {
-            return target == APPROVED || target == REJECTED || target == CANCELLED;
-        }
-        if (this == APPROVED) {
-            return target == EXECUTED;
+            return target == EXECUTED || target == REJECTED || target == CANCELLED;
         }
         return false;
     }

@@ -615,4 +615,54 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                              @Param("settled") Boolean settled,
                                                              @Param("keyword") String keyword,
                                                              @Param("contractNos") List<String> contractNos);
+
+    /**
+     * 查询指定合同号下全部 ACTIVE 业绩事实（合同级调整时按比例分摊用）。
+     * <p>
+     * 通过 normalized_record → raw_signed 关联 contract_no 定位同合同的所有明细事实。
+     *
+     * @param period     归属期间
+     * @param factType   事实口径
+     * @param contractNo 合同号
+     * @return 该合同下全部 ACTIVE 事实列表
+     */
+    @Select("""
+        SELECT f.*
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND rs.contract_no = #{contractNo}
+        ORDER BY f.id
+        """)
+    List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
+                                                         @Param("factType") String factType,
+                                                         @Param("contractNo") String contractNo);
+
+    /**
+     * 按业务键前缀定位退单红冲对应的原正数 ACTIVE 事实（成交月原事实）。
+     * <p>
+     * 事实 source_key = {@code sourceType-recordSourceKey-period}，同一笔业务
+     * （订单|合同|角色人|费项|角色类型）在成交月与退单月仅末尾 period 不同，
+     * 故用 POSITION 做严格前缀匹配（避免 LIKE 下业务键含 _ / % 的歧义），
+     * 取最早期间的一条正数事实作为红冲镜像源。
+     *
+     * @param sourceKeyPrefix 业务键前缀（sourceType + "-" + recordSourceKey + "-"，不含 period）
+     * @param factType        事实口径
+     * @return 最早的正数 ACTIVE 原事实；无则返回 null
+     */
+    @Select("""
+        SELECT f.*
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = #{factType}
+          AND f.origin_amount > 0
+          AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
+        ORDER BY f.period ASC, f.id ASC
+        LIMIT 1
+        """)
+    PerformanceFact selectOriginalPositiveFact(@Param("sourceKeyPrefix") String sourceKeyPrefix,
+                                               @Param("factType") String factType);
 }

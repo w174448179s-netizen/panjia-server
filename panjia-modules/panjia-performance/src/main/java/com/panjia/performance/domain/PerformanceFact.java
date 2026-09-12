@@ -95,6 +95,12 @@ public class PerformanceFact implements Serializable {
     /** 冲销原因 */
     private ReversedReason reversedReason;
 
+    /** 红冲类型（null=正常事实；REDINK_REFUND=退单红冲负事实，仍为 ACTIVE） */
+    private ReversalType reversalType;
+
+    /** 红冲镜像的原正数事实 ID（溯源链：退单月负事实 → 成交月原事实） */
+    private Long refundOfFactId;
+
     /** 操作人 ID */
     private Long operatorId;
 

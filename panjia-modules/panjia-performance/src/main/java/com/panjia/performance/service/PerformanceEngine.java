@@ -11,6 +11,7 @@ import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
+import com.panjia.performance.domain.ReversalType;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.performance.engine.ConversionEngine;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
@@ -70,6 +71,9 @@ public class PerformanceEngine {
 
     /** 经纪人折算比例默认值（参数缺失/非法时兜底） */
     private static final BigDecimal DEFAULT_BROKER_CONVERSION_RATE = new BigDecimal("0.85");
+
+    /** 整单退判定容差：贝壳负数行与原事实当前额相差 ≤ 1 分视为全额退，精确镜像避免尾差 */
+    private static final BigDecimal FULL_REFUND_TOLERANCE = new BigDecimal("0.01");
 
     /**
      * 从导入批次构建业绩事实。
@@ -279,14 +283,28 @@ public class PerformanceEngine {
 
         List<String> factIds = new ArrayList<>(createdFacts.size());
         Set<String> deptIds = new LinkedHashSet<>();
+        // 与 factIds 下标对齐的红冲溯源链（非红冲位置填 null）
+        List<String> refundOfFactIds = new ArrayList<>(createdFacts.size());
+        boolean hasRedink = false;
         for (PerformanceFact fact : createdFacts) {
             factIds.add(String.valueOf(fact.getId()));
             if (fact.getDeptId() != null) {
                 deptIds.add(String.valueOf(fact.getDeptId()));
             }
+            if (fact.getReversalType() == ReversalType.REDINK_REFUND && fact.getRefundOfFactId() != null) {
+                refundOfFactIds.add(String.valueOf(fact.getRefundOfFactId()));
+                hasRedink = true;
+            } else {
+                refundOfFactIds.add(null);
+            }
         }
         event.setFactIds(factIds);
         event.setDeptIds(new ArrayList<>(deptIds));
+        if (hasRedink) {
+            // 仅含红冲事实时才下发标记，下游据此按原事实冻结口径扣回，禁止按当期提点重算
+            event.setRefundRedink(true);
+            event.setRefundOfFactIds(refundOfFactIds);
+        }
 
         eventPort.emit(event);
         log.info("[业绩消费] 已发布事实创建事件：batchId={}, period={}, factCount={}, factType={}",
@@ -377,6 +395,25 @@ public class PerformanceEngine {
      */
     public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId,
                                            List<PerformanceFact> createdCollector) {
+        // 幂等锚点与贝壳「当前金额」两条路径共用，提前解析
+        String sourceKey = generateSourceKey(record);
+        BigDecimal currentAmount = resolveFactCurrentAmount(record, factType);
+
+        // ========== 0. 退单红冲路径（负数行） ==========
+        // ★ 金额铁律（§2.8 修订）：退单必须镜像成交月原事实的冻结口径冲回，
+        //   禁止用退单当月的员工快照（部门/职级可能已变）与当期折算配置重算。
+        //   例：8月 A2/60% 计提 6,000，9月升 A3/65% 后整单退 → 必须冲回 6,000，不是 6,500。
+        if (MoneyUtil.isNegative(currentAmount)) {
+            PerformanceFact original = factMapper.selectOriginalPositiveFact(
+                buildSourceKeyPrefix(record), factType.getCode());
+            if (original != null) {
+                return buildRedinkFact(record, factType, currentAmount, original,
+                    sourceKey, operatorId, createdCollector);
+            }
+            log.warn("[业绩红冲] 负数行未匹配到成交月原正数事实，按当期口径兜底生成（无法保证快照一致）："
+                + "sourceKey={}, factType={}", sourceKey, factType);
+        }
+
         // ========== 1. 员工归属查询 ==========
         // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
         // 员工不存在（脏数据/已删）返回 null，下方 else 分支以 employeeCode 兜底
@@ -389,8 +426,7 @@ public class PerformanceEngine {
         // 贝壳表中的应收/实收是折算后「当前金额」，原始金额需按经纪人折算比例还原：
         //  origin_amount = 当前金额 ÷ 经纪人折算比例（参数 sys_config，默认 85%）
         BigDecimal brokerRate = resolveBrokerConversionRate();
-        BigDecimal originAmount = grossUpOriginAmount(
-            resolveFactCurrentAmount(record, factType), brokerRate);
+        BigDecimal originAmount = grossUpOriginAmount(currentAmount, brokerRate);
         BigDecimal shareRatio = record.getShareRatio();
         // 折算系数即经纪人折算比例：(当前÷比例) × 分摊比例 × 比例 = 当前 × 分摊比例，
         // 业绩金额（结佣基数）口径与贝壳当前金额保持一致，仅原始金额被还原放大
@@ -398,7 +434,6 @@ public class PerformanceEngine {
 
         // ========== 3. 幂等检查 ==========
         // 幂等锚点：sourceKey + factType + ACTIVE
-        String sourceKey = generateSourceKey(record);
         LambdaQueryWrapper<PerformanceFact> idempotentWrapper = new LambdaQueryWrapper<>();
         idempotentWrapper.eq(PerformanceFact::getSourceKey, sourceKey)
                 .eq(PerformanceFact::getFactType, factType)
@@ -463,6 +498,114 @@ public class PerformanceEngine {
     }
 
     /**
+     * 构建退单红冲事实（负数行镜像成交月原事实的冻结口径）。
+     * <p>
+     * 口径规则：
+     * <ul>
+     *   <li><b>归属月</b>＝红冲负数行所在结算月（退单月），历史月事实与已发工资不回改；</li>
+     *   <li><b>人员归属 / 角色 / 分摊比例 / 折算系数</b>：全部镜像原事实冻结值，不取当期快照、不读当期配置；</li>
+     *   <li><b>整单退</b>（负数当前额与原当前额相差 ≤ {@value #FULL_REFUND_TOLERANCE} 元）：
+     *       金额精确镜像相反数，杜绝尾差；</li>
+     *   <li><b>部分退</b>：红冲比例＝本次负数当前额 ÷ 原当前额（负值），原事实金额按比例红冲；</li>
+     *   <li>原事实保持 ACTIVE（红字冲销语义：原行留痕 + 退单月负行），负事实通过
+     *       {@code refund_of_fact_id} 建立溯源链。</li>
+     * </ul>
+     *
+     * @param record           退单月负数归一化记录
+     * @param factType         事实口径
+     * @param negCurrentAmount 本行贝壳当前金额（负数）
+     * @param original         成交月原正数事实
+     * @param sourceKey        红冲事实幂等锚点（含退单月 period）
+     * @param operatorId       操作人 ID
+     * @param createdCollector 新建事实收集器（可空）
+     * @return 新建的红冲事实（幂等命中时返回已存在事实）
+     */
+    private PerformanceFact buildRedinkFact(NormalizedRecordDTO record, FactType factType,
+                                            BigDecimal negCurrentAmount, PerformanceFact original,
+                                            String sourceKey, Long operatorId,
+                                            List<PerformanceFact> createdCollector) {
+        // 幂等检查（同期间重导时旧负事实已随旧批次 supersede，新负事实可正常插入）
+        LambdaQueryWrapper<PerformanceFact> idempotentWrapper = new LambdaQueryWrapper<>();
+        idempotentWrapper.eq(PerformanceFact::getSourceKey, sourceKey)
+                .eq(PerformanceFact::getFactType, factType)
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE);
+        PerformanceFact existingFact = factMapper.selectOne(idempotentWrapper);
+        if (existingFact != null) {
+            log.debug("[业绩红冲] 幂等命中，跳过：sourceKey={}, factType={}", sourceKey, factType);
+            return existingFact;
+        }
+
+        LocalDate businessDate = record.getBusinessDate();
+        if (businessDate == null || record.getPeriod() == null) {
+            throw new IllegalStateException(
+                "退单红冲记录缺少业务日期/归属月，拒绝构建事实：recordId=" + record.getId());
+        }
+
+        // 原事实贝壳「当前金额」口径还原：origin_amount = 当前额 ÷ 折算系数 ⇒ 当前额 = origin × conversion
+        BigDecimal originalCurrent = MoneyUtil.round2(
+            original.getOriginAmount().multiply(original.getConversionRate()));
+
+        BigDecimal redinkOrigin;
+        BigDecimal redinkPerformance;
+        if (MoneyUtil.isZero(originalCurrent)) {
+            // 原事实当前额为 0 的异常数据：直接镜像相反数兜底，避免除零
+            log.warn("[业绩红冲] 原正数事实当前额为 0，按金额全额镜像：originalFactId={}", original.getId());
+            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().negate());
+            redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().negate());
+        } else if (negCurrentAmount.abs().subtract(originalCurrent.abs()).abs()
+                .compareTo(FULL_REFUND_TOLERANCE) <= 0) {
+            // 整单退：精确镜像原事实金额相反数（保证成交月+退单月净额恰好为 0）
+            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().negate());
+            redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().negate());
+        } else {
+            // 部分退：红冲比例（负数）= 本次负数当前额 ÷ 原当前额，原冻结金额按比例冲回
+            BigDecimal ratio = negCurrentAmount.divide(originalCurrent, 8, RoundingMode.HALF_UP);
+            if (ratio.abs().compareTo(BigDecimal.ONE) > 0) {
+                log.warn("[业绩红冲] 红冲金额超过原正数事实（超额退单？请核对贝壳数据）：originalFactId={}, ratio={}",
+                    original.getId(), ratio);
+            }
+            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().multiply(ratio));
+            redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().multiply(ratio));
+        }
+
+        PerformanceFact fact = new PerformanceFact();
+        fact.setFactType(factType);
+        fact.setPeriod(derivePeriod(businessDate));
+        fact.setBusinessDate(businessDate);
+        fact.setBatchId(record.getBatchId());
+        fact.setNormalizedRecordId(record.getId());
+        fact.setSourceKey(sourceKey);
+        fact.setBizType(record.getBizType());
+        // ★ 人员归属/角色镜像原事实快照（不退单当月重查员工主数据）
+        fact.setEmployeeId(original.getEmployeeId());
+        fact.setEmployeeExternalCode(original.getEmployeeExternalCode());
+        fact.setDeptId(original.getDeptId());
+        fact.setRoleType(original.getRoleType());
+        // ★ 分摊比例/折算系数镜像原事实冻结值（不按当期 sys_config 重算）
+        fact.setShareRatio(original.getShareRatio());
+        fact.setConversionRate(original.getConversionRate());
+        fact.setOriginAmount(redinkOrigin);
+        fact.setPerformanceAmount(redinkPerformance);
+        fact.setEffectiveDate(businessDate);
+        fact.setFactStatus(FactStatus.ACTIVE);
+        fact.setSource(PerformanceSource.IMPORT);
+        fact.setReversalType(ReversalType.REDINK_REFUND);
+        fact.setRefundOfFactId(original.getId());
+        fact.setOperatorId(operatorId);
+
+        factMapper.insert(fact);
+        if (createdCollector != null) {
+            createdCollector.add(fact);
+        }
+
+        log.info("[业绩红冲] 退单红冲事实已生成：factId={}, originalFactId={}, 原期间={}, 红冲期间={}, "
+                + "originAmount={}, performanceAmount={}",
+            fact.getId(), original.getId(), original.getPeriod(), fact.getPeriod(),
+            redinkOrigin, redinkPerformance);
+        return fact;
+    }
+
+    /**
      * 从业务日期推导期间（YYYY-MM）。
      *
      * @param businessDate 业务日期
@@ -480,8 +623,9 @@ public class PerformanceEngine {
      * <p>
      * 由 sourceType + 归一化记录 sourceKey（订单|合同|角色|费项）+ 结算月 period 组成。
      * <p>
-     * ★ period 必须纳入：同一订单同一角色在不同结算月各存独立事实（成交月正行 + 退单月负行），
-     * 退单以负数行按月流转自然抵扣，不触发回溯/追回/重算。
+     * ★ period 必须纳入：同一订单同一角色在不同结算月各存独立事实（成交月正行 + 退单月红冲负行）。
+     * 退单负行不再独立按当期规则计算，而是经 {@link #buildRedinkFact} 按业务键前缀
+     * （{@link #buildSourceKeyPrefix}）回溯到成交月原正数事实，镜像其冻结口径生成（§2.8 修订）。
      * 同期间重导由 batch supersede 冲销旧事实后重建，不受 period 纳入影响。
      *
      * @param record 归一化记录
@@ -491,10 +635,25 @@ public class PerformanceEngine {
         if (record == null) {
             return null;
         }
+        return buildSourceKeyPrefix(record) + (record.getPeriod() == null ? "" : record.getPeriod());
+    }
+
+    /**
+     * 业务键前缀（不含 period）：{@code sourceType-recordSourceKey-}。
+     * <p>
+     * 同一笔业务（订单|合同|角色人|费用项|角色类型）在成交月与退单月的事实此前缀相同，
+     * 用于退单红冲时定位成交月原正数事实。
+     *
+     * @param record 归一化记录
+     * @return 业务键前缀
+     */
+    public static String buildSourceKeyPrefix(NormalizedRecordDTO record) {
+        if (record == null) {
+            return "";
+        }
         String sourceType = record.getSourceType() == null ? "" : record.getSourceType();
         String recordSourceKey = record.getSourceKey() == null ? "" : record.getSourceKey();
-        String period = record.getPeriod() == null ? "" : record.getPeriod();
-        return sourceType + "-" + recordSourceKey + "-" + period;
+        return sourceType + "-" + recordSourceKey + "-";
     }
 
     /** 归一化记录类型 code：贝壳业绩明细行，同携当月应收 + 当月实收两列金额 */

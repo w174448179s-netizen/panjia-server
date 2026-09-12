@@ -37,6 +37,20 @@ public class PerformanceFactCreatedEvent implements DomainEvent {
     /** 本批事实覆盖的门店 ID 列表（去重，JSON 序列化用 String） */
     private List<String> deptIds;
 
+    /**
+     * 本批是否含退单红冲事实（负数行，reversal_type=REDINK_REFUND）。
+     * <p>
+     * 下游（结佣/算薪）据此识别：红冲事实的金额镜像自成交月原事实的冻结口径，
+     * 计算扣回时必须沿 {@link #refundOfFactIds} 找原事实/原规则快照，禁止按当期职级提点重算。
+     */
+    private boolean refundRedink;
+
+    /**
+     * 红冲溯源链：与 {@link #factIds} 下标对齐，每个红冲事实对应其镜像的原正数事实 ID；
+     * 非红冲位置为 null。仅在 {@link #refundRedink}=true 时填充。
+     */
+    private List<String> refundOfFactIds;
+
     @Override
     public String eventType() {
         return EVENT_TYPE;
