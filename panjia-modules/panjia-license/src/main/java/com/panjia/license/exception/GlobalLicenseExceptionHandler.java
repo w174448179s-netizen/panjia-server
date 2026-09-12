@@ -3,9 +3,12 @@ package com.panjia.license.exception;
 import cn.dev33.satoken.exception.NotLoginException;
 import cn.dev33.satoken.exception.NotPermissionException;
 import cn.dev33.satoken.exception.NotRoleException;
+import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.http.HttpStatus;
 import jakarta.servlet.http.HttpServletRequest;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.exception.base.BaseException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -80,6 +83,29 @@ public class GlobalLicenseExceptionHandler {
     @ExceptionHandler(AsyncRequestNotUsableException.class)
     public void handleAsyncRequestNotUsableException(AsyncRequestNotUsableException e) {
         log.warn("[GlobalLicenseExceptionHandler] SSE 连接已断开: {}", e.getMessage());
+    }
+
+    /**
+     * RuoYi 基础业务异常（验证码错误/过期、用户不存在或被停用等 BaseException 体系）。
+     * <p>
+     * 本 Advice 与框架原生 GlobalExceptionHandler 均无 @Order，若不声明此处理器，
+     * 这类业务异常会被下面的 Exception 兜底抢先匹配，伪装成"系统内部错误"。
+     * 必须在 Exception 兜底之前按具体类型透传其国际化提示。
+     */
+    @ExceptionHandler(BaseException.class)
+    public R<Void> handleBaseException(BaseException e) {
+        log.warn("[GlobalLicenseExceptionHandler] 业务异常: {}", e.getMessage());
+        return R.fail(e.getMessage());
+    }
+
+    /**
+     * RuoYi 通用业务异常（携带可选错误码），原因同 {@link #handleBaseException}。
+     */
+    @ExceptionHandler(ServiceException.class)
+    public R<Void> handleServiceException(ServiceException e) {
+        log.warn("[GlobalLicenseExceptionHandler] 业务异常: {}", e.getMessage());
+        Integer code = e.getCode();
+        return ObjectUtil.isNotNull(code) ? R.fail(code, e.getMessage()) : R.fail(e.getMessage());
     }
 
     /**
