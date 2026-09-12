@@ -22,7 +22,7 @@ CREATE TABLE pj_perf_fact (
     business_date           DATE                   NOT NULL,
     batch_id                BIGINT,
     normalized_record_id    BIGINT,
-    source_key              VARCHAR(100)           NOT NULL,
+    source_key              VARCHAR(200)           NOT NULL,
     biz_type                VARCHAR(50),
     employee_id             BIGINT,
     employee_external_code  VARCHAR(50),
