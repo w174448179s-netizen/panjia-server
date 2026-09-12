@@ -4,7 +4,6 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionAdjust;
 import com.panjia.commission.dto.AdjustCreateDTO;
 import com.panjia.commission.dto.AdjustQuery;
-import com.panjia.commission.dto.CallbackDTO;
 import com.panjia.commission.service.CommissionAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +25,8 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * 结佣调整单管理（DISCOUNT 折扣 / DIFF 差额补发 / VOID 作废）。
  * <p>
+ * 审批全走 RuoYi 工作流（flowCode = commission_adjust）：
+ * 发起调整单时自动启动审批流程，审批通过后由工作流回调自动执行调整。
  * 已审批结佣数据变更的唯一入口（V4.2 §9.4），不自动修复。
  */
 @Slf4j
@@ -76,21 +77,6 @@ public class CommissionAdjustController extends BaseController {
     public R<Long> add(@Validated @RequestBody AdjustCreateDTO dto) {
         CommissionAdjust adjust = adjustService.create(dto, LoginHelper.getUserId());
         return R.ok("发起成功", adjust.getId());
-    }
-
-    /**
-     * 审批回调（单事务完成 SUBMITTED → EXECUTED 同事务执行变更 / REJECTED）。
-     *
-     * @param id  调整单 ID
-     * @param dto 审批结论（approve）
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:adjust:approve")
-    @Log(title = "结佣调整单审批", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/callback")
-    public R<Void> callback(@PathVariable Long id, @Validated @RequestBody CallbackDTO dto) {
-        adjustService.callback(id, Boolean.TRUE.equals(dto.getApprove()), LoginHelper.getUserId());
-        return R.ok();
     }
 
     /**

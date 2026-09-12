@@ -21,6 +21,8 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -28,6 +30,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,11 +56,24 @@ public class CommissionAdjustService {
 
     private static final DateTimeFormatter ADJUST_NO_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
 
+    /** 结佣调整审批流编码（flow_definition.flow_code） */
+    private static final String FLOW_CODE_COMMISSION_ADJUST = "commission_adjust";
+
+    /** 工作流状态：审批通过 */
+    private static final String WF_STATUS_FINISH = "finish";
+    /** 工作流状态：作废 */
+    private static final String WF_STATUS_INVALID = "invalid";
+    /** 工作流状态：终止 */
+    private static final String WF_STATUS_TERMINATION = "termination";
+    /** 工作流状态：撤销 */
+    private static final String WF_STATUS_CANCEL = "cancel";
+
     private final CommissionAdjustMapper adjustMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionApplicationService applicationService;
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final ObjectMapper objectMapper;
+    private final WorkflowService workflowService;
 
     // ==================== 发起 ====================
 
@@ -130,55 +146,110 @@ public class CommissionAdjustService {
         adjust.setApplicantId(operatorId);
         adjustMapper.insert(adjust);
 
-        log.info("[结佣-调整] 调整单已发起：adjustNo={}, type={}, itemId={}, applicantId={}",
+        // 发起 RuoYi 工作流审批（businessId=调整单ID），失败则整体回滚
+        StartProcessDTO startProcess = new StartProcessDTO();
+        startProcess.setBusinessId(String.valueOf(adjust.getId()));
+        startProcess.setFlowCode(FLOW_CODE_COMMISSION_ADJUST);
+        Map<String, Object> variables = new HashMap<>(2);
+        // 后端发起无登录用户上下文，忽略权限
+        variables.put("ignore", true);
+        startProcess.setVariables(variables);
+
+        boolean started;
+        try {
+            started = workflowService.startCompleteTask(startProcess);
+        } catch (Exception e) {
+            log.error("[结佣-调整] 审批流程发起异常：adjustId={}", adjust.getId(), e);
+            throw new ServiceException("结佣调整审批流程发起失败：" + e.getMessage());
+        }
+        if (!started) {
+            throw new ServiceException("结佣调整审批流程发起失败");
+        }
+
+        // 回填流程实例 ID（回调以 businessId 路由，回填失败不阻断主流程）
+        try {
+            Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(adjust.getId()));
+            if (instanceId != null) {
+                adjust.setProcessInstanceId(String.valueOf(instanceId));
+                adjustMapper.updateById(adjust);
+            }
+        } catch (Exception e) {
+            log.warn("[结佣-调整] 流程实例ID回填失败：adjustId={}", adjust.getId(), e);
+        }
+
+        log.info("[结佣-调整] 调整单已发起并提交审批：adjustNo={}, type={}, itemId={}, applicantId={}",
             adjust.getAdjustNo(), adjustType.getCode(), item.getId(), operatorId);
         return adjust;
     }
 
-    // ==================== 审批回调 ====================
+    // ==================== 工作流回调 ====================
 
     /**
-     * 审批回调（单事务）：
+     * 工作流审批回调（由 CommissionAdjustWorkflowListener 驱动）。
+     * <p>
+     * 状态映射：
      * <ul>
-     *   <li>通过：SUBMITTED → EXECUTED，同事务执行变更（冲销旧行 + 生成新行 + 聚合重算）；</li>
-     *   <li>驳回：SUBMITTED → REJECTED，不动明细。</li>
+     *   <li>finish（审批通过）→ SUBMITTED → EXECUTED，同事务执行明细变更；</li>
+     *   <li>invalid / termination（作废/终止）→ REJECTED；</li>
+     *   <li>cancel（撤销）→ CANCELLED。</li>
      * </ul>
-     * 幂等：重复回调（已 EXECUTED / REJECTED）直接忽略。
+     * 幂等：非 SUBMITTED 状态的回调直接忽略。
      *
-     * @param adjustId   调整单 ID
-     * @param approve    是否通过
-     * @param approverId 审批人 ID
+     * @param adjustId 调整单 ID（businessId）
+     * @param status   流程状态（finish / invalid / termination / cancel）
+     * @param handler  办理人 ID
+     * @param message  审批意见
      */
     @Transactional(rollbackFor = Exception.class)
-    public void callback(Long adjustId, boolean approve, Long approverId) {
+    public void handleWorkflowEvent(Long adjustId, String status, String handler, String message) {
         CommissionAdjust adjust = adjustMapper.selectById(adjustId);
         if (adjust == null) {
-            throw new ServiceException("结佣调整单不存在：" + adjustId);
-        }
-        if (adjust.getStatus() == AdjustStatus.EXECUTED || adjust.getStatus() == AdjustStatus.REJECTED) {
-            log.info("[结佣-调整] 重复回调忽略：adjustNo={}, status={}",
-                adjust.getAdjustNo(), adjust.getStatus().getCode());
+            log.warn("[结佣-调整工作流] 调整单不存在，忽略回调：adjustId={}, status={}", adjustId, status);
             return;
         }
-        if (adjust.getStatus() != AdjustStatus.SUBMITTED
-            && adjust.getStatus() != AdjustStatus.APPROVED) {
-            throw new ServiceException("仅已提交状态的调整单可审批（当前：" + adjust.getStatus().getDesc() + "）");
-        }
+        Long handlerId = parseHandlerId(handler);
 
-        if (!approve) {
-            adjust.setStatus(AdjustStatus.REJECTED);
-            adjust.setApproverId(approverId);
-            adjustMapper.updateById(adjust);
-            log.info("[结佣-调整] 调整单已驳回：adjustNo={}, approverId={}", adjust.getAdjustNo(), approverId);
-            return;
+        switch (status == null ? "" : status) {
+            case WF_STATUS_FINISH -> {
+                if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
+                    log.info("[结佣-调整工作流] 非提交态，忽略通过回调：adjustId={}, current={}",
+                        adjustId, adjust.getStatus());
+                    return;
+                }
+                log.info("[结佣-调整工作流] 审批通过，执行调整：adjustId={}, handler={}, message={}",
+                    adjustId, handler, message);
+                executeAndMark(adjust, handlerId);
+            }
+            case WF_STATUS_INVALID, WF_STATUS_TERMINATION -> {
+                if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
+                    return;
+                }
+                adjust.setStatus(AdjustStatus.REJECTED);
+                adjust.setApproverId(handlerId);
+                adjustMapper.updateById(adjust);
+                log.info("[结佣-调整工作流] 流程作废/终止，调整单置 REJECTED：adjustId={}, message={}", adjustId, message);
+            }
+            case WF_STATUS_CANCEL -> {
+                if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
+                    return;
+                }
+                adjust.setStatus(AdjustStatus.CANCELLED);
+                adjustMapper.updateById(adjust);
+                log.info("[结佣-调整工作流] 流程撤销，调整单置 CANCELLED：adjustId={}, message={}", adjustId, message);
+            }
+            default -> log.info("[结佣-调整工作流] 无需处理的状态，忽略：adjustId={}, status={}", adjustId, status);
         }
+    }
 
-        // EXECUTED 同事务执行变更
+    /**
+     * 标记 EXECUTED 并按类型执行明细变更（同事务）。
+     */
+    private void executeAndMark(CommissionAdjust adjust, Long approverId) {
         adjust.setStatus(AdjustStatus.EXECUTED);
         adjust.setApproverId(approverId);
         int rows = adjustMapper.updateById(adjust);
         if (rows == 0) {
-            throw new ServiceException("调整单并发冲突，请重试：adjustId=" + adjustId);
+            throw new ServiceException("调整单并发冲突，请重试：adjustId=" + adjust.getId());
         }
 
         AdjustType type = adjust.getAdjustType();
@@ -188,8 +259,21 @@ public class CommissionAdjustService {
             case VOID -> executeVoid(adjust);
             default -> throw new ServiceException("非法调整类型：" + type);
         }
-
         log.info("[结佣-调整] 调整单已执行：adjustNo={}, type={}", adjust.getAdjustNo(), type.getCode());
+    }
+
+    /**
+     * 解析工作流回调办理人 ID（params.handler 为用户 ID 字符串，解析失败返回 null）。
+     */
+    private Long parseHandlerId(String handler) {
+        if (StringUtils.isBlank(handler)) {
+            return null;
+        }
+        try {
+            return Long.valueOf(handler.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ==================== 查询 ====================
