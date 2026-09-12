@@ -16,14 +16,17 @@ import com.panjia.performance.engine.ConversionEngine;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
+import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.dromara.system.api.ConfigService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -57,9 +60,16 @@ public class PerformanceEngine {
     private final EmployeeSnapshotQueryPort employeeQueryPort;
     private final ReverseService reverseService;
     private final EventPort eventPort;
+    private final ConfigService configService;
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
+
+    /** 经纪人折算比例参数 key（sys_config.config_key，V140005 种子，默认 85%） */
+    private static final String CONFIG_BROKER_CONVERSION_RATE = "panjia.performance.broker_conversion_rate";
+
+    /** 经纪人折算比例默认值（参数缺失/非法时兜底） */
+    private static final BigDecimal DEFAULT_BROKER_CONVERSION_RATE = new BigDecimal("0.85");
 
     /**
      * 从导入批次构建业绩事实。
@@ -376,11 +386,15 @@ public class PerformanceEngine {
         // ★ 金额口径由 factType 决定（V4.2 / C-12 契约）：
         //  PERF_REAL   → 当月实收 receivedAmount（结佣计薪业绩）
         //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，店长/总监团队提成基数）
-        BigDecimal originAmount = resolveFactOriginAmount(record, factType);
+        // 贝壳表中的应收/实收是折算后「当前金额」，原始金额需按经纪人折算比例还原：
+        //  origin_amount = 当前金额 ÷ 经纪人折算比例（参数 sys_config，默认 85%）
+        BigDecimal brokerRate = resolveBrokerConversionRate();
+        BigDecimal originAmount = grossUpOriginAmount(
+            resolveFactCurrentAmount(record, factType), brokerRate);
         BigDecimal shareRatio = record.getShareRatio();
-        // 折算系数：当前暂用默认值，后续可根据 bizType 从配置中获取专属系数
-        BigDecimal conversionRate = null;
-        BigDecimal performanceAmount = conversionEngine.calculate(originAmount, shareRatio, conversionRate);
+        // 折算系数即经纪人折算比例：(当前÷比例) × 分摊比例 × 比例 = 当前 × 分摊比例，
+        // 业绩金额（结佣基数）口径与贝壳当前金额保持一致，仅原始金额被还原放大
+        BigDecimal performanceAmount = conversionEngine.calculate(originAmount, shareRatio, brokerRate);
 
         // ========== 3. 幂等检查 ==========
         // 幂等锚点：sourceKey + factType + ACTIVE
@@ -424,7 +438,7 @@ public class PerformanceEngine {
 
         fact.setShareRatio(conversionEngine.getEffectiveShareRatio(shareRatio));
         fact.setOriginAmount(originAmount);
-        fact.setConversionRate(conversionEngine.getEffectiveConversionRate(conversionRate));
+        fact.setConversionRate(conversionEngine.getEffectiveConversionRate(brokerRate));
         fact.setPerformanceAmount(performanceAmount);
 
         // 生效日期默认为业务发生日
@@ -509,19 +523,11 @@ public class PerformanceEngine {
     }
 
     /**
-     * 按事实口径解析本行原始金额（V4.2 / C-12 金额契约，纯函数）。
-     * <ul>
-     *   <li>{@code PERF_REAL}：取当月实收 {@code receivedAmount}；为空（历史单口径行）回退
-     *       {@code originAmount}（SIGNED 行其默认值即实收）；</li>
-     *   <li>{@code PERF_EXPECT}：取当月应收 {@code receivableAmount}；为空回退
-     *       {@code originAmount}（SIGNED 行其默认值为实收）。</li>
-     * </ul>
-     *
-     * @param record   归一化记录 DTO
-     * @param factType 事实口径
-     * @return 该口径原始金额（可能为 null，交由 {@link ConversionEngine} 按 0 处理）
+     * 解析事实口径对应的贝壳「当前金额」（折算后原值，未还原）。
+     * PERF_EXPECT 取当月应收 receivableAmount，PERF_REAL 及其余口径取当月实收 receivedAmount；
+     * 对应金额列为空时回退 DTO 单口径 originAmount（历史单口径行兼容）。
      */
-    public static BigDecimal resolveFactOriginAmount(NormalizedRecordDTO record, FactType factType) {
+    public static BigDecimal resolveFactCurrentAmount(NormalizedRecordDTO record, FactType factType) {
         if (record == null || factType == null) {
             return null;
         }
@@ -532,5 +538,46 @@ public class PerformanceEngine {
         // PERF_REAL 及其余口径默认实收
         return record.getReceivedAmount() != null
             ? record.getReceivedAmount() : record.getOriginAmount();
+    }
+
+    /**
+     * 贝壳「当前金额」还原为原始金额：{@code 原始金额 = 当前金额 ÷ 经纪人折算比例}。
+     * <p>
+     * 纯函数（便于单测）；currentAmount 为 null 透传 null；rate 为 null/0 时按默认 85% 兜底。
+     * 结果四舍五入保留 2 位小数。
+     */
+    public static BigDecimal grossUpOriginAmount(BigDecimal currentAmount, BigDecimal brokerRate) {
+        if (currentAmount == null) {
+            return null;
+        }
+        BigDecimal safeRate = (brokerRate == null || MoneyUtil.isZero(brokerRate))
+            ? DEFAULT_BROKER_CONVERSION_RATE : brokerRate;
+        return currentAmount.divide(safeRate, 2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 读取经纪人折算比例（sys_config 参数表，key 见 {@link #CONFIG_BROKER_CONVERSION_RATE}）。
+     * <p>
+     * 参数缺失、为空或不在 (0,1] 区间时兜底默认 85%（{@link #DEFAULT_BROKER_CONVERSION_RATE}），
+     * 避免参数被误改为 0/负数导致除零或业绩金额反向放大。
+     */
+    private BigDecimal resolveBrokerConversionRate() {
+        BigDecimal rate = null;
+        try {
+            rate = configService.getConfigDecimal(CONFIG_BROKER_CONVERSION_RATE);
+        } catch (Exception e) {
+            log.warn("[业绩构建] 读取经纪人折算比例参数失败，使用默认值 {}：{}",
+                DEFAULT_BROKER_CONVERSION_RATE, e.getMessage());
+        }
+        if (rate == null
+            || rate.compareTo(BigDecimal.ZERO) <= 0
+            || rate.compareTo(BigDecimal.ONE) > 0) {
+            if (rate != null) {
+                log.warn("[业绩构建] 经纪人折算比例参数非法（需在 (0,1] 区间）：{}，使用默认值 {}",
+                    rate, DEFAULT_BROKER_CONVERSION_RATE);
+            }
+            return DEFAULT_BROKER_CONVERSION_RATE;
+        }
+        return rate;
     }
 }
