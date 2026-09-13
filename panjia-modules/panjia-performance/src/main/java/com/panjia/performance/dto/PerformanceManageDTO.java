@@ -4,7 +4,6 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 /**
@@ -34,8 +33,8 @@ public class PerformanceManageDTO {
 
     // ==================== 合同维度 ====================
 
-    /** 签约/认购日期（业绩业务发生日） */
-    private LocalDate businessDate;
+    /** 签约/认购日期时间（业绩业务发生日，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 订单号（来自原始签约明细） */
     private String orderNo;

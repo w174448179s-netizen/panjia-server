@@ -4,7 +4,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 业绩管理「合同」维度聚合行（懒加载树表的合同层节点）。
@@ -31,8 +31,8 @@ public class PerformanceManageContractVO {
     /** 房源地址 */
     private String propertyAddress;
 
-    /** 签约/认购日期 */
-    private LocalDate businessDate;
+    /** 签约/认购日期时间（含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 合同金额合计（PERF_EXPECT=应收 / PERF_REAL=实收） */
     private BigDecimal amount;

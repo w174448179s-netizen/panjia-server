@@ -17,4 +17,44 @@ public interface PayrollDetailMapper extends BaseMapperPlus<PayrollDetail, Payro
 
     @Delete("DELETE FROM pj_payroll_detail WHERE batch_id = #{batchId}")
     int deleteByBatchId(@Param("batchId") Long batchId);
+
+    /**
+     * 查询上月工资明细中净发为负的记录（负工资结转）。
+     * <p>
+     * 仅返回 net &lt; 0 的记录，其 net 值即为待结转的负金额。
+     *
+     * @param prevPeriod 上月期间（YYYY-MM）
+     * @return 负净发的工资明细列表
+     */
+    @Select("SELECT * FROM pj_payroll_detail WHERE period = #{prevPeriod} AND net < 0")
+    List<PayrollDetail> selectNegativeNetByPeriod(@Param("prevPeriod") String prevPeriod);
+
+    /**
+     * 查询当年累计个税（当年之前所有月份的 tax 合计，按员工聚合）。
+     *
+     * @param yearStart 当年起始月（YYYY-01）
+     * @param period    当前期间（YYYY-MM，排除）
+     * @return 工资明细列表（仅 employee_id 和 tax 有值）
+     */
+    @Select("SELECT employee_id AS employeeId, COALESCE(SUM(tax), 0) AS tax " +
+        "FROM pj_payroll_detail " +
+        "WHERE period >= #{yearStart} AND period < #{period} " +
+        "GROUP BY employee_id")
+    List<PayrollDetail> selectCumulativeTax(@Param("yearStart") String yearStart,
+                                            @Param("period") String period);
+
+    /**
+     * 查询当年累计应纳税所得额（当年之前所有月份的 gross - deduct 合计，按员工聚合）。
+     *
+     * @param yearStart 当年起始月（YYYY-01）
+     * @param period    当前期间（YYYY-MM，排除）
+     * @return 工资明细列表（仅 employee_id、gross、deduct 有值）
+     */
+    @Select("SELECT employee_id AS employeeId, COALESCE(SUM(gross - deduct), 0) AS gross, " +
+        "COALESCE(SUM(deduct), 0) AS deduct " +
+        "FROM pj_payroll_detail " +
+        "WHERE period >= #{yearStart} AND period < #{period} " +
+        "GROUP BY employee_id")
+    List<PayrollDetail> selectCumulativeTaxable(@Param("yearStart") String yearStart,
+                                                  @Param("period") String period);
 }

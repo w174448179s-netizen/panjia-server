@@ -1,6 +1,8 @@
 package com.panjia.importdomain.adapter;
 
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.NormalizedRecord;
@@ -14,8 +16,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 归一化记录查询适配器（panjia-import 模块实现 {@link ImportNormalizedRecordQueryPort}）。
@@ -27,8 +34,9 @@ import java.util.List;
  * 查询过滤：仅 {@code status='ARCHIVED' AND superseded_by_batch_id IS NULL} 的批次
  * 归一化记录对业绩域可见（避免新旧业绩并存）。该过滤由 NormalizedRecordMapper SQL 内置。
  * <p>
- * DTO 映射：NormalizedRecord → NormalizedRecordDTO 仅做字段拷贝 + sourceType 从 ImportBatch 注入。
- * V2.0 业务日期（签约日）、员工姓名、部门全路径暂未填充，留 null。
+ * DTO 映射：NormalizedRecord → NormalizedRecordDTO 做字段拷贝 + sourceType 从 ImportBatch 注入；
+ * employeeName / deptFullName 通过 {@link EmployeeMainDataQueryPort} 批量查询员工主数据填充。
+ * V2.0 业务日期（签约日）暂用归属月初填充。
  */
 @Slf4j
 @Service
@@ -38,6 +46,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final ImportBatchMapper importBatchMapper;
     private final RawSignedMapper rawSignedMapper;
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     @Override
     public PageResult<NormalizedRecordDTO> listByBatchId(Long batchId, int pageNum, int pageSize) {
@@ -60,8 +69,19 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
             ? null : batch.getSourceType().getCode();
 
         List<NormalizedRecord> records = normalizedRecordMapper.selectPageByBatchId(batchId, offset, pageSize);
+
+        // 批量查询员工主数据（employeeCode → EmployeeMainDataDTO），避免 N+1
+        Set<String> codes = new HashSet<>();
+        for (NormalizedRecord r : records) {
+            if (r.getEmployeeExternalCode() != null) {
+                codes.add(r.getEmployeeExternalCode());
+            }
+        }
+        Map<String, EmployeeMainDataDTO> empMap = codes.isEmpty()
+            ? Collections.emptyMap() : employeeMainDataQueryPort.listByCodes(codes);
+
         List<NormalizedRecordDTO> rows = records.stream()
-            .map(r -> toDTO(r, sourceType))
+            .map(r -> toDTO(r, sourceType, empMap))
             .toList();
 
         return PageResult.build(rows, total);
@@ -93,15 +113,36 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         return null;
     }
 
+    @Override
+    public Map<Long, BigDecimal> sumAmountByPeriodAndType(String period, String recordType) {
+        if (period == null || period.isBlank() || recordType == null || recordType.isBlank()) {
+            return Collections.emptyMap();
+        }
+        List<NormalizedRecord> rows = normalizedRecordMapper.sumReceivableByEmployeeAndType(period, recordType);
+        Map<Long, BigDecimal> result = new HashMap<>();
+        for (NormalizedRecord r : rows) {
+            if (r.getEmployeeId() != null) {
+                result.put(r.getEmployeeId(),
+                    r.getReceivableAmount() == null ? BigDecimal.ZERO : r.getReceivableAmount());
+            }
+        }
+        return result;
+    }
+
     /**
-     * V2.0 简化映射：仅映射已有字段；employeeName / deptFullName 留 null，
-     * 等待 V2.1 / PeopleSnapshotAdapter 接入后补齐。
+     * V2.0 简化映射：映射已有字段；employeeName / deptFullName 通过
+     * {@link EmployeeMainDataQueryPort} 批量查询结果填充。
      * <p>
      * businessDate 用归属月初填充：月度归集的导入业绩业务日期精确到月已足够，
      * 且 pj_perf_fact.business_date / effective_date 为 NOT NULL，null 会让
      * 消费侧事实 INSERT 直接炸掉（derivePeriod(月初) == period，语义自洽）。
+     *
+     * @param r           归一化记录
+     * @param sourceType  来源类型 code
+     * @param empMap      工号 → 员工主数据（批量查询结果，避免 N+1）
      */
-    private NormalizedRecordDTO toDTO(NormalizedRecord r, String sourceType) {
+    private NormalizedRecordDTO toDTO(NormalizedRecord r, String sourceType,
+                                       Map<String, EmployeeMainDataDTO> empMap) {
         NormalizedRecordDTO dto = new NormalizedRecordDTO();
         dto.setId(r.getId());
         dto.setBatchId(r.getBatchId());
@@ -109,8 +150,12 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setBusinessDate(periodStartDate(r.getPeriod()));
         dto.setPeriod(r.getPeriod());
         dto.setEmployeeCode(r.getEmployeeExternalCode());
-        dto.setEmployeeName(null);  // TODO: 待 PeopleSnapshotAdapter 接入后填充
-        dto.setDeptFullName(null);  // TODO: 待 PeopleSnapshotAdapter 接入后填充
+
+        // 通过 EmployeeMainDataQueryPort 批量查询填充员工姓名和部门全路径
+        EmployeeMainDataDTO emp = (r.getEmployeeExternalCode() == null || empMap == null)
+            ? null : empMap.get(r.getEmployeeExternalCode());
+        dto.setEmployeeName(emp == null ? null : emp.getEmployeeName());
+        dto.setDeptFullName(emp == null ? null : emp.getDeptName());
         dto.setBizType(r.getBizType());
         dto.setSourceKey(r.getSourceKey());
         dto.setRecordType(r.getRecordType() == null ? null : r.getRecordType().name());

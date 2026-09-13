@@ -3,11 +3,15 @@ package com.panjia.contracts.port;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import org.dromara.common.core.domain.PageResult;
 
+import java.math.BigDecimal;
+import java.util.Map;
+
 /**
  * 只读 import 域归一化记录的端口接口（跨域契约，panjia-contracts 叶子模块）。
  * <p>
  * 业绩域通过此端口读取 import 域归一化后的业务记录，用于生成业绩事实。
- * 实现由 import 域（panjia-import）提供，依赖方向：performance → contracts ← import。
+ * 薪资域通过此端口读取考勤/积分扣款数据，用于算薪。
+ * 实现由 import 域（panjia-import）提供，依赖方向：payroll/performance → contracts ← import。
  * <p>
  * 业务约束：仅 {@code status='ARCHIVED' AND superseded_by_batch_id IS NULL} 的批次归一化记录可被消费；
  * 废弃批次（SUPERSEDED）的归一化记录对下游不可见（业绩事实已被冲销）。
@@ -56,4 +60,16 @@ public interface ImportNormalizedRecordQueryPort {
      * @return 原始行 JSON 串；无关联原始行返回 null
      */
     String getRawJsonByRecordId(Long recordId);
+
+    /**
+     * 按期间和记录类型汇总归一化记录的金额（receivableAmount），按员工聚合。
+     * <p>
+     * 用于薪资域查询考勤扣款（ATTENDANCE）和积分扣款（POINTS）。
+     * 仅活跃批次（ARCHIVED 且未被 supersede）的记录参与汇总。
+     *
+     * @param period     归属期间（YYYY-MM）
+     * @param recordType 记录类型（NormalizedRecordType code：ATTENDANCE / POINTS / SIGNED / MANUAL）
+     * @return employeeId → 金额合计；employeeId 为 null 的记录不参与汇总
+     */
+    Map<Long, BigDecimal> sumAmountByPeriodAndType(String period, String recordType);
 }

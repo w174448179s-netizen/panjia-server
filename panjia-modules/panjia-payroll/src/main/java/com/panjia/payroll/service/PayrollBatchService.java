@@ -2,6 +2,7 @@ package com.panjia.payroll.service;
 
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.port.CommissionQueryPort;
+import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
@@ -47,6 +48,7 @@ public class PayrollBatchService {
     private final PeopleQueryPort peopleQueryPort;
     private final CommissionQueryPort commissionQueryPort;
     private final PeriodCloseQueryPort periodCloseQueryPort;
+    private final ImportNormalizedRecordQueryPort importQueryPort;
     private final RuleService ruleService;
     private final SalaryCalculationEngine engine;
     private final ManualItemService manualItemService;
@@ -220,24 +222,54 @@ public class PayrollBatchService {
             }
         });
 
-        // 负工资结转 / 累计个税（暂空，后续迭代）
+        // 考勤扣款：从导入的考勤数据（ATTENDANCE record_type）中按员工汇总 receivable_amount
+        input.attendanceFee = importQueryPort.sumAmountByPeriodAndType(period, "ATTENDANCE");
+
+        // 积分扣款：从导入的积分数据（POINTS record_type）中按员工汇总 receivable_amount
+        input.pointsFee = importQueryPort.sumAmountByPeriodAndType(period, "POINTS");
+
+        // 负工资结转：从上月工资明细中查询净发为负的记录
+        String prevPeriod = YearMonth.parse(period).minusMonths(1).toString();
         input.negativeBalance = new HashMap<>();
+        for (PayrollDetail prevDetail : detailMapper.selectNegativeNetByPeriod(prevPeriod)) {
+            if (prevDetail.getEmployeeId() != null && prevDetail.getNet() != null) {
+                input.negativeBalance.put(prevDetail.getEmployeeId(),
+                    prevDetail.getNet().abs());
+            }
+        }
+
+        // 累计个税 & 累计应纳税所得额：从当年（含之前月份）工资明细中按员工汇总
+        String yearStart = period.substring(0, 4) + "-01";
         input.cumulativeTax = new HashMap<>();
+        for (PayrollDetail td : detailMapper.selectCumulativeTax(yearStart, period)) {
+            if (td.getEmployeeId() != null) {
+                input.cumulativeTax.put(td.getEmployeeId(),
+                    MoneyUtil.nvl(td.getTax()));
+            }
+        }
         input.cumulativeTaxable = new HashMap<>();
+        for (PayrollDetail td : detailMapper.selectCumulativeTaxable(yearStart, period)) {
+            if (td.getEmployeeId() != null) {
+                // gross 字段在 SQL 中已聚合为 SUM(gross - deduct)，即累计应纳税所得额
+                input.cumulativeTaxable.put(td.getEmployeeId(),
+                    MoneyUtil.nvl(td.getGross()));
+            }
+        }
+
+        // 入职月数：EmployeeSnapshot 暂无 hireDate 字段，默认 1（后续由 people 域补齐）
         input.monthsEmployed = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
         }
 
-        // 考勤/积分（暂无导入数据，置空）
-        input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
+        // 绩效等级：暂无导入数据源，默认 A（后续由导入或审批域补齐）
         input.perfGrade = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
             input.perfGrade.put(e.getEmployeeId(), "A");
         }
 
-        // 招聘奖励（暂空）
+        // 招聘奖励：需要师徒关系（EmployeeSnapshot.mentorId）+ 结佣数据联合查询
+        // 暂置默认值，后续迭代实现（需跨 people + commission 域联合查询）
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
