@@ -43,7 +43,7 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
     public List<CommissionItemDTO> findLocked(String period, Long deptId) {
         return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
                 .eq(CommissionItem::getPeriod, period)
-                .eq(CommissionItem::getDeptId, deptId)
+                .eq(deptId != null, CommissionItem::getDeptId, deptId)
                 .eq(CommissionItem::getStatus, ItemStatus.APPROVED)
                 .orderByAsc(CommissionItem::getId))
             .stream().map(this::toDTO).toList();

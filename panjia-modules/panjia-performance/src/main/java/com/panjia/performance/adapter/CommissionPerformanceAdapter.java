@@ -34,7 +34,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     public List<PerformanceFactSummaryDTO> findActiveByDept(String period, Long deptId, String factType) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getPeriod, period)
-            .eq(PerformanceFact::getDeptId, deptId)
+            .eq(deptId != null, PerformanceFact::getDeptId, deptId)
             .eq(FactType.fromCode(factType) != null, PerformanceFact::getFactType, FactType.fromCode(factType))
             .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
             .orderByAsc(PerformanceFact::getId);

@@ -144,6 +144,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-commission</artifactId>
         </dependency>
+        <!-- 薪酬结算域（工资批次/算薪引擎/规则/调整补发） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-payroll</artifactId>
+        </dependency>
         <!-- 导入域（导入模板） -->
         <dependency>
             <groupId>com.panjia</groupId>
