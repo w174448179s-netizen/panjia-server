@@ -37,6 +37,10 @@ public class ManualItemService {
                 .orderByDesc(ManualItem::getCreateTime));
     }
 
+    public ManualItem getById(Long id) {
+        return mapper.selectById(id);
+    }
+
     public void delete(Long id, Long operatorId) {
         mapper.deleteById(id);
     }

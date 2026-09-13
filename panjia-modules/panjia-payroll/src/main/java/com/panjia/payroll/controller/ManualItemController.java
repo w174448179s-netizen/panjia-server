@@ -36,6 +36,11 @@ public class ManualItemController {
         return R.ok(manualItemService.listByPeriod(period));
     }
 
+    @GetMapping("/{id}")
+    public R<ManualItem> get(@PathVariable Long id) {
+        return R.ok(manualItemService.getById(id));
+    }
+
     @DeleteMapping("/{id}")
     public R<Void> delete(@PathVariable Long id) {
         manualItemService.delete(id, LoginHelper.getUserId());
