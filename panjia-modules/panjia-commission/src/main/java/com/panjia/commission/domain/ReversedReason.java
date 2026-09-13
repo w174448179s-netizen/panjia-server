@@ -19,6 +19,9 @@ public enum ReversedReason {
     /** 结佣人工调整（DISCOUNT/VOID 调整单执行） */
     MANUAL_ADJUST("人工调整"),
 
+    /** 申请单作废（DRAFT/SUBMITTED 单作废，未审批明细随单冲销，释放事实供重新发起） */
+    APPLICATION_CANCELLED("申请作废"),
+
     /** 业绩域期间作废 */
     PERIOD_VOID("期间作废");
 

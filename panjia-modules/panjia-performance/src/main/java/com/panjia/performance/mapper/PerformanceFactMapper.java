@@ -1,5 +1,6 @@
 package com.panjia.performance.mapper;
 
+import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.dto.PerformanceManageContractVO;
@@ -705,4 +706,83 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         </script>
         """)
     List<PerformanceFactSummaryDTO> selectFactSummariesByIds(@Param("factIds") Collection<Long> factIds);
+
+    /**
+     * 按期间 + 合同号查询 ACTIVE 事实摘要（含合同号/订单号/房源地址，结佣按合同发起用）。
+     *
+     * @param period     归属期间
+     * @param factType   事实口径
+     * @param contractNo 合同号
+     * @return 事实摘要列表（含 amount = 0 的行，过滤由结佣域处理）
+     */
+    @Select("""
+        SELECT f.id AS "factId",
+               f.fact_type AS "factType",
+               f.fact_status AS "factStatus",
+               f.period AS "period",
+               f.business_date AS "businessDate",
+               f.employee_id AS "employeeId",
+               f.employee_external_code AS "employeeCode",
+               f.dept_id AS "deptId",
+               f.biz_type AS "bizType",
+               f.role_type AS "roleType",
+               f.performance_amount AS "amount",
+               f.batch_id AS "batchId",
+               f.normalized_record_id AS "normalizedRecordId",
+               f.source_key AS "sourceKey",
+               rs.contract_no AS "contractNo",
+               rs.order_no AS "orderNo",
+               rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND rs.contract_no = #{contractNo}
+        ORDER BY f.id
+        """)
+    List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
+                                                                          @Param("factType") String factType,
+                                                                          @Param("contractNo") String contractNo);
+
+    /**
+     * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。
+     * <p>
+     * 仅合同号非空的 ACTIVE 事实参与聚合；deptId 非空时含下级部门（与业绩明细页口径一致）。
+     *
+     * @param period   归属期间
+     * @param factType 事实口径
+     * @param deptId   门店 ID（可空）
+     * @return 合同维度摘要列表
+     */
+    @Select("""
+        <script>
+        SELECT rs.contract_no AS "contractNo",
+               MAX(rs.order_no) AS "orderNo",
+               MAX(f.biz_type) AS "bizType",
+               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
+               COALESCE(SUM(f.performance_amount), 0) AS "amount",
+               COUNT(DISTINCT f.employee_id) AS "employeeCount",
+               COUNT(*) AS "detailCount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND rs.contract_no IS NOT NULL
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+        GROUP BY rs.contract_no
+        ORDER BY "businessDate" DESC, rs.contract_no
+        </script>
+        """)
+    List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
+                                                                 @Param("factType") String factType,
+                                                                 @Param("deptId") Long deptId);
 }

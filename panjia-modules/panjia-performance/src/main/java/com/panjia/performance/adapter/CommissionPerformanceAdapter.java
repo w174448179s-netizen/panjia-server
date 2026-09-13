@@ -1,6 +1,7 @@
 package com.panjia.performance.adapter;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.performance.domain.FactStatus;
@@ -74,6 +75,16 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         }
         List<PerformanceFactSummaryDTO> list = factMapper.selectFactSummariesByIds(Collections.singletonList(factId));
         return list.isEmpty() ? null : list.get(0);
+    }
+
+    @Override
+    public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType) {
+        return factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
+    }
+
+    @Override
+    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType) {
+        return factMapper.selectContractSummaries(period, factType, deptId);
     }
 
     private List<PerformanceFactSummaryDTO> toSummaries(List<PerformanceFact> facts) {

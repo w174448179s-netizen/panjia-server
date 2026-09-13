@@ -11,9 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -29,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>C6/C7：禁提成 / 折算字段命名（commission_amount / salary / conversion_rate / rate / point / ratio）；</li>
  *   <li>C9：禁止建 pj_commission_period_close 表（封账复用业绩域，走 Port）；</li>
  *   <li>C10：★ uk_citem_fact_active 必须排除 status &lt;&gt; 'REVERSED'；</li>
- *   <li>C16 锚点前提：增量重拉差集幂等（纯逻辑）+ 0 值过滤（纯逻辑）。</li>
+ *   <li>C16 锚点前提：0 值过滤（纯逻辑）。</li>
  * </ul>
  */
 @Tag("dev")
@@ -130,28 +128,6 @@ class CommissionStaticValidationTest {
         assertEquals(2, result.size());
         assertEquals(1L, result.get(0).getFactId());
         assertEquals(5L, result.get(1).getFactId());
-    }
-
-    // ==================== 增量重拉差集幂等（ADR B15 / C-17 前提） ====================
-
-    @Test
-    void incrementalRefreshDiffIsIdempotent() {
-        List<PerformanceFactSummaryDTO> fetched = List.of(
-            fact(1L, new BigDecimal("100.00")),
-            fact(2L, new BigDecimal("200.00")),
-            fact(3L, new BigDecimal("300.00")));
-
-        // 第一次重拉：S = {1}，差集 = {2, 3}
-        Set<Long> existing = new HashSet<>(Set.of(1L));
-        List<PerformanceFactSummaryDTO> first =
-            com.panjia.commission.service.CommissionApplicationService.computeIncrement(existing, fetched);
-        assertEquals(2, first.size());
-
-        // 追加后 S = {1, 2, 3}，重复重拉差集为空 → 零副作用
-        existing.addAll(List.of(2L, 3L));
-        List<PerformanceFactSummaryDTO> second =
-            com.panjia.commission.service.CommissionApplicationService.computeIncrement(existing, fetched);
-        assertTrue(second.isEmpty(), "重复重拉必须零副作用（幂等）");
     }
 
     private static PerformanceFactSummaryDTO fact(Long factId, BigDecimal amount) {

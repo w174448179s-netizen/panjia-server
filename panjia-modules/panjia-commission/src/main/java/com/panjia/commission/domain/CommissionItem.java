@@ -39,6 +39,9 @@ public class CommissionItem implements Serializable {
     /** 关联业绩事实 ID（只存 ID 不建 FK；DIFF 差额行为 NULL） */
     private Long performanceFactId;
 
+    /** 合同号（冻结快照；DIFF 差额行沿用源明细合同号） */
+    private String contractNo;
+
     /** 业绩归属月（YYYY-MM）；DIFF 差额行为补发目标月 */
     private String period;
 

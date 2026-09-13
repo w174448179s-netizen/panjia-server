@@ -6,14 +6,15 @@ import com.panjia.commission.domain.ApplicationStatus;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionConsumeLog;
 import com.panjia.commission.domain.CommissionItem;
-import com.panjia.commission.domain.ConsumeStatus;
 import com.panjia.commission.domain.ItemStatus;
+import com.panjia.commission.domain.ReversedReason;
 import com.panjia.commission.dto.ApplyQuery;
 import com.panjia.commission.dto.CommissionContractVO;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.event.CommissionApprovedEvent;
 import com.panjia.contracts.event.EventPort;
@@ -31,24 +32,29 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 结佣申请服务（发起 / 增量重拉 / 提交 / 审批锁定，结佣域详细设计 §4.1~§4.2）。
+ * 结佣申请服务（按合同发起 / 提交 / 审批锁定，结佣域详细设计 §4.1~§4.2）。
+ * <p>
+ * 申请单粒度 = <b>合同 + 业绩归属月</b>：一个合同当月一张申请单，独立提交、独立审批；
+ * 数据可分多次导入，未发起的合同在列表中以「未发起」展示，随到随发起，互不影响。
  * <p>
  * 核心口径：
  * <ul>
  *   <li>金额为<b>结佣业绩金额</b>（PERF_REAL 实收事实原样透传），一分钱提成不算（CI C6/C7）；</li>
  *   <li>0 值实收不入单：仅 {@code amount <> 0} 的事实生成明细（ADR B14）；</li>
- *   <li>封账窗口：CLOSED 期间拒绝发起与增量重拉（§2.5，经 Port 实时查）；</li>
- *   <li>增量重拉只追加、不删除、不修改，天然幂等（ADR B15）；</li>
+ *   <li>封账窗口：CLOSED 期间拒绝发起（§2.5，经 Port 实时查）；</li>
+ *   <li>已提交单不支持追加事实：数据有变化走「驳回 / 作废 → 重新发起」；</li>
  *   <li>审批通过月 = 工资归属月 approved_month（V4.2 硬要求 1）。</li>
  * </ul>
  */
@@ -63,6 +69,9 @@ public class CommissionApplicationService {
     /** 结佣口径：实收业绩（结佣确认对象） */
     private static final String FACT_TYPE_REAL = "PERF_REAL";
 
+    /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
+    public static final String ROW_STATUS_NONE = "NONE";
+
     private final CommissionApplicationMapper applicationMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionConsumeLogMapper consumeLogMapper;
@@ -71,57 +80,134 @@ public class CommissionApplicationService {
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
 
-    // ==================== 发起结佣 ====================
+    // ==================== 发起结佣（按合同） ====================
 
     /**
-     * 发起结佣（拉取业绩 → 生成明细，§4.1）。
+     * 发起结佣（拉取该合同当月事实 → 生成明细，§4.1）。
      * <p>
-     * 幂等三情形（ADR B15）：无未完成单 → 新建；已有 DRAFT/SUBMITTED → 拒绝并提示走增量重拉；
-     * 已有 APPROVED/LOCKED → 拒绝，变更走调整单。
+     * 幂等：该 (period, contractNo) 已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单 → 拒绝；
+     * REJECTED 单请直接修改后重新提交；CANCELLED 单作废后可重新发起。
      *
      * @param period     业绩归属月（结算月 YYYY-MM）
-     * @param deptId     门店 ID
+     * @param contractNo 合同号
      * @param operatorId 发起人 ID
      * @return 申请单（含明细条数 / 金额合计）
      */
     @Transactional(rollbackFor = Exception.class)
-    public CommissionApplication apply(String period, Long deptId, Long operatorId) {
-        if (StringUtils.isBlank(period) || deptId == null) {
-            throw new ServiceException("结算月与门店不能为空");
+    public CommissionApplication apply(String period, String contractNo, Long operatorId) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+            throw new ServiceException("结算月与合同号不能为空");
         }
-
-        // ② 封账校验：结佣必须在封账之前完成（§2.5）
         checkPeriodOpen(period, "发起结佣");
+        return doApply(period, contractNo, operatorId);
+    }
 
-        // ③~⑦ 幂等检查：该 (period, deptId) 的未完结申请单
-        CommissionApplication existing = findActiveApplication(period, deptId);
-        if (existing != null) {
-            if (existing.getStatus() == ApplicationStatus.DRAFT
-                || existing.getStatus() == ApplicationStatus.SUBMITTED) {
-                throw new ServiceException("该门店 " + period + " 月已存在未审批申请单（"
-                    + existing.getApplyNo() + "），请走增量重拉补充事实，不要重复发起");
+    /**
+     * 批量发起：为期间内所有「未发起且有非零实收」的合同逐张建单。
+     * <p>
+     * 已存在未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）的合同自动跳过；
+     * 每张单仍为独立草稿，需逐张提交/审批。
+     *
+     * @param period     业绩归属月
+     * @param deptId     门店 ID（null=全部门店；非 null 含下级）
+     * @param operatorId 发起人 ID
+     * @return 新创建申请单数量
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int batchApply(String period, Long deptId, Long operatorId) {
+        if (StringUtils.isBlank(period)) {
+            throw new ServiceException("结算月不能为空");
+        }
+        checkPeriodOpen(period, "批量发起结佣");
+
+        List<PerformanceContractSummaryDTO> contracts =
+            performanceQueryPort.listContractSummaries(period, deptId, FACT_TYPE_REAL);
+        Set<String> activeContractNos = listActiveApplications(period).stream()
+            .map(CommissionApplication::getContractNo)
+            .collect(Collectors.toSet());
+
+        int created = 0;
+        List<String> failed = new ArrayList<>();
+        for (PerformanceContractSummaryDTO contract : contracts) {
+            if (contract.getAmount() == null || contract.getAmount().compareTo(BigDecimal.ZERO) == 0) {
+                continue;
             }
-            throw new ServiceException("该门店 " + period + " 月结佣已审批锁定，新增或变更一律走调整单");
+            if (activeContractNos.contains(contract.getContractNo())) {
+                continue;
+            }
+            try {
+                doApply(period, contract.getContractNo(), operatorId);
+                created++;
+            } catch (ServiceException e) {
+                // 单合同失败（如员工无法归属）不阻断整批，收集后统一提示
+                log.warn("[结佣-批量发起] 合同 {} 发起失败：{}", contract.getContractNo(), e.getMessage());
+                failed.add(contract.getContractNo());
+            }
+        }
+        log.info("[结佣-批量发起] period={}, deptId={}, 创建={}, 失败={}", period, deptId, created, failed.size());
+        if (!failed.isEmpty()) {
+            throw new ServiceException("成功发起 " + created + " 张；以下合同失败（请核对员工归属）：" + failed);
+        }
+        return created;
+    }
+
+    /**
+     * 发起核心逻辑（不含封账校验，由公共入口保证）。
+     */
+    private CommissionApplication doApply(String period, String contractNo, Long operatorId) {
+        // 幂等检查：该 (period, contractNo) 的未完结申请单
+        CommissionApplication existing = findActiveApplication(period, contractNo);
+        if (existing != null) {
+            if (existing.getStatus() == ApplicationStatus.APPROVED
+                || existing.getStatus() == ApplicationStatus.LOCKED) {
+                throw new ServiceException("合同 " + contractNo + " " + period
+                    + " 月结佣已审批锁定，新增或变更一律走调整单");
+            }
+            throw new ServiceException("合同 " + contractNo + " " + period
+                + " 月已存在" + existing.getStatus().getDesc() + "申请单（" + existing.getApplyNo() + "），请勿重复发起");
         }
 
-        // ③ 拉取 ACTIVE 实收事实（含 0 值，本域过滤）
+        // 拉取该合同 ACTIVE 实收事实（含 0 值，本域过滤）
         List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-            .findActiveByDept(period, deptId, FACT_TYPE_REAL);
-
-        // ④★ 0 值过滤：amount = 0 的「已签约未实收」行不生成结佣明细（ADR B14）
+            .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
-            throw new ServiceException("门店 " + period + " 月无可入账的实收业绩（amount>0 的实收事实为 0 条）");
+            throw new ServiceException("合同 " + contractNo + " " + period + " 月无可入账的实收业绩（amount>0 的实收事实为 0 条）");
         }
 
-        // 员工归属兜底：明细 employee_id NOT NULL，按工号补齐（历史事实 employee_id 可能为空）
+        // 员工归属兜底：明细 employee_id NOT NULL，按工号补齐
         resolveEmployeeIds(nonZeroFacts);
 
-        // ⑤⑥ 生成申请单 + 明细（amount 原样透传，不折算）
+        // 合同快照（订单号/房源/签约时间取事实聚合值；跨门店合作单 dept_id 留空）
+        PerformanceFactSummaryDTO first = nonZeroFacts.get(0);
+        String orderNo = null;
+        String propertyAddress = null;
+        LocalDate businessDate = null;
+        Set<Long> deptIds = new HashSet<>();
+        for (PerformanceFactSummaryDTO f : nonZeroFacts) {
+            if (orderNo == null) {
+                orderNo = f.getOrderNo();
+            }
+            if (propertyAddress == null) {
+                propertyAddress = f.getPropertyAddress();
+            }
+            if (f.getBusinessDate() != null
+                && (businessDate == null || f.getBusinessDate().isAfter(businessDate))) {
+                businessDate = f.getBusinessDate();
+            }
+            if (f.getDeptId() != null) {
+                deptIds.add(f.getDeptId());
+            }
+        }
+
         CommissionApplication application = new CommissionApplication();
         application.setApplyNo("CAPP" + LocalDateTime.now().format(APPLY_NO_FORMATTER));
         application.setPeriod(period);
-        application.setDeptId(deptId);
+        application.setContractNo(contractNo);
+        application.setOrderNo(orderNo);
+        application.setPropertyAddress(propertyAddress);
+        application.setBusinessDate(businessDate != null ? businessDate.atStartOfDay() : null);
+        application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
         application.setStatus(ApplicationStatus.DRAFT);
         application.setApplicantId(operatorId);
         application.setItemCount(nonZeroFacts.size());
@@ -129,108 +215,21 @@ public class CommissionApplicationService {
         try {
             applicationMapper.insert(application);
         } catch (DuplicateKeyException e) {
-            // 并发发起撞 uk_capp_period_dept 部分唯一索引 → 转友好提示
-            throw new ServiceException("该门店 " + period + " 月申请单已由他人发起，请刷新后走增量重拉");
+            // 并发发起撞 uk_capp_period_contract 部分唯一索引 → 转友好提示
+            throw new ServiceException("合同 " + contractNo + " " + period + " 月申请单已由他人发起，请刷新");
         }
 
         for (PerformanceFactSummaryDTO fact : nonZeroFacts) {
             itemMapper.insert(buildItem(application, fact, null));
         }
 
-        log.info("[结佣-发起] 申请单已创建：applyNo={}, period={}, deptId={}, itemCount={}, totalAmount={}",
-            application.getApplyNo(), period, deptId, application.getItemCount(), application.getTotalAmount());
-        return application;
-    }
-
-    // ==================== 增量重拉 ====================
-
-    /**
-     * 增量重拉（§4.1.1）：仅 DRAFT/SUBMITTED 单可重拉，差集 F−S 追加为新明细。
-     * <p>
-     ★ 只追加、不删除、不修改：已生成明细的金额永不因重拉而变化；重复重拉差集为空 → 零副作用（幂等）。
-     *
-     * @param applicationId 申请单 ID
-     * @param operatorId    操作人 ID
-     * @return 申请单（聚合已重算）
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public CommissionApplication refresh(Long applicationId, Long operatorId) {
-        CommissionApplication application = getApplication(applicationId);
-        if (application.getStatus() != ApplicationStatus.DRAFT
-            && application.getStatus() != ApplicationStatus.SUBMITTED) {
-            throw new ServiceException("仅草稿/已提交状态的申请单可增量重拉（当前："
-                + application.getStatus().getDesc() + "）");
-        }
-
-        // 封账校验：校验业绩归属月（§2.5 判定规则）
-        checkPeriodOpen(application.getPeriod(), "增量重拉");
-
-        // ① 已有未 REVERSED 明细的事实 ID 集合 S
-        Set<Long> existingFactIds = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
-                .eq(CommissionItem::getApplicationId, applicationId)
-                .isNotNull(CommissionItem::getPerformanceFactId)
-                .ne(CommissionItem::getStatus, ItemStatus.REVERSED))
-            .stream()
-            .map(CommissionItem::getPerformanceFactId)
-            .collect(Collectors.toSet());
-
-        // ② 重新拉取 ACTIVE 且 amount <> 0 的事实集合 F
-        List<PerformanceFactSummaryDTO> fetched = filterNonZero(performanceQueryPort
-            .findActiveByDept(application.getPeriod(), application.getDeptId(), FACT_TYPE_REAL));
-
-        // ③ 差集 F − S
-        List<PerformanceFactSummaryDTO> increment = computeIncrement(existingFactIds, fetched);
-        if (increment.isEmpty()) {
-            log.info("[结佣-重拉] 无新增事实，零副作用：applicationId={}, applyNo={}",
-                applicationId, application.getApplyNo());
-            return application;
-        }
-
-        // 员工归属兜底
-        resolveEmployeeIds(increment);
-
-        // ④ 追加明细（不删除、不修改已有明细）+ 重算聚合
-        for (PerformanceFactSummaryDTO fact : increment) {
-            itemMapper.insert(buildItem(application, fact, null));
-        }
-        recalcAggregates(applicationId, application);
-
-        // 写消费日志留痕（event_id 每次重拉唯一，满足 uk_ccl_event）
-        insertConsumeLog("REFRESH-" + applicationId + "-" + System.currentTimeMillis(),
-            "INCREMENTAL_REFRESH", application.getPeriod(),
-            increment.stream().map(f -> String.valueOf(f.getFactId())).toList(),
-            increment.size(), increment.size(), ConsumeStatus.SUCCESS,
-            "增量重拉追加明细 " + increment.size() + " 条");
-
-        log.info("[结佣-重拉] 追加完成：applicationId={}, 新增={}, 操作人={}",
-            applicationId, increment.size(), operatorId);
+        log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, totalAmount={}",
+            application.getApplyNo(), period, contractNo, application.getItemCount(), application.getTotalAmount());
         return application;
     }
 
     /**
-     * 差集计算（纯函数，供单测）：fetched 中 factId 不在 existingFactIds 内的事实。
-     *
-     * @param existingFactIds 已入单的事实 ID 集合 S
-     * @param fetched         本次拉取的事实列表 F（已过滤 0 值）
-     * @return 待追加的增量事实
-     */
-    public static List<PerformanceFactSummaryDTO> computeIncrement(Set<Long> existingFactIds,
-                                                                   List<PerformanceFactSummaryDTO> fetched) {
-        if (fetched == null || fetched.isEmpty()) {
-            return new ArrayList<>();
-        }
-        Set<Long> existing = existingFactIds == null ? Set.of() : existingFactIds;
-        List<PerformanceFactSummaryDTO> increment = new ArrayList<>();
-        for (PerformanceFactSummaryDTO fact : fetched) {
-            if (fact.getFactId() != null && !existing.contains(fact.getFactId())) {
-                increment.add(fact);
-            }
-        }
-        return increment;
-    }
-
-    /**
-     * 0 值过滤（纯函数，供单测）：仅保留 amount <> 0 的事实（BigDecimal compareTo 比较）。
+     * 0 值过滤（纯函数，供单测）：仅保留 amount &lt;&gt; 0 的事实（BigDecimal compareTo 比较）。
      *
      * @param facts 事实列表
      * @return 非零金额事实
@@ -251,7 +250,9 @@ public class CommissionApplicationService {
     // ==================== 提交 / 审批 ====================
 
     /**
-     * 提交审批：DRAFT → SUBMITTED。
+     * 提交审批：DRAFT / REJECTED → SUBMITTED。
+     * <p>
+     * 驳回后的申请单可直接修改重新提交（明细仍为 PENDING）；草稿单明细随单 DRAFT → PENDING。
      *
      * @param applicationId 申请单 ID
      * @param operatorId    操作人 ID
@@ -259,20 +260,22 @@ public class CommissionApplicationService {
     @Transactional(rollbackFor = Exception.class)
     public void submit(Long applicationId, Long operatorId) {
         CommissionApplication application = getApplication(applicationId);
-        if (application.getStatus() != ApplicationStatus.DRAFT) {
-            throw new ServiceException("仅草稿状态可提交（当前：" + application.getStatus().getDesc() + "）");
+        if (application.getStatus() != ApplicationStatus.DRAFT
+            && application.getStatus() != ApplicationStatus.REJECTED) {
+            throw new ServiceException("仅草稿/已驳回状态可提交（当前：" + application.getStatus().getDesc() + "）");
         }
         application.setStatus(ApplicationStatus.SUBMITTED);
         int rows = applicationMapper.updateById(application);
         if (rows == 0) {
             throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
         }
-        // 明细随单流转：DRAFT（待提交）→ PENDING（待审批）
+        // 草稿明细随单流转：DRAFT（待提交）→ PENDING（待审批）；驳回单明细已是 PENDING
         itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
             .eq(CommissionItem::getApplicationId, applicationId)
             .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
             .set(CommissionItem::getStatus, ItemStatus.PENDING));
-        log.info("[结佣-提交] 申请单已提交：applyNo={}, operatorId={}", application.getApplyNo(), operatorId);
+        log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operatorId={}",
+            application.getApplyNo(), application.getContractNo(), operatorId);
     }
 
     /**
@@ -280,7 +283,7 @@ public class CommissionApplicationService {
      * <ul>
      *   <li>通过：SUBMITTED → LOCKED（内部先 APPROVED 落 approved_month = 当前月），
      *       明细 PENDING → APPROVED，发布 CommissionApprovedEvent；</li>
-     *   <li>驳回：SUBMITTED → REJECTED，明细保持 PENDING。</li>
+     *   <li>驳回：SUBMITTED → REJECTED，明细保持 PENDING（可修改后重新提交）。</li>
      * </ul>
      * 幂等：重复回调（已 LOCKED / REJECTED）直接忽略。
      *
@@ -309,7 +312,8 @@ public class CommissionApplicationService {
             if (rows == 0) {
                 throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
             }
-            log.info("[结佣-审批] 申请单已驳回：applyNo={}, approverId={}", application.getApplyNo(), approverId);
+            log.info("[结佣-审批] 合同申请单已驳回：applyNo={}, contractNo={}, approverId={}",
+                application.getApplyNo(), application.getContractNo(), approverId);
             return;
         }
 
@@ -345,12 +349,15 @@ public class CommissionApplicationService {
         event.setItemIds(pendingItems.stream().map(i -> String.valueOf(i.getId())).toList());
         eventPort.emit(event);
 
-        log.info("[结佣-审批] 申请单已锁定：applyNo={}, period={}, approvedMonth={}, itemCount={}",
-            application.getApplyNo(), application.getPeriod(), approvedMonth, pendingItems.size());
+        log.info("[结佣-审批] 合同申请单已锁定：applyNo={}, contractNo={}, approvedMonth={}, itemCount={}",
+            application.getApplyNo(), application.getContractNo(), approvedMonth, pendingItems.size());
     }
 
     /**
      * 作废申请单：仅 DRAFT/SUBMITTED 可作废。
+     * <p>
+     * 未审批明细（DRAFT/PENDING）随单冲销（REVERSED + APPLICATION_CANCELLED），
+     * 释放对应业绩事实供重新发起；申请单聚合清零。
      *
      * @param applicationId 申请单 ID
      * @param operatorId    操作人 ID
@@ -367,7 +374,20 @@ public class CommissionApplicationService {
         if (rows == 0) {
             throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
         }
-        log.info("[结佣-作废] 申请单已作废：applyNo={}, operatorId={}", application.getApplyNo(), operatorId);
+
+        // 未审批明细随单冲销，释放事实（uk_citem_fact_active 排除 REVERSED → 可重新发起）
+        int reversed = itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
+            .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
+        if (reversed > 0) {
+            application.setItemCount(0);
+            application.setTotalAmount(BigDecimal.ZERO);
+            applicationMapper.updateById(application);
+        }
+        log.info("[结佣-作废] 合同申请单已作废：applyNo={}, contractNo={}, 冲销明细={}, operatorId={}",
+            application.getApplyNo(), application.getContractNo(), reversed, operatorId);
     }
 
     // ==================== 查询 ====================
@@ -385,137 +405,111 @@ public class CommissionApplicationService {
             .eq(query.getDeptId() != null, CommissionApplication::getDeptId, query.getDeptId())
             .eq(StringUtils.isNotBlank(query.getStatus()), CommissionApplication::getStatus,
                 ApplicationStatus.fromCode(query.getStatus()))
+            .and(StringUtils.isNotBlank(query.getKeyword()), w -> w
+                .like(CommissionApplication::getContractNo, query.getKeyword())
+                .or().like(CommissionApplication::getOrderNo, query.getKeyword())
+                .or().like(CommissionApplication::getPropertyAddress, query.getKeyword()))
             .orderByDesc(CommissionApplication::getCreateTime);
         var page = applicationMapper.selectPage(pageQuery.build(), wrapper);
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
     /**
-     * 按「合同」维度分页查询结佣申请明细（与业绩明细页合同维度对齐）。
+     * 按「合同」维度分页查询结佣申请（与业绩明细页合同维度对齐）。
      * <p>
-     * 流程：查申请单 → 查明细 → 查事实合同信息 → 按合同号聚合 → 内存分页。
+     * 数据源为业绩域当月全部合同（PERF_REAL），左联结佣申请单：
+     * 无单的合同状态为「未发起」，有单的展示申请单状态与操作。门店权限过滤由业绩域聚合查询承担。
      *
-     * @param query     筛选条件（period / deptId / status）
+     * @param query     筛选条件（period 必填；deptId / status / keyword）
      * @param pageQuery 分页参数
      * @return 合同维度分页
      */
     public PageResult<CommissionContractVO> listContracts(ApplyQuery query, PageQuery pageQuery) {
-        // 1. 查符合条件的申请单（不分页，全量拉取后内存聚合）
-        LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
-        appWrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionApplication::getPeriod, query.getPeriod())
-            .eq(query.getDeptId() != null, CommissionApplication::getDeptId, query.getDeptId())
-            .eq(StringUtils.isNotBlank(query.getStatus()), CommissionApplication::getStatus,
-                ApplicationStatus.fromCode(query.getStatus()))
-            .orderByDesc(CommissionApplication::getCreateTime);
-        List<CommissionApplication> applications = applicationMapper.selectList(appWrapper);
-        if (applications.isEmpty()) {
-            return PageResult.build(List.of(), 0L);
+        String period = StringUtils.isNotBlank(query.getPeriod())
+            ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
+
+        // 1. 业绩域合同汇总（含下级部门，与业绩明细页口径一致）
+        List<PerformanceContractSummaryDTO> contracts =
+            performanceQueryPort.listContractSummaries(period, query.getDeptId(), FACT_TYPE_REAL);
+
+        // 2. 当月全部申请单：同一合同取最新一张（CANCELLED 后重新发起时新单优先）
+        List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getPeriod, period)
+            .orderByDesc(CommissionApplication::getId));
+        Map<String, CommissionApplication> appMap = new LinkedHashMap<>();
+        for (CommissionApplication app : applications) {
+            appMap.putIfAbsent(app.getContractNo(), app);
         }
 
-        // 2. 批量查所有申请单的明细（排除 REVERSED）
-        List<Long> appIds = applications.stream().map(CommissionApplication::getId).toList();
-        List<CommissionItem> allItems = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
-            .in(CommissionItem::getApplicationId, appIds)
-            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
-        if (allItems.isEmpty()) {
-            return PageResult.build(List.of(), 0L);
-        }
+        // 3. 关键字过滤
+        String keyword = StringUtils.trimToNull(query.getKeyword());
 
-        // 3. 收集事实 ID，批量查事实摘要（含合同号/房源地址）
-        Set<Long> factIds = allItems.stream()
-            .map(CommissionItem::getPerformanceFactId)
-            .filter(java.util.Objects::nonNull)
-            .collect(Collectors.toSet());
-        Map<Long, PerformanceFactSummaryDTO> factMap = Map.of();
-        if (!factIds.isEmpty()) {
-            List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByFacts(factIds);
-            factMap = facts.stream().collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, f -> f, (a, b) -> a));
-        }
-
-        // 4. 按合同号聚合
-        Map<Long, CommissionApplication> appMap = applications.stream()
-            .collect(Collectors.toMap(CommissionApplication::getId, a -> a, (a, b) -> a));
-        Map<String, CommissionContractVO> contractMap = new java.util.LinkedHashMap<>();
-        for (CommissionItem item : allItems) {
-            PerformanceFactSummaryDTO fact = item.getPerformanceFactId() != null
-                ? factMap.get(item.getPerformanceFactId()) : null;
-            String key = buildContractKey(fact);
-            CommissionContractVO vo = contractMap.computeIfAbsent(key, k -> {
-                CommissionContractVO v = new CommissionContractVO();
-                CommissionApplication app = appMap.get(item.getApplicationId());
-                v.setApplicationId(item.getApplicationId());
-                v.setApplyNo(app != null ? app.getApplyNo() : null);
-                v.setStatus(app != null && app.getStatus() != null ? app.getStatus().getCode() : null);
-                v.setApplicantId(app != null ? app.getApplicantId() : null);
-                v.setPeriod(item.getPeriod());
-                v.setDeptId(item.getDeptId());
-                v.setCreateTime(app != null ? app.getCreateTime() : null);
-                if (fact != null) {
-                    v.setContractNo(fact.getContractNo());
-                    v.setOrderNo(fact.getOrderNo());
-                    v.setBizType(fact.getBizType());
-                    v.setPropertyAddress(fact.getPropertyAddress());
-                    v.setBusinessDate(fact.getBusinessDate() != null
-                        ? fact.getBusinessDate().atStartOfDay() : null);
-                } else {
-                    v.setContractNo("调整差额");
-                    v.setBizType(item.getBizType());
-                }
-                return v;
-            });
-            vo.setAmount(vo.getAmount() == null ? item.getAmount() : vo.getAmount().add(item.getAmount()));
-            vo.setDetailCount(vo.getDetailCount() + 1);
-            if (item.getEmployeeId() != null) {
-                // 用 Set 去重员工数：暂用 detailCount 近似，下方再精确计算
+        // 4. 合并：合同事实 + 申请单
+        List<CommissionContractVO> all = new ArrayList<>(contracts.size());
+        for (PerformanceContractSummaryDTO c : contracts) {
+            CommissionApplication app = appMap.get(c.getContractNo());
+            String status = app != null && app.getStatus() != null ? app.getStatus().getCode() : ROW_STATUS_NONE;
+            if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
+                continue;
             }
-        }
-
-        // 5. 精确计算各合同涉及人数
-        Map<String, Set<Long>> empMap = new java.util.HashMap<>();
-        for (CommissionItem item : allItems) {
-            PerformanceFactSummaryDTO fact = item.getPerformanceFactId() != null
-                ? factMap.get(item.getPerformanceFactId()) : null;
-            String key = buildContractKey(fact);
-            empMap.computeIfAbsent(key, k -> new HashSet<>()).add(item.getEmployeeId());
-        }
-        for (Map.Entry<String, Set<Long>> e : empMap.entrySet()) {
-            CommissionContractVO vo = contractMap.get(e.getKey());
-            if (vo != null) {
-                vo.setEmployeeCount(e.getValue().size());
+            if (keyword != null && !containsKeyword(c, keyword)) {
+                continue;
             }
+            all.add(toContractVO(period, c, app, status));
         }
 
-        // 6. 排序 + 分页
-        List<CommissionContractVO> all = new ArrayList<>(contractMap.values());
+        // 5. 排序（签约时间倒序，空值垫底）+ 内存分页
         all.sort((a, b) -> {
-            if (a.getBusinessDate() != null && b.getBusinessDate() != null) {
-                return b.getBusinessDate().compareTo(a.getBusinessDate());
+            if (a.getBusinessDate() == null && b.getBusinessDate() == null) {
+                return 0;
             }
-            return 0;
+            if (a.getBusinessDate() == null) {
+                return 1;
+            }
+            if (b.getBusinessDate() == null) {
+                return -1;
+            }
+            return b.getBusinessDate().compareTo(a.getBusinessDate());
         });
         int total = all.size();
         int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
         int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
         int from = Math.min((pageNum - 1) * pageSize, total);
         int to = Math.min(from + pageSize, total);
-        List<CommissionContractVO> pageRows = all.subList(from, to);
-        return PageResult.build(pageRows, (long) total);
+        return PageResult.build(all.subList(from, to), (long) total);
     }
 
-    /**
-     * 构建合同聚合 Key：优先合同号，其次订单号，最后事实 ID 兜底。
-     */
-    private String buildContractKey(PerformanceFactSummaryDTO fact) {
-        if (fact == null) {
-            return "__DIFF__";
+    /** 合同汇总 + 申请单 → 列表行 VO；有单时金额/条数以申请单聚合为准（0 值事实不入单） */
+    private CommissionContractVO toContractVO(String period, PerformanceContractSummaryDTO c,
+                                              CommissionApplication app, String status) {
+        CommissionContractVO vo = new CommissionContractVO();
+        vo.setPeriod(period);
+        vo.setContractNo(c.getContractNo());
+        vo.setOrderNo(c.getOrderNo());
+        vo.setBizType(c.getBizType());
+        vo.setPropertyAddress(c.getPropertyAddress());
+        vo.setBusinessDate(c.getBusinessDate());
+        vo.setEmployeeCount(c.getEmployeeCount());
+        vo.setStatus(status);
+        if (app != null) {
+            vo.setApplicationId(app.getId());
+            vo.setApplyNo(app.getApplyNo());
+            vo.setApplicantId(app.getApplicantId());
+            vo.setCreateTime(app.getCreateTime());
+            vo.setDeptId(app.getDeptId());
+            vo.setAmount(app.getTotalAmount());
+            vo.setDetailCount(app.getItemCount() == null ? 0 : app.getItemCount());
+        } else {
+            vo.setAmount(c.getAmount());
+            vo.setDetailCount(c.getDetailCount());
         }
-        if (StringUtils.isNotBlank(fact.getContractNo())) {
-            return fact.getContractNo();
-        }
-        if (StringUtils.isNotBlank(fact.getOrderNo())) {
-            return fact.getOrderNo();
-        }
-        return "__FACT_" + fact.getFactId();
+        return vo;
+    }
+
+    private boolean containsKeyword(PerformanceContractSummaryDTO c, String keyword) {
+        return (c.getContractNo() != null && c.getContractNo().contains(keyword))
+            || (c.getOrderNo() != null && c.getOrderNo().contains(keyword))
+            || (c.getPropertyAddress() != null && c.getPropertyAddress().contains(keyword));
     }
 
     /**
@@ -545,14 +539,13 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 按明细 ID 查明细。
+     * 按明细 ID 查单条明细（溯源用，含 REVERSED）。
      *
      * @param itemId 明细 ID
-     * @return 明细列表（最多一条）
+     * @return 明细；不存在返回 null
      */
-    public List<CommissionItem> listItemsByItemId(Long itemId) {
-        return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
-            .eq(CommissionItem::getId, itemId));
+    public CommissionItem getItem(Long itemId) {
+        return itemMapper.selectById(itemId);
     }
 
     /**
@@ -598,7 +591,7 @@ public class CommissionApplicationService {
     /**
      * 重算申请单聚合（item_count / total_amount，按未 REVERSED 明细）。
      * <p>
-     * 供发起 / 增量重拉 / 调整单执行 / 冲销联动共用；REVERSED 行不计入聚合。
+     * 供调整单执行 / 冲销联动共用；REVERSED 行不计入聚合。
      *
      * @param applicationId 申请单 ID
      * @param application   申请单实体（可为 null，内部重新加载）
@@ -622,13 +615,23 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 查该 (period, deptId) 的未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED 任一即视为占用，
-     * 与 uk_capp_period_dept 部分唯一索引口径一致）。
+     * 查该期间所有未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED）。
      */
-    private CommissionApplication findActiveApplication(String period, Long deptId) {
+    private List<CommissionApplication> listActiveApplications(String period) {
+        return applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getPeriod, period)
+            .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
+    }
+
+    /**
+     * 查该 (period, contractNo) 的未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED 任一即视为占用，
+     * 与 uk_capp_period_contract 部分唯一索引口径一致）。
+     */
+    private CommissionApplication findActiveApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
-            .eq(CommissionApplication::getDeptId, deptId)
+            .eq(CommissionApplication::getContractNo, contractNo)
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
             .orderByDesc(CommissionApplication::getCreateTime)
@@ -681,28 +684,27 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 由事实构建结佣明细（amount 原样透传，不折算；冻结 employee/dept/bizType/roleType）。
+     * 由事实构建结佣明细（amount 原样透传，不折算；冻结 contractNo/employee/dept/bizType/roleType）。
      * <p>
-     * 明细初始状态随申请单：DRAFT 申请单 → DRAFT（待提交）；SUBMITTED 申请单（增量重拉追加）
-     * → PENDING（待审批），追加明细与在途审批合并。
+     * 新建申请单恒为 DRAFT，明细初始状态 DRAFT（待提交），提交时随单流转为 PENDING。
      *
      * @param application 所属申请单
      * @param fact        业绩事实摘要
-     * @param adjustId    来源调整单 ID（调整单执行时传入，发起/重拉为 null）
+     * @param adjustId    来源调整单 ID（发起场景为 null）
      * @return 未持久化的明细实体
      */
     private CommissionItem buildItem(CommissionApplication application, PerformanceFactSummaryDTO fact, Long adjustId) {
         CommissionItem item = new CommissionItem();
         item.setApplicationId(application.getId());
         item.setPerformanceFactId(fact.getFactId());
+        item.setContractNo(application.getContractNo());
         item.setPeriod(fact.getPeriod());
         item.setEmployeeId(fact.getEmployeeId());
         item.setDeptId(fact.getDeptId());
         item.setBizType(fact.getBizType());
         item.setRoleType(fact.getRoleType());
         item.setAmount(fact.getAmount());
-        item.setStatus(application.getStatus() == ApplicationStatus.SUBMITTED
-            ? ItemStatus.PENDING : ItemStatus.DRAFT);
+        item.setStatus(ItemStatus.DRAFT);
         item.setOriginReversed(false);
         item.setAdjustId(adjustId);
         return item;
@@ -713,22 +715,5 @@ public class CommissionApplicationService {
         return facts.stream()
             .map(PerformanceFactSummaryDTO::getAmount)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-    }
-
-    /**
-     * 写消费日志（幂等锚点 uk_ccl_event）。
-     */
-    private void insertConsumeLog(String eventId, String eventType, String period, List<String> factIds,
-                                  int factCount, int affectedItems, ConsumeStatus status, String message) {
-        CommissionConsumeLog consumeLog = new CommissionConsumeLog();
-        consumeLog.setEventId(eventId);
-        consumeLog.setEventType(eventType);
-        consumeLog.setPeriod(period);
-        consumeLog.setFactIds(String.join(",", factIds));
-        consumeLog.setFactCount(factCount);
-        consumeLog.setAffectedItems(affectedItems);
-        consumeLog.setStatus(status);
-        consumeLog.setMessage(message);
-        consumeLogMapper.insert(consumeLog);
     }
 }

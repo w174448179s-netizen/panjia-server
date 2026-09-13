@@ -28,9 +28,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 结佣申请单管理（发起 / 增量重拉 / 提交 / 审批锁定）。
+ * 结佣申请单管理（按合同发起 / 提交 / 审批锁定）。
  * <p>
- * 口径：确认"本月实收业绩可以进入工资"并审批锁定；锁定的结果不随上游业绩变动而变动。
+ * 申请单粒度 = 合同 + 月：确认"该合同本月实收业绩可以进入工资"并审批锁定；
+ * 锁定的结果不随上游业绩变动而变动。
  */
 @Slf4j
 @Validated
@@ -55,7 +56,7 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 按「合同」维度分页查询结佣申请明细（列表页合同维度展示用）。
+     * 按「合同」维度分页查询结佣申请（列表页合同维度展示用，含未发起合同）。
      *
      * @param query     筛选条件
      * @param pageQuery 分页参数
@@ -83,11 +84,11 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 发起结佣（门店 + 月）。
+     * 发起结佣（合同 + 月）。
      * <p>
-     * 幂等：已有未审批单提示走增量重拉；已审批/锁定拒绝，变更走调整单。
+     * 幂等：该合同当月已有未完结单时拒绝；已审批/锁定拒绝，变更走调整单。
      *
-     * @param dto 发起请求（period + deptId）
+     * @param dto 发起请求（period + contractNo）
      * @return 申请单 ID
      */
     @SaCheckPermission("commission:apply:add")
@@ -95,12 +96,27 @@ public class CommissionApplyController extends BaseController {
     @PostMapping
     public R<Long> add(@Validated @RequestBody ApplyCreateDTO dto) {
         CommissionApplication application = applicationService.apply(
-            dto.getPeriod(), dto.getDeptId(), LoginHelper.getUserId());
+            dto.getPeriod(), dto.getContractNo(), LoginHelper.getUserId());
         return R.ok("发起成功", application.getId());
     }
 
     /**
-     * 提交审批：DRAFT → SUBMITTED。
+     * 批量发起结佣：为期间内所有未发起且有非零实收的合同逐张建草稿单。
+     *
+     * @param dto 批量请求（period 必填，deptId 可选）
+     * @return 新创建申请单数量
+     */
+    @SaCheckPermission("commission:apply:add")
+    @Log(title = "结佣批量发起", businessType = BusinessType.INSERT)
+    @PostMapping("/batch")
+    public R<Integer> batchAdd(@Validated @RequestBody ApplyCreateDTO dto) {
+        int created = applicationService.batchApply(
+            dto.getPeriod(), dto.getDeptId(), LoginHelper.getUserId());
+        return R.ok("批量发起完成，共创建 " + created + " 张申请单", created);
+    }
+
+    /**
+     * 提交审批：DRAFT / REJECTED → SUBMITTED。
      *
      * @param id 申请单 ID
      * @return 操作结果
@@ -110,20 +126,6 @@ public class CommissionApplyController extends BaseController {
     @PostMapping("/{id}/submit")
     public R<Void> submit(@PathVariable Long id) {
         applicationService.submit(id, LoginHelper.getUserId());
-        return R.ok();
-    }
-
-    /**
-     * 增量重拉（仅 DRAFT/SUBMITTED；追加未入单的 amount>0 实收事实，幂等，§4.1.1）。
-     *
-     * @param id 申请单 ID
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:refresh")
-    @Log(title = "结佣增量重拉", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/refresh")
-    public R<Void> refresh(@PathVariable Long id) {
-        applicationService.refresh(id, LoginHelper.getUserId());
         return R.ok();
     }
 
@@ -146,7 +148,7 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废申请单：仅 DRAFT/SUBMITTED 可作废。
+     * 作废申请单：仅 DRAFT/SUBMITTED 可作废，未审批明细随单冲销。
      *
      * @param id 申请单 ID
      * @return 操作结果

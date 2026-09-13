@@ -74,12 +74,11 @@ public class CommissionItemController extends BaseController {
     @SaCheckPermission("commission:trace:query")
     @GetMapping("/commission/trace/{itemId}")
     public R<ItemTraceVO> trace(@PathVariable Long itemId) {
-        List<CommissionItem> items = applicationService.listItemsByItemId(itemId);
-        if (items.isEmpty()) {
+        CommissionItem item = applicationService.getItem(itemId);
+        if (item == null) {
             return R.fail("结佣明细不存在：" + itemId);
         }
         ItemTraceVO vo = new ItemTraceVO();
-        CommissionItem item = items.get(0);
         vo.setItem(item);
         if (item.getPerformanceFactId() != null) {
             PerformanceFactSummaryDTO fact = performanceQueryPort.getByFactId(item.getPerformanceFactId());

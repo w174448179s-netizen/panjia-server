@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 
 import java.util.Collection;
@@ -56,4 +57,24 @@ public interface CommissionPerformanceQueryPort {
      * @return 事实摘要；不存在返回 null
      */
     PerformanceFactSummaryDTO getByFactId(Long factId);
+
+    /**
+     * 按期间 + 合同号查 ACTIVE 业绩事实（结佣按合同发起用）。
+     *
+     * @param period     归属期间 YYYY-MM
+     * @param contractNo 合同号
+     * @param factType   事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return 事实摘要列表（含合同号/订单号/房源地址；含 amount = 0 的行，过滤留给消费方）
+     */
+    List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType);
+
+    /**
+     * 按期间查「合同」维度业绩汇总（结佣申请列表与合同申请单合并展示用）。
+     *
+     * @param period   归属期间 YYYY-MM
+     * @param deptId   门店 ID（null 查全部；非 null 含下级部门，与业绩明细页口径一致）
+     * @param factType 事实口径（FactType code）
+     * @return 合同维度摘要列表（仅 contract_no 非空的合同，按签约时间倒序由调用方排序）
+     */
+    List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType);
 }

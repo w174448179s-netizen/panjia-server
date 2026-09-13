@@ -361,6 +361,7 @@ public class CommissionAdjustService {
         CommissionItem newItem = new CommissionItem();
         newItem.setApplicationId(oldItem.getApplicationId());
         newItem.setPerformanceFactId(oldItem.getPerformanceFactId());
+        newItem.setContractNo(oldItem.getContractNo());
         newItem.setPeriod(oldItem.getPeriod());
         newItem.setApprovedMonth(oldItem.getApprovedMonth());
         newItem.setEmployeeId(oldItem.getEmployeeId());
@@ -392,6 +393,7 @@ public class CommissionAdjustService {
         CommissionItem diffItem = new CommissionItem();
         diffItem.setApplicationId(adjust.getApplicationId());
         diffItem.setPerformanceFactId(null);
+        diffItem.setContractNo(sourceItem.getContractNo());
         diffItem.setPeriod(adjust.getTargetPeriod());
         diffItem.setApprovedMonth(adjust.getTargetPeriod());
         diffItem.setEmployeeId(sourceItem.getEmployeeId());

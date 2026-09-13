@@ -14,7 +14,9 @@ import java.time.LocalDateTime;
 /**
  * 结佣申请单（对应 pj_commission_application 表，聚合根）。
  * <p>
- * 粒度 = 门店 + 业绩归属月（结算月）。total_amount 为<b>结佣业绩金额合计</b>（非佣金金额）。
+ * 粒度 = 合同 + 业绩归属月（结算月）：一个合同一个月一张申请单，独立提交/审批。
+ * 合同可能跨门店合作（同合同多人分属不同门店），故 dept_id 仅作冗余快照、可为空。
+ * total_amount 为<b>结佣业绩金额合计</b>（非佣金金额）。
  * <p>
  * 不继承 RuoYi BaseEntity：本表无 create_by/update_by 审计列，
  * create_time/update_time 由数据库默认值填充。
@@ -36,7 +38,19 @@ public class CommissionApplication implements Serializable {
     /** 业绩归属月（结算月 YYYY-MM） */
     private String period;
 
-    /** 门店 ID（汇总口径，与业绩域一致） */
+    /** 合同号（业务聚合键，与业绩域 raw_signed.contract_no 一致） */
+    private String contractNo;
+
+    /** 订单号（一手房展示用，快照） */
+    private String orderNo;
+
+    /** 房源地址（快照） */
+    private String propertyAddress;
+
+    /** 签约/认购时间（快照） */
+    private LocalDateTime businessDate;
+
+    /** 门店 ID（冗余快照；跨门店合作单可能为空） */
     private Long deptId;
 
     /** 明细条数 */
