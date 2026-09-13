@@ -1,6 +1,7 @@
 package com.panjia.payroll.service;
 
 import com.panjia.contracts.dto.CommissionItemDTO;
+import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
@@ -18,6 +19,7 @@ import com.panjia.payroll.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -52,6 +54,7 @@ public class PayrollBatchService {
     private final RuleService ruleService;
     private final SalaryCalculationEngine engine;
     private final ManualItemService manualItemService;
+    private final ApplicationEventPublisher eventPublisher;
 
     // ==================== 创建 ====================
 
@@ -317,6 +320,20 @@ public class PayrollBatchService {
         b.setLockedAt(java.time.LocalDateTime.now());
         b.setOperatorId(operatorId);
         batchMapper.updateById(b);
+
+        // 发布工资锁定事件 → performance 域自动封账对应业绩月（V4.2 §13.1）
+        List<PayrollDetail> details = detailMapper.selectByBatchId(batchId);
+        List<Long> itemIds = details.stream().map(PayrollDetail::getId).toList();
+        List<PayrollLockedEvent.DeptCostSummary> deptCosts = buildDeptCosts(details);
+        PayrollLockedEvent event = new PayrollLockedEvent();
+        event.setEventId(java.util.UUID.randomUUID().toString());
+        event.setPeriod(b.getPeriod());
+        event.setBatchId(batchId);
+        event.setItemIds(itemIds);
+        event.setDeptCosts(deptCosts);
+        eventPublisher.publishEvent(event);
+        log.info("[工资锁定] 批次 {} 已锁定，发布 PayrollLockedEvent（period={}, itemCount={}）",
+            batchId, b.getPeriod(), itemIds.size());
         return b;
     }
 
@@ -355,6 +372,28 @@ public class PayrollBatchService {
         PayrollBatch b = batchMapper.selectById(id);
         if (b == null) throw new ServiceException("批次不存在");
         return b;
+    }
+
+    /**
+     * 按门店汇总人工成本（PayrollLockedEvent.deptCosts）。
+     * netPayTotal = 门店实发合计；employerSocialTotal = 公司承担社保合计。
+     */
+    private List<PayrollLockedEvent.DeptCostSummary> buildDeptCosts(List<PayrollDetail> details) {
+        Map<Long, BigDecimal[]> agg = new LinkedHashMap<>(); // deptId -> [netSum, socialSum, count]
+        for (PayrollDetail d : details) {
+            if (d.getDeptId() == null) continue;
+            BigDecimal[] slot = agg.computeIfAbsent(d.getDeptId(),
+                k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO});
+            slot[0] = slot[0].add(d.getNet() == null ? BigDecimal.ZERO : d.getNet());
+            slot[1] = slot[1].add(d.getEmployerSocial() == null ? BigDecimal.ZERO : d.getEmployerSocial());
+            slot[2] = slot[2].add(BigDecimal.ONE);
+        }
+        List<PayrollLockedEvent.DeptCostSummary> result = new ArrayList<>();
+        for (Map.Entry<Long, BigDecimal[]> e : agg.entrySet()) {
+            result.add(new PayrollLockedEvent.DeptCostSummary(
+                e.getKey(), e.getValue()[0], e.getValue()[1], e.getValue()[2].intValue()));
+        }
+        return result;
     }
 
     private String toJson(Object o) {
