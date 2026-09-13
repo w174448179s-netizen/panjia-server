@@ -1,5 +1,6 @@
 package com.panjia.performance.mapper;
 
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
@@ -9,6 +10,7 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -665,4 +667,42 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         """)
     PerformanceFact selectOriginalPositiveFact(@Param("sourceKeyPrefix") String sourceKeyPrefix,
                                                @Param("factType") String factType);
+
+    /**
+     * 按事实 ID 集合查询事实摘要（含合同号/订单号/房源地址）。
+     * <p>
+     * 供结佣域按合同维度展示申请单列表使用，通过 normalized_record → raw_signed
+     * 关联取出合同维度字段。不限状态（溯源需能看到已冲销事实）。
+     *
+     * @param factIds 事实 ID 集合
+     * @return 事实摘要列表（仅存在的 ID）
+     */
+    @Select("""
+        <script>
+        SELECT f.id AS "factId",
+               f.fact_type AS "factType",
+               f.fact_status AS "factStatus",
+               f.period AS "period",
+               f.business_date AS "businessDate",
+               f.employee_id AS "employeeId",
+               f.employee_external_code AS "employeeCode",
+               f.dept_id AS "deptId",
+               f.biz_type AS "bizType",
+               f.role_type AS "roleType",
+               f.performance_amount AS "amount",
+               f.batch_id AS "batchId",
+               f.normalized_record_id AS "normalizedRecordId",
+               f.source_key AS "sourceKey",
+               rs.contract_no AS "contractNo",
+               rs.order_no AS "orderNo",
+               rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.id IN
+        <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+        ORDER BY f.id
+        </script>
+        """)
+    List<PerformanceFactSummaryDTO> selectFactSummariesByIds(@Param("factIds") Collection<Long> factIds);
 }

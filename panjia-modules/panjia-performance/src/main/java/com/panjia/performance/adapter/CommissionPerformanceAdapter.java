@@ -57,11 +57,14 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         if (factIds == null || factIds.isEmpty()) {
             return Collections.emptyList();
         }
-        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
-        wrapper.in(PerformanceFact::getId, factIds)
-            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
-            .orderByAsc(PerformanceFact::getId);
-        return toSummaries(factMapper.selectList(wrapper));
+        List<PerformanceFactSummaryDTO> all = factMapper.selectFactSummariesByIds(factIds);
+        List<PerformanceFactSummaryDTO> active = new ArrayList<>(all.size());
+        for (PerformanceFactSummaryDTO dto : all) {
+            if ("ACTIVE".equals(dto.getFactStatus())) {
+                active.add(dto);
+            }
+        }
+        return active;
     }
 
     @Override
@@ -69,8 +72,8 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         if (factId == null) {
             return null;
         }
-        PerformanceFact fact = factMapper.selectById(factId);
-        return fact == null ? null : toSummary(fact);
+        List<PerformanceFactSummaryDTO> list = factMapper.selectFactSummariesByIds(Collections.singletonList(factId));
+        return list.isEmpty() ? null : list.get(0);
     }
 
     private List<PerformanceFactSummaryDTO> toSummaries(List<PerformanceFact> facts) {

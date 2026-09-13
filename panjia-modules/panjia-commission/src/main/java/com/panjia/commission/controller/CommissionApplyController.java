@@ -55,6 +55,20 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
+     * 按「合同」维度分页查询结佣申请明细（列表页合同维度展示用）。
+     *
+     * @param query     筛选条件
+     * @param pageQuery 分页参数
+     * @return 合同维度分页
+     */
+    @SaCheckPermission("commission:apply:list")
+    @GetMapping("/contract-list")
+    public R<PageResult<com.panjia.commission.dto.CommissionContractVO>> contractList(ApplyQuery query,
+                                                                                      PageQuery pageQuery) {
+        return R.ok(applicationService.listContracts(query, pageQuery));
+    }
+
+    /**
      * 申请单详情（含明细）。
      *
      * @param id 申请单 ID

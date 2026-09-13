@@ -9,6 +9,7 @@ import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ConsumeStatus;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.dto.ApplyQuery;
+import com.panjia.commission.dto.CommissionContractVO;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
@@ -382,6 +383,134 @@ public class CommissionApplicationService {
             .orderByDesc(CommissionApplication::getCreateTime);
         var page = applicationMapper.selectPage(pageQuery.build(), wrapper);
         return PageResult.build(page.getRecords(), page.getTotal());
+    }
+
+    /**
+     * 按「合同」维度分页查询结佣申请明细（与业绩明细页合同维度对齐）。
+     * <p>
+     * 流程：查申请单 → 查明细 → 查事实合同信息 → 按合同号聚合 → 内存分页。
+     *
+     * @param query     筛选条件（period / deptId / status）
+     * @param pageQuery 分页参数
+     * @return 合同维度分页
+     */
+    public PageResult<CommissionContractVO> listContracts(ApplyQuery query, PageQuery pageQuery) {
+        // 1. 查符合条件的申请单（不分页，全量拉取后内存聚合）
+        LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
+        appWrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionApplication::getPeriod, query.getPeriod())
+            .eq(query.getDeptId() != null, CommissionApplication::getDeptId, query.getDeptId())
+            .eq(StringUtils.isNotBlank(query.getStatus()), CommissionApplication::getStatus,
+                ApplicationStatus.fromCode(query.getStatus()))
+            .orderByDesc(CommissionApplication::getCreateTime);
+        List<CommissionApplication> applications = applicationMapper.selectList(appWrapper);
+        if (applications.isEmpty()) {
+            return PageResult.build(List.of(), 0L);
+        }
+
+        // 2. 批量查所有申请单的明细（排除 REVERSED）
+        List<Long> appIds = applications.stream().map(CommissionApplication::getId).toList();
+        List<CommissionItem> allItems = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+            .in(CommissionItem::getApplicationId, appIds)
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
+        if (allItems.isEmpty()) {
+            return PageResult.build(List.of(), 0L);
+        }
+
+        // 3. 收集事实 ID，批量查事实摘要（含合同号/房源地址）
+        Set<Long> factIds = allItems.stream()
+            .map(CommissionItem::getPerformanceFactId)
+            .filter(java.util.Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, PerformanceFactSummaryDTO> factMap = Map.of();
+        if (!factIds.isEmpty()) {
+            List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByFacts(factIds);
+            factMap = facts.stream().collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, f -> f, (a, b) -> a));
+        }
+
+        // 4. 按合同号聚合
+        Map<Long, CommissionApplication> appMap = applications.stream()
+            .collect(Collectors.toMap(CommissionApplication::getId, a -> a, (a, b) -> a));
+        Map<String, CommissionContractVO> contractMap = new java.util.LinkedHashMap<>();
+        for (CommissionItem item : allItems) {
+            PerformanceFactSummaryDTO fact = item.getPerformanceFactId() != null
+                ? factMap.get(item.getPerformanceFactId()) : null;
+            String key = buildContractKey(fact);
+            CommissionContractVO vo = contractMap.computeIfAbsent(key, k -> {
+                CommissionContractVO v = new CommissionContractVO();
+                CommissionApplication app = appMap.get(item.getApplicationId());
+                v.setApplicationId(item.getApplicationId());
+                v.setApplyNo(app != null ? app.getApplyNo() : null);
+                v.setStatus(app != null && app.getStatus() != null ? app.getStatus().getCode() : null);
+                v.setApplicantId(app != null ? app.getApplicantId() : null);
+                v.setPeriod(item.getPeriod());
+                v.setDeptId(item.getDeptId());
+                v.setCreateTime(app != null ? app.getCreateTime() : null);
+                if (fact != null) {
+                    v.setContractNo(fact.getContractNo());
+                    v.setOrderNo(fact.getOrderNo());
+                    v.setBizType(fact.getBizType());
+                    v.setPropertyAddress(fact.getPropertyAddress());
+                    v.setBusinessDate(fact.getBusinessDate() != null
+                        ? fact.getBusinessDate().atStartOfDay() : null);
+                } else {
+                    v.setContractNo("调整差额");
+                    v.setBizType(item.getBizType());
+                }
+                return v;
+            });
+            vo.setAmount(vo.getAmount() == null ? item.getAmount() : vo.getAmount().add(item.getAmount()));
+            vo.setDetailCount(vo.getDetailCount() + 1);
+            if (item.getEmployeeId() != null) {
+                // 用 Set 去重员工数：暂用 detailCount 近似，下方再精确计算
+            }
+        }
+
+        // 5. 精确计算各合同涉及人数
+        Map<String, Set<Long>> empMap = new java.util.HashMap<>();
+        for (CommissionItem item : allItems) {
+            PerformanceFactSummaryDTO fact = item.getPerformanceFactId() != null
+                ? factMap.get(item.getPerformanceFactId()) : null;
+            String key = buildContractKey(fact);
+            empMap.computeIfAbsent(key, k -> new HashSet<>()).add(item.getEmployeeId());
+        }
+        for (Map.Entry<String, Set<Long>> e : empMap.entrySet()) {
+            CommissionContractVO vo = contractMap.get(e.getKey());
+            if (vo != null) {
+                vo.setEmployeeCount(e.getValue().size());
+            }
+        }
+
+        // 6. 排序 + 分页
+        List<CommissionContractVO> all = new ArrayList<>(contractMap.values());
+        all.sort((a, b) -> {
+            if (a.getBusinessDate() != null && b.getBusinessDate() != null) {
+                return b.getBusinessDate().compareTo(a.getBusinessDate());
+            }
+            return 0;
+        });
+        int total = all.size();
+        int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
+        int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
+        int from = Math.min((pageNum - 1) * pageSize, total);
+        int to = Math.min(from + pageSize, total);
+        List<CommissionContractVO> pageRows = all.subList(from, to);
+        return PageResult.build(pageRows, (long) total);
+    }
+
+    /**
+     * 构建合同聚合 Key：优先合同号，其次订单号，最后事实 ID 兜底。
+     */
+    private String buildContractKey(PerformanceFactSummaryDTO fact) {
+        if (fact == null) {
+            return "__DIFF__";
+        }
+        if (StringUtils.isNotBlank(fact.getContractNo())) {
+            return fact.getContractNo();
+        }
+        if (StringUtils.isNotBlank(fact.getOrderNo())) {
+            return fact.getOrderNo();
+        }
+        return "__FACT_" + fact.getFactId();
     }
 
     /**

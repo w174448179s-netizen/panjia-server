@@ -1,0 +1,68 @@
+package com.panjia.commission.dto;
+
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+import java.io.Serial;
+import java.io.Serializable;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+
+/**
+ * 结佣申请「合同」维度聚合行。
+ * <p>
+ * 与业绩明细页合同维度对齐：以合同为标准展示，相比业绩明细多出「状态」「发起人」两列，
+ * 去掉「未结算」列（结佣申请范围内的明细均已锁定结算）。
+ */
+@Data
+@NoArgsConstructor
+public class CommissionContractVO implements Serializable {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    /** 关联申请单 ID */
+    private Long applicationId;
+
+    /** 申请单号 */
+    private String applyNo;
+
+    /** 合同号 */
+    private String contractNo;
+
+    /** 订单号 */
+    private String orderNo;
+
+    /** 业务类型 */
+    private String bizType;
+
+    /** 房源地址 */
+    private String propertyAddress;
+
+    /** 签约/认购时间 */
+    private LocalDateTime businessDate;
+
+    /** 合同结佣金额合计 */
+    private BigDecimal amount;
+
+    /** 涉及签约人数（去重） */
+    private long employeeCount;
+
+    /** 明细条数 */
+    private long detailCount;
+
+    /** 业绩归属月 */
+    private String period;
+
+    /** 门店 ID */
+    private Long deptId;
+
+    /** 申请单状态（DRAFT/SUBMITTED/LOCKED/REJECTED/CANCELLED） */
+    private String status;
+
+    /** 发起人 ID */
+    private Long applicantId;
+
+    /** 创建时间 */
+    private LocalDateTime createTime;
+}

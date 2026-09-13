@@ -60,4 +60,13 @@ public class PerformanceFactSummaryDTO implements Serializable {
 
     /** 来源业务单号（幂等锚点，审计用） */
     private String sourceKey;
+
+    /** 合同号（raw_signed.contract_no，结佣列表合同维度展示用） */
+    private String contractNo;
+
+    /** 订单号（raw_signed.order_no） */
+    private String orderNo;
+
+    /** 房源地址（raw_json.propertyAddress） */
+    private String propertyAddress;
 }
