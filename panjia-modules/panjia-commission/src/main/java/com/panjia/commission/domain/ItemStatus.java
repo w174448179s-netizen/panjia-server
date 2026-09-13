@@ -12,7 +12,10 @@ import com.fasterxml.jackson.annotation.JsonValue;
  */
 public enum ItemStatus {
 
-    /** 待审批 */
+    /** 草稿（申请单未提交，明细待提交） */
+    DRAFT("待提交"),
+
+    /** 待审批（申请单已提交，等待审批） */
     PENDING("待审批"),
 
     /** 已审批（金额冻结，进工资） */

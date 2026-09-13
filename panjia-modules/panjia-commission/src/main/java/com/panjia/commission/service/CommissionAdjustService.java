@@ -81,7 +81,7 @@ public class CommissionAdjustService {
      * 发起调整单（SUBMITTED，待审批）。
      * <p>
      * 前置校验（§3.3）：① 封账校验（按 §2.5 三条判定规则，经 Port 实时查）；
-     * ② 原明细为 PENDING 或 APPROVED；③ 同一 item 无未完成调整单。
+     * ② 原明细为 DRAFT、PENDING 或 APPROVED；③ 同一 item 无未完成调整单。
      *
      * @param dto        调整单创建请求
      * @param operatorId 发起人 ID
@@ -102,8 +102,10 @@ public class CommissionAdjustService {
             throw new ServiceException("结佣明细不属于该申请单：itemId=" + item.getId()
                 + ", applicationId=" + application.getId());
         }
-        if (item.getStatus() != ItemStatus.PENDING && item.getStatus() != ItemStatus.APPROVED) {
-            throw new ServiceException("仅待审批/已审批明细可发起调整（当前：" + item.getStatus().getDesc() + "）");
+        if (item.getStatus() != ItemStatus.DRAFT
+            && item.getStatus() != ItemStatus.PENDING
+            && item.getStatus() != ItemStatus.APPROVED) {
+            throw new ServiceException("仅待提交/待审批/已审批明细可发起调整（当前：" + item.getStatus().getDesc() + "）");
         }
 
         // ① 封账校验（§2.5 判定规则）：DIFF 校验 target_period；DISCOUNT/VOID 校验明细自身 period
@@ -343,6 +345,9 @@ public class CommissionAdjustService {
         CommissionItem oldItem = itemMapper.selectById(adjust.getItemId());
         requireItem(oldItem, adjust);
 
+        // 先冻结源明细状态（下方 oldItem 会被置为 REVERSED，新明细沿用源状态）
+        ItemStatus sourceStatus = oldItem.getStatus();
+
         // 旧明细冲销（REVERSED 终态，永久保留）
         oldItem.setStatus(ItemStatus.REVERSED);
         oldItem.setReversedReason(ReversedReason.MANUAL_ADJUST);
@@ -364,7 +369,7 @@ public class CommissionAdjustService {
         newItem.setRoleType(oldItem.getRoleType());
         newItem.setFeeItem(oldItem.getFeeItem());
         newItem.setAmount(adjust.getNewAmount());
-        newItem.setStatus(oldItem.getStatus());
+        newItem.setStatus(sourceStatus);
         newItem.setOriginReversed(false);
         newItem.setAdjustId(adjust.getId());
         itemMapper.insert(newItem);

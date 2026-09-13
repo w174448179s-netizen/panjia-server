@@ -267,6 +267,11 @@ public class CommissionApplicationService {
         if (rows == 0) {
             throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
         }
+        // 明细随单流转：DRAFT（待提交）→ PENDING（待审批）
+        itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
+            .set(CommissionItem::getStatus, ItemStatus.PENDING));
         log.info("[结佣-提交] 申请单已提交：applyNo={}, operatorId={}", application.getApplyNo(), operatorId);
     }
 
@@ -677,6 +682,9 @@ public class CommissionApplicationService {
 
     /**
      * 由事实构建结佣明细（amount 原样透传，不折算；冻结 employee/dept/bizType/roleType）。
+     * <p>
+     * 明细初始状态随申请单：DRAFT 申请单 → DRAFT（待提交）；SUBMITTED 申请单（增量重拉追加）
+     * → PENDING（待审批），追加明细与在途审批合并。
      *
      * @param application 所属申请单
      * @param fact        业绩事实摘要
@@ -693,7 +701,8 @@ public class CommissionApplicationService {
         item.setBizType(fact.getBizType());
         item.setRoleType(fact.getRoleType());
         item.setAmount(fact.getAmount());
-        item.setStatus(ItemStatus.PENDING);
+        item.setStatus(application.getStatus() == ApplicationStatus.SUBMITTED
+            ? ItemStatus.PENDING : ItemStatus.DRAFT);
         item.setOriginReversed(false);
         item.setAdjustId(adjustId);
         return item;

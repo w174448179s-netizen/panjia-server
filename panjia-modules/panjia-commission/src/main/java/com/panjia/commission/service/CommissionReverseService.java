@@ -82,15 +82,15 @@ public class CommissionReverseService {
             reversedReason = ReversedReason.MANUAL_ADJUST;
         }
 
-        // 分治①：PENDING 随动作废
+        // 分治①：未审批明细（DRAFT 待提交 / PENDING 待审批）随动作废
         List<Long> pendingIds = affectedItems.stream()
-            .filter(i -> i.getStatus() == ItemStatus.PENDING)
+            .filter(i -> i.getStatus() == ItemStatus.DRAFT || i.getStatus() == ItemStatus.PENDING)
             .map(CommissionItem::getId)
             .toList();
         if (!pendingIds.isEmpty()) {
             itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
                 .in(CommissionItem::getId, pendingIds)
-                .eq(CommissionItem::getStatus, ItemStatus.PENDING)
+                .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
                 .set(CommissionItem::getStatus, ItemStatus.REVERSED)
                 .set(CommissionItem::getReversedReason, reversedReason));
         }
