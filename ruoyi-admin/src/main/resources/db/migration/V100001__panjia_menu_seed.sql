@@ -63,7 +63,7 @@ VALUES (1761400000000002200, '业绩管理', 0, 30, 'performance', NULL, NULL, '
 --     业务角色的业绩明细授权在下方 sys_role_menu 段直接绑 2610/2611。
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002202, '结佣申请', 1761400000000002200, 2, 'apply', 'commission/apply/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:apply:list', 'form', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣申请菜单（待审批/已审批/驳回）');
+VALUES (1761400000000002202, '结佣明细', 1761400000000002200, 3, 'apply', 'commission/apply/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:apply:list', 'form', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣明细菜单（待审批/已审批/驳回）');
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002203, '结佣调整', 1761400000000002200, 3, 'adjust', 'commission/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:adjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣调整菜单（漏算补录，新增记录不改原始）');

@@ -74,7 +74,7 @@ VALUES (1761400000000002633, '反结账', 1761400000000002630, 3, NULL, NULL, NU
 
 -- 实收业绩审批（合同维度，需求文档 §2：导入自动提交 财务→总监；支持 Excel 批量审批）
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002640, '实收审批', 1761400000000002200, 4, 'received', 'performance/received/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:received:list', 'validCode', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '实收业绩审批单（合同维度）');
+VALUES (1761400000000002640, '实收明细', 1761400000000002200, 2, 'received', 'performance/received/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:received:list', 'validCode', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '实收业绩明细（合同维度）');
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002641, '实收单查询', 1761400000000002640, 1, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:query', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');

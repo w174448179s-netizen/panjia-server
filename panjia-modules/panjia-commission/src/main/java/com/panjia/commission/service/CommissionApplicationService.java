@@ -143,6 +143,9 @@ public class CommissionApplicationService {
             if (activeContractNos.contains(contract.getContractNo())) {
                 continue;
             }
+            if (!"APPROVED".equals(contract.getReceivedStatus())) {
+                continue;
+            }
             try {
                 doApply(period, contract.getContractNo(), operatorId);
                 created++;
@@ -617,6 +620,9 @@ public class CommissionApplicationService {
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
             String status = app != null && app.getStatus() != null ? app.getStatus().getCode() : ROW_STATUS_NONE;
+            if (app == null && !"APPROVED".equals(c.getReceivedStatus())) {
+                continue;
+            }
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
             }
@@ -659,6 +665,7 @@ public class CommissionApplicationService {
         vo.setEmployeeCount(c.getEmployeeCount());
         vo.setStatus(status);
         vo.setExpectedAmount(c.getExpectedAmount());
+        vo.setReceivedStatus(c.getReceivedStatus());
         if (app != null) {
             vo.setApplicationId(app.getId());
             vo.setApplyNo(app.getApplyNo());

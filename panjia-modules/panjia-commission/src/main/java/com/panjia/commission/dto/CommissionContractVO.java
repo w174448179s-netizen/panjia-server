@@ -69,6 +69,9 @@ public class CommissionContractVO implements Serializable {
     /** 申请单状态（DRAFT/SUBMITTED/LOCKED/REJECTED/CANCELLED） */
     private String status;
 
+    /** 实收审批状态（APPROVED/SUBMITTED/DRAFT/null） */
+    private String receivedStatus;
+
     /** 发起人 ID */
     private Long applicantId;
 
