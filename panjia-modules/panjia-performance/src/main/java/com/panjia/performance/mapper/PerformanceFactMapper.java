@@ -3,6 +3,7 @@ package com.panjia.performance.mapper;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.PerformanceFact;
+import com.panjia.performance.dto.AdjustFactDetailDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
@@ -67,7 +68,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                NULLIF(ed.dept_name, 'tenant_name'))
                    END
                ) AS "deptPath",
-               COALESCE(SUM(f.origin_amount), 0) AS "amount",
+               COALESCE(SUM(f.performance_amount), 0) AS "amount",
                COUNT(DISTINCT rs.contract_no) AS "contractCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
@@ -221,7 +222,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE(nr.role_type, f.role_type) AS roleType,
                rs.role_name AS roleName,
                f.share_ratio AS shareRatio,
-               f.origin_amount AS amount,
+               f.performance_amount AS amount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey
@@ -295,7 +296,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT COUNT(*) AS "detailCount",
                COUNT(DISTINCT rs.contract_no) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
-               COALESCE(SUM(f.origin_amount), 0) AS "totalAmount",
+               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
@@ -403,7 +404,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(f.biz_type) AS "bizType",
                MAX(rs.raw_json -&gt;&gt; 'propertyAddress') AS "propertyAddress",
                MAX(COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
-               COALESCE(SUM(f.origin_amount), 0) AS "amount",
+               COALESCE(SUM(f.performance_amount), 0) AS "amount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
@@ -560,7 +561,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE(nr.role_type, f.role_type) AS roleType,
                rs.role_name AS roleName,
                f.share_ratio AS shareRatio,
-               f.origin_amount AS amount,
+               f.performance_amount AS amount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey
@@ -663,7 +664,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = #{factType}
-          AND f.origin_amount > 0
+          AND f.performance_amount > 0
           AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
         ORDER BY f.period ASC, f.id ASC
         LIMIT 1
@@ -675,7 +676,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 按业务键前缀汇总更早期间已 ACTIVE 认列事实的「贝壳当前金额」合计，
      * 用于跨月重复导入时应收「只认一次」的增量认定（§双口径契约）。
      * <p>
-     * 当前金额 = ROUND(origin_amount × conversion_rate, 2)（与红冲镜像口径一致）；
+     * 当前金额 = performance_amount（即导入的折后金额）；
      * 仅统计 ACTIVE 事实，被 supersede/冲销的历史不认列不参与。
      *
      * @param sourceKeyPrefix 业务键前缀（订单|合同|角色人|费项|角色类型）
@@ -685,7 +686,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        SELECT COALESCE(SUM(ROUND(f.origin_amount * f.conversion_rate, 2)), 0)
+        SELECT COALESCE(SUM(f.performance_amount), 0)
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = #{factType}
@@ -987,4 +988,106 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         """)
     List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
         @Param("batchId") Long batchId, @Param("period") String period);
+
+    /**
+     * 按事实 ID 查询所属合同的基本信息（调整单详情展示用）。
+     *
+     * @param factId 事实 ID
+     * @return 合同摘要；查不到返回 null
+     */
+    @Select("""
+        SELECT rs.contract_no AS "contractNo",
+               MAX(rs.order_no) AS "orderNo",
+               MAX(f.biz_type) AS "bizType",
+               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.id = #{factId}
+          AND rs.contract_no IS NOT NULL
+        GROUP BY rs.contract_no
+        """)
+    java.util.Map<String, Object> selectContractInfoByFactId(@Param("factId") Long factId);
+
+    /**
+     * 按期间 + 合同号查询合同基本信息（调整单详情展示用）。
+     *
+     * @param period     归属期间
+     * @param contractNo 合同号
+     * @return 合同摘要；查不到返回 null
+     */
+    @Select("""
+        SELECT rs.contract_no AS "contractNo",
+               MAX(rs.order_no) AS "orderNo",
+               MAX(f.biz_type) AS "bizType",
+               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND rs.contract_no = #{contractNo}
+        GROUP BY rs.contract_no
+        """)
+    java.util.Map<String, Object> selectContractInfoByContractNo(
+        @Param("period") String period, @Param("contractNo") String contractNo);
+
+    /**
+     * 按期间 + 合同号 + 事实口径查询该合同下全部有效明细（调整单详情展示用）。
+     * <p>
+     * 只查 ACTIVE 状态的事实，过滤掉已冲销/已替代的历史行。
+     * 应收金额与实收金额按 source_key 交叉配对，与业绩明细页口径一致。
+     *
+     * @param period     归属期间
+     * @param contractNo 合同号
+     * @param factType   事实口径（PERF_EXPECT / PERF_REAL）
+     * @return 明细列表
+     */
+    @Select("""
+        SELECT f.id AS "factId",
+               f.employee_id AS "employeeId",
+               COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
+               e.employee_name AS "employeeName",
+               CASE
+                   WHEN array_length(string_to_array(d.ancestors, ','), 1) >= 3 THEN
+                       CONCAT_WS('-',
+                           NULLIF(gp.dept_name, 'tenant_name'),
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           CASE WHEN d.dept_name = p.dept_name THEN NULL
+                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
+                   ELSE
+                       CONCAT_WS('-',
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           NULLIF(d.dept_name, 'tenant_name'))
+               END AS "deptPath",
+               COALESCE(nr.role_type, f.role_type) AS "roleType",
+               rs.role_name AS "roleName",
+               f.share_ratio AS "shareRatio",
+               (SELECT pe.performance_amount
+                  FROM pj_perf_fact pe
+                 WHERE pe.fact_status = 'ACTIVE'
+                   AND pe.fact_type = CASE WHEN #{factType} = 'PERF_EXPECT' THEN 'PERF_REAL' ELSE 'PERF_EXPECT' END
+                   AND pe.source_key = f.source_key
+                 ORDER BY pe.id
+                 LIMIT 1) AS "expectedAmount",
+               f.performance_amount AS "amount",
+               f.fact_status AS "factStatus"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
+        LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
+        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
+        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND rs.contract_no = #{contractNo}
+        ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
+        """)
+    List<AdjustFactDetailDTO> selectAdjustFactDetails(@Param("period") String period,
+                                                       @Param("contractNo") String contractNo,
+                                                       @Param("factType") String factType);
 }

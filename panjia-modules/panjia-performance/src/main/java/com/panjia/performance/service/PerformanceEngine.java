@@ -371,7 +371,7 @@ public class PerformanceEngine {
      * 处理流程：
      * <ol>
      *   <li><b>员工归属查询</b>：通过 employeeQueryPort 按工号查员工快照</li>
-     *   <li><b>业绩金额计算</b>：调用 conversionEngine.calculate 计算</li>
+     *   <li><b>业绩金额计算</b>：直接使用贝壳导入金额（分摊比例仅展示，不参与计算）</li>
      *   <li><b>幂等检查</b>：sourceKey + factType + ACTIVE 已存在则跳过</li>
      *   <li><b>保存事实记录</b>：插入新的业绩事实</li>
      * </ol>
@@ -437,17 +437,12 @@ public class PerformanceEngine {
         EmployeeSnapshot employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
 
         // ========== 2. 计算业绩金额 ==========
-        // ★ 金额口径由 factType 决定（V4.2 / C-12 契约）：
+        // ★ 金额口径由 factType 决定：
         //  PERF_REAL   → 当月实收 receivedAmount（结佣计薪业绩）
         //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，店长/总监团队提成基数）
-        // 贝壳表中的应收/实收是折算后「当前金额」，原始金额需按经纪人折算比例还原：
-        //  origin_amount = 当前金额 ÷ 经纪人折算比例（参数 sys_config，默认 85%）
-        BigDecimal brokerRate = resolveBrokerConversionRate();
-        BigDecimal originAmount = grossUpOriginAmount(currentAmount, brokerRate);
-        BigDecimal shareRatio = record.getShareRatio();
-        // 折算系数即经纪人折算比例：(当前÷比例) × 分摊比例 × 比例 = 当前 × 分摊比例，
-        // 业绩金额（结佣基数）口径与贝壳当前金额保持一致，仅原始金额被还原放大
-        BigDecimal performanceAmount = conversionEngine.calculate(originAmount, shareRatio, brokerRate);
+        // 贝壳导入的金额就是折后金额（performance_amount 口径），直接使用，不再乘以分摊比例；
+        // 分摊比例仅作展示用，不参与计算
+        BigDecimal performanceAmount = MoneyUtil.round2(currentAmount);
 
         // ========== 3. 幂等检查 ==========
         // 幂等锚点：sourceKey + factType + ACTIVE
@@ -488,9 +483,7 @@ public class PerformanceEngine {
             fact.setEmployeeExternalCode(record.getEmployeeCode());
         }
 
-        fact.setShareRatio(conversionEngine.getEffectiveShareRatio(shareRatio));
-        fact.setOriginAmount(originAmount);
-        fact.setConversionRate(conversionEngine.getEffectiveConversionRate(brokerRate));
+        fact.setShareRatio(record.getShareRatio()); // 分摊比例仅展示用，不参与计算
         fact.setPerformanceAmount(performanceAmount);
 
         // 生效日期默认为业务发生日
@@ -558,30 +551,25 @@ public class PerformanceEngine {
                 "退单红冲记录缺少业务日期/归属月，拒绝构建事实：recordId=" + record.getId());
         }
 
-        // 原事实贝壳「当前金额」口径还原：origin_amount = 当前额 ÷ 折算系数 ⇒ 当前额 = origin × conversion
-        BigDecimal originalCurrent = MoneyUtil.round2(
-            original.getOriginAmount().multiply(original.getConversionRate()));
+        // 原事实贝壳「当前金额」= performance_amount（分摊比例仅展示，不参与计算，无需还原）
+        BigDecimal originalCurrent = original.getPerformanceAmount();
 
-        BigDecimal redinkOrigin;
         BigDecimal redinkPerformance;
         if (MoneyUtil.isZero(originalCurrent)) {
             // 原事实当前额为 0 的异常数据：直接镜像相反数兜底，避免除零
             log.warn("[业绩红冲] 原正数事实当前额为 0，按金额全额镜像：originalFactId={}", original.getId());
-            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().negate());
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().negate());
         } else if (negCurrentAmount.abs().subtract(originalCurrent.abs()).abs()
                 .compareTo(FULL_REFUND_TOLERANCE) <= 0) {
             // 整单退：精确镜像原事实金额相反数（保证成交月+退单月净额恰好为 0）
-            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().negate());
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().negate());
         } else {
-            // 部分退：红冲比例（负数）= 本次负数当前额 ÷ 原当前额，原冻结金额按比例冲回
+            // 部分退：红冲比例（负数）= 本次负数当前额 ÷ 原当前额，按比例冲回
             BigDecimal ratio = negCurrentAmount.divide(originalCurrent, 8, RoundingMode.HALF_UP);
             if (ratio.abs().compareTo(BigDecimal.ONE) > 0) {
                 log.warn("[业绩红冲] 红冲金额超过原正数事实（超额退单？请核对贝壳数据）：originalFactId={}, ratio={}",
                     original.getId(), ratio);
             }
-            redinkOrigin = MoneyUtil.round2(original.getOriginAmount().multiply(ratio));
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().multiply(ratio));
         }
 
@@ -598,10 +586,8 @@ public class PerformanceEngine {
         fact.setEmployeeExternalCode(original.getEmployeeExternalCode());
         fact.setDeptId(original.getDeptId());
         fact.setRoleType(original.getRoleType());
-        // ★ 分摊比例/折算系数镜像原事实冻结值（不按当期 sys_config 重算）
+        // ★ 分摊比例镜像原事实冻结值（仅展示用，不参与计算）
         fact.setShareRatio(original.getShareRatio());
-        fact.setConversionRate(original.getConversionRate());
-        fact.setOriginAmount(redinkOrigin);
         fact.setPerformanceAmount(redinkPerformance);
         fact.setEffectiveDate(businessDate);
         fact.setFactStatus(FactStatus.ACTIVE);
@@ -615,10 +601,9 @@ public class PerformanceEngine {
             createdCollector.add(fact);
         }
 
-        log.info("[业绩红冲] 退单红冲事实已生成：factId={}, originalFactId={}, 原期间={}, 红冲期间={}, "
-                + "originAmount={}, performanceAmount={}",
+        log.info("[业绩红冲] 退单红冲事实已生成：factId={}, originalFactId={}, 原期间={}, 红冲期间={}, performanceAmount={}",
             fact.getId(), original.getId(), original.getPeriod(), fact.getPeriod(),
-            redinkOrigin, redinkPerformance);
+            redinkPerformance);
         return fact;
     }
 

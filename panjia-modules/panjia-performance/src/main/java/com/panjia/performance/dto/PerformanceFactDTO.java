@@ -49,14 +49,8 @@ public class PerformanceFactDTO {
     /** 来源单号 */
     private String sourceKey;
 
-    /** 分摊比例 */
+    /** 分摊比例（仅展示用，不参与计算） */
     private BigDecimal shareRatio;
-
-    /** 原始金额 */
-    private BigDecimal originAmount;
-
-    /** 折算系数 */
-    private BigDecimal conversionRate;
 
     /** 业绩金额 */
     private BigDecimal performanceAmount;

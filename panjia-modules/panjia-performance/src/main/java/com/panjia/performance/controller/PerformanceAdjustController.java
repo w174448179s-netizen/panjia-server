@@ -3,6 +3,7 @@ package com.panjia.performance.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.dto.AdjustCreateDTO;
+import com.panjia.performance.dto.AdjustDetailDTO;
 import com.panjia.performance.dto.AdjustQuery;
 import com.panjia.performance.service.PerformanceAdjustService;
 import lombok.RequiredArgsConstructor;
@@ -55,6 +56,17 @@ public class PerformanceAdjustController extends BaseController {
     @GetMapping("/{id}")
     public R<PerformanceAdjust> getInfo(@PathVariable Long id) {
         return R.ok(adjustService.getAdjust(id));
+    }
+
+    /**
+     * 查询调整单完整详情（含合同信息 + 受影响明细）。
+     * <p>
+     * 审批办理页使用，让审批人能看清调整的标的合同和影响范围。
+     */
+    @SaCheckPermission("perf:adjust:query")
+    @GetMapping("/{id}/detail")
+    public R<AdjustDetailDTO> getDetail(@PathVariable Long id) {
+        return R.ok(adjustService.getAdjustDetail(id));
     }
 
     /**

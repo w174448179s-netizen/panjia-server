@@ -74,9 +74,7 @@ public class ReceivedAlignmentService {
                 continue;
             }
             if (eq(realFact.getPerformanceAmount(), expect.getPerformanceAmount())
-                && eq(realFact.getOriginAmount(), expect.getOriginAmount())
-                && eq(realFact.getShareRatio(), expect.getShareRatio())
-                && eq(realFact.getConversionRate(), expect.getConversionRate())) {
+                && eq(realFact.getShareRatio(), expect.getShareRatio())) {
                 // 金额口径已一致：不替换
                 continue;
             }
@@ -114,8 +112,6 @@ public class ReceivedAlignmentService {
         n.setDeptId(realFact.getDeptId());
         n.setRoleType(realFact.getRoleType());
         n.setShareRatio(expect.getShareRatio());
-        n.setConversionRate(expect.getConversionRate());
-        n.setOriginAmount(expect.getOriginAmount());
         n.setPerformanceAmount(expect.getPerformanceAmount());
         n.setEffectiveDate(realFact.getEffectiveDate() != null ? realFact.getEffectiveDate()
             : realFact.getBusinessDate());

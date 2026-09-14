@@ -42,8 +42,11 @@ public class AdjustCreateDTO {
      */
     private String originalPeriod;
 
-    /** 金额变动值（金额调整时使用） */
+    /** 金额变动值（金额调整时使用，自动计算：targetAmount - 当前金额） */
     private BigDecimal deltaAmount;
+
+    /** 目标金额（金额调整时使用，用户输入的调整后金额） */
+    private BigDecimal targetAmount;
 
     /** 目标部门 ID（部门划转时使用） */
     private Long targetDeptId;

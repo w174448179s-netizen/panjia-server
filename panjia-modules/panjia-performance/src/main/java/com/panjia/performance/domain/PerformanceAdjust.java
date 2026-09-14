@@ -129,7 +129,7 @@ public class PerformanceAdjust implements Serializable {
     @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
     private String approverName;
 
-    /** 调整标的原始金额（列表展示用；明细级=关联事实 origin_amount，合同级=该合同 ACTIVE 事实 origin_amount 合计） */
+    /** 调整标的当前金额（列表展示用，performance_amount 口径） */
     @TableField(exist = false)
-    private BigDecimal originAmount;
+    private BigDecimal currentAmount;
 }

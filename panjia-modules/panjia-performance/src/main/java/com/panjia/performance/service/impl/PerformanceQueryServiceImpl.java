@@ -346,8 +346,6 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         dto.setBizType(fact.getBizType());
         dto.setSourceKey(fact.getSourceKey());
         dto.setShareRatio(fact.getShareRatio());
-        dto.setOriginAmount(fact.getOriginAmount());
-        dto.setConversionRate(fact.getConversionRate());
         dto.setPerformanceAmount(fact.getPerformanceAmount());
         dto.setFactStatus(fact.getFactStatus() != null ? fact.getFactStatus().getCode() : null);
         dto.setSource(fact.getSource() != null ? fact.getSource().getCode() : null);

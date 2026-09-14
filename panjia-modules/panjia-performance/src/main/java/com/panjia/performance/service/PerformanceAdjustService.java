@@ -2,6 +2,7 @@ package com.panjia.performance.service;
 
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.dto.AdjustCreateDTO;
+import com.panjia.performance.dto.AdjustDetailDTO;
 import com.panjia.performance.dto.AdjustQuery;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -30,6 +31,16 @@ public interface PerformanceAdjustService {
      * @return 调整单详情；不存在时返回 null
      */
     PerformanceAdjust getAdjust(Long id);
+
+    /**
+     * 查询调整单完整详情（含合同信息 + 受影响明细）。
+     * <p>
+     * 审批办理页使用，让审批人能看清调整的标的合同和影响范围。
+     *
+     * @param id 调整单 ID
+     * @return 完整详情；不存在时返回 null
+     */
+    AdjustDetailDTO getAdjustDetail(Long id);
 
     /**
      * 发起调整单并启动审批流程。

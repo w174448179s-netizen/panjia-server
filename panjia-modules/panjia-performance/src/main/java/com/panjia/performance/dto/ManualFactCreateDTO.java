@@ -45,8 +45,8 @@ public class ManualFactCreateDTO {
     /** 分摊比例 */
     private BigDecimal shareRatio;
 
-    /** 原始金额 */
-    private BigDecimal originAmount;
+    /** 业绩金额 */
+    private BigDecimal performanceAmount;
 
     /** 录入原因 */
     private String reason;
