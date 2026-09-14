@@ -122,6 +122,13 @@ public class PerformanceEngine {
             return existingLog;
         }
 
+        // 重试时清理上次 FAILED 日志：唯一约束 uk_pcl_batch_event 覆盖所有状态，
+        // 遗留 FAILED 行会导致 INSERT RUNNING 撞约束，陷入「失败→重试→撞约束→再 FAILED」死循环
+        consumeLogMapper.delete(new LambdaQueryWrapper<PerformanceConsumeLog>()
+                .eq(PerformanceConsumeLog::getBatchId, batchId)
+                .eq(PerformanceConsumeLog::getEventType, eventType)
+                .eq(PerformanceConsumeLog::getStatus, ConsumeStatus.FAILED));
+
         // ========== 2. 创建消费日志（RUNNING） ==========
         // period/sourceType 在创建时即从事件回填：批次归属月是事件上下文，不该等到消费完才推导；
         // 事件缺失时（历史空 period 批次 / MANUAL_BUILD）留空，消费完成后兜底推导（period 列可空）

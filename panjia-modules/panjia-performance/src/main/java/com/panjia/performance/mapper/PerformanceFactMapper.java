@@ -682,12 +682,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 已认列当前金额合计（无历史返回 0）
      */
     @Select("""
+        <script>
         SELECT COALESCE(SUM(ROUND(f.origin_amount * f.conversion_rate, 2)), 0)
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = #{factType}
           AND f.period &lt; #{period}
           AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
+        </script>
         """)
     java.math.BigDecimal sumRecognizedCurrentByPrefix(@Param("sourceKeyPrefix") String sourceKeyPrefix,
                                                       @Param("factType") String factType,
@@ -704,6 +706,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 历史最大合同累计应收（无历史返回 0）
      */
     @Select("""
+        <script>
         SELECT COALESCE(MAX(n.total_receivable_amount), 0)
         FROM pj_perf_fact f
         JOIN pj_normalized_record n ON n.id = f.normalized_record_id
@@ -712,6 +715,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.fact_status = 'ACTIVE'
           AND f.period &lt; #{period}
           AND rs.contract_no = #{contractNo}
+        </script>
         """)
     java.math.BigDecimal selectMaxPriorContractTotalReceivable(@Param("contractNo") String contractNo,
                                                                @Param("period") String period);
