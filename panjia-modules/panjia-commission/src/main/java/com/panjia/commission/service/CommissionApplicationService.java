@@ -773,6 +773,14 @@ public class CommissionApplicationService {
             .orderByAsc(CommissionItem::getId));
     }
 
+    /**
+     * 查询申请单下每人结佣明细详情（列口径对齐实收明细详情）。
+     * 过滤掉已冲销（REVERSED）行。
+     */
+    public List<com.panjia.commission.dto.CommissionItemDetailDTO> listItemDetails(Long applicationId) {
+        return itemMapper.selectItemDetails(applicationId);
+    }
+
     public CommissionItem getItem(Long itemId) {
         return itemMapper.selectById(itemId);
     }

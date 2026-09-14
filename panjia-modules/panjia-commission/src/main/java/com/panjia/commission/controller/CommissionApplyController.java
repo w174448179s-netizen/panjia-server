@@ -82,7 +82,7 @@ public class CommissionApplyController extends BaseController {
     @GetMapping("/{id}")
     public R<Map<String, Object>> getInfo(@PathVariable Long id) {
         CommissionApplication application = applicationService.getApplication(id);
-        List<CommissionItem> items = applicationService.listItems(id);
+        List<com.panjia.commission.dto.CommissionItemDetailDTO> items = applicationService.listItemDetails(id);
         return R.ok(Map.of("application", application, "items", items));
     }
 
