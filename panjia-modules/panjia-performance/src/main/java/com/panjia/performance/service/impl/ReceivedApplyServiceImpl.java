@@ -26,6 +26,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.CompleteTaskDTO;
 import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.dao.DuplicateKeyException;
@@ -58,6 +59,9 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     private static final String FLOW_CODE = "perf_received";
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
+    /** 业务角色标识，与 flow_node.permission_flag 的 role:…012 / role:…010 对应。 */
+    private static final String ROLE_FINANCE = "finance";
+    private static final String ROLE_DIRECTOR = "director";
     private static final String FACT_TYPE_REAL = FactType.PERF_REAL.getCode();
     private static final String FACT_TYPE_EXPECT = FactType.PERF_EXPECT.getCode();
 
@@ -185,7 +189,12 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
         }
-        workflowService.completeTask(taskId, StringUtils.isBlank(message) ? "审批通过" : message);
+        // 以当前登录人身份办理：不设置 ignore，由流程引擎按 flow_user 中的本节点办理人判权。
+        // 财务在总监节点、或任何非本节点办理人调用，都会被引擎拒绝（不能再用 ignore 绕过）。
+        CompleteTaskDTO completeTask = new CompleteTaskDTO();
+        completeTask.setTaskId(taskId);
+        completeTask.setMessage(StringUtils.isBlank(message) ? "审批通过" : message);
+        completeTaskAsLoginUser(completeTask);
         refreshCurrentNode(apply);
     }
 
@@ -196,6 +205,9 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             throw new ServiceException("仅审批中的单据可驳回（当前：" + apply.getStatus().getDesc() + "）");
         }
+        // 驳回走的是门面提供的系统身份方法（内部 ignore=true，引擎不鉴权），
+        // 故在业务层补一道「登录人角色 = 当前节点办理角色」校验，堵住财务驳回总监节点单据的越权。
+        assertCurrentNodeHandler(apply);
         Long taskId = workflowService.getCurrentTaskId(String.valueOf(id));
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
@@ -205,6 +217,53 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         apply.setStatus(ReceivedApplyStatus.REJECTED);
         apply.setCurrentNode(null);
         applyMapper.updateById(apply);
+    }
+
+    /**
+     * 以当前登录人身份办理任务（不忽略权限）。
+     * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
+     * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
+     */
+    private void completeTaskAsLoginUser(CompleteTaskDTO completeTask) {
+        // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
+        // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
+        if (LoginHelper.isSuperAdmin()) {
+            workflowService.completeTask(completeTask.getTaskId(), completeTask.getMessage());
+            return;
+        }
+        try {
+            workflowService.completeTask(completeTask);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() == null ? "" : e.getMessage();
+            if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {
+                throw new ServiceException("您不是该单据当前审批节点的办理人，无权审批", e);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 校验登录人是否为本单据当前节点对应的办理角色。
+     * <p>节点 → 角色的映射与流程定义 {@code flow_node.permission_flag}
+     * （rcv_finance → role:…012 财务、rcv_director → role:…010 总监）保持一致。</p>
+     */
+    private void assertCurrentNodeHandler(ReceivedApply apply) {
+        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(apply.getId()));
+        String requiredRole;
+        if (NODE_DIRECTOR.equals(nodeCode)) {
+            requiredRole = ROLE_DIRECTOR;
+        } else if (NODE_FINANCE.equals(nodeCode)) {
+            requiredRole = ROLE_FINANCE;
+        } else {
+            throw new ServiceException("该单据当前不在可审批节点，无法驳回");
+        }
+        if (LoginHelper.isSuperAdmin()) {
+            return;
+        }
+        if (!currentRoles().contains(requiredRole)) {
+            throw new ServiceException("该单据当前由「"
+                + (ROLE_DIRECTOR.equals(requiredRole) ? "总监" : "财务") + "」办理，您无权驳回");
+        }
     }
 
     @Override

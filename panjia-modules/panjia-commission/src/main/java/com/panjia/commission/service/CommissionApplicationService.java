@@ -33,6 +33,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.CompleteTaskDTO;
 import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.dao.DuplicateKeyException;
@@ -82,6 +83,9 @@ public class CommissionApplicationService {
     private static final String FLOW_CODE = "commission_apply";
     private static final String NODE_DIRECTOR = "capp_director";
     private static final String NODE_FINANCE = "capp_finance";
+    /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 / role:…012 对应。 */
+    private static final String ROLE_DIRECTOR = "director";
+    private static final String ROLE_FINANCE = "finance";
     private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
 
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
@@ -385,10 +389,19 @@ public class CommissionApplicationService {
         CommissionApplication application = requireSubmitted(applicationId);
         String node = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
         if (NODE_DIRECTOR.equals(node)) {
+            // 总监节点：仅总监可办理（引擎按 flow_user 名单判权，越权直接拒绝）
+            assertCurrentNodeHandler(application, "审批");
             doDirectorApprove(application, LoginHelper.getUserId(), "总监审批通过");
         } else if (NODE_FINANCE.equals(node)) {
+            assertCurrentNodeHandler(application, "审批");
             Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
-            workflowService.completeTask(taskId, "财务审批通过");
+            if (taskId == null) {
+                throw new ServiceException("当前无待办任务");
+            }
+            CompleteTaskDTO completeTask = new CompleteTaskDTO();
+            completeTask.setTaskId(taskId);
+            completeTask.setMessage("财务审批通过");
+            completeTaskAsLoginUser(completeTask);
         } else {
             throw new ServiceException("当前无可审批节点（节点=" + node + "）");
         }
@@ -401,6 +414,9 @@ public class CommissionApplicationService {
     @Transactional(rollbackFor = Exception.class)
     public void reject(Long applicationId, String message) {
         CommissionApplication application = requireSubmitted(applicationId);
+        // 驳回走的是门面提供的系统身份方法（内部 ignore=true，引擎不鉴权），
+        // 故在业务层补一道「登录人角色 = 当前节点办理角色」校验，堵住越权驳回。
+        assertCurrentNodeHandler(application, "驳回");
         Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
@@ -410,6 +426,57 @@ public class CommissionApplicationService {
         application.setCurrentNode(null);
         applicationMapper.updateById(application);
         log.info("[结佣-驳回] applyNo={}, message={}", application.getApplyNo(), message);
+    }
+
+    /**
+     * 以当前登录人身份办理任务（不忽略权限）。
+     * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
+     * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
+     */
+    private void completeTaskAsLoginUser(CompleteTaskDTO completeTask) {
+        // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
+        // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
+        if (LoginHelper.isSuperAdmin()) {
+            workflowService.completeTask(completeTask.getTaskId(), completeTask.getMessage());
+            return;
+        }
+        try {
+            workflowService.completeTask(completeTask);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() == null ? "" : e.getMessage();
+            if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {
+                throw new ServiceException("您不是该单据当前审批节点的办理人，无权审批", e);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 校验登录人是否为本单据当前节点对应的办理角色。
+     * <p>节点 → 角色的映射与流程定义 {@code flow_node.permission_flag}
+     * （capp_director → role:…010 总监、capp_finance → role:…012 财务）保持一致。</p>
+     *
+     * @param action 动作名，用于拼装错误提示（审批 / 驳回）
+     */
+    private void assertCurrentNodeHandler(CommissionApplication application, String action) {
+        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(application.getId()));
+        String requiredRole;
+        String requiredRoleName;
+        if (NODE_DIRECTOR.equals(nodeCode)) {
+            requiredRole = ROLE_DIRECTOR;
+            requiredRoleName = "总监";
+        } else if (NODE_FINANCE.equals(nodeCode)) {
+            requiredRole = ROLE_FINANCE;
+            requiredRoleName = "财务";
+        } else {
+            throw new ServiceException("该单据当前不在可审批节点，无法" + action);
+        }
+        if (LoginHelper.isSuperAdmin()) {
+            return;
+        }
+        if (!currentRoles().contains(requiredRole)) {
+            throw new ServiceException("该单据当前由「" + requiredRoleName + "」办理，您无权" + action);
+        }
     }
 
     /**
@@ -834,11 +901,15 @@ public class CommissionApplicationService {
             recalcAggregates(application.getId(), application);
         }
 
-        workflowService.completeTask(directorTask,
-            StringUtils.isBlank(message) ? "总监审批通过" : message
-                + (hasDiff ? "（实收已自动对齐应收，转财务复核）" : ""));
+        // 总监本人办理：不设 ignore，交由引擎按 flow_user 名单判权（双保险，越权直接拒绝）
+        CompleteTaskDTO directorComplete = new CompleteTaskDTO();
+        directorComplete.setTaskId(directorTask);
+        directorComplete.setMessage(StringUtils.isBlank(message) ? "总监审批通过" : message
+            + (hasDiff ? "（实收已自动对齐应收，转财务复核）" : ""));
+        completeTaskAsLoginUser(directorComplete);
 
         // §3.4 无差异不流转财务（或全局跳过财务）→ 系统自动完成财务节点
+        // 注意：此处为「系统自动审批」（无登录办理人），必须保留 ignore=true，不属于越权。
         boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));
         if (!hasDiff || skipFinance) {
             Long financeTask = taskAtNode(application.getId(), NODE_FINANCE);
