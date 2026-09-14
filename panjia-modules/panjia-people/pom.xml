@@ -76,6 +76,12 @@
             <artifactId>ruoyi-system</artifactId>
         </dependency>
 
+        <!-- 底座字段翻译（EmployeeNameTranslationImpl：TranslationInterface / @TranslationType） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-translation</artifactId>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>

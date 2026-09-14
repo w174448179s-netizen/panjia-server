@@ -7,6 +7,8 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
 import lombok.Data;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 
 import java.io.Serial;
 import java.io.Serializable;
@@ -83,8 +85,21 @@ public class CommissionApplication implements Serializable {
     /** 发起人 ID */
     private Long applicantId;
 
+    /**
+     * 发起人昵称（非入库字段；序列化时按 {@link #applicantId} 翻译）。
+     * 业务角色无 system:user:query 权限，前端不查用户表，由后端统一翻译。
+     */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "applicantId")
+    private String applicantName;
+
     /** 审批人 ID */
     private Long approverId;
+
+    /** 审批人昵称（非入库字段；序列化时按 {@link #approverId} 翻译） */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
+    private String approverName;
 
     /** 锁定时间 */
     private LocalDateTime lockTime;

@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 
 import java.io.Serial;
 import java.io.Serializable;
@@ -113,6 +115,19 @@ public class PerformanceAdjust implements Serializable {
     /** 目标部门名称（划转类展示用，由 sys_dept 回填） */
     @TableField(exist = false)
     private String targetDeptName;
+
+    /**
+     * 申请人昵称（非入库字段；序列化时按 {@link #applicantId} 翻译）。
+     * 业务角色无 system:user:query 权限，前端不查用户表，由后端统一翻译。
+     */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "applicantId")
+    private String applicantName;
+
+    /** 审批人昵称（非入库字段；序列化时按 {@link #approverId} 翻译） */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
+    private String approverName;
 
     /** 调整标的原始金额（列表展示用；明细级=关联事实 origin_amount，合同级=该合同 ACTIVE 事实 origin_amount 合计） */
     @TableField(exist = false)
