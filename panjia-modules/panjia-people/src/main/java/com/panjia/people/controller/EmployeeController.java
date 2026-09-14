@@ -164,7 +164,7 @@ public class EmployeeController extends BaseController {
         try {
             Long batchId = employeeImportService.importEmployees(
                 file.getBytes(), file.getOriginalFilename(), LoginHelper.getUserId());
-            return R.ok("导入完成", batchId);
+            return R.ok("导入已提交，正在后台处理", batchId);
         } catch (Exception e) {
             log.error("员工导入失败", e);
             return R.fail("员工导入失败: " + e.getMessage());
@@ -180,6 +180,18 @@ public class EmployeeController extends BaseController {
     @GetMapping("/import/batches")
     public R<List<PeopleImportBatch>> importBatches() {
         return R.ok(employeeImportService.listBatches());
+    }
+
+    /**
+     * 员工导入批次详情（前端轮询进度用）。
+     *
+     * @param batchId 批次 ID
+     * @return 批次
+     */
+    @SaCheckPermission("people:employee:import")
+    @GetMapping("/import/batches/{batchId}")
+    public R<PeopleImportBatch> importBatch(@PathVariable Long batchId) {
+        return R.ok(employeeImportService.getBatch(batchId));
     }
 
     /**

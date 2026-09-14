@@ -32,7 +32,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
@@ -55,12 +57,13 @@ import java.util.stream.Collectors;
  * <p>
  * 文件解析/归档/基础格式校验由 common-import-util 提供；本服务只做：
  * <ul>
- *   <li>阶段 A（独立小事务）：落批次 PARSING + 原始行 raw_json（insert-only）+
+ *   <li>阶段 A（同步，独立小事务）：落批次 PARSING + 原始行 raw_json（insert-only）+
  *       基础格式 issue + 业务校验 issue（工号唯一/部门路径/师傅存在）；
  *       存在任一阻断 issue → 批次 FAILED（issue 保留供排查）；</li>
- *   <li>阶段 B（★ 单一大原子事务）：逐行 deptPort.ensureDept 自动建树 →
- *       复用 {@link EmployeeService#createEmployee}（员工 + sys_user + 岗位/角色 +
- *       8 条 fact + change_log + salary_record）；任一行失败整批回滚 → FAILED。</li>
+ *   <li>阶段 B（异步，单一大原子事务）：提交到线程池后台执行，
+ *       逐行 deptPort.ensureDept 自动建树 → 复用 {@link EmployeeService#createEmployee}；
+ *       每 {@value #PROGRESS_INTERVAL} 行用 REQUIRES_NEW 事务更新批次进度（前端可轮询）；
+ *       任一行失败整批回滚 → FAILED。</li>
  * </ul>
  */
 @Slf4j
@@ -80,6 +83,9 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     /** 部门路径分隔符（模板约定：门店-组别） */
     private static final String DEPT_PATH_SEPARATOR = "-";
 
+    /** 进度更新间隔（每 N 行更新一次批次进度） */
+    private static final int PROGRESS_INTERVAL = 50;
+
     /** 系统操作人（无人值守兜底） */
     private static final Long SYSTEM_OPERATOR_ID = 0L;
 
@@ -95,12 +101,17 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     private final EmployeeService employeeService;
     private final DeptPort deptPort;
     private final PlatformTransactionManager transactionManager;
+    private final TaskExecutor taskExecutor;
 
     private TransactionTemplate txTemplate;
+    private TransactionTemplate progressTxTemplate;
 
     @PostConstruct
     void init() {
         this.txTemplate = new TransactionTemplate(transactionManager);
+        this.progressTxTemplate = new TransactionTemplate(transactionManager);
+        this.progressTxTemplate.setPropagationBehavior(
+            TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     @Override
@@ -136,14 +147,11 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             return batchId;
         }
 
-        // 6. 阶段 B：单一大原子事务落地
-        try {
-            txTemplate.executeWithoutResult(status -> doImport(batchId, sheet, operatorId, deptCols));
-        } catch (Exception e) {
-            log.error("员工导入落地失败，整批回滚 batchId={}", batchId, e);
-            markFailed(batchId, "落地失败整批回滚: " + e.getMessage());
-            throw new ServiceException("员工导入失败: " + e.getMessage());
-        }
+        // 6. 阶段 B：异步提交到线程池（不阻塞 HTTP 请求）
+        ParsedSheet sheetRef = sheet;
+        List<ColumnDef> deptColsRef = deptCols;
+        taskExecutor.execute(() -> doImportAsync(batchId, sheetRef, operatorId, deptColsRef));
+
         return batchId;
     }
 
@@ -293,33 +301,85 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         return issues;
     }
 
-    // ==================== 阶段 B：单一大原子事务落地 ====================
+    // ==================== 阶段 B：异步落地 ====================
 
     /**
-     * 落地阶段（在单一大原子事务内执行）：逐行建树 + 复用员工新增全流程。
+     * 异步落地入口（线程池调度）：设置 IMPORTING → 主事务执行 → SUCCESS/FAILED。
+     * 状态变更通过 REQUIRES_NEW 事务独立提交，主事务只做员工数据写入。
      */
-    private void doImport(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
-        PeopleImportBatch batch = batchMapper.selectById(batchId);
-        if (batch == null) {
-            throw new IllegalStateException("导入批次不存在: " + batchId);
+    private void doImportAsync(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
+        updateBatchStatus(batchId, PeopleImportBatchStatus.IMPORTING, 0, 0, null);
+        try {
+            txTemplate.executeWithoutResult(status ->
+                doImportEmployees(batchId, sheet, operatorId, deptCols));
+            updateBatchStatus(batchId, PeopleImportBatchStatus.SUCCESS,
+                sheet.getTotalRows(), 0, null);
+            log.info("[员工导入] 异步落地成功：batchId={}, totalRows={}",
+                batchId, sheet.getTotalRows());
+        } catch (Exception e) {
+            log.error("[员工导入] 异步落地失败，整批回滚 batchId={}", batchId, e);
+            updateBatchStatus(batchId, PeopleImportBatchStatus.FAILED, 0, 0,
+                "落地失败整批回滚: " + e.getMessage());
         }
-        batch.setStatus(PeopleImportBatchStatus.IMPORTING);
-        batchMapper.updateById(batch);
+    }
 
+    /**
+     * 逐行创建员工（在主事务内执行，不更新批次行避免锁竞争）。
+     * 每 {@value #PROGRESS_INTERVAL} 行通过 REQUIRES_NEW 事务更新进度。
+     */
+    private void doImportEmployees(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
-        // 部门路径 → deptId 文件内缓存：导入文件同部门重复率极高（一个门店几十人），
-        // ensureDept 内部逐级查询+建树，不缓存则每行重复 2-4 条 SQL
         Map<String, Long> deptIdCache = new HashMap<>();
+        int processed = 0;
         for (ParsedRow row : sheet.getRows()) {
             EmployeeCreateDTO dto = toCreateDTO(row, deptCols, deptIdCache);
             employeeService.createEmployee(dto, operator);
+            processed++;
+            if (processed % PROGRESS_INTERVAL == 0) {
+                updateProgress(batchId, processed);
+            }
         }
+    }
 
-        batch.setStatus(PeopleImportBatchStatus.SUCCESS);
-        batch.setSuccessRows(sheet.getTotalRows());
-        batch.setFailedRows(0);
-        batch.setRemark(null);
-        batchMapper.updateById(batch);
+    /**
+     * 通过 REQUIRES_NEW 事务更新批次进度（独立提交，主事务不持有批次行锁）。
+     */
+    private void updateProgress(Long batchId, int successRows) {
+        try {
+            progressTxTemplate.executeWithoutResult(status -> {
+                PeopleImportBatch batch = batchMapper.selectById(batchId);
+                if (batch != null) {
+                    batch.setSuccessRows(successRows);
+                    batchMapper.updateById(batch);
+                }
+            });
+        } catch (Exception e) {
+            log.debug("[员工导入] 进度更新异常（非致命）batchId={}: {}", batchId, e.getMessage());
+        }
+    }
+
+    /**
+     * 通过独立事务更新批次状态和结果（异步落地前后调用）。
+     */
+    private void updateBatchStatus(Long batchId, PeopleImportBatchStatus status,
+                                    Integer successRows, Integer failedRows, String remark) {
+        try {
+            progressTxTemplate.executeWithoutResult(status1 -> {
+                PeopleImportBatch batch = batchMapper.selectById(batchId);
+                if (batch != null) {
+                    batch.setStatus(status);
+                    if (successRows != null) batch.setSuccessRows(successRows);
+                    if (failedRows != null) batch.setFailedRows(failedRows);
+                    if (remark != null) batch.setRemark(truncate(remark, 500));
+                    if (status == PeopleImportBatchStatus.SUCCESS && remark == null) {
+                        batch.setRemark(null);
+                    }
+                    batchMapper.updateById(batch);
+                }
+            });
+        } catch (Exception e) {
+            log.warn("[员工导入] 批次状态更新异常 batchId={}: {}", batchId, e.getMessage(), e);
+        }
     }
 
     /**
@@ -353,24 +413,6 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     }
 
     // ==================== 辅助方法 ====================
-
-    /**
-     * 阶段 B 失败后在新事务内标记批次 FAILED（落地事务已回滚，批次/raw/issue 保留）。
-     */
-    private void markFailed(Long batchId, String reason) {
-        try {
-            txTemplate.executeWithoutResult(status -> {
-                PeopleImportBatch batch = batchMapper.selectById(batchId);
-                if (batch != null) {
-                    batch.setStatus(PeopleImportBatchStatus.FAILED);
-                    batch.setRemark(truncate(reason, 500));
-                    batchMapper.updateById(batch);
-                }
-            });
-        } catch (Exception e) {
-            log.warn("标记批次 FAILED 异常 batchId={}", batchId, e);
-        }
-    }
 
     private PeopleImportIssue toIssue(Long batchId, FieldError fe) {
         return buildIssue(batchId, fe.getRowNo(), mapIssueType(fe),

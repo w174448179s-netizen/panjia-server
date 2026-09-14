@@ -8,8 +8,9 @@ import java.util.List;
 /**
  * 员工导入服务（V6.0：员工导入回迁 people 域本域承接）。
  * <p>
- * 两阶段执行：阶段 A 诊断（解析落 raw + 基础/业务校验，阻断问题致批次 FAILED）；
- * 阶段 B 单一大原子事务逐行复用 {@link EmployeeService#createEmployee} 落地，
+ * 两阶段执行：阶段 A（同步）诊断（解析落 raw + 基础/业务校验，阻断问题致批次 FAILED）；
+ * 阶段 B（异步）提交到线程池后台执行，单一大原子事务逐行复用
+ * {@link EmployeeService#createEmployee} 落地，每 50 行更新进度（前端轮询可查）；
  * 任一行失败整批回滚不留半成品。
  */
 public interface EmployeeImportService {
