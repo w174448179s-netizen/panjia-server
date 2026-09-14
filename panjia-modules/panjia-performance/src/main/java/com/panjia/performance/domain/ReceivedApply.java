@@ -7,6 +7,8 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
 import lombok.Data;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 
 import java.io.Serial;
 import java.io.Serializable;
@@ -64,6 +66,18 @@ public class ReceivedApply implements Serializable {
     /** 明细条数（实收事实条数） */
     private Integer itemCount;
 
+    /**
+     * 业务类型（非入库字段；列表查询时按 (period, contractNo) 回填 ACTIVE PERF_REAL 事实的 biz_type）。
+     */
+    @TableField(exist = false)
+    private String bizType;
+
+    /**
+     * 涉及人数（非入库字段；列表查询时回填该合同本期间实收事实的去重员工数）。
+     */
+    @TableField(exist = false)
+    private Integer employeeCount;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 
@@ -77,8 +91,23 @@ public class ReceivedApply implements Serializable {
     /** 发起人 ID（系统自动发起为空） */
     private Long applicantId;
 
+    /**
+     * 发起人昵称（非入库字段；序列化时按 {@link #applicantId} 翻译）。
+     * <p>
+     * 业务角色（店长/财务/人事/经纪人）没有 system:user:query 权限，前端无法自行查用户表翻译，
+     * 故由后端统一翻译。为空表示系统自动发起（如导入归档自动建单），前端展示「系统自动」。
+     */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "applicantId")
+    private String applicantName;
+
     /** 终审人 ID */
     private Long approverId;
+
+    /** 终审人昵称（非入库字段；序列化时按 {@link #approverId} 翻译） */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
+    private String approverName;
 
     /** 终审时间 */
     private LocalDateTime approveTime;

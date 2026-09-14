@@ -151,6 +151,36 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                 r.setTargetDeptName(deptNameMap.get(r.getTargetDeptId()));
             }
         }
+        fillOriginAmounts(records);
+    }
+
+    /**
+     * 回填调整标的原始金额：明细级取关联事实 origin_amount（一次 IN 批量），
+     * 合同级汇总该合同下全部 ACTIVE 事实 origin_amount（口径同 selectActiveFactsByContractNo，
+     * 跨月调整用 originalPeriod 定位原月事实）。合同级行数少，逐行查询无 N+1 风险。
+     */
+    private void fillOriginAmounts(List<PerformanceAdjust> records) {
+        // 明细级：批量取
+        List<Long> factIds = records.stream()
+            .map(PerformanceAdjust::getFactId).filter(java.util.Objects::nonNull)
+            .toList();
+        Map<Long, java.math.BigDecimal> factAmountMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.originAmounts(factIds)) {
+            factAmountMap.put(((Number) row.get("factId")).longValue(),
+                (java.math.BigDecimal) row.get("originAmount"));
+        }
+        for (PerformanceAdjust r : records) {
+            if (r.getFactId() != null) {
+                r.setOriginAmount(factAmountMap.get(r.getFactId()));
+            } else if (StringUtils.isNotBlank(r.getContractNo())
+                && r.getFactType() != null && StringUtils.isNotBlank(r.getPeriod())) {
+                // 合同级：跨月调整取原月
+                String loadPeriod = StringUtils.isNotBlank(r.getOriginalPeriod())
+                    ? r.getOriginalPeriod() : r.getPeriod();
+                r.setOriginAmount(adjustMapper.selectContractOriginAmount(
+                    loadPeriod, r.getFactType(), r.getContractNo()));
+            }
+        }
     }
 
     @Override

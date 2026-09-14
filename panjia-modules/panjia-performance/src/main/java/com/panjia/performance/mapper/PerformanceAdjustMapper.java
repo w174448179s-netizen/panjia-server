@@ -59,4 +59,48 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
         }
         return selectDeptNamesByIds(ids);
     }
+
+    /**
+     * 批量查询业绩事实的原始金额（按事实 ID）。
+     *
+     * @param ids 事实 ID 集合
+     * @return 每行含 factId / originAmount；ids 为空时返回空列表
+     */
+    @Select("<script>"
+        + "SELECT id AS \"factId\", origin_amount AS \"originAmount\" "
+        + "FROM pj_perf_fact "
+        + "WHERE id IN "
+        + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
+        + "</script>")
+    List<Map<String, Object>> selectOriginAmountsByFactIds(@Param("ids") List<Long> ids);
+
+    /**
+     * 合同级调整：汇总该合同下全部 ACTIVE 事实的原始金额（口径同 selectActiveFactsByContractNo）。
+     *
+     * @param period     归属期间（跨月调整传原业绩归属月）
+     * @param factType   事实口径
+     * @param contractNo 合同号
+     * @return 原始金额合计，无匹配事实时为 0
+     */
+    @Select("""
+        SELECT COALESCE(SUM(f.origin_amount), 0)
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND rs.contract_no = #{contractNo}
+        """)
+    java.math.BigDecimal selectContractOriginAmount(@Param("period") String period,
+                                                     @Param("factType") String factType,
+                                                     @Param("contractNo") String contractNo);
+
+    /** 空集合安全 */
+    default List<Map<String, Object>> originAmounts(List<Long> ids) {
+        if (CollectionUtils.isEmpty(ids)) {
+            return Collections.emptyList();
+        }
+        return selectOriginAmountsByFactIds(ids);
+    }
 }

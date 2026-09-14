@@ -6,6 +6,7 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
+import com.panjia.performance.dto.ReceivedContractMetricsDTO;
 import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
@@ -816,6 +817,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 每人实收明细行
      */
     @Select("""
+        <script>
         SELECT f.id AS "factId",
                f.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
@@ -855,9 +857,40 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.fact_type = 'PERF_REAL'
           AND rs.contract_no = #{contractNo}
         ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
+        </script>
         """)
     List<ReceivedFactDetailDTO> selectReceivedFactDetails(@Param("period") String period,
                                                            @Param("contractNo") String contractNo);
+
+    /**
+     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数）。
+     * <p>
+     * 实收审批单表不存这两个字段，列表页按 (period, contractNo) 从 ACTIVE PERF_REAL
+     * 事实聚合回填，口径与详情弹窗的「每人实收明细」一致（同期间同口径）。
+     *
+     * @param period      归属期间
+     * @param contractNos 合同号集合（不可为空，调用方需先过滤）
+     * @return 合同维度的业务类型与涉及人数
+     */
+    @Select("""
+        <script>
+        SELECT rs.contract_no AS "contractNo",
+               MAX(f.biz_type) AS "bizType",
+               COUNT(DISTINCT f.employee_id) AS "employeeCount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_REAL'
+          AND f.period = #{period}
+          AND rs.contract_no IN
+          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
+        GROUP BY rs.contract_no
+        </script>
+        """)
+    List<ReceivedContractMetricsDTO> selectReceivedContractMetrics(
+        @Param("period") String period,
+        @Param("contractNos") Collection<String> contractNos);
 
     /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。

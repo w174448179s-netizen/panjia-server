@@ -113,4 +113,8 @@ public class PerformanceAdjust implements Serializable {
     /** 目标部门名称（划转类展示用，由 sys_dept 回填） */
     @TableField(exist = false)
     private String targetDeptName;
+
+    /** 调整标的原始金额（列表展示用；明细级=关联事实 origin_amount，合同级=该合同 ACTIVE 事实 origin_amount 合计） */
+    @TableField(exist = false)
+    private BigDecimal originAmount;
 }

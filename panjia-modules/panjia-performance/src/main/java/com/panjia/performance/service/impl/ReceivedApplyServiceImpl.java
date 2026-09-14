@@ -11,6 +11,7 @@ import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import com.panjia.performance.dto.ReceivedContractGroupDTO;
+import com.panjia.performance.dto.ReceivedContractMetricsDTO;
 import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
@@ -37,6 +38,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -347,7 +349,53 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 .or().like(ReceivedApply::getPropertyAddress, query.getKeyword()))
             .orderByDesc(ReceivedApply::getCreateTime);
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
-        return PageResult.build(page.getRecords(), page.getTotal());
+        List<ReceivedApply> records = page.getRecords();
+        fillContractMetrics(records);
+        return PageResult.build(records, page.getTotal());
+    }
+
+    /**
+     * 回填实收明细列表的补充字段（业务类型、涉及人数）。
+     * <p>
+     * 审批单表不存这两个字段，按 (period, contractNo) 从 ACTIVE PERF_REAL 事实聚合，
+     * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
+     * 期间或合同号缺失的行保持 null，前端显示占位符。
+     */
+    private void fillContractMetrics(List<ReceivedApply> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Map<String, Set<String>> contractsByPeriod = new HashMap<>();
+        for (ReceivedApply apply : records) {
+            if (StringUtils.isBlank(apply.getPeriod()) || StringUtils.isBlank(apply.getContractNo())) {
+                continue;
+            }
+            contractsByPeriod.computeIfAbsent(apply.getPeriod(), k -> new LinkedHashSet<>())
+                .add(apply.getContractNo());
+        }
+        if (contractsByPeriod.isEmpty()) {
+            return;
+        }
+        Map<String, ReceivedContractMetricsDTO> metrics = new HashMap<>();
+        for (Map.Entry<String, Set<String>> entry : contractsByPeriod.entrySet()) {
+            List<ReceivedContractMetricsDTO> rows =
+                factMapper.selectReceivedContractMetrics(entry.getKey(), entry.getValue());
+            for (ReceivedContractMetricsDTO row : rows) {
+                metrics.put(metricsKey(entry.getKey(), row.getContractNo()), row);
+            }
+        }
+        for (ReceivedApply apply : records) {
+            ReceivedContractMetricsDTO m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
+            if (m != null) {
+                apply.setBizType(m.getBizType());
+                apply.setEmployeeCount(m.getEmployeeCount());
+            }
+        }
+    }
+
+    /** 组装 (期间, 合同号) 复合键；任一为空返回空串（对应查不到，保持 null）。 */
+    private String metricsKey(String period, String contractNo) {
+        return StringUtils.isBlank(period) || StringUtils.isBlank(contractNo) ? "" : period + '|' + contractNo;
     }
 
     @Override
