@@ -61,6 +61,12 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 来源业务单号（幂等锚点，审计用） */
     private String sourceKey;
 
+    /** 实收审批单 ID（PERF_REAL 事实关联的实收业绩审批单，§2 实收审批通过后方可发起结佣） */
+    private Long receivedApplyId;
+
+    /** 实收审批单状态（DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED；无单为 null） */
+    private String receivedStatus;
+
     /** 合同号（raw_signed.contract_no，结佣列表合同维度展示用） */
     private String contractNo;
 

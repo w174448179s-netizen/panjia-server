@@ -2,6 +2,7 @@ package com.panjia.contracts.port;
 
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
+import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 
 import java.util.Collection;
 import java.util.List;
@@ -77,4 +78,18 @@ public interface CommissionPerformanceQueryPort {
      * @return 合同维度摘要列表（仅 contract_no 非空的合同，按签约时间倒序由调用方排序）
      */
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType);
+
+    /**
+     * 实收自动对齐应收（§3.5，结佣总监审批发现差异时调用）。
+     * <p>
+     * 将指定合同当月每条 ACTIVE 的 PERF_REAL 事实，按同 sourceKey 的 PERF_EXPECT 事实口径
+     * （原始金额/折算系数/分摊比例/业绩金额）supersede 为新事实，实现「合同总额 + 每人明细」
+     * 实收全部对齐应收；已一致的事实保持不变。对齐后返回新旧事实映射供结佣域重绑明细。
+     *
+     * @param period     归属期间 YYYY-MM
+     * @param contractNo 合同号
+     * @param operatorId 操作人 ID（系统办理记总监审批人）
+     * @return 对齐结果（含替换映射与对齐前后合计）；无对应应收事实的实收事实保持不变
+     */
+    ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId);
 }

@@ -25,6 +25,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,6 +34,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -76,8 +78,13 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     /** 调整范围：明细级 */
     private static final String SCOPE_DETAIL = "DETAIL";
 
+    /** §4.1 业绩调整只允许改应收口径 */
+    private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
+
     /** 工作流状态：审批通过（BusinessStatusEnum.finish） */
     private static final String WF_STATUS_FINISH = "finish";
+    /** 工作流状态：驳回（REJECT 边回调，与实收/结佣一致 status=back） */
+    private static final String WF_STATUS_BACK = "back";
     /** 工作流状态：作废（BusinessStatusEnum.invalid） */
     private static final String WF_STATUS_INVALID = "invalid";
     /** 工作流状态：终止（BusinessStatusEnum.termination） */
@@ -164,6 +171,10 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             throw new ServiceException("非法调整类型：{}", dto.getAdjustType());
         }
         String scope = StringUtils.isBlank(dto.getAdjustScope()) ? SCOPE_DETAIL : dto.getAdjustScope();
+        // §4.1 业绩调整只改应收（PERF_EXPECT）：合同级 / 明细级均拦截
+        if (!FACT_TYPE_EXPECT.equals(dto.getFactType())) {
+            throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
+        }
         if (SCOPE_CONTRACT.equals(scope)) {
             // 合同级当前仅支持金额调整（按占比分摊）
             if (adjustType != AdjustType.AMOUNT) {
@@ -187,6 +198,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         adjust.setAdjustScope(scope);
         adjust.setContractNo(dto.getContractNo());
         adjust.setFactType(dto.getFactType());
+        adjust.setOriginalPeriod(dto.getOriginalPeriod());
         adjust.setDeltaAmount(dto.getDeltaAmount());
         adjust.setTargetDeptId(dto.getTargetDeptId());
         adjust.setReason(dto.getReason());
@@ -195,16 +207,44 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         adjust.setApplicantId(applicantId);
 
         // 合同级调整前端可能未传员工/部门（合同聚合行无此信息），从该合同首条 ACTIVE 事实回填
+        // 跨月调整时事实在 originalPeriod（原业绩归属月）
         if (SCOPE_CONTRACT.equals(scope)
-            && (dto.getDeptId() == null || dto.getDeptId() <= 0)) {
+            && (dto.getDeptId() == null || dto.getDeptId() <= 0 || dto.getEmployeeId() == null)) {
+            String factLoadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+                ? dto.getOriginalPeriod() : dto.getPeriod();
             List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
-                dto.getPeriod(), dto.getFactType(), dto.getContractNo());
+                factLoadPeriod, dto.getFactType(), dto.getContractNo());
             if (facts == null || facts.isEmpty()) {
                 throw new ServiceException("合同下未找到有效业绩事实，无法发起调整：{}", dto.getContractNo());
             }
-            adjust.setDeptId(facts.get(0).getDeptId());
+            if (adjust.getDeptId() == null || adjust.getDeptId() <= 0) {
+                adjust.setDeptId(facts.get(0).getDeptId());
+            }
             if (adjust.getEmployeeId() == null) {
                 adjust.setEmployeeId(facts.get(0).getEmployeeId());
+            }
+        }
+
+        // 明细级调整：员工/部门缺省从关联事实回填；同时前置校验事实存在、口径为应收、状态有效（§4.1）
+        if (SCOPE_DETAIL.equals(scope)
+            && (dto.getEmployeeId() == null || dto.getDeptId() == null || dto.getDeptId() <= 0)) {
+            PerformanceFact refFact = factMapper.selectById(dto.getFactId());
+            if (refFact == null) {
+                throw new ServiceException("关联业绩事实不存在：factId={}", dto.getFactId());
+            }
+            if (refFact.getFactType() == null
+                || !FACT_TYPE_EXPECT.equals(refFact.getFactType().getCode())) {
+                throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
+            }
+            if (refFact.getFactStatus() != FactStatus.ACTIVE) {
+                throw new ServiceException("关联业绩事实非有效状态，无法调整：factId={}, status={}",
+                    dto.getFactId(), refFact.getFactStatus().getCode());
+            }
+            if (adjust.getEmployeeId() == null) {
+                adjust.setEmployeeId(refFact.getEmployeeId());
+            }
+            if (adjust.getDeptId() == null || adjust.getDeptId() <= 0) {
+                adjust.setDeptId(refFact.getDeptId());
             }
         }
 
@@ -218,6 +258,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         // 后端发起无登录用户上下文，忽略权限
         variables.put("ignore", true);
         startProcess.setVariables(variables);
+        startProcess.setBizExt(buildBizExt(adjust));
 
         boolean started;
         try {
@@ -264,6 +305,20 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                     adjustId, handler, message);
                 executeAdjust(adjustId, handlerId);
             }
+            case WF_STATUS_BACK -> {
+                // 总监驳回 → 调整单 REJECTED（与实收/结佣驳回语义一致）
+                if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
+                    log.info("[调整单工作流] 非提交态，忽略驳回回调：adjustId={}, current={}",
+                        adjustId, adjust.getStatus());
+                    return;
+                }
+                adjust.setStatus(AdjustStatus.REJECTED);
+                adjust.setApproverId(handlerId);
+                adjust.setApproveTime(LocalDateTime.now());
+                adjustMapper.updateById(adjust);
+                log.info("[调整单工作流] 总监驳回，调整单置 REJECTED：adjustId={}, message={}",
+                    adjustId, message);
+            }
             case WF_STATUS_INVALID, WF_STATUS_TERMINATION -> {
                 if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
                     log.info("[调整单工作流] 非提交态，忽略作废/终止回调：adjustId={}, current={}",
@@ -299,6 +354,21 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         PerformanceAdjust adjust = getAndCheck(id);
         checkTransition(adjust.getStatus(), AdjustStatus.CANCELLED, "调整单");
 
+        // 终止运行中的审批流程实例（触发 cancel 事件，监听器幂等置 CANCELLED），与实收/结佣作废一致
+        if (StringUtils.isNotBlank(adjust.getProcessInstanceId())) {
+            try {
+                workflowService.deleteInstance(List.of(String.valueOf(id)));
+            } catch (Exception e) {
+                log.warn("[调整单] 取消时终止流程实例失败，按业务取消继续：adjustId={}", id, e);
+            }
+            PerformanceAdjust latest = adjustMapper.selectById(id);
+            if (latest != null && latest.getStatus() == AdjustStatus.CANCELLED) {
+                log.info("[调整单] 取消（流程事件已置 CANCELLED）：adjustId={}, operatorId={}", id, operatorId);
+                return;
+            }
+            adjust = latest != null ? latest : adjust;
+        }
+
         adjust.setStatus(AdjustStatus.CANCELLED);
         adjust.setOperatorId(operatorId);
         adjustMapper.updateById(adjust);
@@ -314,12 +384,38 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            executeContractAmountAdjust(adjust, operatorId);
+            // 合同级仅 AMOUNT：原月=调整月走金额调整；跨月走业绩冲销（§4.6）
+            String originalPeriod = StringUtils.isNotBlank(adjust.getOriginalPeriod())
+                ? adjust.getOriginalPeriod() : adjust.getPeriod();
+            if (originalPeriod.equals(adjust.getPeriod())) {
+                executeContractAmountAdjust(adjust, operatorId);
+            } else {
+                executeContractCrossMonthAdjust(adjust, originalPeriod, operatorId);
+            }
         } else {
+            PerformanceFact oldFact = getActiveFact(adjust);
+            boolean crossMonth = !oldFact.getPeriod().equals(adjust.getPeriod());
             switch (adjust.getAdjustType()) {
-                case AMOUNT -> executeAmountAdjust(adjust, operatorId);
-                case VOID -> executeVoidAdjust(adjust, operatorId);
-                case TRANSFER -> executeTransferAdjust(adjust, operatorId);
+                case AMOUNT -> {
+                    if (crossMonth) {
+                        executeDetailCrossMonthAmountAdjust(adjust, oldFact, operatorId);
+                    } else {
+                        executeAmountAdjust(adjust, operatorId);
+                    }
+                }
+                case VOID -> {
+                    if (crossMonth) {
+                        executeDetailCrossMonthVoidAdjust(adjust, oldFact, operatorId);
+                    } else {
+                        executeVoidAdjust(adjust, operatorId);
+                    }
+                }
+                case TRANSFER -> {
+                    if (crossMonth) {
+                        throw new ServiceException("部门划转仅支持在业绩原归属月内调整，不支持跨月");
+                    }
+                    executeTransferAdjust(adjust, operatorId);
+                }
                 default -> throw new ServiceException("不支持的调整类型：{}", adjust.getAdjustType());
             }
         }
@@ -335,6 +431,25 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     }
 
     // ==================== 内部方法 ====================
+
+    /**
+     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     */
+    private FlowInstanceBizExtDTO buildBizExt(PerformanceAdjust adjust) {
+        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
+        bizExt.setBusinessId(String.valueOf(adjust.getId()));
+        bizExt.setBusinessCode(text(adjust.getAdjustNo()));
+        bizExt.setBusinessTitle("业绩调整｜单号" + text(adjust.getAdjustNo())
+            + "｜账期" + text(adjust.getPeriod())
+            + "｜合同" + text(adjust.getContractNo())
+            + "｜类型" + text(adjust.getAdjustType())
+            + "｜差额" + text(adjust.getDeltaAmount()));
+        return bizExt;
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
 
     /**
      * 构建查询条件。
@@ -481,6 +596,124 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         newFact.setOriginAmount(newOrigin);
         newFact.setPerformanceAmount(newPerformance);
         newFact.setAdjustId(adjustId);
+        return newFact;
+    }
+
+    /**
+     * 执行合同级跨月调整（§4.6 业绩冲销）：原月事实保持不动（历史月已结算不回改），
+     * 在调整月按原各人业绩占比分摊调整额，逐人生成净额调整事实（正=补提，负=冲销）。
+     */
+    private void executeContractCrossMonthAdjust(PerformanceAdjust adjust, String originalPeriod, Long operatorId) {
+        if (adjust.getDeltaAmount() == null) {
+            throw new ServiceException("合同级跨月调整缺少调整金额：adjustId={}", adjust.getId());
+        }
+        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
+            originalPeriod, adjust.getFactType(), adjust.getContractNo());
+        if (facts == null || facts.isEmpty()) {
+            throw new ServiceException("原月合同下未找到有效业绩事实：contractNo={}, period={}",
+                adjust.getContractNo(), originalPeriod);
+        }
+        BigDecimal total = facts.stream()
+            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (MoneyUtil.isZero(total)) {
+            throw new ServiceException("原月合同业绩金额合计为 0，无法按占比冲销：contractNo={}",
+                adjust.getContractNo());
+        }
+        BigDecimal deltaTotal = adjust.getDeltaAmount();
+        BigDecimal[] parts = new BigDecimal[facts.size()];
+        BigDecimal allocated = BigDecimal.ZERO;
+        int largestIdx = 0;
+        for (int i = 0; i < facts.size(); i++) {
+            PerformanceFact fact = facts.get(i);
+            BigDecimal base = fact.getPerformanceAmount() == null ? BigDecimal.ZERO : fact.getPerformanceAmount();
+            parts[i] = MoneyUtil.round2(
+                deltaTotal.multiply(base).divide(total, 8, RoundingMode.HALF_UP));
+            allocated = allocated.add(parts[i]);
+            if (base.abs().compareTo(facts.get(largestIdx).getPerformanceAmount().abs()) > 0) {
+                largestIdx = i;
+            }
+        }
+        parts[largestIdx] = MoneyUtil.round2(parts[largestIdx].add(deltaTotal.subtract(allocated)));
+
+        int generated = 0;
+        for (int i = 0; i < facts.size(); i++) {
+            if (MoneyUtil.isZero(parts[i])) {
+                continue;
+            }
+            PerformanceFact oldFact = facts.get(i);
+            BigDecimal ratio = oldFact.getShareRatio().multiply(oldFact.getConversionRate());
+            BigDecimal originPart;
+            if (MoneyUtil.isZero(ratio)) {
+                log.warn("[调整单-跨月] 原事实分摊×折算系数为 0，原始冲销额取业绩额：factId={}", oldFact.getId());
+                originPart = parts[i];
+            } else {
+                originPart = MoneyUtil.round2(parts[i].divide(ratio, 2, RoundingMode.HALF_UP));
+            }
+            PerformanceFact offsetFact = buildOffsetFact(oldFact, adjust.getPeriod(),
+                originPart, parts[i], adjust.getId());
+            factMapper.insert(offsetFact);
+            generated++;
+        }
+        log.info("[调整单-跨月] 合同级跨月冲销完成：adjustId={}, contractNo={}, {}→{}, 生成调整事实={}",
+            adjust.getId(), adjust.getContractNo(), originalPeriod, adjust.getPeriod(), generated);
+    }
+
+    /**
+     * 执行明细级跨月金额调整（§4.6）：在调整月生成一条净额调整事实
+     * （新应收-原应收的差额，正补负冲），原月事实不动。
+     */
+    private void executeDetailCrossMonthAmountAdjust(PerformanceAdjust adjust, PerformanceFact oldFact,
+                                                     Long operatorId) {
+        if (adjust.getDeltaAmount() == null) {
+            throw new ServiceException("金额调整缺少调整金额：adjustId={}", adjust.getId());
+        }
+        BigDecimal newOrigin = MoneyUtil.round2(oldFact.getOriginAmount().add(adjust.getDeltaAmount()));
+        BigDecimal newPerformance = conversionEngine.calculate(
+            newOrigin, oldFact.getShareRatio(), oldFact.getConversionRate());
+        BigDecimal originDelta = MoneyUtil.round2(newOrigin.subtract(oldFact.getOriginAmount()));
+        BigDecimal performanceDelta = MoneyUtil.round2(
+            newPerformance.subtract(oldFact.getPerformanceAmount()));
+        if (MoneyUtil.isZero(originDelta) && MoneyUtil.isZero(performanceDelta)) {
+            log.info("[调整单-跨月] 调整额为 0，无需生成冲销事实：adjustId={}, factId={}",
+                adjust.getId(), oldFact.getId());
+            return;
+        }
+        factMapper.insert(buildOffsetFact(oldFact, adjust.getPeriod(),
+            originDelta, performanceDelta, adjust.getId()));
+        log.info("[调整单-跨月] 明细级跨月冲销事实已生成：adjustId={}, factId={}, {}→{}, deltaPerf={}",
+            adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod(), performanceDelta);
+    }
+
+    /**
+     * 执行明细级跨月业绩冲销（§4.6 VOID 跨月）：在调整月生成原事实金额的相反数事实。
+     */
+    private void executeDetailCrossMonthVoidAdjust(PerformanceAdjust adjust, PerformanceFact oldFact,
+                                                   Long operatorId) {
+        factMapper.insert(buildOffsetFact(oldFact, adjust.getPeriod(),
+            MoneyUtil.round2(oldFact.getOriginAmount().negate()),
+            MoneyUtil.round2(oldFact.getPerformanceAmount().negate()),
+            adjust.getId()));
+        log.info("[调整单-跨月] 明细级跨月全额冲销事实已生成：adjustId={}, factId={}, {}→{}",
+            adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod());
+    }
+
+    /**
+     * 构建跨月净额调整事实（直接插入，不冲销原月事实）：
+     * 复制原事实人员/合同/系数快照，金额取净额（可负），期间取调整月，业务日期取调整月首日，
+     * sourceKey 追加调整单后缀以避开原事实幂等键。
+     */
+    private PerformanceFact buildOffsetFact(PerformanceFact oldFact, String targetPeriod,
+                                            BigDecimal originDelta, BigDecimal performanceDelta, Long adjustId) {
+        PerformanceFact newFact = copyFactBase(oldFact);
+        LocalDate firstDay = YearMonth.parse(targetPeriod).atDay(1);
+        newFact.setPeriod(targetPeriod);
+        newFact.setBusinessDate(firstDay);
+        newFact.setEffectiveDate(firstDay);
+        newFact.setOriginAmount(MoneyUtil.round2(originDelta));
+        newFact.setPerformanceAmount(MoneyUtil.round2(performanceDelta));
+        newFact.setAdjustId(adjustId);
+        newFact.setSourceKey(oldFact.getSourceKey() + "-ADJ-" + adjustId);
         return newFact;
     }
 

@@ -2,7 +2,9 @@ package com.panjia.performance.handler;
 
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
+import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.service.PerformanceEngine;
+import com.panjia.performance.service.ReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -35,6 +37,7 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
     private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED");
 
     private final PerformanceEngine performanceEngine;
+    private final ReceivedApplyService receivedApplyService;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -65,7 +68,7 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
 
             List<Long> supersededIds = convertSupersededIds(event.getSupersededBatchIds());
 
-            performanceEngine.buildFromBatch(
+            PerformanceConsumeLog consumeLog = performanceEngine.buildFromBatch(
                 event.getBatchId(),
                 eventId,
                 "IMPORT_BATCH_ARCHIVED",
@@ -74,7 +77,10 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
                 event.getSourceType(),
                 event.getPeriod());
 
-            log.info("[业绩消费] 归档批次消费完成：batchId={}", event.getBatchId());
+            // §2.1 业绩事实生成后，有实收的合同自动生成实收审批单并提交（按未绑定事实幂等）
+            String period = event.getPeriod() != null ? event.getPeriod() : consumeLog.getPeriod();
+            int created = receivedApplyService.autoCreateForBatch(event.getBatchId(), period);
+            log.info("[业绩消费] 归档批次消费完成：batchId={}, 实收审批单新建={}", event.getBatchId(), created);
         } catch (Exception e) {
             log.error("[业绩消费] 归档事件处理失败：batchId={}, eventId={}",
                 event.getBatchId(), eventId, e);

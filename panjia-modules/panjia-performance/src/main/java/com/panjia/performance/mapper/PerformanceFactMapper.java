@@ -670,6 +670,53 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                @Param("factType") String factType);
 
     /**
+     * 按业务键前缀汇总更早期间已 ACTIVE 认列事实的「贝壳当前金额」合计，
+     * 用于跨月重复导入时应收「只认一次」的增量认定（§双口径契约）。
+     * <p>
+     * 当前金额 = ROUND(origin_amount × conversion_rate, 2)（与红冲镜像口径一致）；
+     * 仅统计 ACTIVE 事实，被 supersede/冲销的历史不认列不参与。
+     *
+     * @param sourceKeyPrefix 业务键前缀（订单|合同|角色人|费项|角色类型）
+     * @param factType        事实口径（PERF_EXPECT）
+     * @param period          当前导入期间（仅统计更早期间）
+     * @return 已认列当前金额合计（无历史返回 0）
+     */
+    @Select("""
+        SELECT COALESCE(SUM(ROUND(f.origin_amount * f.conversion_rate, 2)), 0)
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = #{factType}
+          AND f.period &lt; #{period}
+          AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
+        """)
+    java.math.BigDecimal sumRecognizedCurrentByPrefix(@Param("sourceKeyPrefix") String sourceKeyPrefix,
+                                                      @Param("factType") String factType,
+                                                      @Param("period") String period);
+
+    /**
+     * 查询某合同在更早期间已认列事实所携带的最大「合同累计应收（总应收业绩）」。
+     * <p>
+     * 该列在合同每个角色行重复出现，取 MAX 即合同口径历史累计值；
+     * 仅取 ACTIVE 应收事实关联的归一化行，天然排除已 supersede 批次。
+     *
+     * @param contractNo 合同号
+     * @param period     当前导入期间
+     * @return 历史最大合同累计应收（无历史返回 0）
+     */
+    @Select("""
+        SELECT COALESCE(MAX(n.total_receivable_amount), 0)
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record n ON n.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = n.raw_data_id
+        WHERE f.fact_type = 'PERF_EXPECT'
+          AND f.fact_status = 'ACTIVE'
+          AND f.period &lt; #{period}
+          AND rs.contract_no = #{contractNo}
+        """)
+    java.math.BigDecimal selectMaxPriorContractTotalReceivable(@Param("contractNo") String contractNo,
+                                                               @Param("period") String period);
+
+    /**
      * 按事实 ID 集合查询事实摘要（含合同号/订单号/房源地址）。
      * <p>
      * 供结佣域按合同维度展示申请单列表使用，通过 normalized_record → raw_signed
@@ -694,12 +741,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.batch_id AS "batchId",
                f.normalized_record_id AS "normalizedRecordId",
                f.source_key AS "sourceKey",
+               f.received_apply_id AS "receivedApplyId",
+               ra.status AS "receivedStatus",
                rs.contract_no AS "contractNo",
                rs.order_no AS "orderNo",
                rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
         FROM pj_perf_fact f
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.id IN
         <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
         ORDER BY f.id
@@ -730,12 +780,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.batch_id AS "batchId",
                f.normalized_record_id AS "normalizedRecordId",
                f.source_key AS "sourceKey",
+               f.received_apply_id AS "receivedApplyId",
+               ra.status AS "receivedStatus",
                rs.contract_no AS "contractNo",
                rs.order_no AS "orderNo",
                rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
@@ -764,11 +817,26 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
                MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
+               COALESCE((
+                   SELECT SUM(e.performance_amount)
+                   FROM pj_perf_fact e
+                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
+                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
+                   WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
+                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+               ), 0) AS "expectedAmount",
+               CASE
+                   WHEN bool_or(ra.status = 'SUBMITTED') THEN 'SUBMITTED'
+                   WHEN bool_or(ra.status = 'DRAFT') THEN 'DRAFT'
+                   WHEN COUNT(*) = COUNT(ra.id) FILTER (WHERE ra.status = 'APPROVED') THEN 'APPROVED'
+                   ELSE NULL
+               END AS "receivedStatus",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount"
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
@@ -785,4 +853,45 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
                                                                  @Param("factType") String factType,
                                                                  @Param("deptId") Long deptId);
+
+    /**
+     * 按导入批次聚合「实收业绩合同组」（实收审批单自动建单用，§2.1）。
+     * <p>
+     * 仅取本批新建、ACTIVE、尚未挂实收审批单（received_apply_id IS NULL）的 PERF_REAL 事实，
+     * 按合同号聚合：实收合计、同合同应收合计（PERF_EXPECT）、快照字段、明细条数。
+     *
+     * @param batchId 导入批次 ID
+     * @param period  归属期间
+     * @return 合同聚合组列表
+     */
+    @Select("""
+        SELECT rs.contract_no AS "contractNo",
+               MAX(rs.order_no) AS "orderNo",
+               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
+               COALESCE(SUM(f.performance_amount), 0) AS "receivedAmount",
+               COALESCE((
+                   SELECT SUM(e.performance_amount)
+                   FROM pj_perf_fact e
+                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
+                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
+                   WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
+                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+               ), 0) AS "expectedAmount",
+               COUNT(*) AS "itemCount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_REAL'
+          AND f.batch_id = #{batchId}
+          AND f.period = #{period}
+          AND f.received_apply_id IS NULL
+          AND rs.contract_no IS NOT NULL
+        GROUP BY rs.contract_no
+        HAVING COALESCE(SUM(f.performance_amount), 0) <> 0
+        ORDER BY rs.contract_no
+        """)
+    List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
+        @Param("batchId") Long batchId, @Param("period") String period);
 }

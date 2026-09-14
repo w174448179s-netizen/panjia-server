@@ -71,6 +71,14 @@ public class NormalizedRecordDTO {
     /** 当月实收金额（PERF_REAL 结佣计薪业绩口径，SIGNED 行有值） */
     private BigDecimal receivedAmount;
 
+    /**
+     * 合同累计应收金额（贝壳「总应收业绩」列，合同口径在每个角色行重复出现）。
+     * <p>
+     * 跨月重复导入同一合同时，用于判断合同应收是否增长，配合历史已认应收
+     * 保证「应收只计算一次、只就增量认列」；无该列时为 null。
+     */
+    private BigDecimal totalReceivableAmount;
+
     /** 分摊比例 */
     private BigDecimal shareRatio;
 

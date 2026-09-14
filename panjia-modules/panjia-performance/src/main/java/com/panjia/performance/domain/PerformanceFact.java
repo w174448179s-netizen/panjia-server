@@ -101,6 +101,9 @@ public class PerformanceFact implements Serializable {
     /** 红冲镜像的原正数事实 ID（溯源链：退单月负事实 → 成交月原事实） */
     private Long refundOfFactId;
 
+    /** 实收业绩审批单 ID（仅 PERF_REAL 事实；导入自动聚合或手工提交时回填） */
+    private Long receivedApplyId;
+
     /** 操作人 ID */
     private Long operatorId;
 

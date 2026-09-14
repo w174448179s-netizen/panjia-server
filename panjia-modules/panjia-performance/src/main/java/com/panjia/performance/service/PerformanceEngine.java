@@ -414,6 +414,16 @@ public class PerformanceEngine {
                 + "sourceKey={}, factType={}", sourceKey, factType);
         }
 
+        // ========== 0.5 跨月应收「只认一次」增量认定（仅 SIGNED 正数 PERF_EXPECT 行） ==========
+        // 贝壳 9 月回款表会把 8 月合同行整行重复带出（「当月应收业绩」仍有值）。
+        // 业务铁律：同一合同+角色人+费项的应收只认一次，重复行认 0（仍落 0 元事实留痕），
+        // 合同累计应收（总应收业绩）增长时当月行视为增量全额认列。
+        if (factType == FactType.PERF_EXPECT
+            && RECORD_TYPE_SIGNED.equals(record.getRecordType())
+            && currentAmount != null && currentAmount.signum() > 0) {
+            currentAmount = recognizeCrossMonthIncrement(record, currentAmount);
+        }
+
         // ========== 1. 员工归属查询 ==========
         // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
         // 员工不存在（脏数据/已删）返回 null，下方 else 分支以 employeeCode 兜底
@@ -686,20 +696,118 @@ public class PerformanceEngine {
 
     /**
      * 解析事实口径对应的贝壳「当前金额」（折算后原值，未还原）。
-     * PERF_EXPECT 取当月应收 receivableAmount，PERF_REAL 及其余口径取当月实收 receivedAmount；
-     * 对应金额列为空时回退 DTO 单口径 originAmount（历史单口径行兼容）。
+     * PERF_EXPECT 取当月应收 receivableAmount，PERF_REAL 及其余口径取当月实收 receivedAmount。
+     * <p>
+     * ★ 空列口径（§双口径契约）：SIGNED 行应收/实收两列并存，某列为空（null）表示
+     * 「当月该口径无发生额」，按 0 处理，<b>禁止回退另一口径金额</b>。
+     * 典型场景：8 月导入合同有应收无实收（REAL=0），9 月回款再次导入时应收列留空、
+     * 实收列有值——若回退，9 月 PERF_EXPECT 会错取实收额，导致店长团队提成/总监门店
+     * 提成按同一笔钱在 8、9 两月重复计提。
+     * <p>
+     * 仅非 SIGNED 的历史单口径行（无应收/实收分列）才回退 DTO.originAmount 兼容。
      */
     public static BigDecimal resolveFactCurrentAmount(NormalizedRecordDTO record, FactType factType) {
         if (record == null || factType == null) {
             return null;
         }
+        boolean dualCaliber = RECORD_TYPE_SIGNED.equals(record.getRecordType());
         if (factType == FactType.PERF_EXPECT) {
-            return record.getReceivableAmount() != null
-                ? record.getReceivableAmount() : record.getOriginAmount();
+            if (record.getReceivableAmount() != null) {
+                return record.getReceivableAmount();
+            }
+            return dualCaliber ? BigDecimal.ZERO : record.getOriginAmount();
         }
         // PERF_REAL 及其余口径默认实收
-        return record.getReceivedAmount() != null
-            ? record.getReceivedAmount() : record.getOriginAmount();
+        if (record.getReceivedAmount() != null) {
+            return record.getReceivedAmount();
+        }
+        return dualCaliber ? BigDecimal.ZERO : record.getOriginAmount();
+    }
+
+    /** 跨月应收重复认列尾差容忍：当月值与已认值差 ≤ 1 分视为全额重复 */
+    private static final BigDecimal RECEIVABLE_DEDUP_TOLERANCE = new BigDecimal("0.01");
+
+    /**
+     * 跨月重复导入时的应收增量认定（查库版，决策逻辑见
+     * {@link #resolveIncrementalReceivable} 纯函数）。
+     *
+     * @param record            当月归一化行
+     * @param monthlyReceivable 当月行「当月应收业绩」金额（&gt; 0）
+     * @return 本月实际认列的应收当前金额（0 表示重复行，仍落 0 元事实留痕）
+     */
+    private BigDecimal recognizeCrossMonthIncrement(NormalizedRecordDTO record, BigDecimal monthlyReceivable) {
+        String prefix = buildSourceKeyPrefix(record);
+        BigDecimal priorRole = factMapper.sumRecognizedCurrentByPrefix(
+            prefix, FactType.PERF_EXPECT.getCode(), record.getPeriod());
+        if (priorRole == null) {
+            priorRole = BigDecimal.ZERO;
+        }
+        BigDecimal priorContractTotal = BigDecimal.ZERO;
+        BigDecimal totalNow = record.getTotalReceivableAmount();
+        String contractNo = extractContractNo(record.getSourceKey());
+        if (totalNow != null && contractNo != null) {
+            priorContractTotal = factMapper.selectMaxPriorContractTotalReceivable(
+                contractNo, record.getPeriod());
+            if (priorContractTotal == null) {
+                priorContractTotal = BigDecimal.ZERO;
+            }
+        }
+        BigDecimal recognized = resolveIncrementalReceivable(
+            monthlyReceivable, priorRole, totalNow, priorContractTotal);
+        if (recognized.compareTo(monthlyReceivable) != 0) {
+            log.info("[业绩应收防重] 跨月重复行增量认定：sourceKey={}, 合同={}, 期间={}, "
+                    + "当月应收={}, 该角色已认={}, 合同累计={}/历史累计={}, 本次认列={}",
+                prefix, contractNo, record.getPeriod(), monthlyReceivable, priorRole,
+                totalNow, priorContractTotal, recognized);
+        }
+        return recognized;
+    }
+
+    /**
+     * 应收跨月增量认定纯规则（无 IO，便于单测）。业务铁律：应收只计算一次。
+     * <ul>
+     *   <li>该角色行首次出现（历史已认 ≤ 0）：当月金额全额认列；</li>
+     *   <li>合同累计应收（总应收业绩）较历史增长：当月行即本期增量，全额认列；</li>
+     *   <li>其余情况按「当月应收 − 该角色已认」取差，≤ {@value #RECEIVABLE_DEDUP_TOLERANCE}
+     *       （1 分尾差）或为负一律认 0：全额重复行不再产生新签业绩。</li>
+     * </ul>
+     *
+     * @param monthly             当月行应收金额
+     * @param priorRoleRecognized 同合同+角色人+费项更早期间已认列当前金额合计
+     * @param totalNow            当月行合同累计应收（可空）
+     * @param priorContractTotal  历史合同累计应收最大值（可空）
+     * @return 本月认列金额（≥ 0，两位小数）
+     */
+    public static BigDecimal resolveIncrementalReceivable(BigDecimal monthly, BigDecimal priorRoleRecognized,
+                                                          BigDecimal totalNow, BigDecimal priorContractTotal) {
+        if (monthly == null || monthly.signum() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal prior = priorRoleRecognized == null ? BigDecimal.ZERO : priorRoleRecognized;
+        if (prior.signum() <= 0) {
+            return MoneyUtil.round2(monthly);
+        }
+        if (totalNow != null && priorContractTotal != null
+            && totalNow.compareTo(priorContractTotal) > 0) {
+            // 合同累计应收增长 → 当月行承载的是本期增量
+            return MoneyUtil.round2(monthly);
+        }
+        BigDecimal delta = monthly.subtract(prior);
+        if (delta.compareTo(RECEIVABLE_DEDUP_TOLERANCE) <= 0) {
+            return BigDecimal.ZERO;
+        }
+        return MoneyUtil.round2(delta);
+    }
+
+    /**
+     * 从归一化业务键 {@code 订单号|合同号|角色人系统号|费用项|角色类型} 中取合同号（第 2 段）。
+     */
+    public static String extractContractNo(String recordSourceKey) {
+        if (recordSourceKey == null) {
+            return null;
+        }
+        String[] parts = recordSourceKey.split("\\|", -1);
+        return parts.length >= 2 && !parts[1].isEmpty() ? parts[1] : null;
     }
 
     /**

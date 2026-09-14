@@ -72,6 +72,25 @@ VALUES (1761400000000002632, '封账', 1761400000000002630, 2, NULL, NULL, NULL,
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002633, '反结账', 1761400000000002630, 3, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:period:reopen', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');
 
+-- 实收业绩审批（合同维度，需求文档 §2：导入自动提交 财务→总监；支持 Excel 批量审批）
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002640, '实收审批', 1761400000000002200, 4, 'received', 'performance/received/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:received:list', 'validCode', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '实收业绩审批单（合同维度）');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002641, '实收单查询', 1761400000000002640, 1, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:query', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002642, '手工提交实收', 1761400000000002640, 2, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:submit', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '店长/财务/总监可手工发起（§2.2）');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002643, '实收审批办理', 1761400000000002640, 3, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:approve', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '财务/总监审批（§2.1）');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002644, '作废实收单', 1761400000000002640, 4, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:cancel', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002645, '实收批量审批', 1761400000000002640, 5, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:batch', '#', '', '', 176100000000000100, 1761100000000000001, now(), NULL, NULL, 'Excel 导入按合同号+金额批量审批（§2.3）');
+
 -- 角色权限关联：超级管理员 + 总监拥有全部业绩权限
 -- 注：2600「业绩管理」中间层已删除；运维角色绑顶级 2200+ 子菜单
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
@@ -88,6 +107,12 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1, 1761400000000002631),
 (1, 1761400000000002632),
 (1, 1761400000000002633),
+(1, 1761400000000002640),
+(1, 1761400000000002641),
+(1, 1761400000000002642),
+(1, 1761400000000002643),
+(1, 1761400000000002644),
+(1, 1761400000000002645),
 (1, 1761400000000002200),
 (1761100000000000100, 1761400000000002610),
 (1761100000000000100, 1761400000000002611),
@@ -102,6 +127,32 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761100000000000100, 1761400000000002631),
 (1761100000000000100, 1761400000000002632),
 (1761100000000000100, 1761400000000002633),
-(1761100000000000100, 1761400000000002200);
+(1761100000000000100, 1761400000000002640),
+(1761100000000000100, 1761400000000002641),
+(1761100000000000100, 1761400000000002642),
+(1761100000000000100, 1761400000000002643),
+(1761100000000000100, 1761400000000002644),
+(1761100000000000100, 1761400000000002645),
+(1761100000000000100, 1761400000000002200),
+-- 总监（1761300000000000010）：实收全部权限（手工提交+审批+批量+作废）
+(1761300000000000010, 1761400000000002640),
+(1761300000000000010, 1761400000000002641),
+(1761300000000000010, 1761400000000002642),
+(1761300000000000010, 1761400000000002643),
+(1761300000000000010, 1761400000000002644),
+(1761300000000000010, 1761400000000002645),
+-- 财务（1761300000000000012）：实收全部权限（手工提交+审批+批量+作废）
+(1761300000000000012, 1761400000000002640),
+(1761300000000000012, 1761400000000002641),
+(1761300000000000012, 1761400000000002642),
+(1761300000000000012, 1761400000000002643),
+(1761300000000000012, 1761400000000002644),
+(1761300000000000012, 1761400000000002645),
+-- 店长（1761300000000000011）：手工提交/查询/作废（不承担审批）
+(1761300000000000011, 1761400000000002640),
+(1761300000000000011, 1761400000000002641),
+(1761300000000000011, 1761400000000002642),
+(1761300000000000011, 1761400000000002644)
+ON CONFLICT (role_id, menu_id) DO NOTHING;
 
 COMMIT;

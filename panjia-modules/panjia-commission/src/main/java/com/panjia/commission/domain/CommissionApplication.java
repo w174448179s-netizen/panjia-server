@@ -1,6 +1,8 @@
 package com.panjia.commission.domain;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
@@ -56,11 +58,21 @@ public class CommissionApplication implements Serializable {
     /** 明细条数 */
     private Integer itemCount;
 
-    /** 结佣业绩金额合计（原样透传，非佣金金额） */
+    /** 结佣业绩金额合计（原样透传，非佣金金额；§3.5 对齐后=应收合计） */
     private BigDecimal totalAmount;
+
+    /** 应收业绩合计（提交时快照，§3.4/3.5 差异判定） */
+    private BigDecimal expectedAmount;
+
+    /** 是否已发生实收对齐应收（§3.5 自动对齐后置 true） */
+    private Boolean aligned;
 
     /** 状态 DRAFT/SUBMITTED/APPROVED/LOCKED/REJECTED/CANCELLED */
     private ApplicationStatus status;
+
+    /** 当前审批节点 DIRECTOR=总监审批 FINANCE=财务审批；终审/驳回/作废需写回 null */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private String currentNode;
 
     /** 审批通过月 = 工资归属月（YYYY-MM，V4.2 硬要求 1） */
     private String approvedMonth;

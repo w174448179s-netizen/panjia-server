@@ -67,7 +67,8 @@ CREATE TABLE pj_import_raw_signed (
     role_type           VARCHAR(64),                                   -- 角色类型
     share_ratio         NUMERIC(10,4),                                 -- 业绩比例
     current_receivable  NUMERIC(18,2),                                 -- 当月应收
-    current_received    NUMERIC(18,2)                                  -- 当月实收
+    current_received    NUMERIC(18,2),                                 -- 当月实收
+    total_receivable    NUMERIC(18,2)                                  -- 总应收业绩（合同累计口径，跨月应收增量认定用）
 );
 CREATE INDEX idx_raw_signed_batch ON pj_import_raw_signed(batch_id);
 
@@ -164,6 +165,7 @@ CREATE TABLE pj_normalized_record (
     biz_type                VARCHAR(64),
     receivable_amount       NUMERIC(18,2),
     received_amount         NUMERIC(18,2),
+    total_receivable_amount NUMERIC(18,2),   -- 合同累计应收（贝壳「总应收业绩」列，跨月应收只认一次的增量基准）
     share_ratio             NUMERIC(10,4),
     role_type               VARCHAR(64),
     extra_json              JSONB,                    -- 扩展字段（扣款、考勤细分等）

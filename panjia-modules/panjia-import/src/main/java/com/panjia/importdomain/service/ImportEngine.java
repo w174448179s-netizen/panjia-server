@@ -507,6 +507,7 @@ public class ImportEngine {
                 nr.setBizType(str(json, "bizType"));
                 nr.setReceivableAmount(decimal(json, "currentReceivable"));
                 nr.setReceivedAmount(decimal(json, "currentReceived"));
+                nr.setTotalReceivableAmount(decimal(json, "totalReceivable"));
                 nr.setShareRatio(decimal(json, "shareRatio"));
                 nr.setRoleType(str(json, "roleType"));
             }

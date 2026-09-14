@@ -3,11 +3,13 @@ package com.panjia.performance.adapter;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
+import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.service.ReceivedAlignmentService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -30,6 +32,7 @@ import java.util.List;
 public class CommissionPerformanceAdapter implements CommissionPerformanceQueryPort {
 
     private final PerformanceFactMapper factMapper;
+    private final ReceivedAlignmentService receivedAlignmentService;
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByDept(String period, Long deptId, String factType) {
@@ -87,6 +90,11 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         return factMapper.selectContractSummaries(period, factType, deptId);
     }
 
+    @Override
+    public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
+        return receivedAlignmentService.align(period, contractNo, operatorId);
+    }
+
     private List<PerformanceFactSummaryDTO> toSummaries(List<PerformanceFact> facts) {
         List<PerformanceFactSummaryDTO> list = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
@@ -111,6 +119,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         dto.setBatchId(fact.getBatchId());
         dto.setNormalizedRecordId(fact.getNormalizedRecordId());
         dto.setSourceKey(fact.getSourceKey());
+        dto.setReceivedApplyId(fact.getReceivedApplyId());
         return dto;
     }
 }

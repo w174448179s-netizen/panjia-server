@@ -6,6 +6,7 @@ import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
 import com.panjia.commission.dto.CallbackDTO;
+import com.panjia.commission.dto.CommissionBatchResult;
 import com.panjia.commission.service.CommissionApplicationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,7 +23,9 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
@@ -130,10 +133,68 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 审批回调（简化审批，单事务完成 SUBMITTED → LOCKED / REJECTED）。
-     * <p>
-     * 通过时落 approved_month = 当前月（工资归属月），明细 PENDING → APPROVED，
-     * 发布 CommissionApprovedEvent 供 payroll 消费。
+     * 单个审批通过（§3.3）：按当前节点自动识别总监/财务；
+     * 总监节点有差异时系统先自动对齐实收=应收，无差异不流转财务。
+     *
+     * @param id 申请单 ID
+     * @return 操作结果
+     */
+    @SaCheckPermission("commission:apply:approve")
+    @Log(title = "结佣申请单审批", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/approve")
+    public R<Void> approve(@PathVariable Long id) {
+        applicationService.approve(id);
+        return R.ok();
+    }
+
+    /**
+     * 单个驳回（§3.3）：驳回到申请人，可修改后重新提交。
+     *
+     * @param id  申请单 ID
+     * @param dto 审批结论（message 可选）
+     * @return 操作结果
+     */
+    @SaCheckPermission("commission:apply:approve")
+    @Log(title = "结佣申请单驳回", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/reject")
+    public R<Void> reject(@PathVariable Long id, @RequestBody(required = false) CallbackDTO dto) {
+        String message = dto == null ? null : dto.getMessage();
+        applicationService.reject(id, message);
+        return R.ok();
+    }
+
+    /**
+     * Excel 批量发起（§3.2）：按表内合同号逐张发起并自动提交。
+     *
+     * @param file   Excel（含「合同号」列，金额列可选）
+     * @param period 业绩归属月 YYYY-MM
+     * @return 成功/失败明细
+     */
+    @SaCheckPermission("commission:apply:batch")
+    @Log(title = "结佣Excel批量发起", businessType = BusinessType.IMPORT)
+    @PostMapping("/batch-initiate")
+    public R<CommissionBatchResult> batchInitiate(@RequestParam("file") MultipartFile file,
+                                                  @RequestParam("period") String period) {
+        return R.ok(applicationService.batchInitiate(period, file, LoginHelper.getUserId()));
+    }
+
+    /**
+     * Excel 批量审批（§3.3）：匹配 合同号+金额 与审批中单据，按当前节点逐张通过。
+     *
+     * @param file   Excel（含「合同号」+实收金额列）
+     * @param period 业绩归属月 YYYY-MM
+     * @return 成功/失败明细
+     */
+    @SaCheckPermission("commission:apply:batch")
+    @Log(title = "结佣Excel批量审批", businessType = BusinessType.IMPORT)
+    @PostMapping("/batch-approve")
+    public R<CommissionBatchResult> batchApprove(@RequestParam("file") MultipartFile file,
+                                                 @RequestParam("period") String period) {
+        return R.ok(applicationService.batchApprove(period, file));
+    }
+
+    /**
+     * 审批回调（兼容旧端点）：approve=true 走当前节点通过，false 驳回。
      *
      * @param id  申请单 ID
      * @param dto 审批结论（approve）

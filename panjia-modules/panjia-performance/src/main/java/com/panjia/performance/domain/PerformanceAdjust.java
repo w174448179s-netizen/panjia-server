@@ -55,8 +55,11 @@ public class PerformanceAdjust implements Serializable {
     /** 合同号（合同级调整时填，用于定位该合同下全部明细事实） */
     private String contractNo;
 
-    /** 事实口径：PERF_REAL-结佣业绩 / PERF_EXPECT-新签业绩 */
+    /** 事实口径（§4.1 只允许 PERF_EXPECT 应收） */
     private String factType;
+
+    /** 原业绩归属月（合同级跨月调整定位原月事实；空=同月调整，§4.6） */
+    private String originalPeriod;
 
     /** 调整详情 JSON */
     private String payloadJson;

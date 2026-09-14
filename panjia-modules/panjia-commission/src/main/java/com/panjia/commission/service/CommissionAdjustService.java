@@ -22,6 +22,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -156,6 +157,7 @@ public class CommissionAdjustService {
         // 后端发起无登录用户上下文，忽略权限
         variables.put("ignore", true);
         startProcess.setVariables(variables);
+        startProcess.setBizExt(buildBizExt(adjust));
 
         boolean started;
         try {
@@ -241,6 +243,24 @@ public class CommissionAdjustService {
             }
             default -> log.info("[结佣-调整工作流] 无需处理的状态，忽略：adjustId={}, status={}", adjustId, status);
         }
+    }
+
+    /**
+     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     */
+    private FlowInstanceBizExtDTO buildBizExt(CommissionAdjust adjust) {
+        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
+        bizExt.setBusinessId(String.valueOf(adjust.getId()));
+        bizExt.setBusinessCode(text(adjust.getAdjustNo()));
+        bizExt.setBusinessTitle("结佣调整｜单号" + text(adjust.getAdjustNo())
+            + "｜账期" + text(adjust.getPeriod())
+            + "｜类型" + text(adjust.getAdjustType())
+            + "｜差额" + text(adjust.getDiffAmount()));
+        return bizExt;
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : String.valueOf(value);
     }
 
     /**

@@ -41,6 +41,7 @@ public class SignedDataSource extends AbstractDataSource {
             raw.setShareRatio(decimal(row, "shareRatio"));
             raw.setCurrentReceivable(decimal(row, "currentReceivable"));
             raw.setCurrentReceived(decimal(row, "currentReceived"));
+            raw.setTotalReceivable(decimal(row, "totalReceivable"));
 
             result.addRow(raw);
         }

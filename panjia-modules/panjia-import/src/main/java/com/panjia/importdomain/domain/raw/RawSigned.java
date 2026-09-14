@@ -38,4 +38,6 @@ public class RawSigned implements RawData {
     private BigDecimal shareRatio;
     private BigDecimal currentReceivable;
     private BigDecimal currentReceived;
+    /** 总应收业绩（合同累计口径，跨月应收增量认定用） */
+    private BigDecimal totalReceivable;
 }

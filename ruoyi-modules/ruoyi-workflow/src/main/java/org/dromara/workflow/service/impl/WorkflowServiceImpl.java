@@ -3,8 +3,12 @@ package org.dromara.workflow.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.ObjectUtil;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.warm.flow.core.FlowEngine;
+import org.dromara.warm.flow.core.entity.Task;
 import org.dromara.warm.flow.orm.entity.FlowInstance;
+import org.dromara.warm.flow.orm.entity.FlowTask;
 import org.dromara.workflow.api.WorkflowService;
 import org.dromara.workflow.api.domain.CompleteTaskDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
@@ -12,22 +16,27 @@ import org.dromara.workflow.api.domain.StartProcessReturnDTO;
 import org.dromara.workflow.common.ConditionalOnEnable;
 import org.dromara.workflow.common.enums.MessageTypeEnum;
 import org.dromara.workflow.domain.FlowInstanceBizExt;
+import org.dromara.workflow.domain.bo.BackProcessBo;
 import org.dromara.workflow.domain.bo.CompleteTaskBo;
 import org.dromara.workflow.domain.bo.StartProcessBo;
+import org.dromara.workflow.service.IFlwCommonService;
 import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwTaskService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 通用 工作流服务实现
  *
  * @author may
  */
+@Slf4j
 @ConditionalOnEnable
 @RequiredArgsConstructor
 @Service
@@ -35,6 +44,7 @@ public class WorkflowServiceImpl implements WorkflowService {
 
     private final IFlwInstanceService flwInstanceService;
     private final IFlwTaskService flwTaskService;
+    private final IFlwCommonService flwCommonService;
 
     /**
      * 删除流程实例
@@ -169,5 +179,93 @@ public class WorkflowServiceImpl implements WorkflowService {
         taskBo.setVariables(startProcess.getVariables());
         taskBo.setHandler(startProcess.getHandler());
         return flwTaskService.completeTask(taskBo);
+    }
+
+    /**
+     * 按业务 id 查询当前待办任务（中间节点）
+     *
+     * @param businessId 业务id
+     * @return 当前待办任务，无则返回 {@code null}
+     */
+    private FlowTask currentTask(String businessId) {
+        FlowInstance flowInstance = flwInstanceService.selectInstByBusinessId(businessId);
+        if (ObjectUtil.isNull(flowInstance)) {
+            return null;
+        }
+        List<FlowTask> tasks = flwTaskService.selectByInstId(flowInstance.getId());
+        return tasks.stream()
+            .filter(t -> Integer.valueOf(1).equals(t.getNodeType()))
+            .findFirst()
+            .orElse(null);
+    }
+
+    @Override
+    public Long getCurrentTaskId(String businessId) {
+        FlowTask task = currentTask(businessId);
+        return ObjectUtil.isNotNull(task) ? task.getId() : null;
+    }
+
+    @Override
+    public String getCurrentNodeCode(String businessId) {
+        FlowTask task = currentTask(businessId);
+        return ObjectUtil.isNotNull(task) ? task.getNodeCode() : null;
+    }
+
+    /**
+     * 驳回当前待办任务（系统身份忽略权限，驳回到流程申请人节点）。
+     */
+    @Override
+    public boolean rejectTask(Long taskId, String message) {
+        List<FlowTask> tasks = flwTaskService.selectByIdList(Collections.singletonList(taskId));
+        if (tasks == null || tasks.isEmpty()) {
+            throw new IllegalStateException("待办任务不存在：taskId=" + taskId);
+        }
+        FlowTask task = tasks.get(0);
+        String applyNodeCode = flwCommonService.applyNodeCode(task.getDefinitionId());
+
+        BackProcessBo bo = new BackProcessBo();
+        bo.setTaskId(taskId);
+        bo.setNodeCode(applyNodeCode);
+        bo.setMessage(message);
+        bo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
+        bo.getVariables().put("ignore", true);
+        return flwTaskService.backProcess(bo);
+    }
+
+    /**
+     * 超时自动通过：扫描指定节点集合上的待办中间任务，创建时间超过 timeoutHours 的系统自动办理。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int autoCompleteTimeoutTasks(Set<String> nodeCodes, int timeoutHours, String message) {
+        if (nodeCodes == null || nodeCodes.isEmpty() || timeoutHours <= 0) {
+            return 0;
+        }
+        Date deadline = new Date(System.currentTimeMillis() - timeoutHours * 3600_000L);
+        List<Task> allTasks = FlowEngine.taskService().list(new FlowTask());
+        int done = 0;
+        for (Task task : allTasks) {
+            if (!Integer.valueOf(1).equals(task.getNodeType())
+                || task.getNodeCode() == null || !nodeCodes.contains(task.getNodeCode())
+                || task.getCreateTime() == null || task.getCreateTime().after(deadline)) {
+                continue;
+            }
+            CompleteTaskBo taskBo = new CompleteTaskBo();
+            taskBo.setTaskId(task.getId());
+            taskBo.setMessage(message);
+            taskBo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
+            taskBo.getVariables().put("ignore", true);
+            try {
+                flwTaskService.completeTask(taskBo);
+                done++;
+                log.info("[工作流-超时自动审批] taskId={}, nodeCode={}, instanceId={}",
+                    task.getId(), task.getNodeCode(), task.getInstanceId());
+            } catch (Exception e) {
+                // 单条失败不阻断其余任务（如流程状态已被人工抢先办理）
+                log.warn("[工作流-超时自动审批] 自动办理失败：taskId={}, nodeCode={}, reason={}",
+                    task.getId(), task.getNodeCode(), e.getMessage());
+            }
+        }
+        return done;
     }
 }

@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 纯逻辑单测 + 迁移脚本静态扫描，无需 Spring 上下文。覆盖：
  * <ul>
  *   <li>SIGNED 行必须双发 REAL+EXPECT，其余类型不产事实（含已废弃的 NEW_SIGN）；</li>
- *   <li>金额按口径取数：REAL=实收 receivedAmount，EXPECT=应收 receivableAmount，缺列回退 originAmount；</li>
+ *   <li>金额按口径取数：REAL=实收 receivedAmount，EXPECT=应收 receivableAmount；SIGNED 空列按 0（不串口径），
+ *       仅非 SIGNED 历史单口径行缺列回退 originAmount；</li>
  *   <li>部分唯一索引 uk_perf_fact_source_key 必须以 fact_type 打头（双发同 sourceKey 共存前提）。</li>
  * </ul>
  */
@@ -78,6 +79,69 @@ class PerformanceDualFactTest {
         assertEquals(new BigDecimal("206274.04"),
             PerformanceEngine.resolveFactCurrentAmount(signed, FactType.PERF_EXPECT),
             "PERF_EXPECT 当前金额必须取应收");
+    }
+
+    @Test
+    void signedBlankColumnMeansZeroNotCrossFallback() {
+        // 跨月回款场景：9 月 SIGNED 行应收列留空、实收列有值。
+        // 空列语义=当月该口径无发生额（按 0），禁止回退另一口径导致店长/总监团队提成重复计提。
+        NormalizedRecordDTO collected = new NormalizedRecordDTO();
+        collected.setRecordType("SIGNED");
+        collected.setReceivedAmount(new BigDecimal("1000.00"));
+        collected.setOriginAmount(new BigDecimal("1000.00"));
+
+        assertEquals(new BigDecimal("1000.00"),
+            PerformanceEngine.resolveFactCurrentAmount(collected, FactType.PERF_REAL),
+            "SIGNED 实收列有值时 REAL 取实收");
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveFactCurrentAmount(collected, FactType.PERF_EXPECT),
+            "SIGNED 应收列为空时 EXPECT 必须为 0，不得回退实收/origin");
+
+        // 反向：8 月有应收无实收
+        NormalizedRecordDTO signedOnly = new NormalizedRecordDTO();
+        signedOnly.setRecordType("SIGNED");
+        signedOnly.setReceivableAmount(new BigDecimal("1000.00"));
+
+        assertEquals(new BigDecimal("1000.00"),
+            PerformanceEngine.resolveFactCurrentAmount(signedOnly, FactType.PERF_EXPECT));
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveFactCurrentAmount(signedOnly, FactType.PERF_REAL),
+            "SIGNED 实收列为空时 REAL 必须为 0");
+    }
+
+    @Test
+    void receivableRecognizedOnlyOnceAcrossMonths() {
+        // 1) 首次出现：全额认列
+        assertEquals(new BigDecimal("446.25"),
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("446.25"), BigDecimal.ZERO,
+                new BigDecimal("446.25"), BigDecimal.ZERO));
+        // 2) 9 月整行重复（当月应收仍 446.25，合同累计未增长）：认 0
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("446.25"), new BigDecimal("446.25"),
+                new BigDecimal("446.25"), new BigDecimal("446.25")));
+        // 3) 1 分折算尾差：仍认 0
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("446.25"), new BigDecimal("446.24"),
+                new BigDecimal("446.25"), new BigDecimal("446.25")));
+        // 4) 合同累计应收增长（总应收 235.87→300），当月行 64.13 即增量：全额认列
+        assertEquals(new BigDecimal("64.13"),
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("64.13"), new BigDecimal("235.87"),
+                new BigDecimal("300.00"), new BigDecimal("235.87")));
+        // 5) 无累计列兜底：当月为角色累计口径增长 446.25→500：只认差额
+        assertEquals(new BigDecimal("53.75"),
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("500.00"), new BigDecimal("446.25"), null, null));
+        // 6) 无累计列且当月小于已认（回款月重复带小额）：不允许冲减，认 0
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveIncrementalReceivable(
+                new BigDecimal("100.00"), new BigDecimal("446.25"), null, null));
+        // 7) 合同号解析
+        assertEquals("TGCF2608525461",
+            PerformanceEngine.extractContractNo("9550600|TGCF2608525461|30999387|中介费|客源成交人"));
     }
 
     @Test

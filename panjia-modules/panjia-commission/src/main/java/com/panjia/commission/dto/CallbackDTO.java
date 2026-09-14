@@ -21,4 +21,7 @@ public class CallbackDTO implements Serializable {
     /** 是否通过（true=通过并锁定 / false=驳回） */
     @NotNull(message = "审批结论不能为空")
     private Boolean approve;
+
+    /** 审批/驳回意见（可选） */
+    private String message;
 }

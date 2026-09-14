@@ -9,13 +9,16 @@ import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
 import com.panjia.commission.dto.ApplyQuery;
+import com.panjia.commission.dto.CommissionBatchResult;
 import com.panjia.commission.dto.CommissionContractVO;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
+import com.panjia.commission.util.CommissionBatchExcelParser;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
+import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.event.CommissionApprovedEvent;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -27,15 +30,22 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.system.api.ConfigService;
+import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
+import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,17 +54,17 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 结佣申请服务（按合同发起 / 提交 / 审批锁定，结佣域详细设计 §4.1~§4.2）。
+ * 结佣申请服务（按合同发起 / 提交 / 审批锁定，结佣域详细设计 §4.1~§4.2，新流程 §3）。
  * <p>
- * 申请单粒度 = <b>合同 + 业绩归属月</b>：一个合同当月一张申请单，独立提交、独立审批；
- * 数据可分多次导入，未发起的合同在列表中以「未发起」展示，随到随发起，互不影响。
+ * 申请单粒度 = <b>合同 + 业绩归属月</b>：一个合同当月一张申请单，独立提交、独立审批。
  * <p>
- * 核心口径：
+ * 新业务口径：
  * <ul>
- *   <li>金额为<b>结佣业绩金额</b>（PERF_REAL 实收事实原样透传），一分钱提成不算（CI C6/C7）；</li>
- *   <li>0 值实收不入单：仅 {@code amount <> 0} 的事实生成明细（ADR B14）；</li>
- *   <li>封账窗口：CLOSED 期间拒绝发起（§2.5，经 Port 实时查）；</li>
- *   <li>已提交单不支持追加事实：数据有变化走「驳回 / 作废 → 重新发起」；</li>
+ *   <li>仅可对<b>实收审批通过</b>（received_apply APPROVED）的实收业绩发起（§3.2）；</li>
+ *   <li>金额为结佣业绩金额（PERF_REAL 原样透传），0 值实收不入单（ADR B14）；</li>
+ *   <li>审批流 commission_apply：申请人 → 总监 → 财务；总监发起时系统自动过总监节点（§3.1）；</li>
+ *   <li>实收=应收无差异：总监通过后不流转财务（§3.4）；skip_finance=true 全局跳过财务；</li>
+ *   <li>有差异：总监通过时系统自动把实收对齐应收（合同+每人明细都改），再流转财务人工审批（§3.5）；</li>
  *   <li>审批通过月 = 工资归属月 approved_month（V4.2 硬要求 1）。</li>
  * </ul>
  */
@@ -69,6 +79,11 @@ public class CommissionApplicationService {
     /** 结佣口径：实收业绩（结佣确认对象） */
     private static final String FACT_TYPE_REAL = "PERF_REAL";
 
+    private static final String FLOW_CODE = "commission_apply";
+    private static final String NODE_DIRECTOR = "capp_director";
+    private static final String NODE_FINANCE = "capp_finance";
+    private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
+
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
     public static final String ROW_STATUS_NONE = "NONE";
 
@@ -79,19 +94,20 @@ public class CommissionApplicationService {
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
+    private final WorkflowService workflowService;
+    private final ConfigService configService;
 
     // ==================== 发起结佣（按合同） ====================
 
     /**
      * 发起结佣（拉取该合同当月事实 → 生成明细，§4.1）。
      * <p>
-     * 幂等：该 (period, contractNo) 已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单 → 拒绝；
-     * REJECTED 单请直接修改后重新提交；CANCELLED 单作废后可重新发起。
+     * 新流程前置（§3.2）：合同实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
      *
      * @param period     业绩归属月（结算月 YYYY-MM）
      * @param contractNo 合同号
      * @param operatorId 发起人 ID
-     * @return 申请单（含明细条数 / 金额合计）
+     * @return 申请单（草稿）
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId) {
@@ -103,15 +119,7 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 批量发起：为期间内所有「未发起且有非零实收」的合同逐张建单。
-     * <p>
-     * 已存在未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）的合同自动跳过；
-     * 每张单仍为独立草稿，需逐张提交/审批。
-     *
-     * @param period     业绩归属月
-     * @param deptId     门店 ID（null=全部门店；非 null 含下级）
-     * @param operatorId 发起人 ID
-     * @return 新创建申请单数量
+     * 批量发起：为期间内所有「未发起且有非零实收」的合同逐张建单（草稿，不自动提交）。
      */
     @Transactional(rollbackFor = Exception.class)
     public int batchApply(String period, Long deptId, Long operatorId) {
@@ -139,16 +147,67 @@ public class CommissionApplicationService {
                 doApply(period, contract.getContractNo(), operatorId);
                 created++;
             } catch (ServiceException e) {
-                // 单合同失败（如员工无法归属）不阻断整批，收集后统一提示
+                // 单合同失败（如实收未审批 / 员工无法归属）不阻断整批，收集后统一提示
                 log.warn("[结佣-批量发起] 合同 {} 发起失败：{}", contract.getContractNo(), e.getMessage());
                 failed.add(contract.getContractNo());
             }
         }
         log.info("[结佣-批量发起] period={}, deptId={}, 创建={}, 失败={}", period, deptId, created, failed.size());
         if (!failed.isEmpty()) {
-            throw new ServiceException("成功发起 " + created + " 张；以下合同失败（请核对员工归属）：" + failed);
+            throw new ServiceException("成功发起 " + created + " 张；以下合同失败：" + failed);
         }
         return created;
+    }
+
+    /**
+     * Excel 批量发起（§3.2）：按表内合同号逐张 发起+自动提交；金额列仅用于展示不参与校验。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionBatchResult batchInitiate(String period, MultipartFile file, Long operatorId) {
+        if (StringUtils.isBlank(period)) {
+            throw new ServiceException("结算月不能为空");
+        }
+        if (file == null || file.isEmpty()) {
+            throw new ServiceException("请上传 Excel 文件（.xlsx/.xls）");
+        }
+        List<CommissionBatchExcelParser.ContractAmountRow> rows;
+        try {
+            rows = CommissionBatchExcelParser.parse(file.getInputStream());
+        } catch (Exception e) {
+            throw new ServiceException("Excel 读取失败：{}", e.getMessage());
+        }
+        CommissionBatchResult result = new CommissionBatchResult();
+        Set<String> seen = new HashSet<>();
+        for (CommissionBatchExcelParser.ContractAmountRow row : rows) {
+            if (!seen.add(row.getContractNo())) {
+                continue;
+            }
+            try {
+                CommissionApplication application;
+                CommissionApplication existing = findActiveApplication(period, row.getContractNo());
+                if (existing != null
+                    && existing.getStatus() != ApplicationStatus.CANCELLED) {
+                    // 已有未完结单：草稿/驳回单直接提交，审批中/已锁定视为成功跳过
+                    if (existing.getStatus() == ApplicationStatus.DRAFT
+                        || existing.getStatus() == ApplicationStatus.REJECTED) {
+                        application = existing;
+                    } else {
+                        result.addSuccess();
+                        continue;
+                    }
+                } else {
+                    checkPeriodOpen(period, "批量发起结佣");
+                    application = doApply(period, row.getContractNo(), operatorId);
+                }
+                submit(application.getId(), operatorId);
+                result.addSuccess();
+            } catch (Exception e) {
+                result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
+            }
+        }
+        log.info("[结佣-Excel批量发起] period={}, 成功={}, 失败={}",
+            period, result.getSuccessCount(), result.getFailedRows().size());
+        return result;
     }
 
     /**
@@ -173,6 +232,17 @@ public class CommissionApplicationService {
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
             throw new ServiceException("合同 " + contractNo + " " + period + " 月无可入账的实收业绩（amount>0 的实收事实为 0 条）");
+        }
+
+        // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣
+        List<String> unapproved = nonZeroFacts.stream()
+            .filter(f -> f.getReceivedApplyId() == null || !"APPROVED".equals(f.getReceivedStatus()))
+            .map(f -> "事实" + f.getFactId() + "(" + f.getReceivedStatus() + ")")
+            .distinct()
+            .toList();
+        if (!unapproved.isEmpty()) {
+            throw new ServiceException("合同 " + contractNo + " 的实收业绩尚未完成实收审批（§3.2），"
+                + "不能发起结佣；未通过明细：" + unapproved);
         }
 
         // 员工归属兜底：明细 employee_id NOT NULL，按工号补齐
@@ -212,6 +282,8 @@ public class CommissionApplicationService {
         application.setApplicantId(operatorId);
         application.setItemCount(nonZeroFacts.size());
         application.setTotalAmount(sumAmounts(nonZeroFacts));
+        application.setExpectedAmount(resolveExpectedAmount(period, contractNo));
+        application.setAligned(false);
         try {
             applicationMapper.insert(application);
         } catch (DuplicateKeyException e) {
@@ -223,16 +295,23 @@ public class CommissionApplicationService {
             itemMapper.insert(buildItem(application, fact, null));
         }
 
-        log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, totalAmount={}",
-            application.getApplyNo(), period, contractNo, application.getItemCount(), application.getTotalAmount());
+        log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, received={}, expected={}",
+            application.getApplyNo(), period, contractNo, application.getItemCount(),
+            application.getTotalAmount(), application.getExpectedAmount());
         return application;
+    }
+
+    /** 应收合计：取业绩域合同汇总的应收列（PERF_EXPECT 合计）。 */
+    private BigDecimal resolveExpectedAmount(String period, String contractNo) {
+        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL).stream()
+            .filter(c -> contractNo.equals(c.getContractNo()))
+            .findFirst()
+            .map(PerformanceContractSummaryDTO::getExpectedAmount)
+            .orElse(BigDecimal.ZERO);
     }
 
     /**
      * 0 值过滤（纯函数，供单测）：仅保留 amount &lt;&gt; 0 的事实（BigDecimal compareTo 比较）。
-     *
-     * @param facts 事实列表
-     * @return 非零金额事实
      */
     public static List<PerformanceFactSummaryDTO> filterNonZero(List<PerformanceFactSummaryDTO> facts) {
         if (facts == null || facts.isEmpty()) {
@@ -247,15 +326,13 @@ public class CommissionApplicationService {
         return result;
     }
 
-    // ==================== 提交 / 审批 ====================
+    // ==================== 提交 / 审批（workflow） ====================
 
     /**
-     * 提交审批：DRAFT / REJECTED → SUBMITTED。
+     * 提交审批（§3.1）：DRAFT / REJECTED → SUBMITTED，启动 commission_apply 流程。
      * <p>
-     * 驳回后的申请单可直接修改重新提交（明细仍为 PENDING）；草稿单明细随单 DRAFT → PENDING。
-     *
-     * @param applicationId 申请单 ID
-     * @param operatorId    操作人 ID
+     * 发起人路由：申请人节点办理后进入总监节点；若发起人=总监（或超管），
+     * 系统自动办理总监节点（含 §3.5 差异对齐判定），无差异时继续自动过财务直至完成。
      */
     @Transactional(rollbackFor = Exception.class)
     public void submit(Long applicationId, Long operatorId) {
@@ -265,102 +342,140 @@ public class CommissionApplicationService {
             throw new ServiceException("仅草稿/已驳回状态可提交（当前：" + application.getStatus().getDesc() + "）");
         }
         application.setStatus(ApplicationStatus.SUBMITTED);
-        int rows = applicationMapper.updateById(application);
-        if (rows == 0) {
-            throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
-        }
-        // 草稿明细随单流转：DRAFT（待提交）→ PENDING（待审批）；驳回单明细已是 PENDING
+        applicationMapper.updateById(application);
+        // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
         itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
             .eq(CommissionItem::getApplicationId, applicationId)
             .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
             .set(CommissionItem::getStatus, ItemStatus.PENDING));
-        log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operatorId={}",
-            application.getApplyNo(), application.getContractNo(), operatorId);
+
+        if (StringUtils.isBlank(application.getProcessInstanceId())) {
+            startWorkflow(application);
+        } else {
+            // 驳回后流程停在申请人节点：办理申请人任务重新提交
+            Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+            if (taskId == null) {
+                throw new ServiceException("审批流程任务不存在，请联系管理员");
+            }
+            workflowService.completeTask(taskId, "重新提交");
+        }
+
+        // 发起人=总监 → 系统自动办理总监节点（§3.1 总监发起）
+        Set<String> roles = currentRoles();
+        if (roles.contains("director")) {
+            doDirectorApprove(application, operatorId, "总监发起，系统自动审批");
+        }
+        refreshCurrentNode(application);
+        log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
+            application.getApplyNo(), application.getContractNo(), operatorId, application.getCurrentNode());
     }
 
     /**
-     * 审批回调（简化审批，单事务）：
+     * 单个审批通过（§3.3）：按当前待办节点自动识别。
      * <ul>
-     *   <li>通过：SUBMITTED → LOCKED（内部先 APPROVED 落 approved_month = 当前月），
-     *       明细 PENDING → APPROVED，发布 CommissionApprovedEvent；</li>
-     *   <li>驳回：SUBMITTED → REJECTED，明细保持 PENDING（可修改后重新提交）。</li>
+     *   <li>总监节点：先做 §3.5 差异判定与实收对齐，办理后无差异/跳过财务则系统自动过财务；</li>
+     *   <li>财务节点：直接办理，流程结束 → finish 事件锁定单据。</li>
      * </ul>
-     * 幂等：重复回调（已 LOCKED / REJECTED）直接忽略。
-     *
-     * @param applicationId 申请单 ID
-     * @param approve       是否通过
-     * @param approverId    审批人 ID
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void approve(Long applicationId) {
+        CommissionApplication application = requireSubmitted(applicationId);
+        String node = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
+        if (NODE_DIRECTOR.equals(node)) {
+            doDirectorApprove(application, LoginHelper.getUserId(), "总监审批通过");
+        } else if (NODE_FINANCE.equals(node)) {
+            Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+            workflowService.completeTask(taskId, "财务审批通过");
+        } else {
+            throw new ServiceException("当前无可审批节点（节点=" + node + "）");
+        }
+        refreshCurrentNode(application);
+    }
+
+    /**
+     * 单个驳回（§3.3）：驳回到申请人，单据置 REJECTED，明细保持 PENDING 可修改后重新提交。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void reject(Long applicationId, String message) {
+        CommissionApplication application = requireSubmitted(applicationId);
+        Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+        if (taskId == null) {
+            throw new ServiceException("当前无待办任务");
+        }
+        workflowService.rejectTask(taskId, StringUtils.isBlank(message) ? "驳回" : message);
+        application.setStatus(ApplicationStatus.REJECTED);
+        application.setCurrentNode(null);
+        applicationMapper.updateById(application);
+        log.info("[结佣-驳回] applyNo={}, message={}", application.getApplyNo(), message);
+    }
+
+    /**
+     * 兼容旧回调端点：approve=true 走当前节点通过，false 驳回。
      */
     @Transactional(rollbackFor = Exception.class)
     public void callback(Long applicationId, boolean approve, Long approverId) {
-        CommissionApplication application = getApplication(applicationId);
-        if (application.getStatus() == ApplicationStatus.LOCKED
-            || application.getStatus() == ApplicationStatus.REJECTED
-            || application.getStatus() == ApplicationStatus.APPROVED) {
-            log.info("[结佣-审批] 重复回调忽略：applyNo={}, status={}",
-                application.getApplyNo(), application.getStatus().getCode());
-            return;
+        if (approve) {
+            approve(applicationId);
+        } else {
+            reject(applicationId, "驳回");
         }
-        if (application.getStatus() != ApplicationStatus.SUBMITTED) {
-            throw new ServiceException("仅已提交状态的申请单可审批（当前：" + application.getStatus().getDesc() + "）");
-        }
-
-        if (!approve) {
-            application.setStatus(ApplicationStatus.REJECTED);
-            application.setApproverId(approverId);
-            int rows = applicationMapper.updateById(application);
-            if (rows == 0) {
-                throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
-            }
-            log.info("[结佣-审批] 合同申请单已驳回：applyNo={}, contractNo={}, approverId={}",
-                application.getApplyNo(), application.getContractNo(), approverId);
-            return;
-        }
-
-        // ★ 审批通过月 = 工资归属月（V4.2 硬要求 1）：8 月业绩 9 月审批 → period=2026-08、approved_month=2026-09
-        String approvedMonth = LocalDateTime.now().format(PERIOD_FORMATTER);
-
-        // 明细 PENDING → APPROVED（先查 ID 供事件载荷）
-        List<CommissionItem> pendingItems = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, applicationId)
-            .eq(CommissionItem::getStatus, ItemStatus.PENDING));
-        itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, applicationId)
-            .eq(CommissionItem::getStatus, ItemStatus.PENDING)
-            .set(CommissionItem::getStatus, ItemStatus.APPROVED)
-            .set(CommissionItem::getApprovedMonth, approvedMonth));
-
-        // SUBMITTED → APPROVED → LOCKED（单事务内连续流转，终态 LOCKED）
-        application.setStatus(ApplicationStatus.LOCKED);
-        application.setApprovedMonth(approvedMonth);
-        application.setApproverId(approverId);
-        application.setLockTime(LocalDateTime.now());
-        int rows = applicationMapper.updateById(application);
-        if (rows == 0) {
-            throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
-        }
-
-        // 发布审批通过事件（payroll 消费；事件只传 ID，明细由 payroll 走 Port 拉取）
-        CommissionApprovedEvent event = new CommissionApprovedEvent();
-        event.setApplicationId(applicationId);
-        event.setPeriod(application.getPeriod());
-        event.setApprovedMonth(approvedMonth);
-        event.setDeptId(application.getDeptId());
-        event.setItemIds(pendingItems.stream().map(i -> String.valueOf(i.getId())).toList());
-        eventPort.emit(event);
-
-        log.info("[结佣-审批] 合同申请单已锁定：applyNo={}, contractNo={}, approvedMonth={}, itemCount={}",
-            application.getApplyNo(), application.getContractNo(), approvedMonth, pendingItems.size());
     }
 
     /**
-     * 作废申请单：仅 DRAFT/SUBMITTED 可作废。
-     * <p>
-     * 未审批明细（DRAFT/PENDING）随单冲销（REVERSED + APPLICATION_CANCELLED），
-     * 释放对应业绩事实供重新发起；申请单聚合清零。
-     *
-     * @param applicationId 申请单 ID
-     * @param operatorId    操作人 ID
+     * Excel 批量审批（§3.3）：匹配 合同号+实收金额 与 SUBMITTED 单据，按当前节点逐张通过。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionBatchResult batchApprove(String period, MultipartFile file) {
+        if (StringUtils.isBlank(period)) {
+            throw new ServiceException("结算月不能为空");
+        }
+        if (file == null || file.isEmpty()) {
+            throw new ServiceException("请上传 Excel 文件（.xlsx/.xls）");
+        }
+        List<CommissionBatchExcelParser.ContractAmountRow> rows;
+        try {
+            rows = CommissionBatchExcelParser.parse(file.getInputStream());
+        } catch (Exception e) {
+            throw new ServiceException("Excel 读取失败：{}", e.getMessage());
+        }
+        CommissionBatchResult result = new CommissionBatchResult();
+        for (CommissionBatchExcelParser.ContractAmountRow row : rows) {
+            try {
+                BigDecimal amount = CommissionBatchExcelParser.parseAmount(row.getAmountText());
+                CommissionApplication application = applicationMapper.selectOne(
+                    new LambdaQueryWrapper<CommissionApplication>()
+                        .eq(CommissionApplication::getPeriod, period)
+                        .eq(CommissionApplication::getContractNo, row.getContractNo())
+                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
+                        .orderByDesc(CommissionApplication::getId)
+                        .last("LIMIT 1"));
+                if (application == null) {
+                    result.addFailure(row.getContractNo(), row.getAmountText(), "无审批中的结佣申请单");
+                    continue;
+                }
+                if (amount == null) {
+                    result.addFailure(row.getContractNo(), row.getAmountText(), "金额无法识别");
+                    continue;
+                }
+                if (application.getTotalAmount() == null
+                    || application.getTotalAmount().compareTo(amount) != 0) {
+                    result.addFailure(row.getContractNo(), row.getAmountText(),
+                        "金额不匹配，单据实收=" + application.getTotalAmount());
+                    continue;
+                }
+                approve(application.getId());
+                result.addSuccess();
+            } catch (Exception e) {
+                result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
+            }
+        }
+        log.info("[结佣-Excel批量审批] period={}, 成功={}, 失败={}",
+            period, result.getSuccessCount(), result.getFailedRows().size());
+        return result;
+    }
+
+    /**
+     * 作废申请单：DRAFT/SUBMITTED 可作废；运行中的流程先终止（cancel 事件回调冲销明细）。
      */
     @Transactional(rollbackFor = Exception.class)
     public void cancel(Long applicationId, Long operatorId) {
@@ -369,36 +484,100 @@ public class CommissionApplicationService {
             && application.getStatus() != ApplicationStatus.SUBMITTED) {
             throw new ServiceException("仅草稿/已提交状态可作废（当前：" + application.getStatus().getDesc() + "）");
         }
-        application.setStatus(ApplicationStatus.CANCELLED);
-        int rows = applicationMapper.updateById(application);
-        if (rows == 0) {
-            throw new ServiceException("申请单状态已变化（并发冲突），请刷新后重试");
+        if (StringUtils.isNotBlank(application.getProcessInstanceId())) {
+            // 终止运行中的流程实例（触发 cancel 事件，监听器置 CANCELLED + 冲销明细，幂等）
+            workflowService.deleteInstance(List.of(String.valueOf(applicationId)));
         }
-
-        // 未审批明细随单冲销，释放事实（uk_citem_fact_active 排除 REVERSED → 可重新发起）
-        int reversed = itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, applicationId)
-            .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
-            .set(CommissionItem::getStatus, ItemStatus.REVERSED)
-            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
-        if (reversed > 0) {
+        // 草稿无流程实例：本地直接置 CANCELLED 并冲销明细
+        reverseUnapprovedItems(applicationId);
+        // 明细 UPDATE 会清空 MyBatis 一级缓存并推进数据版本，这里重新加载避免乐观锁更新丢失
+        application = applicationMapper.selectById(applicationId);
+        if (application != null && application.getStatus() != ApplicationStatus.CANCELLED) {
             application.setItemCount(0);
             application.setTotalAmount(BigDecimal.ZERO);
+            application.setStatus(ApplicationStatus.CANCELLED);
+            application.setCurrentNode(null);
             applicationMapper.updateById(application);
         }
-        log.info("[结佣-作废] 合同申请单已作废：applyNo={}, contractNo={}, 冲销明细={}, operatorId={}",
-            application.getApplyNo(), application.getContractNo(), reversed, operatorId);
+        log.info("[结佣-作废] applyNo={}, operator={}",
+            application == null ? applicationId : application.getApplyNo(), operatorId);
+    }
+
+    // ==================== 工作流回调 ====================
+
+    /**
+     * commission_apply 流程事件处理（CommissionApplyWorkflowListener 调用）。
+     * <ul>
+     *   <li>finish：SUBMITTED → LOCKED，落 approved_month=当前月，明细 PENDING→APPROVED，发结佣通过事件；</li>
+     *   <li>back：→ REJECTED（明细保持 PENDING）；</li>
+     *   <li>cancel/invalid/termination：→ CANCELLED，未审批明细冲销释放事实。</li>
+     * </ul>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void handleWorkflowEvent(Long applicationId, String status, String handler, String message) {
+        CommissionApplication application = applicationMapper.selectById(applicationId);
+        if (application == null) {
+            log.warn("[结佣工作流] 申请单不存在，忽略：id={}, status={}", applicationId, status);
+            return;
+        }
+        Long handlerId = parseHandlerId(handler);
+        switch (status == null ? "" : status) {
+            case "finish" -> {
+                if (application.getStatus() == ApplicationStatus.LOCKED) {
+                    return;
+                }
+                String approvedMonth = LocalDateTime.now().format(PERIOD_FORMATTER);
+                List<CommissionItem> pendingItems = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+                    .eq(CommissionItem::getApplicationId, applicationId)
+                    .eq(CommissionItem::getStatus, ItemStatus.PENDING));
+                itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+                    .eq(CommissionItem::getApplicationId, applicationId)
+                    .eq(CommissionItem::getStatus, ItemStatus.PENDING)
+                    .set(CommissionItem::getStatus, ItemStatus.APPROVED)
+                    .set(CommissionItem::getApprovedMonth, approvedMonth));
+                application.setStatus(ApplicationStatus.LOCKED);
+                application.setCurrentNode(null);
+                application.setApprovedMonth(approvedMonth);
+                if (handlerId != null) {
+                    application.setApproverId(handlerId);
+                }
+                application.setLockTime(LocalDateTime.now());
+                applicationMapper.updateById(application);
+
+                CommissionApprovedEvent event = new CommissionApprovedEvent();
+                event.setApplicationId(applicationId);
+                event.setPeriod(application.getPeriod());
+                event.setApprovedMonth(approvedMonth);
+                event.setDeptId(application.getDeptId());
+                event.setItemIds(pendingItems.stream().map(i -> String.valueOf(i.getId())).toList());
+                eventPort.emit(event);
+                log.info("[结佣工作流] 审批通过已锁定：id={}, applyNo={}, approvedMonth={}, items={}",
+                    applicationId, application.getApplyNo(), approvedMonth, pendingItems.size());
+            }
+            case "back" -> {
+                if (application.getStatus() != ApplicationStatus.SUBMITTED) {
+                    return;
+                }
+                application.setStatus(ApplicationStatus.REJECTED);
+                application.setCurrentNode(null);
+                applicationMapper.updateById(application);
+                log.info("[结佣工作流] 驳回：id={}, message={}", applicationId, message);
+            }
+            case "cancel", "invalid", "termination" -> {
+                reverseUnapprovedItems(applicationId);
+                application.setItemCount(0);
+                application.setTotalAmount(BigDecimal.ZERO);
+                application.setStatus(ApplicationStatus.CANCELLED);
+                application.setCurrentNode(null);
+                applicationMapper.updateById(application);
+                log.info("[结佣工作流] 作废/终止：id={}", applicationId);
+            }
+            default -> log.info("[结佣工作流] 忽略状态：id={}, status={}", applicationId, status);
+        }
     }
 
     // ==================== 查询 ====================
 
-    /**
-     * 分页查询申请单。
-     *
-     * @param query     筛选条件
-     * @param pageQuery 分页参数
-     * @return 申请单分页
-     */
     public PageResult<CommissionApplication> listApplications(ApplyQuery query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionApplication> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionApplication::getPeriod, query.getPeriod())
@@ -416,23 +595,14 @@ public class CommissionApplicationService {
 
     /**
      * 按「合同」维度分页查询结佣申请（与业绩明细页合同维度对齐）。
-     * <p>
-     * 数据源为业绩域当月全部合同（PERF_REAL），左联结佣申请单：
-     * 无单的合同状态为「未发起」，有单的展示申请单状态与操作。门店权限过滤由业绩域聚合查询承担。
-     *
-     * @param query     筛选条件（period 必填；deptId / status / keyword）
-     * @param pageQuery 分页参数
-     * @return 合同维度分页
      */
     public PageResult<CommissionContractVO> listContracts(ApplyQuery query, PageQuery pageQuery) {
         String period = StringUtils.isNotBlank(query.getPeriod())
             ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
 
-        // 1. 业绩域合同汇总（含下级部门，与业绩明细页口径一致）
         List<PerformanceContractSummaryDTO> contracts =
             performanceQueryPort.listContractSummaries(period, query.getDeptId(), FACT_TYPE_REAL);
 
-        // 2. 当月全部申请单：同一合同取最新一张（CANCELLED 后重新发起时新单优先）
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
             .orderByDesc(CommissionApplication::getId));
@@ -441,10 +611,8 @@ public class CommissionApplicationService {
             appMap.putIfAbsent(app.getContractNo(), app);
         }
 
-        // 3. 关键字过滤
         String keyword = StringUtils.trimToNull(query.getKeyword());
 
-        // 4. 合并：合同事实 + 申请单
         List<CommissionContractVO> all = new ArrayList<>(contracts.size());
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
@@ -458,7 +626,6 @@ public class CommissionApplicationService {
             all.add(toContractVO(period, c, app, status));
         }
 
-        // 5. 排序（签约时间倒序，空值垫底）+ 内存分页
         all.sort((a, b) -> {
             if (a.getBusinessDate() == null && b.getBusinessDate() == null) {
                 return 0;
@@ -491,6 +658,7 @@ public class CommissionApplicationService {
         vo.setBusinessDate(c.getBusinessDate());
         vo.setEmployeeCount(c.getEmployeeCount());
         vo.setStatus(status);
+        vo.setExpectedAmount(c.getExpectedAmount());
         if (app != null) {
             vo.setApplicationId(app.getId());
             vo.setApplyNo(app.getApplyNo());
@@ -499,6 +667,11 @@ public class CommissionApplicationService {
             vo.setDeptId(app.getDeptId());
             vo.setAmount(app.getTotalAmount());
             vo.setDetailCount(app.getItemCount() == null ? 0 : app.getItemCount());
+            vo.setAligned(app.getAligned());
+            vo.setCurrentNode(app.getCurrentNode());
+            if (app.getExpectedAmount() != null) {
+                vo.setExpectedAmount(app.getExpectedAmount());
+            }
         } else {
             vo.setAmount(c.getAmount());
             vo.setDetailCount(c.getDetailCount());
@@ -512,12 +685,6 @@ public class CommissionApplicationService {
             || (c.getPropertyAddress() != null && c.getPropertyAddress().contains(keyword));
     }
 
-    /**
-     * 申请单详情（含明细）。
-     *
-     * @param applicationId 申请单 ID
-     * @return 申请单
-     */
     public CommissionApplication getApplication(Long applicationId) {
         CommissionApplication application = applicationMapper.selectById(applicationId);
         if (application == null) {
@@ -526,35 +693,16 @@ public class CommissionApplicationService {
         return application;
     }
 
-    /**
-     * 申请单明细列表（全量，含 REVERSED，供详情/审计）。
-     *
-     * @param applicationId 申请单 ID
-     * @return 明细列表（按 ID 升序）
-     */
     public List<CommissionItem> listItems(Long applicationId) {
         return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
             .eq(CommissionItem::getApplicationId, applicationId)
             .orderByAsc(CommissionItem::getId));
     }
 
-    /**
-     * 按明细 ID 查单条明细（溯源用，含 REVERSED）。
-     *
-     * @param itemId 明细 ID
-     * @return 明细；不存在返回 null
-     */
     public CommissionItem getItem(Long itemId) {
         return itemMapper.selectById(itemId);
     }
 
-    /**
-     * 明细分页查询（列表页）。
-     *
-     * @param query     筛选条件
-     * @param pageQuery 分页参数
-     * @return 明细分页
-     */
     public PageResult<CommissionItem> listItems(com.panjia.commission.dto.ItemQuery query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionItem> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionItem::getPeriod, query.getPeriod())
@@ -568,13 +716,6 @@ public class CommissionApplicationService {
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
-    /**
-     * 消费日志分页查询。
-     *
-     * @param query     筛选条件
-     * @param pageQuery 分页参数
-     * @return 消费日志分页
-     */
     public PageResult<CommissionConsumeLog> listConsumeLogs(com.panjia.commission.dto.ConsumeLogQuery query,
                                                             PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionConsumeLog> wrapper = new LambdaQueryWrapper<>();
@@ -590,11 +731,6 @@ public class CommissionApplicationService {
 
     /**
      * 重算申请单聚合（item_count / total_amount，按未 REVERSED 明细）。
-     * <p>
-     * 供调整单执行 / 冲销联动共用；REVERSED 行不计入聚合。
-     *
-     * @param applicationId 申请单 ID
-     * @param application   申请单实体（可为 null，内部重新加载）
      */
     public void recalcAggregates(Long applicationId, CommissionApplication application) {
         CommissionApplication app = application != null ? application : applicationMapper.selectById(applicationId);
@@ -615,8 +751,161 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 查该期间所有未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED）。
+     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * <p>
+     * 不填的后果：flow_instance_biz_ext.business_title 为空，待办列表业务编码/业务标题两列全空，
+     * 审批人只能看到一串技术编码，无法分辨审的是哪张单。
      */
+    private FlowInstanceBizExtDTO buildBizExt(CommissionApplication application) {
+        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
+        bizExt.setBusinessId(String.valueOf(application.getId()));
+        bizExt.setBusinessCode(text(application.getApplyNo()));
+        bizExt.setBusinessTitle("结佣审批｜" + text(application.getContractNo())
+            + " " + text(application.getPropertyAddress())
+            + "｜账期" + text(application.getPeriod())
+            + "｜应收" + text(application.getTotalAmount()));
+        return bizExt;
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    /**
+     * 启动 commission_apply 流程并办理申请人首节点。
+     */
+    private void startWorkflow(CommissionApplication application) {
+        StartProcessDTO start = new StartProcessDTO();
+        start.setBusinessId(String.valueOf(application.getId()));
+        start.setFlowCode(FLOW_CODE);
+        Map<String, Object> variables = new HashMap<>(2);
+        variables.put("ignore", true);
+        start.setVariables(variables);
+        start.setBizExt(buildBizExt(application));
+        try {
+            boolean ok = workflowService.startCompleteTask(start);
+            if (!ok) {
+                throw new ServiceException("结佣审批流程发起失败");
+            }
+        } catch (Exception e) {
+            log.error("[结佣] 流程发起异常：id={}", application.getId(), e);
+            throw new ServiceException("结佣审批流程发起失败：{}", e.getMessage());
+        }
+        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(application.getId()));
+        if (instanceId != null) {
+            application.setProcessInstanceId(String.valueOf(instanceId));
+            applicationMapper.updateById(application);
+        }
+    }
+
+    /**
+     * 总监节点审批处理（§3.4/§3.5）：
+     * <ol>
+     *   <li>比对单内实收合计与应收合计：有差异且未对齐 → 调业绩域对齐端口，
+     *       实收事实（合同+每人明细）supersede 为应收口径，结佣明细按映射重绑事实+金额并重算；</li>
+     *   <li>办理总监任务；</li>
+     *   <li>无差异（或全局 skip_finance）→ 系统自动办理财务节点，流程结束；有差异 → 停留财务人工审批。</li>
+     * </ol>
+     */
+    private void doDirectorApprove(CommissionApplication application, Long operatorId, String message) {
+        Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
+        if (directorTask == null) {
+            throw new ServiceException("当前不在总监审批节点");
+        }
+        BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
+        BigDecimal expected = application.getExpectedAmount() == null
+            ? BigDecimal.ZERO : application.getExpectedAmount();
+        boolean hasDiff = received.compareTo(expected) != 0;
+
+        if (hasDiff && !Boolean.TRUE.equals(application.getAligned())) {
+            log.info("[结佣-对齐] 实收与应收存在差异，触发自动对齐：id={}, received={}, expected={}",
+                application.getId(), received, expected);
+            ReceivedAlignmentResultDTO result = performanceQueryPort.alignReceivedToExpected(
+                application.getPeriod(), application.getContractNo(), operatorId);
+            rebindItemsAfterAlignment(application, result);
+            application.setAligned(true);
+            recalcAggregates(application.getId(), application);
+        }
+
+        workflowService.completeTask(directorTask,
+            StringUtils.isBlank(message) ? "总监审批通过" : message
+                + (hasDiff ? "（实收已自动对齐应收，转财务复核）" : ""));
+
+        // §3.4 无差异不流转财务（或全局跳过财务）→ 系统自动完成财务节点
+        boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));
+        if (!hasDiff || skipFinance) {
+            Long financeTask = taskAtNode(application.getId(), NODE_FINANCE);
+            if (financeTask != null) {
+                workflowService.completeTask(financeTask,
+                    hasDiff ? "全局跳过财务，系统自动通过" : "实收应收无差异，系统自动完成财务节点");
+            }
+        }
+    }
+
+    /**
+     * 对齐后按 旧事实→新事实 映射重绑结佣明细：事实 ID / 金额 / 期间 / 门店 同步到新事实。
+     */
+    private void rebindItemsAfterAlignment(CommissionApplication application, ReceivedAlignmentResultDTO result) {
+        if (result == null || result.getMappings() == null || result.getMappings().isEmpty()) {
+            return;
+        }
+        for (ReceivedAlignmentResultDTO.Mapping mapping : result.getMappings()) {
+            PerformanceFactSummaryDTO newFact = mapping.getNewFact();
+            if (mapping.getOldFactId() == null || newFact == null) {
+                continue;
+            }
+            itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+                .eq(CommissionItem::getApplicationId, application.getId())
+                .eq(CommissionItem::getPerformanceFactId, mapping.getOldFactId())
+                .ne(CommissionItem::getStatus, ItemStatus.REVERSED)
+                .set(CommissionItem::getPerformanceFactId, newFact.getFactId())
+                .set(CommissionItem::getAmount, newFact.getAmount())
+                .set(newFact.getPeriod() != null, CommissionItem::getPeriod, newFact.getPeriod())
+                .set(newFact.getDeptId() != null, CommissionItem::getDeptId, newFact.getDeptId()));
+        }
+    }
+
+    private Long taskAtNode(Long applicationId, String nodeCode) {
+        String current = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
+        return nodeCode.equals(current) ? workflowService.getCurrentTaskId(String.valueOf(applicationId)) : null;
+    }
+
+    /** 从工作流回写当前节点（capp_director→DIRECTOR / capp_finance→FINANCE / 已结束→null）。 */
+    private void refreshCurrentNode(CommissionApplication application) {
+        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(application.getId()));
+        String shortNode;
+        if (NODE_DIRECTOR.equals(nodeCode)) {
+            shortNode = "DIRECTOR";
+        } else if (NODE_FINANCE.equals(nodeCode)) {
+            shortNode = "FINANCE";
+        } else {
+            shortNode = null;
+        }
+        application.setCurrentNode(shortNode);
+        applicationMapper.updateById(application);
+    }
+
+    /**
+     * 未审批明细（DRAFT/PENDING）随单冲销，释放业绩事实。
+     * 注意：只更新明细，不回写申请单聚合——申请单的状态/聚合由调用方在自己持有的版本对象上更新，
+     * 避免与调用方形成「一级缓存分叉 + @Version 乐观锁」导致的更新丢失。
+     */
+    private int reverseUnapprovedItems(Long applicationId) {
+        return itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
+            .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
+    }
+
+    private CommissionApplication requireSubmitted(Long applicationId) {
+        CommissionApplication application = getApplication(applicationId);
+        if (application.getStatus() != ApplicationStatus.SUBMITTED) {
+            throw new ServiceException("仅审批中的单据可办理（当前：" + application.getStatus().getDesc() + "）");
+        }
+        return application;
+    }
+
     private List<CommissionApplication> listActiveApplications(String period) {
         return applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
@@ -624,10 +913,6 @@ public class CommissionApplicationService {
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
     }
 
-    /**
-     * 查该 (period, contractNo) 的未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED 任一即视为占用，
-     * 与 uk_capp_period_contract 部分唯一索引口径一致）。
-     */
     private CommissionApplication findActiveApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
@@ -650,7 +935,7 @@ public class CommissionApplicationService {
 
     /**
      * 员工归属兜底（就地修改 fact.employeeId）：事实 employee_id 为空时按工号批量补齐，
-     * 仍无法归属的（脏数据 / 员工已删）整体拒绝，fail fast（明细 employee_id NOT NULL）。
+     * 仍无法归属的整体拒绝，fail fast（明细 employee_id NOT NULL）。
      */
     private void resolveEmployeeIds(List<PerformanceFactSummaryDTO> facts) {
         Set<String> missingCodes = new HashSet<>();
@@ -685,13 +970,6 @@ public class CommissionApplicationService {
 
     /**
      * 由事实构建结佣明细（amount 原样透传，不折算；冻结 contractNo/employee/dept/bizType/roleType）。
-     * <p>
-     * 新建申请单恒为 DRAFT，明细初始状态 DRAFT（待提交），提交时随单流转为 PENDING。
-     *
-     * @param application 所属申请单
-     * @param fact        业绩事实摘要
-     * @param adjustId    来源调整单 ID（发起场景为 null）
-     * @return 未持久化的明细实体
      */
     private CommissionItem buildItem(CommissionApplication application, PerformanceFactSummaryDTO fact, Long adjustId) {
         CommissionItem item = new CommissionItem();
@@ -715,5 +993,32 @@ public class CommissionApplicationService {
         return facts.stream()
             .map(PerformanceFactSummaryDTO::getAmount)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    private Set<String> currentRoles() {
+        try {
+            if (LoginHelper.isLogin() && LoginHelper.getLoginUser() != null) {
+                Set<String> roles = LoginHelper.getLoginUser().getRolePermission();
+                if (LoginHelper.isSuperAdmin()) {
+                    roles = roles == null ? new HashSet<>() : new HashSet<>(roles);
+                    roles.add("director");
+                }
+                return roles == null ? Set.of() : roles;
+            }
+        } catch (Exception e) {
+            log.debug("[结佣] 无登录上下文：{}", e.getMessage());
+        }
+        return Set.of();
+    }
+
+    private Long parseHandlerId(String handler) {
+        if (StringUtils.isBlank(handler)) {
+            return null;
+        }
+        try {
+            return Long.valueOf(handler.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 }

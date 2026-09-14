@@ -37,6 +37,16 @@ public class PerformanceContractSummaryDTO implements Serializable {
     /** 合同业绩金额合计（事实原样值求和） */
     private BigDecimal amount;
 
+    /** 应收业绩合计（PERF_REAL 查询时附带的同合同 PERF_EXPECT 合计，§3.4 差异判定用；可能为 null） */
+    private BigDecimal expectedAmount;
+
+    /**
+     * 实收审批状态（PERF_REAL 查询时返回）：
+     * 全部实收事实已挂 APPROVED 实收单 → APPROVED；存在未完结单 → SUBMITTED/DRAFT；
+     * 无任何实收单 → null。
+     */
+    private String receivedStatus;
+
     /** 涉及签约人数（去重） */
     private long employeeCount;
 

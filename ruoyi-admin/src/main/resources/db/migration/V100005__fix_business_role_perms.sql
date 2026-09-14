@@ -21,12 +21,14 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000011832)   -- commission:consumelog:list
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- 业绩调整：页面 + 审批/执行
+-- 业绩调整（§4.4 总监可发起、§4.5 总监审批）：页面 + 发起/取消 + 审批/执行
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000002620),  -- perf:adjust:list
 (1761300000000000010, 1761400000000002621),  -- perf:adjust:query
+(1761300000000000010, 1761400000000002622),  -- perf:adjust:add
 (1761300000000000010, 1761400000000002623),  -- perf:adjust:approve
-(1761300000000000010, 1761400000000002624)   -- perf:adjust:execute
+(1761300000000000010, 1761400000000002624),  -- perf:adjust:execute
+(1761300000000000010, 1761400000000002625)   -- perf:adjust:edit
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
 -- 期间封账：查看
@@ -96,6 +98,14 @@ ON CONFLICT (role_id, menu_id) DO NOTHING;
 -- 业绩明细：重新消费
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000011, 1761400000000002612)   -- perf:fact:build
+ON CONFLICT (role_id, menu_id) DO NOTHING;
+
+-- 业绩调整（§4.4 店长/店助可发起）：页面 + 查询 + 发起 + 取消（无审批权）
+INSERT INTO sys_role_menu (role_id, menu_id) VALUES
+(1761300000000000011, 1761400000000002620),  -- perf:adjust:list
+(1761300000000000011, 1761400000000002621),  -- perf:adjust:query
+(1761300000000000011, 1761400000000002622),  -- perf:adjust:add
+(1761300000000000011, 1761400000000002625)   -- perf:adjust:edit
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
 -- 工作流任务：我的待办 + 我发起的

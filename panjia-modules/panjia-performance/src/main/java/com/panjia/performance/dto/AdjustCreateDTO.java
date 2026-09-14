@@ -33,8 +33,14 @@ public class AdjustCreateDTO {
     /** 合同号（合同级调整时必填，用于定位该合同下全部明细） */
     private String contractNo;
 
-    /** 事实口径：PERF_REAL / PERF_EXPECT */
+    /** 事实口径：仅允许 PERF_EXPECT（§4.1 业绩调整只改应收） */
     private String factType;
+
+    /**
+     * 原业绩归属月 YYYY-MM（合同级跨月调整时必填，用于定位原月事实；
+     * 为空则视 period 为原月，即同月调整）。§4.6 跨月调整走业绩冲销。
+     */
+    private String originalPeriod;
 
     /** 金额变动值（金额调整时使用） */
     private BigDecimal deltaAmount;

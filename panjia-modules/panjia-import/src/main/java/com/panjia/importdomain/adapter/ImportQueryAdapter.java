@@ -165,6 +165,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         //  SIGNED 行两列并存，业绩引擎对其双发两条事实；originAmount 保留单口径默认值兼容旧消费方
         dto.setReceivableAmount(r.getReceivableAmount());
         dto.setReceivedAmount(r.getReceivedAmount());
+        dto.setTotalReceivableAmount(r.getTotalReceivableAmount());
         dto.setOriginAmount(resolveOriginAmount(r));
         dto.setShareRatio(r.getShareRatio());
         dto.setRoleType(r.getRoleType());
