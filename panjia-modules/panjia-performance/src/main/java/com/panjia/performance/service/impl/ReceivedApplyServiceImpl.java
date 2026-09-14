@@ -11,6 +11,7 @@ import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import com.panjia.performance.dto.ReceivedContractGroupDTO;
+import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.performance.service.ReceivedApplyService;
@@ -352,8 +353,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     @Override
     public ReceivedApplyDetail getDetail(Long id) {
         ReceivedApply apply = getAndCheck(id);
-        List<PerformanceFactSummaryDTO> facts = factMapper.selectActiveFactSummariesByContractNo(
-            apply.getPeriod(), FACT_TYPE_REAL, apply.getContractNo());
+        List<ReceivedFactDetailDTO> facts = factMapper.selectReceivedFactDetails(
+            apply.getPeriod(), apply.getContractNo());
         return new ReceivedApplyDetail(apply, facts);
     }
 

@@ -6,6 +6,7 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
+import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -802,6 +803,61 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
                                                                           @Param("factType") String factType,
                                                                           @Param("contractNo") String contractNo);
+
+    /**
+     * 按期间 + 合同号查询实收审批单详情明细（每人一行，含应收/实收双口径）。
+     * <p>
+     * 列口径对齐「合同业绩明细」页（selectManageListByContractNos）：
+     * deptPath / 工号 / 姓名 / 角色 / 角色占比；应收金额按同 sourceKey 的
+     * PERF_EXPECT 事实配对（导入引擎一行双发，与 ReceivedAlignmentService 口径一致）。
+     *
+     * @param period     归属期间
+     * @param contractNo 合同号
+     * @return 每人实收明细行
+     */
+    @Select("""
+        SELECT f.id AS "factId",
+               f.employee_id AS "employeeId",
+               COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
+               e.employee_name AS "employeeName",
+               CASE
+                   WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
+                       CONCAT_WS('-',
+                           NULLIF(gp.dept_name, 'tenant_name'),
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           CASE WHEN d.dept_name = p.dept_name THEN NULL
+                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
+                   ELSE
+                       CONCAT_WS('-',
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           NULLIF(d.dept_name, 'tenant_name'))
+               END AS "deptPath",
+               COALESCE(nr.role_type, f.role_type) AS "roleType",
+               rs.role_name AS "roleName",
+               f.share_ratio AS "shareRatio",
+               (SELECT pe.performance_amount
+                  FROM pj_perf_fact pe
+                 WHERE pe.fact_status = 'ACTIVE'
+                   AND pe.fact_type = 'PERF_EXPECT'
+                   AND pe.source_key = f.source_key
+                 ORDER BY pe.id
+                 LIMIT 1) AS "expectedAmount",
+               f.performance_amount AS "amount"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
+        LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
+        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
+        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = 'PERF_REAL'
+          AND rs.contract_no = #{contractNo}
+        ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
+        """)
+    List<ReceivedFactDetailDTO> selectReceivedFactDetails(@Param("period") String period,
+                                                           @Param("contractNo") String contractNo);
 
     /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。

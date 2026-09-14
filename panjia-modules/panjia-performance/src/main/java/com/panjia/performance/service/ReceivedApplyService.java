@@ -82,11 +82,11 @@ public interface ReceivedApplyService {
     /** 分页查询 */
     PageResult<ReceivedApply> list(ReceivedApplyQuery query, PageQuery pageQuery);
 
-    /** 详情（含合同下每人实收事实明细） */
+    /** 详情（含合同下每人实收明细，列口径对齐合同业绩明细） */
     ReceivedApplyDetail getDetail(Long id);
 
     /** 实收审批单明细视图 */
     record ReceivedApplyDetail(ReceivedApply apply,
-                               List<com.panjia.contracts.dto.PerformanceFactSummaryDTO> facts) {
+                               List<com.panjia.performance.dto.ReceivedFactDetailDTO> facts) {
     }
 }
