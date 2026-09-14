@@ -334,8 +334,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                     result.addFailure(row.getContractNo(), row.getAmountText(), "当前无待办任务");
                     continue;
                 }
-                workflowService.completeTask(taskId, "Excel 批量审批通过");
-                refreshCurrentNode(apply);
+                // 复用单张审批：与「我的待办 → 去处理」同一条鉴权路径，由引擎按 flow_user 名单判权。
+                // 越权行（如财务对停在总监节点的单据）抛 ServiceException，被上方 catch 记为该行失败并透出原因，不中断整批。
+                // 此前直接 completeTask(taskId, ...)（内部 ignore=true）会让任何持有本接口权限的角色批量批掉他人节点的单据。
+                approve(apply.getId(), "Excel 批量审批通过");
                 result.addSuccess();
             } catch (Exception e) {
                 result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
