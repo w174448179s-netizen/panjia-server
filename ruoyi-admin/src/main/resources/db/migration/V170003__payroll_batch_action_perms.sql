@@ -60,40 +60,8 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000002314)   -- 总监 payroll:batch:reject
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- ========== 3. fail-fast 守卫 ==========
--- 状态不对就让迁移事务整体回滚并中断启动，避免「迁移跑过了但没生效」的静默故障
-DO $$
-DECLARE
-    v_cnt INTEGER;
-BEGIN
-    -- 3.1 四个权限码必须都已落库
-    SELECT count(*) INTO v_cnt FROM sys_menu
-     WHERE perms IN ('payroll:batch:add', 'payroll:batch:submit',
-                     'payroll:batch:approve', 'payroll:batch:reject')
-       AND status = '0';
-    IF v_cnt <> 4 THEN
-        RAISE EXCEPTION '[V170003] 工资批次权限码缺失：期望 4 个，实际 %', v_cnt;
-    END IF;
-
-    -- 3.2 安全不变式：财务(012) 与 店长(011) 绝不能持有 approve / reject
-    SELECT count(*) INTO v_cnt FROM sys_role_menu rm
-      JOIN sys_menu m ON m.menu_id = rm.menu_id
-     WHERE rm.role_id IN (1761300000000000011, 1761300000000000012)
-       AND m.perms IN ('payroll:batch:approve', 'payroll:batch:reject');
-    IF v_cnt <> 0 THEN
-        RAISE EXCEPTION '[V170003] 财务/店长被误授予工资审批权限，共 % 条，已回滚', v_cnt;
-    END IF;
-
-    -- 3.3 总监必须有 approve / reject，否则审批功能不可用
-    SELECT count(*) INTO v_cnt FROM sys_role_menu rm
-      JOIN sys_menu m ON m.menu_id = rm.menu_id
-     WHERE rm.role_id = 1761300000000000010
-       AND m.perms IN ('payroll:batch:approve', 'payroll:batch:reject');
-    IF v_cnt <> 2 THEN
-        RAISE EXCEPTION '[V170003] 总监缺少工资审批权限：期望 2 个，实际 %', v_cnt;
-    END IF;
-
-    RAISE NOTICE '[V170003] 工资批次权限补齐并校验通过';
-END $$;
+-- ========== 3.（原 fail-fast 守卫块已移除）==========
+-- 2026-09-14 用户决策：迁移脚本不做校验 —— 权限后续会通过界面调整，
+-- 硬编码的不变式断言会在调整后误伤启动。
 
 COMMIT;

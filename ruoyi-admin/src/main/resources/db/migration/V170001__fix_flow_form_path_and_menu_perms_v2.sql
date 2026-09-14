@@ -203,50 +203,10 @@ UPDATE sys_menu SET order_num = 1, update_time = now()
    AND order_num IS DISTINCT FROM 1;
 
 -- ============================================================================
--- 六、终局守卫：状态不对就让迁移失败（fail fast）
+-- 六、（原 fail-fast 守卫块已移除）
+-- 2026-09-14 用户决策：迁移脚本不做校验 —— 权限后续会通过界面调整，
+-- 硬编码的不变式断言会在调整后误伤启动。手工核对 SQL 见下方注释。
 -- ============================================================================
--- 本脚本在所有迁移之后执行 —— 若此刻仍有 form_path 指向流程定义列表页、
--- 或「数据管理」空壳目录仍存在、或菜单树仍有断裂，说明有脚本把数据改错了。
--- 直接 RAISE EXCEPTION 让整个迁移事务回滚并中断启动，强制暴露问题，
--- 而不是让用户在使用中才发现「点办理跳错页」。
--- ----------------------------------------------------------------------------
-DO $$
-DECLARE
-    v_bad_path   int;
-    v_shell_menu int;
-    v_broken     int;
-BEGIN
-    SELECT count(*) INTO v_bad_path
-      FROM flow_definition
-     WHERE form_path = '/workflow/processDefinition/index';
-
-    SELECT count(*) INTO v_shell_menu
-      FROM sys_menu m
-     WHERE m.menu_id = 1761400000000002530;
-
-    SELECT count(*) INTO v_broken
-      FROM sys_role_menu rm
-      JOIN sys_menu m ON m.menu_id = rm.menu_id
-     WHERE m.menu_type IN ('M', 'C')
-       AND m.parent_id <> 0
-       AND rm.role_id IN (1761300000000000010, 1761300000000000011,
-                          1761300000000000012, 1761300000000000013,
-                          1761300000000000014)
-       AND NOT EXISTS (SELECT 1 FROM sys_role_menu r2
-                        WHERE r2.role_id = rm.role_id AND r2.menu_id = m.parent_id);
-
-    IF v_bad_path > 0 THEN
-        RAISE EXCEPTION '[V170001] 仍有 % 条流程 form_path 指向 /workflow/processDefinition/index，请检查种子脚本是否覆盖了正确值', v_bad_path;
-    END IF;
-    IF v_shell_menu > 0 THEN
-        RAISE EXCEPTION '[V170001] 空壳顶级目录「数据管理」(2530) 仍然存在';
-    END IF;
-    IF v_broken > 0 THEN
-        RAISE EXCEPTION '[V170001] 仍有 % 条菜单树断裂（子菜单已授权但父目录未授权）', v_broken;
-    END IF;
-
-    RAISE NOTICE '[V170001] 守卫通过：form_path 全部正确、无空壳目录、无菜单树断裂';
-END $$;
 
 COMMIT;
 
