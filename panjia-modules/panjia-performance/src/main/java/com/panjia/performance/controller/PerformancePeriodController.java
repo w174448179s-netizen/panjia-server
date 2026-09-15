@@ -76,15 +76,18 @@ public class PerformancePeriodController extends BaseController {
 
     /**
      * 反结账。
+     * <p>反结账需强制录入原因，留痕审计（§3.5）。
      *
      * @param period 期间（YYYY-MM）
+     * @param reason 反结账原因（必填）
      * @return 操作结果
      */
     @SaCheckPermission("perf:period:reopen")
     @Log(title = "期间反结账", businessType = BusinessType.UPDATE)
     @PostMapping("/reopen/{period}")
-    public R<Void> reopen(@PathVariable String period) {
-        periodCloseService.reopenPeriod(period, LoginHelper.getUserId());
+    public R<Void> reopen(@PathVariable String period,
+                          @RequestParam String reason) {
+        periodCloseService.reopenPeriod(period, reason, LoginHelper.getUserId());
         return R.ok();
     }
 }

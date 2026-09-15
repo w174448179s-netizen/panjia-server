@@ -21,6 +21,7 @@ import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.system.api.ConfigService;
 import org.springframework.stereotype.Service;
@@ -570,8 +571,13 @@ public class PerformanceEngine {
             // 部分退：红冲比例（负数）= 本次负数当前额 ÷ 原当前额，按比例冲回
             BigDecimal ratio = negCurrentAmount.divide(originalCurrent, 8, RoundingMode.HALF_UP);
             if (ratio.abs().compareTo(BigDecimal.ONE) > 0) {
-                log.warn("[业绩红冲] 红冲金额超过原正数事实（超额退单？请核对贝壳数据）：originalFactId={}, ratio={}",
-                    original.getId(), ratio);
+                // §3.5 红冲超额拦截：退金额 > 原金额时禁止生成超额红冲事实，
+                // 否则合同 real_total 可能变负、下游算薪扣回异常。
+                // 仅 warn 会让错误数据静默入库，此处抛异常拒绝并提示核对贝壳数据。
+                throw new ServiceException(
+                    "[业绩红冲] 红冲金额超过原正数事实（超额退单），拒绝生成超额红冲事实：originalFactId="
+                        + original.getId() + ", ratio=" + ratio
+                        + "，请核对贝壳数据后重新导入");
             }
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().multiply(ratio));
         }

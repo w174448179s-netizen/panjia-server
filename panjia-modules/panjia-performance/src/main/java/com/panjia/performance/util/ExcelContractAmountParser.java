@@ -115,7 +115,26 @@ public final class ExcelContractAmountParser {
             }
             return BigDecimal.valueOf(d).toPlainString();
         }
-        return formatter.formatCellValue(cell);
+        return sanitizeFormula(formatter.formatCellValue(cell));
+    }
+
+    /**
+     * 净化 Excel 公式注入：拒绝以 =/+/-/@ 开头的单元格文本（CSV/公式注入常见 payload）。
+     * <p>合同号、金额均为普通文本/数字，不应以这些字符开头；
+     * 若命中则原样保留首字符但不传播可能的公式，前端展示更不会执行（双层防御）。
+     * <p>同时去除前导单引号（CSV 注入常用隐藏前缀）。
+     */
+    private static String sanitizeFormula(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        char first = text.charAt(0);
+        // CSV/Excel 注入常见首字符：= + - @ ；合同号/金额不应以这些开头
+        if (first == '=' || first == '+' || first == '-' || first == '@') {
+            // 在首字符前加一个空格，使其作为纯文本显示，不再被 Office 识别为公式
+            return " " + text;
+        }
+        return text;
     }
 
     /** 解析金额文本（去千分位/空白），非法返回 null。 */

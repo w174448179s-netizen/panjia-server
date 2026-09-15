@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -76,10 +77,13 @@ public class PeriodCloseServiceImpl implements PeriodCloseService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void reopenPeriod(String period, Long operatorId) {
+    public void reopenPeriod(String period, String reason, Long operatorId) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("期间不能为空");
+        }
+        if (StringUtils.isBlank(reason)) {
+            // §3.5 反结账需强制录入原因，留痕审计
+            throw new ServiceException("反结账必须填写原因（留痕审计）");
         }
 
         PerformancePeriodClose record = getPeriod(period);
@@ -93,13 +97,22 @@ public class PeriodCloseServiceImpl implements PeriodCloseService {
                 record.getStatus().getCode(), PeriodCloseStatus.OPEN.getCode(), "期间封账");
         }
 
+        // 保留原封账原因 + 追加反结账原因/操作人/时间，用于审计（§3.5 留痕）
+        String originalCloseReason = record.getCloseReason();
+        String reopenMark = "[反结账 " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+            + " 操作人=" + operatorId + " 原因=" + reason.trim() + "]";
+        String auditReason = StringUtils.isBlank(originalCloseReason)
+            ? reopenMark
+            : originalCloseReason + " | " + reopenMark;
+
         // 执行反结账
         record.setStatus(PeriodCloseStatus.OPEN);
         record.setCloseTime(null);
         record.setOperatorId(operatorId);
+        record.setCloseReason(auditReason);
         periodCloseMapper.updateById(record);
 
-        log.info("[期间封账] 反结账完成：period={}, operatorId={}", period, operatorId);
+        log.info("[期间封账] 反结账完成：period={}, operatorId={}, reason={}", period, operatorId, reason);
     }
 
     @Override

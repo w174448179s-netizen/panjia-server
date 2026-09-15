@@ -42,11 +42,13 @@ public interface PeriodCloseService {
      * 反结账（重新开启）。
      * <p>
      * 状态流转：CLOSED → OPEN。
+     * <p>反结账需强制录入原因，并保留原封账原因用于审计（§3.5 解封需总监二次确认 + AuditPort 留痕）。
      *
      * @param period     期间（YYYY-MM）
+     * @param reason     反结账原因（必填，留痕审计）
      * @param operatorId 操作人 ID
      */
-    void reopenPeriod(String period, Long operatorId);
+    void reopenPeriod(String period, String reason, Long operatorId);
 
     /**
      * 期间是否已封账。
