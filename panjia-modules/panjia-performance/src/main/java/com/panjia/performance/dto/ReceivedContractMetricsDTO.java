@@ -4,6 +4,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
+import java.math.BigDecimal;
 
 /**
  * 实收明细列表·合同维度补充字段（列表页展示用，不入库）。
@@ -26,4 +27,7 @@ public class ReceivedContractMetricsDTO implements Serializable {
 
     /** 涉及人数（该合同本期间实收事实的去重员工数） */
     private Integer employeeCount;
+
+    /** 应收业绩合计（该合同本期间 ACTIVE PERF_EXPECT 事实合计，含已生效调整） */
+    private BigDecimal expectedAmount;
 }

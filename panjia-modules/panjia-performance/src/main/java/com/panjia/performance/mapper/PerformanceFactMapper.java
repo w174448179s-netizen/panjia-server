@@ -901,20 +901,29 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                            @Param("contractNo") String contractNo);
 
     /**
-     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数）。
+     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数、应收合计）。
      * <p>
-     * 实收审批单表不存这两个字段，列表页按 (period, contractNo) 从 ACTIVE PERF_REAL
-     * 事实聚合回填，口径与详情弹窗的「每人实收明细」一致（同期间同口径）。
+     * 实收审批单表不存这几个字段，列表页按 (period, contractNo) 从 ACTIVE 事实聚合回填，
+     * 口径与详情弹窗的「每人实收明细」一致（同期间同口径）。
+     * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
      *
      * @param period      归属期间
      * @param contractNos 合同号集合（不可为空，调用方需先过滤）
-     * @return 合同维度的业务类型与涉及人数
+     * @return 合同维度的业务类型、涉及人数与应收合计
      */
     @Select("""
         <script>
         SELECT rs.contract_no AS "contractNo",
                MAX(f.biz_type) AS "bizType",
-               COUNT(DISTINCT f.employee_id) AS "employeeCount"
+               COUNT(DISTINCT f.employee_id) AS "employeeCount",
+               COALESCE((
+                   SELECT SUM(e.performance_amount)
+                   FROM pj_perf_fact e
+                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
+                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
+                   WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
+                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+               ), 0) AS "expectedAmount"
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id

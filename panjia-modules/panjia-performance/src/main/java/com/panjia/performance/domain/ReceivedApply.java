@@ -60,7 +60,7 @@ public class ReceivedApply implements Serializable {
     /** 实收业绩合计 */
     private BigDecimal receivedAmount;
 
-    /** 应收业绩合计（本次导入/提交时记录，§1 合同历史调整后取最新应收） */
+    /** 应收业绩合计（提交时点快照，仅留痕；列表/详情展示实时取 ACTIVE PERF_EXPECT 含已生效调整） */
     private BigDecimal expectedAmount;
 
     /** 明细条数（实收事实条数） */
@@ -77,6 +77,14 @@ public class ReceivedApply implements Serializable {
      */
     @TableField(exist = false)
     private Integer employeeCount;
+
+    /**
+     * 应收已被调整（非入库字段；展示标记）。
+     * <p>当前 ACTIVE 应收合计 ≠ 提交时快照时置 true，前端据此显示「已调整」标记，
+     * 让业务人员知道应收与实收不一致是业绩调整所致。</p>
+     */
+    @TableField(exist = false)
+    private Boolean expectedAdjusted;
 
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;

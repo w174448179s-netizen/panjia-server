@@ -440,10 +440,11 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 回填实收明细列表的补充字段（业务类型、涉及人数）。
+     * 回填实收明细列表的补充字段（业务类型、涉及人数、应收合计）。
      * <p>
-     * 审批单表不存这两个字段，按 (period, contractNo) 从 ACTIVE PERF_REAL 事实聚合，
+     * 审批单表不存这几个字段，按 (period, contractNo) 从 ACTIVE 事实聚合，
      * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
+     * 应收合计含已生效调整（新签业绩显示调整后金额），与快照不一致时置「已调整」标记。
      * 期间或合同号缺失的行保持 null，前端显示占位符。
      */
     private void fillContractMetrics(List<ReceivedApply> records) {
@@ -474,6 +475,12 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             if (m != null) {
                 apply.setBizType(m.getBizType());
                 apply.setEmployeeCount(m.getEmployeeCount());
+                // 新签业绩展示实时值（含已生效调整），与详情/每人明细口径一致；与快照不一致时标「已调整」
+                if (m.getExpectedAmount() != null) {
+                    apply.setExpectedAdjusted(apply.getExpectedAmount() != null
+                        && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
+                    apply.setExpectedAmount(m.getExpectedAmount());
+                }
             }
         }
     }
@@ -486,6 +493,15 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     @Override
     public ReceivedApplyDetail getDetail(Long id) {
         ReceivedApply apply = getAndCheck(id);
+        // 应收是参照口径（非审批对象）：展示时实时取当前 ACTIVE PERF_EXPECT 合计（含已生效调整），
+        // 与明细行「按 source_key 实时配对」口径一致；仅内存覆盖，不落库。
+        // 与提交时快照不一致时置「已调整」标记，让业务人员知道差额来自业绩调整。
+        if (StringUtils.isNotBlank(apply.getContractNo())) {
+            BigDecimal expected = sumExpect(apply.getPeriod(), apply.getContractNo());
+            apply.setExpectedAdjusted(apply.getExpectedAmount() != null
+                && apply.getExpectedAmount().compareTo(expected) != 0);
+            apply.setExpectedAmount(expected);
+        }
         List<ReceivedFactDetailDTO> facts = factMapper.selectReceivedFactDetails(
             apply.getPeriod(), apply.getContractNo());
         return new ReceivedApplyDetail(apply, facts);
