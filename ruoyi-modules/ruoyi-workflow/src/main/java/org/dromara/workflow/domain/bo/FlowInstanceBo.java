@@ -52,4 +52,10 @@ public class FlowInstanceBo implements Serializable {
      */
     private List<String> createByIds;
 
+    /**
+     * 业务标题关键字（模糊匹配 flow_instance_biz_ext.business_title，
+     * 覆盖合同号/房源地址/账期/金额等业务摘要）
+     */
+    private String businessTitle;
+
 }

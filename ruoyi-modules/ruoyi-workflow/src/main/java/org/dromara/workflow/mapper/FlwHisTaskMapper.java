@@ -56,6 +56,7 @@ public interface FlwHisTaskMapper extends BaseMapperPlus<FlowHisTask, FlowHisTas
             .likeIfText("c", FlowDefinition::getFlowName, bo.getFlowName())
             .likeIfText("c", FlowDefinition::getFlowCode, bo.getFlowCode())
             .likeIfText("b", FlowInstance::getFlowStatus, bo.getFlowStatus())
+            .likeIfText("biz", FlowInstanceBizExt::getBusinessTitle, bo.getBusinessTitle())
             .inIfNotEmpty("b", FlowInstance::getCreateBy, bo.getCreateByIds())
             .inIfNotEmpty("c", FlowDefinition::getCategory, categoryIds)
             .betweenParams("a", FlowHisTask::getCreateTime, params, "beginTime", "endTime")

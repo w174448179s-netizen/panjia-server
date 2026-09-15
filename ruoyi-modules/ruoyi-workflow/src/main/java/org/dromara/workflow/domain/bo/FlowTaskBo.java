@@ -61,6 +61,12 @@ public class FlowTaskBo implements Serializable {
     private List<Long> createByIds;
 
     /**
+     * 业务标题关键字（模糊匹配 flow_instance_biz_ext.business_title，
+     * 覆盖合同号/房源地址/账期/金额等业务摘要）
+     */
+    private String businessTitle;
+
+    /**
      * 请求参数
      */
     @JsonInclude(JsonInclude.Include.NON_EMPTY)

@@ -157,6 +157,7 @@ public class FlwInstanceServiceImpl implements IFlwInstanceService {
         queryBuilder.likeIfText("fi", FlowInstance::getNodeName, flowInstanceBo.getNodeName());
         queryBuilder.likeIfText("fd", org.dromara.warm.flow.orm.entity.FlowDefinition::getFlowName, flowInstanceBo.getFlowName());
         queryBuilder.likeIfText("fd", org.dromara.warm.flow.orm.entity.FlowDefinition::getFlowCode, flowInstanceBo.getFlowCode());
+        queryBuilder.likeIfText("biz", FlowInstanceBizExt::getBusinessTitle, flowInstanceBo.getBusinessTitle());
         if (StringUtils.isNotBlank(flowInstanceBo.getCategory())) {
             List<Long> categoryIds = flwCategoryMapper.selectCategoryIdsByParentId(Convert.toLong(flowInstanceBo.getCategory()));
             queryBuilder.inIfNotEmpty("fd", org.dromara.warm.flow.orm.entity.FlowDefinition::getCategory, StreamUtils.toList(categoryIds, Convert::toStr));
