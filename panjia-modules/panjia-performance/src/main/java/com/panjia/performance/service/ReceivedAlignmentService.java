@@ -73,8 +73,8 @@ public class ReceivedAlignmentService {
                     realFact.getId(), realFact.getSourceKey());
                 continue;
             }
-            if (eq(realFact.getPerformanceAmount(), expect.getPerformanceAmount())
-                && eq(realFact.getShareRatio(), expect.getShareRatio())) {
+            // 仅比较 performance_amount：shareRatio 仅展示用，不作为对齐判定依据
+            if (eq(realFact.getPerformanceAmount(), expect.getPerformanceAmount())) {
                 // 金额口径已一致：不替换
                 continue;
             }
@@ -118,6 +118,10 @@ public class ReceivedAlignmentService {
         n.setFactStatus(FactStatus.ACTIVE);
         n.setSource(realFact.getSource());
         n.setReceivedApplyId(realFact.getReceivedApplyId());
+        // 保留红冲/调整关联字段，避免溯源链断裂
+        n.setReversalType(realFact.getReversalType());
+        n.setRefundOfFactId(realFact.getRefundOfFactId());
+        n.setAdjustId(realFact.getAdjustId());
         return n;
     }
 

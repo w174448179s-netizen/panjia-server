@@ -13,7 +13,6 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.ReversalType;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
-import com.panjia.performance.engine.ConversionEngine;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
@@ -56,7 +55,6 @@ public class PerformanceEngine {
 
     private final PerformanceFactMapper factMapper;
     private final PerformanceConsumeLogMapper consumeLogMapper;
-    private final ConversionEngine conversionEngine;
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final EmployeeSnapshotQueryPort employeeQueryPort;
     private final ReverseService reverseService;
@@ -65,12 +63,6 @@ public class PerformanceEngine {
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
-
-    /** 经纪人折算比例参数 key（sys_config.config_key，V140005 种子，默认 85%） */
-    private static final String CONFIG_BROKER_CONVERSION_RATE = "panjia.performance.broker_conversion_rate";
-
-    /** 经纪人折算比例默认值（参数缺失/非法时兜底） */
-    private static final BigDecimal DEFAULT_BROKER_CONVERSION_RATE = new BigDecimal("0.85");
 
     /** 整单退判定容差：贝壳负数行与原事实当前额相差 ≤ 1 分视为全额退，精确镜像避免尾差 */
     private static final BigDecimal FULL_REFUND_TOLERANCE = new BigDecimal("0.01");
@@ -465,7 +457,9 @@ public class PerformanceEngine {
         }
         PerformanceFact fact = new PerformanceFact();
         fact.setFactType(factType);
-        fact.setPeriod(derivePeriod(record.getBusinessDate()));
+        // ★ 归属月统一取 record.getPeriod()（导入数据的归属月），与 sourceKey 尾段的 period 同源；
+        //   不再由 businessDate 推导——业务日期（成交日）与导入归属月可能跨月错位
+        fact.setPeriod(record.getPeriod());
         fact.setBusinessDate(record.getBusinessDate());
         fact.setBatchId(record.getBatchId());
         fact.setNormalizedRecordId(record.getId());
@@ -575,7 +569,8 @@ public class PerformanceEngine {
 
         PerformanceFact fact = new PerformanceFact();
         fact.setFactType(factType);
-        fact.setPeriod(derivePeriod(businessDate));
+        // ★ 归属月＝红冲负数行所在导入归属月（退单月），与 sourceKey 尾段同源（方案 A 统一口径）
+        fact.setPeriod(record.getPeriod());
         fact.setBusinessDate(businessDate);
         fact.setBatchId(record.getBatchId());
         fact.setNormalizedRecordId(record.getId());
@@ -800,46 +795,5 @@ public class PerformanceEngine {
         }
         String[] parts = recordSourceKey.split("\\|", -1);
         return parts.length >= 2 && !parts[1].isEmpty() ? parts[1] : null;
-    }
-
-    /**
-     * 贝壳「当前金额」还原为原始金额：{@code 原始金额 = 当前金额 ÷ 经纪人折算比例}。
-     * <p>
-     * 纯函数（便于单测）；currentAmount 为 null 透传 null；rate 为 null/0 时按默认 85% 兜底。
-     * 结果四舍五入保留 2 位小数。
-     */
-    public static BigDecimal grossUpOriginAmount(BigDecimal currentAmount, BigDecimal brokerRate) {
-        if (currentAmount == null) {
-            return null;
-        }
-        BigDecimal safeRate = (brokerRate == null || MoneyUtil.isZero(brokerRate))
-            ? DEFAULT_BROKER_CONVERSION_RATE : brokerRate;
-        return currentAmount.divide(safeRate, 2, RoundingMode.HALF_UP);
-    }
-
-    /**
-     * 读取经纪人折算比例（sys_config 参数表，key 见 {@link #CONFIG_BROKER_CONVERSION_RATE}）。
-     * <p>
-     * 参数缺失、为空或不在 (0,1] 区间时兜底默认 85%（{@link #DEFAULT_BROKER_CONVERSION_RATE}），
-     * 避免参数被误改为 0/负数导致除零或业绩金额反向放大。
-     */
-    private BigDecimal resolveBrokerConversionRate() {
-        BigDecimal rate = null;
-        try {
-            rate = configService.getConfigDecimal(CONFIG_BROKER_CONVERSION_RATE);
-        } catch (Exception e) {
-            log.warn("[业绩构建] 读取经纪人折算比例参数失败，使用默认值 {}：{}",
-                DEFAULT_BROKER_CONVERSION_RATE, e.getMessage());
-        }
-        if (rate == null
-            || rate.compareTo(BigDecimal.ZERO) <= 0
-            || rate.compareTo(BigDecimal.ONE) > 0) {
-            if (rate != null) {
-                log.warn("[业绩构建] 经纪人折算比例参数非法（需在 (0,1] 区间）：{}，使用默认值 {}",
-                    rate, DEFAULT_BROKER_CONVERSION_RATE);
-            }
-            return DEFAULT_BROKER_CONVERSION_RATE;
-        }
-        return rate;
     }
 }

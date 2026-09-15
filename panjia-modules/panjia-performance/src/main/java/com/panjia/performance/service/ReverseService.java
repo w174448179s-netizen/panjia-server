@@ -149,26 +149,19 @@ public class ReverseService {
             return 0;
         }
 
-        int reversedCount = 0;
         List<Long> reversedFactIds = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
-            try {
-                checkAndReverse(fact, reason, operatorId);
-                factMapper.updateById(fact);
-                reversedCount++;
-                reversedFactIds.add(fact.getId());
-            } catch (Exception e) {
-                log.warn("[冲销-{}] 单条事实冲销失败：factId={}, batchId={}",
-                        reason.getCode(), fact.getId(), batchId, e);
-            }
+            checkAndReverse(fact, reason, operatorId);
+            factMapper.updateById(fact);
+            reversedFactIds.add(fact.getId());
         }
 
         // 冲销成功后发布事件（结佣域联动；事务内 emit）
         emitReversed(facts.get(0).getPeriod(), reversedFactIds, reason);
 
         log.info("[冲销-{}] 批次冲销完成：batchId={}, 冲销数={}",
-                reason.getCode(), batchId, reversedCount);
-        return reversedCount;
+                reason.getCode(), batchId, reversedFactIds.size());
+        return reversedFactIds.size();
     }
 
     /**
@@ -229,26 +222,19 @@ public class ReverseService {
             return 0;
         }
 
-        // 2. 逐条冲销
-        int reversedCount = 0;
+        // 2. 逐条冲销（全有或全无：单条失败则整批回滚）
         List<Long> reversedFactIds = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
-            try {
-                checkAndReverse(fact, ReversedReason.PERIOD_VOID, operatorId);
-                factMapper.updateById(fact);
-                reversedCount++;
-                reversedFactIds.add(fact.getId());
-            } catch (Exception e) {
-                log.warn("[冲销-期间作废] 单条事实冲销失败：factId={}, period={}",
-                        fact.getId(), period, e);
-            }
+            checkAndReverse(fact, ReversedReason.PERIOD_VOID, operatorId);
+            factMapper.updateById(fact);
+            reversedFactIds.add(fact.getId());
         }
 
         // 冲销成功后发布事件（结佣域联动；事务内 emit）
         emitReversed(period, reversedFactIds, ReversedReason.PERIOD_VOID);
 
-        log.info("[冲销-期间作废] 期间冲销完成：period={}, 冲销数={}", period, reversedCount);
-        return reversedCount;
+        log.info("[冲销-期间作废] 期间冲销完成：period={}, 冲销数={}", period, reversedFactIds.size());
+        return reversedFactIds.size();
     }
 
     /**

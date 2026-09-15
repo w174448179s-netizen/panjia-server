@@ -666,6 +666,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.fact_type = #{factType}
           AND f.performance_amount > 0
           AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
+          AND LENGTH(f.source_key) = LENGTH(#{sourceKeyPrefix}) + 7
         ORDER BY f.period ASC, f.id ASC
         LIMIT 1
         """)

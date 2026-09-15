@@ -66,8 +66,8 @@ public class PerformanceAdjust implements Serializable {
     /** 调整详情 JSON */
     private String payloadJson;
 
-    /** 金额变动值 */
-    private BigDecimal deltaAmount;
+    /** 调整后目标金额（用户录入的最终金额） */
+    private BigDecimal targetAmount;
 
     /** 目标部门 ID（划转类） */
     private Long targetDeptId;
@@ -95,6 +95,9 @@ public class PerformanceAdjust implements Serializable {
 
     /** 执行时间 */
     private LocalDateTime executeTime;
+
+    /** 调整前原始金额（创建时快照，performance_amount 口径） */
+    private BigDecimal originalAmount;
 
     /** 创建时间（DB 默认填充） */
     private LocalDateTime createTime;
@@ -128,8 +131,4 @@ public class PerformanceAdjust implements Serializable {
     @TableField(exist = false)
     @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
     private String approverName;
-
-    /** 调整标的当前金额（列表展示用，performance_amount 口径） */
-    @TableField(exist = false)
-    private BigDecimal currentAmount;
 }
