@@ -29,8 +29,6 @@ CREATE TABLE pj_perf_fact (
     dept_id                 BIGINT,
     role_type               VARCHAR(30),
     share_ratio             NUMERIC(10,6)          NOT NULL DEFAULT 1.000000,
-    origin_amount           NUMERIC(18,2)          NOT NULL DEFAULT 0,
-    conversion_rate         NUMERIC(10,6)          NOT NULL DEFAULT 1.000000,
     performance_amount      NUMERIC(18,2)          NOT NULL DEFAULT 0,
     effective_date          DATE                   NOT NULL,
     expire_date             DATE,
@@ -74,8 +72,6 @@ COMMENT ON COLUMN pj_perf_fact.employee_external_code IS '员工外部编码(工
 COMMENT ON COLUMN pj_perf_fact.dept_id IS '归属部门ID';
 COMMENT ON COLUMN pj_perf_fact.role_type IS '角色类型(主筹/跟筹等)';
 COMMENT ON COLUMN pj_perf_fact.share_ratio IS '分摊比例';
-COMMENT ON COLUMN pj_perf_fact.origin_amount IS '原始金额';
-COMMENT ON COLUMN pj_perf_fact.conversion_rate IS '折算系数';
 COMMENT ON COLUMN pj_perf_fact.performance_amount IS '业绩金额(=原始金额×分摊比例×折算系数)';
 COMMENT ON COLUMN pj_perf_fact.effective_date IS '生效起始日(闭区间)';
 COMMENT ON COLUMN pj_perf_fact.expire_date IS '生效截止日(开区间，9999-12-31表示有效)';
@@ -105,7 +101,8 @@ CREATE TABLE pj_perf_adjust (
     fact_type           VARCHAR(20),
     original_period     VARCHAR(7),
     payload_json        TEXT,
-    delta_amount        NUMERIC(18,2)          DEFAULT 0,
+    target_amount        NUMERIC(18,2)          DEFAULT 0,
+    original_amount        NUMERIC(18,2)          DEFAULT 0,
     target_dept_id      BIGINT,
     reason              VARCHAR(500),
     status              VARCHAR(20)            NOT NULL DEFAULT 'SUBMITTED',
@@ -136,7 +133,8 @@ COMMENT ON COLUMN pj_perf_adjust.contract_no IS '合同号(合同级调整时填
 COMMENT ON COLUMN pj_perf_adjust.fact_type IS '事实口径(§4.1 业绩调整只允许 PERF_EXPECT 应收)';
 COMMENT ON COLUMN pj_perf_adjust.original_period IS '原业绩归属月(合同级跨月调整定位原月事实；空=同月调整，§4.6)';
 COMMENT ON COLUMN pj_perf_adjust.payload_json IS '调整详情JSON(不同类型结构不同)';
-COMMENT ON COLUMN pj_perf_adjust.delta_amount IS '金额变动值(正增负减)';
+COMMENT ON COLUMN pj_perf_adjust.target_amount IS '变动后金额';
+COMMENT ON COLUMN pj_perf_adjust.original_amount IS '调整前原始金额（创建时快照）';
 COMMENT ON COLUMN pj_perf_adjust.target_dept_id IS '目标部门ID(划转类必填)';
 COMMENT ON COLUMN pj_perf_adjust.reason IS '调整原因';
 COMMENT ON COLUMN pj_perf_adjust.status IS '状态 SUBMITTED=已提交 APPROVED=已通过 REJECTED=已拒绝 CANCELLED=已取消 EXECUTED=已执行';

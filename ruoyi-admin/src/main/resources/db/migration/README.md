@@ -17,11 +17,10 @@
 | `V12xxxx`           | **import 域** | `panjia-modules/panjia-import` | `V120002`-`V120006` | 导入模板 / 批次表 / 模板管理菜单 |
 | `V13xxxx`           | **outbox 域** | `panjia-modules/panjia-outbox` | `V130001`-`V130002` | 事件 outbox + 幂等键 |
 | `V14xxxx`           | **performance 域** | `panjia-modules/panjia-performance` | `V140002`-`V140003` | 业绩事实表 + 业绩域菜单 |
-| `V15xxxx`           | customer 域 | `panjia-modules/panjia-customer` | （预留）| 客户账号 / 设备 / 在线状态 |
+| `V15xxxx`           | **commission 域** | `panjia-modules/panjia-commission` | （即将新建）| 结佣申请 / 审批 / 锁定 |
 | `V16xxxx`           | **payroll 域** | `panjia-modules/panjia-payroll` | （即将新建）| 薪酬结算：算薪引擎 / 工资批次 / 状态机 |
-| `V17xxxx`           | **commission 域** | `panjia-modules/panjia-commission` | （即将新建）| 结佣申请 / 审批 / 锁定 |
-| `V18xxxx`           | **ledger 域** | `panjia-modules/panjia-ledger` | （即将新建）| 经营结算：收入 / 支出 / 部门台账 / 利润 |
-| `V19xxxx`           | **rules 域** | `panjia-modules/panjia-rules` | （即将新建）| 规则引擎（条件 / 动作 / 评分 / 触发器）|
+| `V17xxxx`           | **ledger 域** | `panjia-modules/panjia-ledger` | （即将新建）| 经营结算：收入 / 支出 / 部门台账 / 利润 |
+| `V18xxxx`           | **rules 域** | `panjia-modules/panjia-rules` | （即将新建）| 规则引擎（条件 / 动作 / 评分 / 触发器）|
 | `V20xxxx`-`V29xxxx` | 预留扩展 | TBD | — | 第 2 代盘家业务域（10 个域位备用） |
 | `V30xxxx`-`V69xxxx` | 长期预留 | TBD | — | 第 3/4 代业务（40 个域位）|
 | `V70xxxx`-`V89xxxx` | 系统 / 横切域 | TBD | — | license / backup / monitor / log 等基础设施 |
