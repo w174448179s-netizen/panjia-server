@@ -69,6 +69,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    END
                ) AS "deptPath",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
+               COALESCE(SUM(
+                 COALESCE(
+                   (SELECT pf.performance_amount FROM pj_perf_fact pf
+                    WHERE pf.source_key = f.source_key
+                      AND pf.fact_type = f.fact_type
+                      AND pf.fact_status = 'REVERSED'
+                    ORDER BY pf.id ASC LIMIT 1),
+                   f.performance_amount
+                 )
+               ), 0) AS "originalAmount",
                COUNT(DISTINCT rs.contract_no) AS "contractCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
@@ -223,6 +233,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                rs.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
+               COALESCE(
+                 (SELECT pf.performance_amount FROM pj_perf_fact pf
+                  WHERE pf.source_key = f.source_key
+                    AND pf.fact_type = f.fact_type
+                    AND pf.fact_status = 'REVERSED'
+                  ORDER BY pf.id ASC LIMIT 1),
+                 f.performance_amount
+               ) AS originalAmount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey
@@ -405,6 +423,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(rs.raw_json -&gt;&gt; 'propertyAddress') AS "propertyAddress",
                MAX(COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
+               COALESCE(SUM(
+                 COALESCE(
+                   (SELECT pf.performance_amount FROM pj_perf_fact pf
+                    WHERE pf.source_key = f.source_key
+                      AND pf.fact_type = f.fact_type
+                      AND pf.fact_status = 'REVERSED'
+                    ORDER BY pf.id ASC LIMIT 1),
+                   f.performance_amount
+                 )
+               ), 0) AS "originalAmount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
@@ -562,6 +590,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                rs.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
+               COALESCE(
+                 (SELECT pf.performance_amount FROM pj_perf_fact pf
+                  WHERE pf.source_key = f.source_key
+                    AND pf.fact_type = f.fact_type
+                    AND pf.fact_status = 'REVERSED'
+                  ORDER BY pf.id ASC LIMIT 1),
+                 f.performance_amount
+               ) AS originalAmount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey

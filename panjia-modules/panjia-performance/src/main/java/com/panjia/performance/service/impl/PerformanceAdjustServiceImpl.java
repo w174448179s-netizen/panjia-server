@@ -23,6 +23,7 @@ import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.dromara.common.core.enums.BusinessStatusEnum;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -167,6 +168,8 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     public PerformanceAdjust getAdjust(Long id) {
         PerformanceAdjust adjust = adjustMapper.selectById(id);
         if (adjust != null) {
+            // 状态自愈：工作流已终态但调整单还是 SUBMITTED 时自动对齐
+            adjust = syncStatusWithWorkflow(adjust);
             fillDisplayNames(List.of(adjust));
         }
         return adjust;
@@ -1069,7 +1072,9 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         newFact.setFactType(oldFact.getFactType());
         newFact.setPeriod(oldFact.getPeriod());
         newFact.setBusinessDate(oldFact.getBusinessDate());
-        newFact.setBatchId(oldFact.getBatchId());
+        // 注意：batch_id 不继承——调整生成的事实不归属于任何导入批次，
+        // 避免后续批次 supersede / 重归一化时被误冲销
+        newFact.setBatchId(null);
         newFact.setNormalizedRecordId(oldFact.getNormalizedRecordId());
         newFact.setSourceKey(oldFact.getSourceKey());
         newFact.setBizType(oldFact.getBizType());
@@ -1099,5 +1104,70 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         if (periodCloseService.isClosed(period)) {
             throw new ServiceException("期间已封账，禁止执行调整：" + label + "=" + period);
         }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public PerformanceAdjust syncStatusWithWorkflow(PerformanceAdjust adjust) {
+        // 只有 SUBMITTED 状态的单据才可能出现"工作流已终态但业务未更新"的卡住
+        if (adjust == null || adjust.getStatus() != AdjustStatus.SUBMITTED) {
+            return adjust;
+        }
+        if (StringUtils.isBlank(adjust.getProcessInstanceId())) {
+            return adjust;
+        }
+        String wfStatus;
+        try {
+            wfStatus = workflowService.getBusinessStatus(String.valueOf(adjust.getId()));
+        } catch (Exception e) {
+            log.warn("[调整单状态自愈] 查询工作流状态失败，跳过：adjustId={}", adjust.getId(), e);
+            return adjust;
+        }
+        if (StringUtils.isBlank(wfStatus)) {
+            return adjust;
+        }
+        // 工作流还是运行中状态（waiting / draft），无需修复
+        if (BusinessStatusEnum.WAITING.getStatus().equals(wfStatus)
+            || BusinessStatusEnum.DRAFT.getStatus().equals(wfStatus)) {
+            return adjust;
+        }
+
+        // 工作流已进入终态但调整单还是 SUBMITTED → 按工作流状态对齐
+        log.info("[调整单状态自愈] 发现状态不一致，开始修复：adjustId={}, adjustStatus={}, wfStatus={}",
+            adjust.getId(), adjust.getStatus(), wfStatus);
+
+        switch (wfStatus) {
+            case "cancel" -> {
+                adjust.setStatus(AdjustStatus.CANCELLED);
+                adjust.setOperatorId(null);
+                adjustMapper.updateById(adjust);
+                log.info("[调整单状态自愈] 已修复为 CANCELLED：adjustId={}", adjust.getId());
+            }
+            case "finish" -> {
+                // 审批通过但未执行 → 直接执行调整（幂等）
+                log.info("[调整单状态自愈] 工作流已 finish，补执行调整：adjustId={}", adjust.getId());
+                adjust.setStatus(AdjustStatus.APPROVED);
+                adjustMapper.updateById(adjust);
+                try {
+                    executeAdjust(adjust.getId(), null);
+                    adjust = adjustMapper.selectById(adjust.getId());
+                } catch (Exception e) {
+                    log.error("[调整单状态自愈] 补执行调整失败：adjustId={}", adjust.getId(), e);
+                    markCallbackFailure(adjust.getId(), "状态自愈补执行失败: " + e.getMessage());
+                }
+            }
+            case "back" -> {
+                adjust.setStatus(AdjustStatus.REJECTED);
+                adjustMapper.updateById(adjust);
+                log.info("[调整单状态自愈] 已修复为 REJECTED（驳回）：adjustId={}", adjust.getId());
+            }
+            case "invalid", "termination" -> {
+                adjust.setStatus(AdjustStatus.REJECTED);
+                adjustMapper.updateById(adjust);
+                log.info("[调整单状态自愈] 已修复为 REJECTED（作废/终止）：adjustId={}", adjust.getId());
+            }
+            default -> log.info("[调整单状态自愈] 未知工作流状态，不处理：adjustId={}, wfStatus={}", adjust.getId(), wfStatus);
+        }
+        return adjust;
     }
 }

@@ -74,13 +74,20 @@ public class PerformanceManageDTO {
     // ==================== 金额 ====================
 
     /**
-     * 业绩金额：
+     * 业绩金额（调整后）：
      * <ul>
      *   <li>PERF_EXPECT → 当月应收（新签业绩）；</li>
      *   <li>PERF_REAL → 当月实收（结佣业绩）。</li>
      * </ul>
      */
     private BigDecimal amount;
+
+    /**
+     * 原始金额（调整前）。
+     * 从未被调整过的事实，originalAmount = amount；
+     * 被业绩调整覆盖的事实，originalAmount = 最早被冲销事实的金额（即导入原值）。
+     */
+    private BigDecimal originalAmount;
 
     // ==================== 结佣状态 ====================
 

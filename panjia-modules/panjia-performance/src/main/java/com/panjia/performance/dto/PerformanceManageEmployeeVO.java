@@ -29,8 +29,11 @@ public class PerformanceManageEmployeeVO {
     /** 门店/组别全路径（员工归属部门：大区-门店-组；组级与门店同名时只到两级） */
     private String deptPath;
 
-    /** 金额合计（PERF_EXPECT=应收 / PERF_REAL=实收） */
+    /** 金额合计（调整后，PERF_EXPECT=应收 / PERF_REAL=实收） */
     private BigDecimal amount;
+
+    /** 原始金额合计（调整前，未调整时 = amount） */
+    private BigDecimal originalAmount;
 
     /** 合同数（按合同号去重） */
     private long contractCount;

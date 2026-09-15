@@ -106,4 +106,23 @@ public interface PerformanceAdjustService {
      * @param operatorId  执行人 ID
      */
     void executeAdjust(Long id, Long operatorId);
+
+    /**
+     * 状态自愈：比对调整单状态与工作流实例状态，不一致时自动对齐。
+     * <p>
+     * 当工作流监听器回调异常（如事务不一致）时，可能出现"工作流已终态
+     * 但调整单仍为 SUBMITTED"的卡住状态。本方法在查询详情时自动检测并修复。
+     * <p>
+     * 对齐规则：
+     * <ul>
+     *   <li>工作流 cancel → 调整单 CANCELLED</li>
+     *   <li>工作流 finish → 调整单 EXECUTED（触发执行调整）</li>
+     *   <li>工作流 back → 调整单 REJECTED</li>
+     *   <li>工作流 invalid / termination → 调整单 REJECTED</li>
+     * </ul>
+     *
+     * @param adjust 调整单（必须是 SUBMITTED 状态才会检查）
+     * @return 修复后的调整单；无需修复时返回原对象
+     */
+    PerformanceAdjust syncStatusWithWorkflow(PerformanceAdjust adjust);
 }

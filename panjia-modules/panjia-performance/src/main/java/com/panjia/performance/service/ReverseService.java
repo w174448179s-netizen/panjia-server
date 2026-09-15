@@ -135,6 +135,9 @@ public class ReverseService {
 
     /**
      * 通用内部：按指定 reason 冲销批次下所有 ACTIVE 事实。
+     * <p>
+     * 注意：已被业绩调整覆盖的事实（adjust_id 非空）会被跳过——
+     * 调整事实不属于任何导入批次，不应被批次 supersede / 重归一化冲销。
      *
      * @param batchId    批次 ID
      * @param reason     冲销原因（ReversedReason.RENORMALIZE / SUPERSEDE）
@@ -144,11 +147,13 @@ public class ReverseService {
     private int reverseByReason(Long batchId, ReversedReason reason, Long operatorId) {
         LambdaQueryWrapper<PerformanceFact> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(PerformanceFact::getBatchId, batchId)
-                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE);
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+                .isNull(PerformanceFact::getAdjustId);  // 跳过已调整事实
         List<PerformanceFact> facts = factMapper.selectList(queryWrapper);
 
         if (facts.isEmpty()) {
-            log.info("[冲销-{}] 批次无待冲销事实：batchId={}", reason.getCode(), batchId);
+            log.info("[冲销-{}] 批次无待冲销事实（adjust_id 非空的已调整事实已跳过）：batchId={}",
+                reason.getCode(), batchId);
             return 0;
         }
 

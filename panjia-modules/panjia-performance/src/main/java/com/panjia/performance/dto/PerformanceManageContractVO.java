@@ -34,8 +34,11 @@ public class PerformanceManageContractVO {
     /** 签约/认购日期时间（含时分秒） */
     private LocalDateTime businessDate;
 
-    /** 合同金额合计（PERF_EXPECT=应收 / PERF_REAL=实收） */
+    /** 合同金额合计（调整后，PERF_EXPECT=应收 / PERF_REAL=实收） */
     private BigDecimal amount;
+
+    /** 原始金额合计（调整前，未调整时 = amount） */
+    private BigDecimal originalAmount;
 
     /** 涉及签约人数（去重） */
     private long employeeCount;
