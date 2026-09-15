@@ -42,7 +42,11 @@ public interface FlwHisTaskMapper extends BaseMapperPlus<FlowHisTask, FlowHisTas
                 FlowHisTask::getDefinitionId, FlowHisTask::getInstanceId)
             .selectAs(FlowHisTask::getFlowStatus, FlowHisTaskVo::getFlowTaskStatus)
             .select(FlowHisTask::getMessage, FlowHisTask::getExt, FlowHisTask::getCreateTime,
-                FlowHisTask::getUpdateTime, FlowHisTask::getFormCustom, FlowHisTask::getFormPath)
+                FlowHisTask::getUpdateTime, FlowHisTask::getFormCustom)
+            // formPath 优先用定义级 c.form_path（已由 V100009 修正），
+            // 任务快照 a.form_path 作为兜底，避免历史任务因快照里是旧的错误值而打不开业务页
+            .selectAs("COALESCE(NULLIF(TRIM(c.form_path), ''), NULLIF(TRIM(a.form_path), ''))",
+                FlowHisTaskVo::getFormPath)
             .select("b", FlowInstance::getFlowStatus, FlowInstance::getBusinessId, FlowInstance::getCreateBy)
             .select("c", FlowDefinition::getFlowName, FlowDefinition::getFlowCode, FlowDefinition::getCategory,
                 FlowDefinition::getVersion)

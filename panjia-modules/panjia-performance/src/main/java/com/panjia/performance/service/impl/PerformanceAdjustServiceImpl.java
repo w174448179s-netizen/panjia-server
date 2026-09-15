@@ -661,17 +661,39 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
     /**
      * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * <p>合同级调整以合同号作为主标识；明细级调整（无合同号）以员工姓名作为主标识。
      */
     private FlowInstanceBizExtDTO buildBizExt(PerformanceAdjust adjust) {
         FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
         bizExt.setBusinessId(String.valueOf(adjust.getId()));
         bizExt.setBusinessCode(text(adjust.getAdjustNo()));
-        bizExt.setBusinessTitle("业绩调整｜单号" + text(adjust.getAdjustNo())
+        // 合同级有合同号 → 用合同号；否则用员工姓名作为主标识
+        String subject;
+        if (StringUtils.isNotBlank(adjust.getContractNo())) {
+            subject = "合同" + adjust.getContractNo();
+        } else {
+            subject = "员工" + resolveEmployeeName(adjust.getEmployeeId());
+        }
+        bizExt.setBusinessTitle("业绩调整｜" + subject
             + "｜账期" + text(adjust.getPeriod())
-            + "｜合同" + text(adjust.getContractNo())
             + "｜类型" + text(adjust.getAdjustType())
-            + "｜目标金额" + text(adjust.getTargetAmount()));
+            + "｜目标金额" + text(adjust.getTargetAmount())
+            + "｜单号" + text(adjust.getAdjustNo()));
         return bizExt;
+    }
+
+    /**
+     * 查询员工姓名，查不到则回退为工号。
+     */
+    private String resolveEmployeeName(Long employeeId) {
+        if (employeeId == null) {
+            return "";
+        }
+        List<Map<String, Object>> rows = adjustMapper.employeeNames(List.of(employeeId));
+        if (rows.isEmpty()) {
+            return String.valueOf(employeeId);
+        }
+        return String.valueOf(rows.get(0).get("employeeName"));
     }
 
     private static String text(Object value) {

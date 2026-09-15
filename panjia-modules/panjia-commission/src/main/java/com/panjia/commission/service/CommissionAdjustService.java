@@ -252,10 +252,10 @@ public class CommissionAdjustService {
         FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
         bizExt.setBusinessId(String.valueOf(adjust.getId()));
         bizExt.setBusinessCode(text(adjust.getAdjustNo()));
-        bizExt.setBusinessTitle("结佣调整｜单号" + text(adjust.getAdjustNo())
-            + "｜账期" + text(adjust.getPeriod())
+        bizExt.setBusinessTitle("结佣调整｜账期" + text(adjust.getPeriod())
             + "｜类型" + text(adjust.getAdjustType())
-            + "｜差额" + text(adjust.getDiffAmount()));
+            + "｜差额" + text(adjust.getDiffAmount())
+            + "｜单号" + text(adjust.getAdjustNo()));
         return bizExt;
     }
 
