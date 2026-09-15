@@ -17,6 +17,7 @@ import com.panjia.performance.dto.AdjustQuery;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.PerformanceAdjustService;
+import com.panjia.performance.service.PeriodCloseService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
@@ -97,6 +98,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final PerformanceFactMapper factMapper;
     private final ReverseService reverseService;
     private final WorkflowService workflowService;
+    private final PeriodCloseService periodCloseService;
 
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(AdjustQuery query, PageQuery pageQuery) {
@@ -512,11 +514,16 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         PerformanceAdjust adjust = getAndCheck(id);
         checkTransition(adjust.getStatus(), AdjustStatus.EXECUTED, "调整单");
 
+        // §3.5 封账期间禁止执行调整：原月与目标月（调整生效月）均需未封账
+        String originalPeriod = StringUtils.isNotBlank(adjust.getOriginalPeriod())
+            ? adjust.getOriginalPeriod() : adjust.getPeriod();
+        assertPeriodNotClosed(originalPeriod, "原业绩归属月");
+        assertPeriodNotClosed(adjust.getPeriod(), "调整生效月");
+
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
             // 合同级仅 AMOUNT：原月=调整月走金额调整；跨月走业绩冲销（§4.6）
-            String originalPeriod = StringUtils.isNotBlank(adjust.getOriginalPeriod())
-                ? adjust.getOriginalPeriod() : adjust.getPeriod();
+            // originalPeriod 已在封账校验前解析
             if (originalPeriod.equals(adjust.getPeriod())) {
                 executeContractAmountAdjust(adjust, operatorId);
             } else {
@@ -965,5 +972,20 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         newFact.setFactStatus(FactStatus.ACTIVE);
         newFact.setSource(oldFact.getSource());
         return newFact;
+    }
+
+    /**
+     * §3.5 封账校验：指定期间已 CLOSED 时抛业务异常，禁止执行调整。
+     *
+     * @param period 期间（YYYY-MM）
+     * @param label   期间用途描述（用于异常消息）
+     */
+    private void assertPeriodNotClosed(String period, String label) {
+        if (StringUtils.isBlank(period)) {
+            return;
+        }
+        if (periodCloseService.isClosed(period)) {
+            throw new ServiceException("期间已封账，禁止执行调整：" + label + "=" + period);
+        }
     }
 }

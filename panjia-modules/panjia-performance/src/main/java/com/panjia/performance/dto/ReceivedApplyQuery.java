@@ -22,4 +22,7 @@ public class ReceivedApplyQuery {
 
     /** 批次 ID */
     private Long batchId;
+
+    /** 部门 ID（店长仅能查本店，服务端强制注入） */
+    private Long deptId;
 }

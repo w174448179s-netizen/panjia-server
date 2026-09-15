@@ -20,9 +20,11 @@ import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.PerformanceQueryService;
+import com.panjia.performance.service.PerformanceViewLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
@@ -45,10 +47,15 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     /** 经纪人角色 ID（仅本人业绩数据权限） */
     private static final Long ROLE_AGENT = 1761300000000000014L;
+    /** 店长角色 ID（仅本店业绩数据权限） */
+    private static final Long ROLE_STORE_MANAGER = 1761300000000000011L;
+    /** 总监角色 ID（分管范围数据权限；当前实现等同于全量，无分管切片时不限制） */
+    private static final Long ROLE_DIRECTOR = 1761300000000000010L;
 
     private final PerformanceFactMapper factMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
+    private final PerformanceViewLogService viewLogService;
 
     @Override
     public PageResult<PerformanceFactDTO> listFacts(FactQuery query, PageQuery pageQuery) {
@@ -173,6 +180,10 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
         int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
+        // §3.6 数据级行级权限：店长仅本店。未传 deptId 时强制设为登录用户的 dept_id
+        if (selfEmployeeId == null) {
+            deptId = enforceStoreManagerDeptFilter(deptId);
+        }
 
         long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
         vo.setTotal(total);
@@ -229,6 +240,10 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
         int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
+        // §3.6 数据级行级权限：店长仅本店。未传 deptId 时强制设为登录用户的 dept_id
+        if (selfEmployeeId == null) {
+            deptId = enforceStoreManagerDeptFilter(deptId);
+        }
 
         long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
         vo.setTotal(total);
@@ -263,8 +278,29 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
-        return factMapper.selectManageListByContractNos(
+        List<PerformanceManageDTO> rows = factMapper.selectManageListByContractNos(
             period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
+
+        // §3.6 查看留痕：经纪人打开含他人业绩的合同 → 异步写 view_log
+        // 触发条件：当前登录用户是经纪人 + 单合同展开（contractNos.size()==1）
+        // 店长/总监/算薪属职权查看不记（resolveSelfEmployeeId 返回 null 即非经纪人）
+        if (contractNos.size() == 1) {
+            Long viewerId = resolveSelfEmployeeId();
+            if (viewerId != null) {
+                List<Long> viewedEmployeeIds = rows.stream()
+                    .map(PerformanceManageDTO::getEmployeeId)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
+                viewLogService.recordViewAsync(
+                    null,  // contractId 在事实表无显式合同实体，留 null；按需可后续接入合同域 ID
+                    contractNos.get(0),
+                    viewerId,
+                    viewedEmployeeIds,
+                    "MY_PERF_DRILLDOWN");
+            }
+        }
+        return rows;
     }
 
     private long toLong(Object v) {
@@ -292,6 +328,43 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         } catch (Exception e) {
             log.warn("[performance] 解析经纪人数据权限失败，默认不限制", e);
             return null;
+        }
+    }
+
+    /**
+     * 数据权限：店长角色仅本店业绩。
+     * <p>
+     * 当前登录用户是店长时：
+     * <ul>
+     *   <li>未传 deptId → 强制设为登录用户的 dept_id（本店）</li>
+     *   <li>已传 deptId 但非本人 dept_id → 拒绝（防止越权指定他店 deptId 绕过过滤）</li>
+     * </ul>
+     * 非店长角色直接返回原 deptId（财务/总监不限制）。
+     *
+     * @param requestedDeptId 调用方传入的 deptId（可空）
+     * @return 实际生效的 deptId
+     */
+    private Long enforceStoreManagerDeptFilter(Long requestedDeptId) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoleId() == null
+                || !ROLE_STORE_MANAGER.equals(loginUser.getRoleId())) {
+                return requestedDeptId;
+            }
+            Long userDeptId = loginUser.getDeptId();
+            if (userDeptId == null) {
+                log.warn("[performance] 店长 deptId 为空，降级为不限制（请检查账号配置）");
+                return requestedDeptId;
+            }
+            if (requestedDeptId != null && !requestedDeptId.equals(userDeptId)) {
+                throw new ServiceException("店长仅能查看本店业绩数据");
+            }
+            return userDeptId;
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[performance] 解析店长数据权限失败，默认不限制", e);
+            return requestedDeptId;
         }
     }
 

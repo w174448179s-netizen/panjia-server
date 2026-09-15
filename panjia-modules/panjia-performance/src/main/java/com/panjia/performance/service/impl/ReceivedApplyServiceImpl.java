@@ -62,6 +62,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…012 / role:…010 对应。 */
     private static final String ROLE_FINANCE = "finance";
     private static final String ROLE_DIRECTOR = "director";
+    /** 店长角色 ID（仅本店数据权限） */
+    private static final Long ROLE_STORE_MANAGER = 1761300000000000011L;
     private static final String FACT_TYPE_REAL = FactType.PERF_REAL.getCode();
     private static final String FACT_TYPE_EXPECT = FactType.PERF_EXPECT.getCode();
 
@@ -101,7 +103,15 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                     log.info("[实收审批] 导入自动建单并提交：applyNo={}, contractNo={}, received={}",
                         apply.getApplyNo(), apply.getContractNo(), apply.getReceivedAmount());
                 } else {
-                    // 同合同已有未完结单：新批次事实合并进既有单（审批单以合同为粒度，事实随到随并）
+                    // ★ 已审批通过单（APPROVED）不再合并新事实：避免绕过审批流程改变已审批金额。
+                    //   合同+月唯一索引 uk_capp_period_contract 也不允许新建，故 APPROVED 单直接跳过。
+                    //   待提交/审批中单（DRAFT/SUBMITTED）才合并事实。
+                    if (existing.getStatus() == ReceivedApplyStatus.APPROVED) {
+                        log.info("[实收审批] 合同本月审批单已 APPROVED，跳过新批次事实合并：applyId={}, contractNo={}",
+                            existing.getId(), group.getContractNo());
+                        continue;
+                    }
+                    // 同合同已有未完结单（DRAFT/SUBMITTED）：新批次事实合并进既有单（审批单以合同为粒度，事实随到随并）
                     bindBatchFacts(existing, batchId);
                     refreshTotals(existing);
                     applyMapper.updateById(existing);
@@ -139,7 +149,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             refreshTotals(apply);
             applyMapper.updateById(apply);
         } else if (apply.getStatus() == ReceivedApplyStatus.APPROVED) {
-            throw new ServiceException("合同 " + contractNo + " 实收业绩已审批通过");
+            throw new ServiceException("合同 " + contractNo + " 实收业绩已审批通过，如需追加请走调整流程或解封后重发");
         } else if (apply.getStatus() == ReceivedApplyStatus.SUBMITTED) {
             throw new ServiceException("合同 " + contractNo + " 实收业绩审批中，请勿重复提交");
         }
@@ -273,6 +283,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (apply.getStatus() != ReceivedApplyStatus.DRAFT && apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             throw new ServiceException("仅待提交/审批中的单据可作废（当前：" + apply.getStatus().getDesc() + "）");
         }
+        // 解绑该审批单已绑定的实收事实：作废后事实应可重新发起（项目约束"申请单作废时未审批明细必须随单冲销以释放事实可重新发起"）
+        unbindFacts(id);
         if (StringUtils.isNotBlank(apply.getProcessInstanceId())) {
             // 终止运行中的流程实例（触发 cancel 事件，监听器幂等置 CANCELLED）
             workflowService.deleteInstance(List.of(String.valueOf(id)));
@@ -285,6 +297,47 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         apply.setStatus(ReceivedApplyStatus.CANCELLED);
         apply.setCurrentNode(null);
         applyMapper.updateById(apply);
+    }
+
+    /**
+     * 解绑审批单下所有事实的 receivedApplyId 关联。
+     * <p>用于作废场景：让事实恢复自由身，可重新挂载到新的审批单。
+     * <p>幂等：仅当前已绑定到本单的事实会被更新，其他单的事实不受影响。
+     */
+    private void unbindFacts(Long applyId) {
+        factMapper.update(null, new LambdaUpdateWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getReceivedApplyId, applyId)
+            .set(PerformanceFact::getReceivedApplyId, null));
+        log.info("[实收审批] 已解绑审批单事实：applyId={}", applyId);
+    }
+
+    /**
+     * 数据权限：店长角色仅本店审批单。
+     * <p>店长：未传 deptId → 强制设为登录用户 dept_id；传了非本人 dept_id → 拒绝。
+     * <p>非店长角色（财务/总监）直接返回原 deptId（不限制）。
+     */
+    private Long enforceStoreManagerDeptFilter(Long requestedDeptId) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoleId() == null
+                || !ROLE_STORE_MANAGER.equals(loginUser.getRoleId())) {
+                return requestedDeptId;
+            }
+            Long userDeptId = loginUser.getDeptId();
+            if (userDeptId == null) {
+                log.warn("[实收审批] 店长 deptId 为空，降级为不限制（请检查账号配置）");
+                return requestedDeptId;
+            }
+            if (requestedDeptId != null && !requestedDeptId.equals(userDeptId)) {
+                throw new ServiceException("店长仅能查看本店审批单");
+            }
+            return userDeptId;
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[实收审批] 解析店长数据权限失败，默认不限制", e);
+            return requestedDeptId;
+        }
     }
 
     // ==================== Excel 批量审批（§2.3） ====================
@@ -397,9 +450,14 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     @Override
     public PageResult<ReceivedApply> list(ReceivedApplyQuery query, PageQuery pageQuery) {
+        // §3.6 数据级行级权限：店长仅本店审批单。
+        // 若调用方未传 deptId 且当前登录用户是店长，强制设为本人 dept_id；
+        // 若调用方传了非本人 dept_id，直接拒绝（防越权）。
+        Long effectiveDeptId = enforceStoreManagerDeptFilter(query == null ? null : query.getDeptId());
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
             .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
+            .eq(effectiveDeptId != null, ReceivedApply::getDeptId, effectiveDeptId)
             .eq(StringUtils.isNotBlank(query.getCurrentNode()),
                 ReceivedApply::getCurrentNode, query.getCurrentNode())
             .eq(StringUtils.isNotBlank(query.getStatus()),
@@ -709,6 +767,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     private ReceivedApply findActiveApply(String period, String contractNo) {
+        // 查未完结单（DRAFT/SUBMITTED/APPROVED）：APPROVED 单仍存在以便 autoCreateForBatch 判重跳过，
+        // 但 autoCreateForBatch 的 else 分支会对 APPROVED 单跳过合并事实，避免改 receivedAmount。
         return applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
             .eq(ReceivedApply::getContractNo, contractNo)

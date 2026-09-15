@@ -16,10 +16,12 @@ import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
+import com.panjia.performance.service.PeriodCloseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.dromara.common.core.utils.StringUtils;
 import org.dromara.system.api.ConfigService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -60,6 +62,7 @@ public class PerformanceEngine {
     private final ReverseService reverseService;
     private final EventPort eventPort;
     private final ConfigService configService;
+    private final PeriodCloseService periodCloseService;
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
@@ -101,6 +104,12 @@ public class PerformanceEngine {
     public PerformanceConsumeLog buildFromBatch(Long batchId, String eventId, String eventType,
                                                 Long operatorId, List<Long> supersededBatchIds,
                                                 String sourceType, String period) {
+        // ========== 0. 期间封账校验（§3.5 CLOSED 期间禁止重新消费） ==========
+        // period 为空时（MANUAL_BUILD）延迟到消费完成由 derivedPeriod 兜底；此处仅校验显式传入的 period
+        if (StringUtils.isNotBlank(period) && periodCloseService.isClosed(period)) {
+            throw new IllegalStateException("期间已封账，禁止重新消费批次：period=" + period);
+        }
+
         // ========== 1. 幂等检查 ==========
         // 查询是否已有相同 batchId + eventType 的成功/部分成功记录
         LambdaQueryWrapper<PerformanceConsumeLog> idempotentWrapper = new LambdaQueryWrapper<>();
@@ -110,7 +119,7 @@ public class PerformanceEngine {
         PerformanceConsumeLog existingLog = consumeLogMapper.selectOne(idempotentWrapper);
         if (existingLog != null) {
             log.info("[业绩消费] 幂等命中，跳过处理：batchId={}, eventType={}, logId={}",
-                    batchId, eventType, existingLog.getId());
+                batchId, eventType, existingLog.getId());
             return existingLog;
         }
 

@@ -9,8 +9,10 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.service.PeriodCloseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -46,6 +48,7 @@ public class ReverseService {
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
     private final EventPort eventPort;
+    private final PeriodCloseService periodCloseService;
 
     /**
      * 替换冲销。
@@ -211,6 +214,11 @@ public class ReverseService {
      */
     @Transactional(rollbackFor = Exception.class)
     public int reverseByPeriodVoid(String period, Long operatorId) {
+        // §3.5 封账期间禁止冲销（reverseByPeriodVoid 属于期间作废冲销，封账后不可执行）
+        if (period != null && periodCloseService.isClosed(period)) {
+            throw new ServiceException("期间已封账，禁止作废冲销：period=" + period);
+        }
+
         // 1. 查询该期间下所有 ACTIVE 状态的事实
         LambdaQueryWrapper<PerformanceFact> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(PerformanceFact::getPeriod, period)
