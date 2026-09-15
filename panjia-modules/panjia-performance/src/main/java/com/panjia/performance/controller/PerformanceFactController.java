@@ -1,6 +1,7 @@
 package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.panjia.contracts.port.ImportBatchCancelPort;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
@@ -43,6 +44,7 @@ public class PerformanceFactController extends BaseController {
 
     private final PerformanceQueryService queryService;
     private final PerformanceEngine performanceEngine;
+    private final ImportBatchCancelPort importBatchCancelPort;
 
     /**
      * 分页查询业绩事实列表。
@@ -87,6 +89,29 @@ public class PerformanceFactController extends BaseController {
         performanceEngine.buildFromBatch(batchId, eventId, "MANUAL_BUILD",
             LoginHelper.getUserId(), Collections.emptyList(), null, null);
         return R.ok();
+    }
+
+    /**
+     * 撤销导入。
+     * <p>
+     * 冲销指定批次所有 ACTIVE 业绩事实，并将导入批次和消费日志标记为已撤销。
+     * 已封账期间禁止撤销；已调整事实不会被冲销。
+     *
+     * @param batchId 导入批次 ID
+     * @return 冲销的事实条数
+     */
+    @SaCheckPermission("perf:fact:build")
+    @Log(title = "撤销导入", businessType = BusinessType.DELETE)
+    @PostMapping("/cancel/{batchId}")
+    public R<Integer> cancelImport(@PathVariable Long batchId) {
+        Long operatorId = LoginHelper.getUserId();
+        // 先查询归属期间用于封账校验
+        String period = importBatchCancelPort.getPeriod(batchId);
+        // 冲销业绩事实 + 标记消费日志为 CANCELLED
+        int reversedCount = performanceEngine.cancelImport(batchId, period, operatorId);
+        // 更新导入批次状态为 CANCELLED
+        importBatchCancelPort.cancelBatch(batchId, operatorId);
+        return R.ok(reversedCount);
     }
 
     /**

@@ -75,4 +75,14 @@ public interface ImportBatchService {
      * 取批次上传时的原始文件名（用于下载响应头）。
      */
     String getOriginalFileName(Long batchId);
+
+    /**
+     * 撤销导入（ARCHIVED → CANCELLED）。
+     * <p>
+     * 仅已归档批次可撤销；撤销后业绩事实由业绩域冲销，导入批次状态变为 CANCELLED（终态）。
+     *
+     * @param batchId    批次 ID
+     * @param operatorId 操作人 ID
+     */
+    void cancel(Long batchId, Long operatorId);
 }

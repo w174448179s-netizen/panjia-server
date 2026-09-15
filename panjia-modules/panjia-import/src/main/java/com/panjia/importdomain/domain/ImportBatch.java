@@ -84,6 +84,11 @@ public class ImportBatch implements Serializable {
         transitTo(hasIssue ? ImportBatchStatus.PENDING_CONFIRM : ImportBatchStatus.ARCHIVED);
     }
 
+    /** 撤销导入：ARCHIVED → CANCELLED（终态，业绩事实已冲销） */
+    public void cancel() {
+        transitTo(ImportBatchStatus.CANCELLED);
+    }
+
     private void transitTo(ImportBatchStatus target) {
         if (!status.canTransitTo(target)) {
             throw new IllegalStateTransitionException(status, target);

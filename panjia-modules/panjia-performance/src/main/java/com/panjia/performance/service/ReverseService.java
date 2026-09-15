@@ -134,6 +134,24 @@ public class ReverseService {
     }
 
     /**
+     * 撤销导入冲销。
+     * <p>
+     * 将指定批次的所有 ACTIVE 事实全部冲销，{@code reversed_reason = CANCEL}。
+     * 典型场景：用户导入选错归属月，主动撤销整个导入批次。
+     * <p>
+     * 与 {@link #reverseBySupersede} 类似，但语义为"撤销导入"而非"被新版本覆盖"。
+     * 同样跳过已调整事实（adjust_id 非空）。
+     *
+     * @param batchId    批次 ID
+     * @param operatorId 操作人 ID
+     * @return 冲销的事实条数
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int reverseByCancel(Long batchId, Long operatorId) {
+        return reverseByReason(batchId, ReversedReason.BATCH_REVOKE, operatorId);
+    }
+
+    /**
      * 通用内部：按指定 reason 冲销批次下所有 ACTIVE 事实。
      * <p>
      * 注意：已被业绩调整覆盖的事实（adjust_id 非空）会被跳过——

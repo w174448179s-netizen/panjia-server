@@ -23,10 +23,13 @@ public enum ImportBatchStatus {
     PENDING_CONFIRM(2, "待确认", Set.of("NORMALIZING", "ARCHIVED", "FAILED"), false, false),
 
     /** 已归档（对外可见/可被下游消费） */
-    ARCHIVED(3, "已归档", Set.of(), true, false),
+    ARCHIVED(3, "已归档", Set.of("CANCELLED"), true, false),
 
     /** 失败（终态，不可直接修改，需新建批次重试） */
-    FAILED(4, "失败", Set.of(), true, false);
+    FAILED(4, "失败", Set.of(), true, false),
+
+    /** 已撤销（终态：用户主动撤销导入，业绩事实已冲销） */
+    CANCELLED(5, "已撤销", Set.of(), true, false);
 
     @EnumValue
     private final int code;
@@ -47,9 +50,13 @@ public enum ImportBatchStatus {
         return code;
     }
 
-    @JsonValue
     public String getDesc() {
         return desc;
+    }
+
+    @JsonValue
+    public String jsonValue() {
+        return name();
     }
 
     /** 是否可流转到目标状态 */

@@ -115,15 +115,22 @@ public class ImportBatchServiceImpl implements ImportBatchService {
             ? Collections.emptyList()
             : supersededIds.stream().map(String::valueOf).toList();
 
+        Long operatorId = null;
+        try {
+            operatorId = org.dromara.common.satoken.utils.LoginHelper.getUserId();
+        } catch (Exception ignored) {
+        }
+
         ImportBatchArchivedEvent event = new ImportBatchArchivedEvent();
         event.setBatchId(batch.getId());
         event.setSourceType(batch.getSourceType() == null ? null : batch.getSourceType().getCode());
         event.setPeriod(batch.getPeriod());
+        event.setOperatorId(operatorId);
         event.setSupersededBatchIds(supersededStrIds);
         eventPort.emit(event);
 
-        log.info("[导入归档事件] 发布 ImportBatchArchivedEvent: batchId={}, sourceType={}, period={}, supersededBatchIds={}",
-            batch.getId(), event.getSourceType(), event.getPeriod(), supersededStrIds);
+        log.info("[导入归档事件] 发布 ImportBatchArchivedEvent: batchId={}, sourceType={}, period={}, operatorId={}, supersededBatchIds={}",
+            batch.getId(), event.getSourceType(), event.getPeriod(), operatorId, supersededStrIds);
     }
 
     /**
@@ -200,5 +207,14 @@ public class ImportBatchServiceImpl implements ImportBatchService {
             name = "batch_" + batchId + "_" + (batch.getSourceType() == null ? "unknown" : batch.getSourceType().getCode()) + ".xlsx";
         }
         return name;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancel(Long batchId, Long operatorId) {
+        ImportBatch batch = requireBatch(batchId);
+        batch.cancel();
+        batchMapper.updateById(batch);
+        log.info("[导入撤销] 批次状态已更新为 CANCELLED：batchId={}, operatorId={}", batchId, operatorId);
     }
 }

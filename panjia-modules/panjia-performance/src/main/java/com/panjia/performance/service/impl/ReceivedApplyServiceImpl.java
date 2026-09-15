@@ -79,9 +79,19 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public int autoCreateForBatch(Long batchId, String period) {
+    public int autoCreateForBatch(Long batchId, String period, Long operatorId) {
         if (batchId == null || StringUtils.isBlank(period)) {
             return 0;
+        }
+        // 兜底：事件驱动场景可能无登录上下文
+        if (operatorId == null) {
+            try {
+                operatorId = LoginHelper.getUserId();
+            } catch (Exception ignored) {
+            }
+        }
+        if (operatorId == null) {
+            operatorId = 1L;
         }
         List<ReceivedContractGroupDTO> groups = factMapper.selectBatchReceivedContractGroups(batchId, period);
         if (groups.isEmpty()) {
@@ -93,12 +103,12 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             try {
                 ReceivedApply existing = findActiveApply(period, group.getContractNo());
                 if (existing == null) {
-                    ReceivedApply apply = newApplyFromGroup(period, group, batchId, null);
+                    ReceivedApply apply = newApplyFromGroup(period, group, batchId, operatorId);
                     insertApply(apply);
                     bindBatchFacts(apply, batchId);
                     refreshTotals(apply);
                     applyMapper.updateById(apply);
-                    startWorkflow(apply, null, Set.of());
+                    startWorkflow(apply, apply.getApplicantId(), Set.of());
                     created++;
                     log.info("[实收审批] 导入自动建单并提交：applyNo={}, contractNo={}, received={}",
                         apply.getApplyNo(), apply.getContractNo(), apply.getReceivedAmount());
@@ -575,11 +585,30 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         apply.setStatus(ReceivedApplyStatus.SUBMITTED);
         applyMapper.updateById(apply);
 
+        // 确保有有效的发起人：事件驱动场景（导入归档自动建单）无登录上下文，
+        // applicantId 可能为 null，需兜底取登录用户，仍为空则用 apply.applicantId
+        Long initiator = applicantId;
+        if (initiator == null) {
+            try {
+                initiator = LoginHelper.getUserId();
+            } catch (Exception ignored) {
+            }
+        }
+        if (initiator == null) {
+            initiator = apply.getApplicantId();
+        }
+        if (initiator == null) {
+            initiator = 1L;
+        }
+
         StartProcessDTO start = new StartProcessDTO();
         start.setBusinessId(String.valueOf(apply.getId()));
         start.setFlowCode(FLOW_CODE);
-        Map<String, Object> variables = new HashMap<>(2);
+        start.setHandler(String.valueOf(initiator));
+        Map<String, Object> variables = new HashMap<>(4);
         variables.put("ignore", true);
+        variables.put("initiator", String.valueOf(initiator));
+        variables.put("initiatorDeptId", apply.getDeptId());
         start.setVariables(variables);
         start.setBizExt(buildBizExt(apply));
         try {

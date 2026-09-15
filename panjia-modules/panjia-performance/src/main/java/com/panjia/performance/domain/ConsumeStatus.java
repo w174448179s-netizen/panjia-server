@@ -28,7 +28,10 @@ public enum ConsumeStatus {
     PARTIAL("部分成功"),
 
     /** 失败（终态） */
-    FAILED("失败");
+    FAILED("失败"),
+
+    /** 已撤销（终态：撤销导入，对应事实已冲销） */
+    CANCELLED("已撤销");
 
     /** 状态码（DB / JSON 存储值，与枚举名一致） */
     private final String code;
@@ -84,7 +87,7 @@ public enum ConsumeStatus {
      * @return true 表示终态
      */
     public boolean isTerminal() {
-        return this == SUCCESS || this == PARTIAL || this == FAILED;
+        return this == SUCCESS || this == PARTIAL || this == FAILED || this == CANCELLED;
     }
 
     /**

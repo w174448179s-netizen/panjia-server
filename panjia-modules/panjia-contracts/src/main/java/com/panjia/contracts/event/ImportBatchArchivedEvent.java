@@ -36,6 +36,9 @@ public class ImportBatchArchivedEvent implements DomainEvent {
     /** 归属期间（YYYY-MM） */
     private String period;
 
+    /** 操作人 ID（归档操作发起人，用于下游自动建单时设置创建人） */
+    private Long operatorId;
+
     /**
      * 被本批 supersede 的旧批次 ID 列表。
      * <p>

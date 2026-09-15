@@ -72,14 +72,14 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
                 event.getBatchId(),
                 eventId,
                 "IMPORT_BATCH_ARCHIVED",
-                null,
+                event.getOperatorId(),
                 supersededIds,
                 event.getSourceType(),
                 event.getPeriod());
 
             // §2.1 业绩事实生成后，有实收的合同自动生成实收审批单并提交（按未绑定事实幂等）
             String period = event.getPeriod() != null ? event.getPeriod() : consumeLog.getPeriod();
-            int created = receivedApplyService.autoCreateForBatch(event.getBatchId(), period);
+            int created = receivedApplyService.autoCreateForBatch(event.getBatchId(), period, event.getOperatorId());
             log.info("[业绩消费] 归档批次消费完成：batchId={}, 实收审批单新建={}", event.getBatchId(), created);
         } catch (Exception e) {
             log.error("[业绩消费] 归档事件处理失败：batchId={}, eventId={}",

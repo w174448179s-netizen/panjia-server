@@ -20,7 +20,13 @@ public enum ReversedReason {
     MANUAL_ADJUST("手工调整"),
 
     /** 期间作废 */
-    PERIOD_VOID("期间作废");
+    PERIOD_VOID("期间作废"),
+
+    /** 撤销导入 */
+    CANCEL("撤销导入"),
+
+    /** 整批撤销（导入归属月选错，整批作废重导） */
+    BATCH_REVOKE("整批撤销");
 
     /** 冲销原因码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

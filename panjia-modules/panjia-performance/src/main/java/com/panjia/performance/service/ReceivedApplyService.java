@@ -18,11 +18,12 @@ public interface ReceivedApplyService {
      * 导入批次归档后自动建单并提交（§2.1：有实收 → 自动提交，流转财务→总监）。
      * <p>幂等：仅处理批次内 received_apply_id 尚未绑定的实收事实；同合同已有审批单时合并。
      *
-     * @param batchId 导入批次 ID
-     * @param period  归属期间
+     * @param batchId    导入批次 ID
+     * @param period     归属期间
+     * @param operatorId 操作人 ID（归档操作发起人，用于设置审批单创建人；为空时兜底取登录用户）
      * @return 新建审批单数量（合并不计）
      */
-    int autoCreateForBatch(Long batchId, String period);
+    int autoCreateForBatch(Long batchId, String period, Long operatorId);
 
     /**
      * 手工提交（店长/财务/总监，§2.2 发起人路由）：无单则按合同实收事实自动建单并提交；
