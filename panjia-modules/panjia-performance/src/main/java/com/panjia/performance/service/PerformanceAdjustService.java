@@ -69,6 +69,18 @@ public interface PerformanceAdjustService {
     void handleWorkflowEvent(Long adjustId, String status, String handler, String message);
 
     /**
+     * 标记工作流回调失败：在独立事务中把异常摘要追加到 reason 字段。
+     * <p>
+     * 监听器 catch 块中调用，避免主事务回滚导致失败信息也丢失；
+     * 运维可在列表页看到 reason 中带 [回调失败] 前缀的摘要，便于介入排查。
+     * <p>幂等：重复调用会追加多条失败摘要（保留最近几次失败上下文）。
+     *
+     * @param adjustId    调整单 ID
+     * @param errorSummary 异常摘要（可空）
+     */
+    void markCallbackFailure(Long adjustId, String errorSummary);
+
+    /**
      * 取消调整单。
      * <p>
      * 状态流转：SUBMITTED → CANCELLED。

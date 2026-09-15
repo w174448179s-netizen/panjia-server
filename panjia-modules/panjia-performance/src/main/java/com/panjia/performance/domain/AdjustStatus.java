@@ -7,8 +7,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * <p>
  * 状态流转：
  * <ul>
- *   <li>{@link #SUBMITTED} → {@link #APPROVED} / {@link #REJECTED} / {@link #CANCELLED}</li>
- *   <li>{@link #APPROVED} → {@link #EXECUTED}</li>
+ *   <li>{@link #SUBMITTED} → {@link #APPROVED}（工作流 finish 回调先置 APPROVED）/ {@link #REJECTED} / {@link #CANCELLED}</li>
+ *   <li>{@link #APPROVED} → {@link #EXECUTED}（自动/手动执行）</li>
+ *   <li>禁止 {@link #SUBMITTED} → {@link #EXECUTED} 直连，防止手动 execute 接口绕过审批</li>
  *   <li>终态：{@link #REJECTED} / {@link #CANCELLED} / {@link #EXECUTED}</li>
  * </ul>
  * <p>
@@ -81,10 +82,12 @@ public enum AdjustStatus {
     }
 
     /**
-     * 判断是否可流转到目标状态。
-     * <p>
      * 合法流转：
-     * SUBMITTED → EXECUTED（工作流审批通过后自动执行）/ REJECTED / CANCELLED；
+     * <ul>
+     *   <li>SUBMITTED → APPROVED（工作流 finish 回调先置 APPROVED）/ REJECTED / CANCELLED</li>
+     *   <li>APPROVED → EXECUTED（自动/手动执行）</li>
+     * </ul>
+     * 禁止 SUBMITTED → EXECUTED 直连，防止手动 execute 接口绕过审批。
      * 终态不可再流转，不允许自流转。
      *
      * @param target 目标状态
@@ -95,7 +98,10 @@ public enum AdjustStatus {
             return false;
         }
         if (this == SUBMITTED) {
-            return target == EXECUTED || target == REJECTED || target == CANCELLED;
+            return target == APPROVED || target == REJECTED || target == CANCELLED;
+        }
+        if (this == APPROVED) {
+            return target == EXECUTED;
         }
         return false;
     }

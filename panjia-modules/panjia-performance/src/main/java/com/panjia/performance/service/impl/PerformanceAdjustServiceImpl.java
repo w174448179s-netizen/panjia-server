@@ -30,6 +30,7 @@ import org.dromara.workflow.api.WorkflowService;
 import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -432,8 +433,23 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
         switch (status == null ? "" : status) {
             case WF_STATUS_FINISH -> {
-                // 审批通过 → 自动执行调整（内含 SUBMITTED 状态校验，天然幂等）
-                log.info("[调整单工作流] 审批通过，执行调整：adjustId={}, handler={}, message={}",
+                // 审批通过 → 先置 APPROVED（补全审批人/时间留痕），再执行调整
+                // executeAdjust 内部 checkTransition 走 APPROVED → EXECUTED 路径，
+                // 杜绝手动 execute 接口从 SUBMITTED 直接跳 EXECUTED 绕过审批。
+                if (adjust.getStatus() == AdjustStatus.EXECUTED) {
+                    log.info("[调整单工作流] 已执行，幂等忽略 finish 回调：adjustId={}", adjustId);
+                    return;
+                }
+                if (adjust.getStatus() != AdjustStatus.SUBMITTED && adjust.getStatus() != AdjustStatus.APPROVED) {
+                    log.info("[调整单工作流] 非提交/审批通过态，忽略 finish 回调：adjustId={}, current={}",
+                        adjustId, adjust.getStatus());
+                    return;
+                }
+                adjust.setStatus(AdjustStatus.APPROVED);
+                adjust.setApproverId(handlerId);
+                adjust.setApproveTime(LocalDateTime.now());
+                adjustMapper.updateById(adjust);
+                log.info("[调整单工作流] 审批通过，置 APPROVED 后执行调整：adjustId={}, handler={}, message={}",
                     adjustId, handler, message);
                 executeAdjust(adjustId, handlerId);
             }
@@ -506,6 +522,37 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         adjustMapper.updateById(adjust);
 
         log.info("[调整单] 取消：adjustId={}, operatorId={}", id, operatorId);
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
+    public void markCallbackFailure(Long adjustId, String errorSummary) {
+        if (adjustId == null) {
+            return;
+        }
+        PerformanceAdjust adjust = adjustMapper.selectById(adjustId);
+        if (adjust == null) {
+            log.warn("[调整单] 标记回调失败时调整单不存在：adjustId={}", adjustId);
+            return;
+        }
+        // 追加失败摘要到 reason 字段（带时间戳 + [回调失败] 前缀，便于运维识别）
+        String truncated = errorSummary == null ? "未知错误" : errorSummary;
+        if (truncated.length() > 200) {
+            truncated = truncated.substring(0, 200) + "...";
+        }
+        String failureMark = "[" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("MM-dd HH:mm:ss"))
+            + " 回调失败] " + truncated;
+        String existingReason = adjust.getReason();
+        String newReason = StringUtils.isBlank(existingReason)
+            ? failureMark
+            : existingReason + " | " + failureMark;
+        // 控制总长度，避免 reason 字段撑爆（保留最近的失败上下文）
+        if (newReason.length() > 500) {
+            newReason = newReason.substring(newReason.length() - 500);
+        }
+        adjust.setReason(newReason);
+        adjustMapper.updateById(adjust);
+        log.warn("[调整单] 已追加回调失败摘要：adjustId={}, reason={}", adjustId, failureMark);
     }
 
     @Override
