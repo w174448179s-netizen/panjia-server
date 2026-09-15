@@ -217,30 +217,73 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             BigDecimal delta = deltaOf(adjust);
             boolean isExpectType = "PERF_EXPECT".equals(factType);
 
+            // 调整已执行（EXECUTED）后，SQL 查到的是新 ACTIVE 事实，amount 已是调整后金额。
+            // 此时需反转语义：把 SQL 的 amount 作为 afterAmount（调整后），
+            // 再反推原始金额 amount = afterAmount - delta，避免在调整后金额上再叠加 delta 重复计算。
+            boolean alreadyExecuted = adjust.getStatus() == AdjustStatus.EXECUTED;
+            if (alreadyExecuted) {
+                for (AdjustFactDetailDTO d : details) {
+                    BigDecimal currentAmount = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                    // 反推原始金额：原始 = 当前 - 变动；但此时 delta 尚未计算，先暂存当前 amount
+                    d.setAfterAmount(currentAmount);
+                }
+                // 已执行场景：原始 amount 需在 delta 计算后反推，先重置为 null 标记
+                for (AdjustFactDetailDTO d : details) {
+                    d.setAmount(null);
+                }
+            }
+
             if (isContractScope) {
                 // 合同级：按金额占比分摊 delta（与执行逻辑共用同一分摊方法）
+                // 分摊基准：未执行用当前 amount，已执行用 afterAmount（即调整后金额）反推
                 List<BigDecimal> amounts = details.stream()
-                    .map(d -> d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO)
+                    .map(d -> {
+                        BigDecimal a = d.getAmount();
+                        if (a == null && alreadyExecuted) {
+                            // 已执行场景：用 afterAmount 作为分摊基准（与执行时用原始 amount 分摊的口径一致）
+                            a = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
+                        }
+                        return a != null ? a : BigDecimal.ZERO;
+                    })
                     .toList();
                 BigDecimal[] parts = allocateByAmount(amounts, delta);
                 for (int i = 0; i < details.size(); i++) {
-                    var d = details.get(i);
-                    BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                    AdjustFactDetailDTO d = details.get(i);
+                    BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
                     d.setDeltaAmount(parts[i]);
-                    d.setAfterAmount(MoneyUtil.round2(amt.add(parts[i])));
+                    if (alreadyExecuted) {
+                        // 已执行：amount = afterAmount - delta（反推原始金额）
+                        d.setAmount(MoneyUtil.round2(afterAmt.subtract(parts[i])));
+                    } else {
+                        // 未执行：afterAmount = amount + delta（推算调整后）
+                        BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                        d.setAfterAmount(MoneyUtil.round2(amt.add(parts[i])));
+                    }
                     d.setTarget(true);
                 }
             } else {
                 // 明细级：只标记目标行
-                for (var d : details) {
-                    BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                for (AdjustFactDetailDTO d : details) {
                     if (d.getFactId() != null && d.getFactId().equals(factId)) {
                         d.setDeltaAmount(delta);
-                        d.setAfterAmount(amt.add(delta));
+                        if (alreadyExecuted) {
+                            BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
+                            d.setAmount(MoneyUtil.round2(afterAmt.subtract(delta)));
+                        } else {
+                            BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                            d.setAfterAmount(MoneyUtil.round2(amt.add(delta)));
+                        }
                         d.setTarget(true);
                     } else {
                         d.setDeltaAmount(BigDecimal.ZERO);
-                        d.setAfterAmount(amt);
+                        if (alreadyExecuted) {
+                            // 非目标行：amount 和 afterAmount 相同
+                            BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
+                            d.setAmount(afterAmt);
+                        } else {
+                            BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                            d.setAfterAmount(amt);
+                        }
                         d.setTarget(false);
                     }
                 }
