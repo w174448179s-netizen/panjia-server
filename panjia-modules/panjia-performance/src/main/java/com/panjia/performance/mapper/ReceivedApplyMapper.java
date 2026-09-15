@@ -14,9 +14,9 @@ public interface ReceivedApplyMapper extends BaseMapperPlus<ReceivedApply, Recei
 
     /**
      * 校验指定用户是否为某任务的待办办理人（查 flow_user 表）。
-     * <p>用于驳回鉴权对齐 approve 路径的引擎原生鉴权：
+     * <p>用于业务层鉴权对齐 approve 路径的引擎原生鉴权：
      * approve 走 completeTask(completeTask) 由引擎按 flow_user 判权，
-     * reject 走 rejectTask（系统身份 ignore=true）无引擎鉴权，故业务层补此校验。
+     * 系统身份路径（ignore=true，如 Excel 批量审批代办理）无引擎鉴权，故业务层补此校验。
      * <p>processed_by 在 flow_user 中以字符串存 user_id，故参数按字符串比较。
      *
      * @param taskId 任务 ID

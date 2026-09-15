@@ -46,6 +46,7 @@ import org.dromara.workflow.domain.context.InstanceDeleteContext;
 import org.dromara.workflow.domain.vo.FlowHisTaskVo;
 import org.dromara.workflow.domain.vo.FlowInstanceVo;
 import org.dromara.workflow.mapper.FlwCategoryMapper;
+import org.dromara.workflow.mapper.FlwInstanceBizExtMapper;
 import org.dromara.workflow.mapper.FlwInstanceMapper;
 import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwTaskService;
@@ -75,6 +76,7 @@ public class FlwInstanceServiceImpl implements IFlwInstanceService {
     private final IFlwTaskService flwTaskService;
     private final FlwInstanceMapper flwInstanceMapper;
     private final FlwCategoryMapper flwCategoryMapper;
+    private final FlwInstanceBizExtMapper flwInstanceBizExtMapper;
 
     /**
      * 分页查询正在运行的流程实例
@@ -215,6 +217,31 @@ public class FlwInstanceServiceImpl implements IFlwInstanceService {
     public boolean deleteByBusinessIds(List<String> businessIds) {
         InstanceDeleteContext context = InstanceDeleteContext.byBusinessIds(businessIds);
         LiteFlowUtils.execute(DELETE_INSTANCE_CHAIN, context);
+        return context.isResult();
+    }
+
+    /**
+     * 系统级按业务id删除流程实例（忽略权限校验，用于无用户上下文的系统操作）。
+     * <p>
+     * 与 {@link #deleteByBusinessIds(List)} 走完全相同的 LiteFlow 删除链，
+     * 仅通过 {@code InstanceDeleteContext.sysDelete} 跳过登录用户权限校验
+     * （{@code instanceDeleteEvent} 中的 superAdmin/createBy 判断与 {@code LoginHelper} 取当前用户）。
+     * 业务删除事件照常发布，若业务侧无需感知请自行忽略。
+     * <p>
+     * 另补充清理实例业务扩展（flw_instance_biz_ext，标准链路不清，防孤儿数据）。
+     *
+     * @param businessIds 业务id
+     * @return 删除成功返回 {@code true}，未找到实例时返回 {@code false}
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean deleteByBusinessIdsSys(List<String> businessIds) {
+        InstanceDeleteContext context = InstanceDeleteContext.byBusinessIdsSys(businessIds);
+        LiteFlowUtils.execute(DELETE_INSTANCE_CHAIN, context);
+        // 实例业务扩展（flw_instance_biz_ext，标准删除链不清，防孤儿数据）
+        if (CollUtil.isNotEmpty(context.getDeleteInstanceIds())) {
+            flwInstanceBizExtMapper.deleteByInstIds(context.getDeleteInstanceIds());
+        }
         return context.isResult();
     }
 

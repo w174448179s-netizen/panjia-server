@@ -181,6 +181,16 @@ public class ImportController {
     }
 
     /**
+     * 撤销导入（硬删批次及下游数据，原始导入文件保留）。
+     */
+    @SaCheckPermission("import:batch:revoke")
+    @PostMapping("/batches/{id}/revoke")
+    public R<Void> revoke(@PathVariable Long id) {
+        importBatchService.revoke(id);
+        return R.ok();
+    }
+
+    /**
      * 批次问题列表。
      */
     @SaCheckPermission("import:batch:list")

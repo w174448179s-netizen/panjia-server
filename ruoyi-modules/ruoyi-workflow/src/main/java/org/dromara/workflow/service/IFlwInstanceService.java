@@ -79,6 +79,16 @@ public interface IFlwInstanceService {
     boolean deleteByBusinessIds(List<String> businessIds);
 
     /**
+     * 系统级按业务id删除流程实例（忽略权限校验，用于无用户上下文的系统操作）。
+     * <p>
+     * 与 {@link #deleteByBusinessIds(List)} 走相同删除链路，仅跳过登录用户权限校验。
+     *
+     * @param businessIds 业务id
+     * @return 结果
+     */
+    boolean deleteByBusinessIdsSys(List<String> businessIds);
+
+    /**
      * 按照实例id删除流程实例
      *
      * @param instanceIds 实例id

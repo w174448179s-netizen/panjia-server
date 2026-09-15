@@ -77,12 +77,17 @@ public interface ImportBatchService {
     String getOriginalFileName(Long batchId);
 
     /**
-     * 撤销导入（ARCHIVED → CANCELLED）。
+     * 撤销导入（硬删批次及下游数据，原始导入文件保留）。
      * <p>
-     * 仅已归档批次可撤销；撤销后业绩事实由业绩域冲销，导入批次状态变为 CANCELLED（终态）。
+     * 仅已归档批次可撤销。撤销流程：
+     * <ol>
+     *   <li>通过 BatchConsumptionQueryPort 校验下游消费状态（封账/调整/实收）</li>
+     *   <li>硬删导入域数据：问题清单 → 归一化记录 → 批次本身</li>
+     *   <li>发布 ImportBatchRevokedEvent，下游（业绩/结佣）级联删除</li>
+     * </ol>
+     * 原始导入 raw 数据保留做合规留档。
      *
-     * @param batchId    批次 ID
-     * @param operatorId 操作人 ID
+     * @param batchId 批次 ID
      */
-    void cancel(Long batchId, Long operatorId);
+    void revoke(Long batchId);
 }

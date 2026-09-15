@@ -69,6 +69,7 @@ public class PerformanceEngine {
     private final ConfigService configService;
     private final PeriodCloseService periodCloseService;
     private final ReceivedApplyMapper receivedApplyMapper;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /** 期间格式：YYYY-MM */
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
@@ -817,110 +818,4 @@ public class PerformanceEngine {
         return parts.length >= 2 && !parts[1].isEmpty() ? parts[1] : null;
     }
 
-    /**
-     * 整批撤销导入。
-     * <p>
-     * 典型场景：用户导入选错归属月，主动撤销整个导入批次的业绩数据。
-     * <p>
-     * 同一事务内执行以下动作：
-     * <ol>
-     *   <li>约束校验：已封账 / 业绩调整审批通过 / 实收审批通过 → 禁止撤销</li>
-     *   <li>该批全部 ACTIVE 事实 → REVERSED（BATCH_REVOKE）</li>
-     *   <li>级联取消未生效下游：实收确认单 DRAFT/SUBMITTED → CANCELLED，解绑事实</li>
-     *   <li>消费日志 SUCCESS/PARTIAL/RUNNING → CANCELLED</li>
-     *   <li>留痕：操作人、时间、原因、批次号记录在日志和事实 reversed_reason 字段</li>
-     * </ol>
-     * 事实冲销后发布 PerformanceFactReversedEvent，结佣域通过 PerformanceFactReversedHandler
-     * 自动联动处理 PENDING 明细 → REVERSED。
-     *
-     * @param batchId    导入批次 ID
-     * @param period     归属期间（用于封账校验）
-     * @param operatorId 操作人 ID
-     * @return 冲销的事实条数
-     * @throws ServiceException 期间已封账 / 下游已生效时拒绝撤销
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public int cancelImport(Long batchId, String period, Long operatorId) {
-        // ── 约束校验 ──
-        // 约束①：已封账禁止撤销
-        if (StringUtils.isNotBlank(period) && periodCloseService.isClosed(period)) {
-            throw new ServiceException("期间已封账，禁止撤销导入：period=" + period);
-        }
-
-        // 约束②：业绩调整审批通过的事实不可撤销
-        LambdaQueryWrapper<PerformanceFact> adjustedQuery = new LambdaQueryWrapper<>();
-        adjustedQuery.eq(PerformanceFact::getBatchId, batchId)
-                     .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
-                     .isNotNull(PerformanceFact::getAdjustId);
-        Long adjustedCount = factMapper.selectCount(adjustedQuery);
-        if (adjustedCount > 0) {
-            throw new ServiceException("该批次存在已审批通过的业绩调整（" + adjustedCount + " 条），"
-                + "禁止撤销，请先撤销调整单");
-        }
-
-        // 约束③：实收审批通过禁止撤销
-        LambdaQueryWrapper<ReceivedApply> applyQuery = new LambdaQueryWrapper<>();
-        applyQuery.eq(ReceivedApply::getBatchId, batchId)
-                  .eq(ReceivedApply::getStatus, ReceivedApplyStatus.APPROVED);
-        Long approvedApplyCount = receivedApplyMapper.selectCount(applyQuery);
-        if (approvedApplyCount > 0) {
-            throw new ServiceException("该批次存在已审批通过的实收确认单（" + approvedApplyCount + " 条），"
-                + "禁止撤销，请走退单/调整流程");
-        }
-
-        log.info("[整批撤销] 开始：batchId={}, period={}, operatorId={}", batchId, period, operatorId);
-
-        // ── 动作①：该批全部 ACTIVE 事实 → REVERSED（BATCH_REVOKE） ──
-        int reversedCount = reverseService.reverseByCancel(batchId, operatorId);
-        log.info("[整批撤销] 事实冲销完成：batchId={}, 冲销数={}", batchId, reversedCount);
-
-        // ── 动作②：级联取消未生效下游 — 实收确认单 DRAFT/SUBMITTED → CANCELLED ──
-        // 注意：不调用 workflowService.deleteInstance，因为它内部的事务/权限检查
-        // 可能将外层事务标记为 rollback-only，导致整个撤销事务回滚。
-        // 直接更新审批单状态为 CANCELLED + 解绑事实，流程实例残留不影响业务语义
-        //（审批单已作废，流程引擎查询时通过 businessId 关联会发现业务侧已终态）。
-        LambdaQueryWrapper<ReceivedApply> cancelApplyQuery = new LambdaQueryWrapper<>();
-        cancelApplyQuery.eq(ReceivedApply::getBatchId, batchId)
-                         .in(ReceivedApply::getStatus,
-                             ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED);
-        List<ReceivedApply> pendingApplies = receivedApplyMapper.selectList(cancelApplyQuery);
-        for (ReceivedApply apply : pendingApplies) {
-            // 解绑事实关联
-            factMapper.update(null, new LambdaUpdateWrapper<PerformanceFact>()
-                .eq(PerformanceFact::getReceivedApplyId, apply.getId())
-                .set(PerformanceFact::getReceivedApplyId, null));
-            // 直接标记为 CANCELLED
-            apply.setStatus(ReceivedApplyStatus.CANCELLED);
-            apply.setCurrentNode(null);
-            receivedApplyMapper.updateById(apply);
-            log.info("[整批撤销] 实收确认单已取消：applyId={}, contractNo={}",
-                apply.getId(), apply.getContractNo());
-        }
-
-        // ── 动作③：消费日志 → CANCELLED ──
-        LambdaQueryWrapper<PerformanceConsumeLog> logQuery = new LambdaQueryWrapper<>();
-        logQuery.eq(PerformanceConsumeLog::getBatchId, batchId)
-                .in(PerformanceConsumeLog::getStatus,
-                    ConsumeStatus.SUCCESS, ConsumeStatus.PARTIAL, ConsumeStatus.RUNNING);
-        List<PerformanceConsumeLog> logs = consumeLogMapper.selectList(logQuery);
-        for (PerformanceConsumeLog consumeLog : logs) {
-            consumeLog.setStatus(ConsumeStatus.CANCELLED);
-            consumeLog.setOperatorId(operatorId);
-            consumeLogMapper.updateById(consumeLog);
-            log.info("[整批撤销] 消费日志已标记为 CANCELLED：logId={}, batchId={}",
-                consumeLog.getId(), batchId);
-        }
-
-        // ── 动作④：留痕 ──
-        // 事实的 reversed_reason = BATCH_REVOKE 已由 reverseByCancel 设置；
-        // 消费日志的 operatorId 已记录操作人；
-        // 此处统一记录审计日志
-        log.info("[整批撤销] 完成：batchId={}, period={}, 冲销事实={}, 取消实收单={}, 消费日志={}, 操作人={}",
-            batchId, period, reversedCount, pendingApplies.size(), logs.size(), operatorId);
-
-        // ── 动作⑤：PerformanceFactReversedEvent 已由 ReverseService 发布，
-        //    结佣域通过 PerformanceFactReversedHandler 自动联动处理 ──
-
-        return reversedCount;
-    }
 }

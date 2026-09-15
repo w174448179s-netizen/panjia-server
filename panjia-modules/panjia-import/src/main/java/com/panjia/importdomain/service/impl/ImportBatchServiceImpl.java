@@ -4,13 +4,25 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.contracts.event.ImportBatchRenormalizedEvent;
+import com.panjia.contracts.event.ImportBatchRevokedEvent;
+import com.panjia.contracts.port.BatchConsumptionQueryPort;
+import org.springframework.beans.factory.ObjectProvider;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportSourceType;
+import com.panjia.importdomain.domain.raw.RawAttendance;
+import com.panjia.importdomain.domain.raw.RawManual;
+import com.panjia.importdomain.domain.raw.RawPoints;
+import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.ImportIssueMapper;
+import com.panjia.importdomain.mapper.NormalizedRecordMapper;
+import com.panjia.importdomain.mapper.RawAttendanceMapper;
+import com.panjia.importdomain.mapper.RawManualMapper;
+import com.panjia.importdomain.mapper.RawPointsMapper;
+import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.service.ImportBatchService;
 import com.panjia.importdomain.service.ImportEngine;
 import com.panjia.importutil.archive.FileArchiver;
@@ -33,6 +45,12 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final ImportEngine importEngine;
     private final ImportBatchMapper batchMapper;
     private final ImportIssueMapper issueMapper;
+    private final NormalizedRecordMapper normalizedRecordMapper;
+    private final RawSignedMapper rawSignedMapper;
+    private final RawAttendanceMapper rawAttendanceMapper;
+    private final RawPointsMapper rawPointsMapper;
+    private final RawManualMapper rawManualMapper;
+    private final ObjectProvider<BatchConsumptionQueryPort> consumptionQueryPortProvider;
     private final FileArchiver fileArchiver;
     private final EventPort eventPort;
 
@@ -211,10 +229,105 @@ public class ImportBatchServiceImpl implements ImportBatchService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void cancel(Long batchId, Long operatorId) {
+    public void revoke(Long batchId) {
         ImportBatch batch = requireBatch(batchId);
-        batch.cancel();
-        batchMapper.updateById(batch);
-        log.info("[导入撤销] 批次状态已更新为 CANCELLED：batchId={}, operatorId={}", batchId, operatorId);
+        // 前置校验①：仅已归档批次可撤销
+        if (batch.getStatus() != ImportBatchStatus.ARCHIVED) {
+            throw new IllegalStateException(
+                "仅已归档批次可撤销，当前状态：" + batch.getStatus().getDesc());
+        }
+        // 前置校验②：通过反向端口查询下游消费状态（封账/调整/实收）
+        // 降级策略：端口缺失或异常时默认不可撤销（保守拒绝，宁可不撤也不误撤）
+        boolean revocable = false;
+        String rejectReason = "下游消费状态校验失败，无法撤销";
+        BatchConsumptionQueryPort port = consumptionQueryPortProvider.getIfAvailable();
+        if (port != null) {
+            try {
+                BatchConsumptionQueryPort.RevokeCheckResult result =
+                    port.checkRevocable(batchId, batch.getPeriod());
+                revocable = result.isRevocable();
+                if (!revocable && result.getReason() != null) {
+                    rejectReason = result.getReason();
+                }
+            } catch (Exception e) {
+                log.warn("[导入撤销] 下游消费校验异常，保守拒绝：batchId={}, error={}", batchId, e.getMessage());
+            }
+        } else {
+            log.warn("[导入撤销] BatchConsumptionQueryPort 未实现，保守拒绝：batchId={}", batchId);
+        }
+        if (!revocable) {
+            throw new IllegalStateException(rejectReason);
+        }
+
+        Long operatorId = null;
+        try {
+            operatorId = org.dromara.common.satoken.utils.LoginHelper.getUserId();
+        } catch (Exception ignored) {
+        }
+
+        // 1. 硬删问题清单
+        issueMapper.delete(new LambdaQueryWrapper<ImportIssue>()
+            .eq(ImportIssue::getBatchId, batchId));
+        // 2. 硬删归一化记录
+        normalizedRecordMapper.delete(new LambdaQueryWrapper<com.panjia.importdomain.domain.NormalizedRecord>()
+            .eq(com.panjia.importdomain.domain.NormalizedRecord::getBatchId, batchId));
+        // 3. 硬删原始解析数据（按来源类型删对应 raw 表，解除外键约束后才能删批次）
+        deleteRawData(batchId, batch.getSourceType());
+        // 4. 硬删导入批次本身（原始上传文件保留在文件存储中，storage_path 指向的归档文件不删）
+        batchMapper.deleteById(batchId);
+
+        // 5. 发布撤销事件（Outbox，与事务原子提交），下游级联删除
+        emitRevokedEvent(batch, operatorId);
+
+        log.info("[导入撤销] 批次已删除，事件已发布：batchId={}, sourceType={}, period={}, operatorId={}",
+            batchId, batch.getSourceType(), batch.getPeriod(), operatorId);
+    }
+
+    /**
+     * 构造并发布 ImportBatchRevokedEvent。
+     */
+    private void emitRevokedEvent(ImportBatch batch, Long operatorId) {
+        ImportBatchRevokedEvent event = new ImportBatchRevokedEvent();
+        event.setBatchId(batch.getId());
+        event.setSourceType(batch.getSourceType() == null ? null : batch.getSourceType().getCode());
+        event.setPeriod(batch.getPeriod());
+        event.setOperatorId(operatorId);
+        eventPort.emit(event);
+    }
+
+    /**
+     * 按来源类型删除对应 raw 表的解析数据。
+     * <p>
+     * 必须在删批次之前调用，否则外键约束会报错。
+     */
+    private void deleteRawData(Long batchId, ImportSourceType sourceType) {
+        if (sourceType == null) {
+            return;
+        }
+        int count;
+        switch (sourceType) {
+            case KE_SIGNED:
+                count = rawSignedMapper.delete(new LambdaQueryWrapper<RawSigned>()
+                    .eq(RawSigned::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=KE_SIGNED, count={}", batchId, count);
+                break;
+            case ATTENDANCE:
+                count = rawAttendanceMapper.delete(new LambdaQueryWrapper<RawAttendance>()
+                    .eq(RawAttendance::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=ATTENDANCE, count={}", batchId, count);
+                break;
+            case POINTS:
+                count = rawPointsMapper.delete(new LambdaQueryWrapper<RawPoints>()
+                    .eq(RawPoints::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=POINTS, count={}", batchId, count);
+                break;
+            case OTHERS:
+                count = rawManualMapper.delete(new LambdaQueryWrapper<RawManual>()
+                    .eq(RawManual::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=OTHERS, count={}", batchId, count);
+                break;
+            default:
+                log.warn("[导入撤销] 未知来源类型，跳过 raw 数据删除：batchId={}, sourceType={}", batchId, sourceType);
+        }
     }
 }

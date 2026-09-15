@@ -218,34 +218,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         refreshCurrentNode(apply);
     }
 
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void reject(Long id, String message) {
-        ReceivedApply apply = getAndCheck(id);
-        if (apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
-            throw new ServiceException("仅审批中的单据可驳回（当前：" + apply.getStatus().getDesc() + "）");
-        }
-        // 驳回走的是门面提供的系统身份方法（内部 ignore=true，引擎不鉴权），
-        // 故在业务层补一道「登录人角色 = 当前节点办理角色」+ flow_user 分配校验，
-        // 堵住财务驳回总监节点单据、或同角色其他用户越权驳回的漏洞，对齐 approve 的引擎原生鉴权。
-        assertCurrentNodeHandler(apply);
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(id));
-        if (taskId == null) {
-            throw new ServiceException("当前无待办任务");
-        }
-        // 二次确认 taskId 与 assertCurrentNodeHandler 中的一致（并发场景下任务可能已流转）
-        Long currentUserId = LoginHelper.getUserId();
-        if (!LoginHelper.isSuperAdmin()
-            && applyMapper.countFlowUserAssignment(taskId, currentUserId) <= 0) {
-            throw new ServiceException("该任务未分配给您，无权驳回（对齐审批通过的引擎原生鉴权）");
-        }
-        workflowService.rejectTask(taskId, StringUtils.isBlank(message) ? "驳回" : message);
-        // back 事件由监听器置 REJECTED；同步刷新本实例状态
-        apply.setStatus(ReceivedApplyStatus.REJECTED);
-        apply.setCurrentNode(null);
-        applyMapper.updateById(apply);
-    }
-
     /**
      * 以当前登录人身份办理任务（不忽略权限）。
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
@@ -487,12 +459,16 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         // 若调用方未传 deptId 且当前登录用户是店长，强制设为本人 dept_id；
         // 若调用方传了非本人 dept_id，直接拒绝（防越权）。
         Long effectiveDeptId = enforceStoreManagerDeptFilter(query == null ? null : query.getDeptId());
+        // 默认排除已作废（CANCELLED），与业绩明细只查 ACTIVE 一致；
+        // 前端显式传 status 时按指定状态查询（含 CANCELLED）
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
             .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
             .eq(effectiveDeptId != null, ReceivedApply::getDeptId, effectiveDeptId)
             .eq(StringUtils.isNotBlank(query.getCurrentNode()),
                 ReceivedApply::getCurrentNode, query.getCurrentNode())
+            .ne(StringUtils.isBlank(query.getStatus()),
+                ReceivedApply::getStatus, ReceivedApplyStatus.CANCELLED)
             .eq(StringUtils.isNotBlank(query.getStatus()),
                 ReceivedApply::getStatus, ReceivedApplyStatus.fromCode(query.getStatus()))
             .and(StringUtils.isNotBlank(query.getKeyword()), w -> w

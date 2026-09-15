@@ -35,12 +35,15 @@ public class InstanceDeleteEventComponent extends NodeComponent {
     @Override
     public void process() {
         InstanceDeleteContext context = getContextBean(InstanceDeleteContext.class);
-        String userId = LoginHelper.getUserIdStr();
-        context.getFlowInstances().forEach(flowInstance -> {
-            if (!LoginHelper.isSuperAdmin() && !flowInstance.getCreateBy().equals(userId)) {
-                throw new ServiceException("权限不足，无法删除流程实例信息!");
-            }
-        });
+        // 系统级删除：无用户上下文（事件消费/批量撤销等），跳过登录与权限校验
+        if (!context.isSysDelete()) {
+            String userId = LoginHelper.getUserIdStr();
+            context.getFlowInstances().forEach(flowInstance -> {
+                if (!LoginHelper.isSuperAdmin() && !flowInstance.getCreateBy().equals(userId)) {
+                    throw new ServiceException("权限不足，无法删除流程实例信息!");
+                }
+            });
+        }
 
         Map<Long, Definition> definitionMap = StreamUtils.toMap(
             defService.getByIds(StreamUtils.toList(context.getFlowInstances(), Instance::getDefinitionId)),

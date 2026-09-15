@@ -85,16 +85,6 @@ public class ReceivedApplyController extends BaseController {
         return R.ok();
     }
 
-    /** 驳回 */
-    @SaCheckPermission("perf:received:approve")
-    @Log(title = "实收业绩驳回", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/reject")
-    public R<Void> reject(@PathVariable Long id, @RequestBody(required = false) Map<String, String> body) {
-        String message = body == null ? null : body.get("message");
-        receivedApplyService.reject(id, message);
-        return R.ok();
-    }
-
     /** 作废 */
     @SaCheckPermission("perf:received:cancel")
     @Log(title = "实收业绩审批作废", businessType = BusinessType.UPDATE)

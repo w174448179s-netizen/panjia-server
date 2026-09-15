@@ -35,6 +35,11 @@ public class InstanceDeleteContext {
     private List<FlowInstance> flowInstances;
 
     /**
+     * 系统级删除：跳过登录用户权限校验（无用户上下文的系统操作，如事件消费、批量撤销）。
+     */
+    private boolean sysDelete;
+
+    /**
      * 实际执行删除的实例 id。
      */
     private List<Long> deleteInstanceIds;
@@ -46,6 +51,15 @@ public class InstanceDeleteContext {
 
     public static InstanceDeleteContext byBusinessIds(List<String> businessIds) {
         return new InstanceDeleteContext(businessIds, null, false);
+    }
+
+    /**
+     * 系统级按业务 id 删除：与 {@link #byBusinessIds(List)} 同链路，仅跳过权限校验。
+     */
+    public static InstanceDeleteContext byBusinessIdsSys(List<String> businessIds) {
+        InstanceDeleteContext context = byBusinessIds(businessIds);
+        context.setSysDelete(true);
+        return context;
     }
 
     public static InstanceDeleteContext byInstanceIds(Collection<Long> instanceIds) {

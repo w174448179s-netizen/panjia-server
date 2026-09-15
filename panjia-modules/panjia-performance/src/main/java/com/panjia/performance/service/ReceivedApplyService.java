@@ -52,14 +52,6 @@ public interface ReceivedApplyService {
     void approve(Long id, String message);
 
     /**
-     * 驳回当前节点（驳回到申请人，单据置 REJECTED）。
-     *
-     * @param id      审批单 ID
-     * @param message 驳回意见
-     */
-    void reject(Long id, String message);
-
-    /**
      * 作废审批单（DRAFT/SUBMITTED；SUBMITTED 同步终止流程）。
      *
      * @param id 审批单 ID

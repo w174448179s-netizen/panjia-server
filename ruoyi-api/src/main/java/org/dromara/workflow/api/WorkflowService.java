@@ -24,6 +24,17 @@ public interface WorkflowService {
     boolean deleteInstance(List<String> businessIds);
 
     /**
+     * 系统级删除流程实例（无用户上下文场景，如事件消费、批量撤销等），忽略权限校验。
+     * <p>
+     * 与 {@link #deleteInstance(List)} 走相同删除链路，仅跳过登录用户权限校验。
+     * 仅用于系统内部自动操作，业务方需自行确保操作合法性。
+     *
+     * @param businessIds 业务id
+     * @return 结果
+     */
+    boolean deleteInstanceSys(List<String> businessIds);
+
+    /**
      * 获取当前流程状态
      *
      * @param taskId 任务id

@@ -409,26 +409,6 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 单个驳回（§3.3）：驳回到申请人，单据置 REJECTED，明细保持 PENDING 可修改后重新提交。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void reject(Long applicationId, String message) {
-        CommissionApplication application = requireSubmitted(applicationId);
-        // 驳回走的是门面提供的系统身份方法（内部 ignore=true，引擎不鉴权），
-        // 故在业务层补一道「登录人角色 = 当前节点办理角色」校验，堵住越权驳回。
-        assertCurrentNodeHandler(application, "驳回");
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
-        if (taskId == null) {
-            throw new ServiceException("当前无待办任务");
-        }
-        workflowService.rejectTask(taskId, StringUtils.isBlank(message) ? "驳回" : message);
-        application.setStatus(ApplicationStatus.REJECTED);
-        application.setCurrentNode(null);
-        applicationMapper.updateById(application);
-        log.info("[结佣-驳回] applyNo={}, message={}", application.getApplyNo(), message);
-    }
-
-    /**
      * 以当前登录人身份办理任务（不忽略权限）。
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
      * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
@@ -476,18 +456,6 @@ public class CommissionApplicationService {
         }
         if (!currentRoles().contains(requiredRole)) {
             throw new ServiceException("该单据当前由「" + requiredRoleName + "」办理，您无权" + action);
-        }
-    }
-
-    /**
-     * 兼容旧回调端点：approve=true 走当前节点通过，false 驳回。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void callback(Long applicationId, boolean approve, Long approverId) {
-        if (approve) {
-            approve(applicationId);
-        } else {
-            reject(applicationId, "驳回");
         }
     }
 

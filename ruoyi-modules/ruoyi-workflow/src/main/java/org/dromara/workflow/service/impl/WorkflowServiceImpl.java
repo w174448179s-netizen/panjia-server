@@ -58,6 +58,17 @@ public class WorkflowServiceImpl implements WorkflowService {
     }
 
     /**
+     * 系统级删除流程实例（忽略权限校验，用于无用户上下文场景）
+     *
+     * @param businessIds 业务id
+     * @return 结果
+     */
+    @Override
+    public boolean deleteInstanceSys(List<String> businessIds) {
+        return flwInstanceService.deleteByBusinessIdsSys(businessIds);
+    }
+
+    /**
      * 获取当前流程状态
      *
      * @param taskId 任务id

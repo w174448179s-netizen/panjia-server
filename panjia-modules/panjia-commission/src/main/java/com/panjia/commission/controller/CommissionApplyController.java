@@ -5,7 +5,6 @@ import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
-import com.panjia.commission.dto.CallbackDTO;
 import com.panjia.commission.dto.CommissionBatchResult;
 import com.panjia.commission.service.CommissionApplicationService;
 import lombok.RequiredArgsConstructor;
@@ -148,22 +147,6 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 单个驳回（§3.3）：驳回到申请人，可修改后重新提交。
-     *
-     * @param id  申请单 ID
-     * @param dto 审批结论（message 可选）
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:approve")
-    @Log(title = "结佣申请单驳回", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/reject")
-    public R<Void> reject(@PathVariable Long id, @RequestBody(required = false) CallbackDTO dto) {
-        String message = dto == null ? null : dto.getMessage();
-        applicationService.reject(id, message);
-        return R.ok();
-    }
-
-    /**
      * Excel 批量发起（§3.2）：按表内合同号逐张发起并自动提交。
      *
      * @param file   Excel（含「合同号」列，金额列可选）
@@ -191,21 +174,6 @@ public class CommissionApplyController extends BaseController {
     public R<CommissionBatchResult> batchApprove(@RequestParam("file") MultipartFile file,
                                                  @RequestParam("period") String period) {
         return R.ok(applicationService.batchApprove(period, file));
-    }
-
-    /**
-     * 审批回调（兼容旧端点）：approve=true 走当前节点通过，false 驳回。
-     *
-     * @param id  申请单 ID
-     * @param dto 审批结论（approve）
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:approve")
-    @Log(title = "结佣申请单审批", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/callback")
-    public R<Void> callback(@PathVariable Long id, @Validated @RequestBody CallbackDTO dto) {
-        applicationService.callback(id, Boolean.TRUE.equals(dto.getApprove()), LoginHelper.getUserId());
-        return R.ok();
     }
 
     /**
