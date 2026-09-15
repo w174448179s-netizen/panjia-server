@@ -83,9 +83,8 @@ public class CommissionApplicationService {
     private static final String FLOW_CODE = "commission_apply";
     private static final String NODE_DIRECTOR = "capp_director";
     private static final String NODE_FINANCE = "capp_finance";
-    /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 / role:…012 对应。 */
+    /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
     private static final String ROLE_DIRECTOR = "director";
-    private static final String ROLE_FINANCE = "finance";
     private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
 
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
@@ -367,10 +366,17 @@ public class CommissionApplicationService {
             workflowService.completeTask(taskId, "重新提交");
         }
 
-        // 发起人=总监 → 系统自动办理总监节点（§3.1 总监发起）
-        Set<String> roles = currentRoles();
-        if (roles.contains("director")) {
-            doDirectorApprove(application, operatorId, "总监发起，系统自动审批");
+        // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
+        // 后续 §3.5 差异对齐与「无差异自动过财务」由 capp_finance 任务创建事件监听器接管
+        if (currentRoles().contains(ROLE_DIRECTOR)) {
+            Long directorTask = taskAtNode(applicationId, NODE_DIRECTOR);
+            if (directorTask == null) {
+                throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
+            }
+            CompleteTaskDTO directorComplete = new CompleteTaskDTO();
+            directorComplete.setTaskId(directorTask);
+            directorComplete.setMessage("总监发起，系统自动审批");
+            completeTaskAsLoginUser(directorComplete);
         }
         refreshCurrentNode(application);
         log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
@@ -378,33 +384,28 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 单个审批通过（§3.3）：按当前待办节点自动识别。
-     * <ul>
-     *   <li>总监节点：先做 §3.5 差异判定与实收对齐，办理后无差异/跳过财务则系统自动过财务；</li>
-     *   <li>财务节点：直接办理，流程结束 → finish 事件锁定单据。</li>
-     * </ul>
+     * 单个审批通过（§3.3，供 Excel 批量审批复用）：办理当前待办任务，节点鉴权完全交给流程引擎。
+     * <p>
+     * 引擎按 flow_user 名单判权（越权直接拒绝）；总监节点办理后的 §3.5 实收对齐与
+     * 「无差异自动过财务」由 {@code CommissionApplyWorkflowListener} 的 capp_finance
+     * 任务创建事件接管，无论总监从「我的待办」还是业务页通过都会触发。
+     * </p>
      */
     @Transactional(rollbackFor = Exception.class)
     public void approve(Long applicationId) {
         CommissionApplication application = requireSubmitted(applicationId);
         String node = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
-        if (NODE_DIRECTOR.equals(node)) {
-            // 总监节点：仅总监可办理（引擎按 flow_user 名单判权，越权直接拒绝）
-            assertCurrentNodeHandler(application, "审批");
-            doDirectorApprove(application, LoginHelper.getUserId(), "总监审批通过");
-        } else if (NODE_FINANCE.equals(node)) {
-            assertCurrentNodeHandler(application, "审批");
-            Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
-            if (taskId == null) {
-                throw new ServiceException("当前无待办任务");
-            }
-            CompleteTaskDTO completeTask = new CompleteTaskDTO();
-            completeTask.setTaskId(taskId);
-            completeTask.setMessage("财务审批通过");
-            completeTaskAsLoginUser(completeTask);
-        } else {
+        if (!NODE_DIRECTOR.equals(node) && !NODE_FINANCE.equals(node)) {
             throw new ServiceException("当前无可审批节点（节点=" + node + "）");
         }
+        Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+        if (taskId == null) {
+            throw new ServiceException("当前无待办任务");
+        }
+        CompleteTaskDTO completeTask = new CompleteTaskDTO();
+        completeTask.setTaskId(taskId);
+        completeTask.setMessage(NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过");
+        completeTaskAsLoginUser(completeTask);
         refreshCurrentNode(application);
     }
 
@@ -428,34 +429,6 @@ public class CommissionApplicationService {
                 throw new ServiceException("您不是该单据当前审批节点的办理人，无权审批", e);
             }
             throw e;
-        }
-    }
-
-    /**
-     * 校验登录人是否为本单据当前节点对应的办理角色。
-     * <p>节点 → 角色的映射与流程定义 {@code flow_node.permission_flag}
-     * （capp_director → role:…010 总监、capp_finance → role:…012 财务）保持一致。</p>
-     *
-     * @param action 动作名，用于拼装错误提示（审批 / 驳回）
-     */
-    private void assertCurrentNodeHandler(CommissionApplication application, String action) {
-        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(application.getId()));
-        String requiredRole;
-        String requiredRoleName;
-        if (NODE_DIRECTOR.equals(nodeCode)) {
-            requiredRole = ROLE_DIRECTOR;
-            requiredRoleName = "总监";
-        } else if (NODE_FINANCE.equals(nodeCode)) {
-            requiredRole = ROLE_FINANCE;
-            requiredRoleName = "财务";
-        } else {
-            throw new ServiceException("该单据当前不在可审批节点，无法" + action);
-        }
-        if (LoginHelper.isSuperAdmin()) {
-            return;
-        }
-        if (!currentRoles().contains(requiredRole)) {
-            throw new ServiceException("该单据当前由「" + requiredRoleName + "」办理，您无权" + action);
         }
     }
 
@@ -849,18 +822,25 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 总监节点审批处理（§3.4/§3.5）：
+     * 总监节点办理完成后的联动（§3.4/§3.5，由 capp_finance 任务创建事件驱动）。
+     * <p>
+     * 无论总监从「我的待办」（原生 completeTask）还是业务页/Excel 批量审批通过，
+     * 流程进入财务节点即触发本方法，保证 §3.5 对齐不因审批入口不同而被跳过：
+     * </p>
      * <ol>
      *   <li>比对单内实收合计与应收合计：有差异且未对齐 → 调业绩域对齐端口，
      *       实收事实（合同+每人明细）supersede 为应收口径，结佣明细按映射重绑事实+金额并重算；</li>
-     *   <li>办理总监任务；</li>
      *   <li>无差异（或全局 skip_finance）→ 系统自动办理财务节点，流程结束；有差异 → 停留财务人工审批。</li>
      * </ol>
+     * <p>监听器在总监 completeTask 的事务内同步执行；warm-flow 引擎在进入监听前已完成
+     * 任务持久化，此处的嵌套 completeTask 不会覆盖引擎状态（已按 1.8.9 字节码取证确认）。</p>
      */
-    private void doDirectorApprove(CommissionApplication application, Long operatorId, String message) {
-        Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
-        if (directorTask == null) {
-            throw new ServiceException("当前不在总监审批节点");
+    @Transactional(rollbackFor = Exception.class)
+    public void afterDirectorPassed(Long applicationId, Long financeTaskId, Long operatorId) {
+        CommissionApplication application = applicationMapper.selectById(applicationId);
+        if (application == null) {
+            log.warn("[结佣-总监通过联动] 申请单不存在，忽略：id={}", applicationId);
+            return;
         }
         BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
         BigDecimal expected = application.getExpectedAmount() == null
@@ -877,23 +857,14 @@ public class CommissionApplicationService {
             recalcAggregates(application.getId(), application);
         }
 
-        // 总监本人办理：不设 ignore，交由引擎按 flow_user 名单判权（双保险，越权直接拒绝）
-        CompleteTaskDTO directorComplete = new CompleteTaskDTO();
-        directorComplete.setTaskId(directorTask);
-        directorComplete.setMessage(StringUtils.isBlank(message) ? "总监审批通过" : message
-            + (hasDiff ? "（实收已自动对齐应收，转财务复核）" : ""));
-        completeTaskAsLoginUser(directorComplete);
-
         // §3.4 无差异不流转财务（或全局跳过财务）→ 系统自动完成财务节点
         // 注意：此处为「系统自动审批」（无登录办理人），必须保留 ignore=true，不属于越权。
         boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));
         if (!hasDiff || skipFinance) {
-            Long financeTask = taskAtNode(application.getId(), NODE_FINANCE);
-            if (financeTask != null) {
-                workflowService.completeTask(financeTask,
-                    hasDiff ? "全局跳过财务，系统自动通过" : "实收应收无差异，系统自动完成财务节点");
-            }
+            workflowService.completeTask(financeTaskId,
+                hasDiff ? "全局跳过财务，系统自动通过" : "实收应收无差异，系统自动完成财务节点");
         }
+        refreshCurrentNode(application);
     }
 
     /**
@@ -924,7 +895,9 @@ public class CommissionApplicationService {
         return nodeCode.equals(current) ? workflowService.getCurrentTaskId(String.valueOf(applicationId)) : null;
     }
 
-    /** 从工作流回写当前节点（capp_director→DIRECTOR / capp_finance→FINANCE / 已结束→null）。 */
+    /** 从工作流回写当前节点（capp_director→DIRECTOR / capp_finance→FINANCE / 已结束→null）。
+     * <p>只更新 current_node 列：事件监听器可能在嵌套 completeTask 内被触发，
+     * 此时持有的实体已过期（状态/版本已被 finish 回调推进），整实体 updateById 会静默失败或回写脏状态。</p> */
     private void refreshCurrentNode(CommissionApplication application) {
         String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(application.getId()));
         String shortNode;
@@ -936,7 +909,9 @@ public class CommissionApplicationService {
             shortNode = null;
         }
         application.setCurrentNode(shortNode);
-        applicationMapper.updateById(application);
+        applicationMapper.update(null, new LambdaUpdateWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getId, application.getId())
+            .set(CommissionApplication::getCurrentNode, shortNode));
     }
 
     /**

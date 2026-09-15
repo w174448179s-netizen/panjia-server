@@ -75,16 +75,6 @@ public class ReceivedApplyController extends BaseController {
         return R.ok();
     }
 
-    /** 审批通过（办理当前节点） */
-    @SaCheckPermission("perf:received:approve")
-    @Log(title = "实收业绩审批通过", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/approve")
-    public R<Void> approve(@PathVariable Long id, @RequestBody(required = false) Map<String, String> body) {
-        String message = body == null ? null : body.get("message");
-        receivedApplyService.approve(id, message);
-        return R.ok();
-    }
-
     /** 作废 */
     @SaCheckPermission("perf:received:cancel")
     @Log(title = "实收业绩审批作废", businessType = BusinessType.UPDATE)

@@ -59,9 +59,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     private static final String FLOW_CODE = "perf_received";
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
-    /** 业务角色标识，与 flow_node.permission_flag 的 role:…012 / role:…010 对应。 */
-    private static final String ROLE_FINANCE = "finance";
-    private static final String ROLE_DIRECTOR = "director";
     /** 店长角色 ID（仅本店数据权限） */
     private static final Long ROLE_STORE_MANAGER = 1761300000000000011L;
     private static final String FACT_TYPE_REAL = FactType.PERF_REAL.getCode();
@@ -238,46 +235,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 throw new ServiceException("您不是该单据当前审批节点的办理人，无权审批", e);
             }
             throw e;
-        }
-    }
-
-    /**
-     * 校验登录人是否为本单据当前节点对应的办理角色。
-     * <p>节点 → 角色的映射与流程定义 {@code flow_node.permission_flag}
-     * （rcv_finance → role:…012 财务、rcv_director → role:…010 总监）保持一致。</p>
-     * <p>双重校验对齐 approve 路径的引擎原生鉴权：
-     * <ol>
-     *   <li>角色映射校验：登录人持有当前节点所需角色</li>
-     *   <li>flow_user 校验：当前待办任务确实分配给了登录人（避免同角色其他用户越权驳回）</li>
-     * </ol>
-     * 超管跳过校验（运维解卡能力）。
-     */
-    private void assertCurrentNodeHandler(ReceivedApply apply) {
-        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(apply.getId()));
-        String requiredRole;
-        if (NODE_DIRECTOR.equals(nodeCode)) {
-            requiredRole = ROLE_DIRECTOR;
-        } else if (NODE_FINANCE.equals(nodeCode)) {
-            requiredRole = ROLE_FINANCE;
-        } else {
-            throw new ServiceException("该单据当前不在可审批节点，无法驳回");
-        }
-        if (LoginHelper.isSuperAdmin()) {
-            return;
-        }
-        if (!currentRoles().contains(requiredRole)) {
-            throw new ServiceException("该单据当前由「"
-                + (ROLE_DIRECTOR.equals(requiredRole) ? "总监" : "财务") + "」办理，您无权驳回");
-        }
-        // 二次校验：该任务是否真的分配给当前登录用户（对齐 approve 的引擎原生 flow_user 鉴权）
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(apply.getId()));
-        if (taskId == null) {
-            throw new ServiceException("当前无待办任务，无法驳回");
-        }
-        Long currentUserId = LoginHelper.getUserId();
-        int assigned = applyMapper.countFlowUserAssignment(taskId, currentUserId);
-        if (assigned <= 0) {
-            throw new ServiceException("该任务未分配给您，无权驳回（对齐审批通过的引擎原生鉴权）");
         }
     }
 

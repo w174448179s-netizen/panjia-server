@@ -132,21 +132,6 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 单个审批通过（§3.3）：按当前节点自动识别总监/财务；
-     * 总监节点有差异时系统先自动对齐实收=应收，无差异不流转财务。
-     *
-     * @param id 申请单 ID
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:approve")
-    @Log(title = "结佣申请单审批", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/approve")
-    public R<Void> approve(@PathVariable Long id) {
-        applicationService.approve(id);
-        return R.ok();
-    }
-
-    /**
      * Excel 批量发起（§3.2）：按表内合同号逐张发起并自动提交。
      *
      * @param file   Excel（含「合同号」列，金额列可选）

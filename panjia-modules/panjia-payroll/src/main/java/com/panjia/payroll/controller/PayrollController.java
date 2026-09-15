@@ -22,9 +22,9 @@ import java.util.Map;
 /**
  * 工资批次管理。
  * <p>
- * 权限码与 {@code flow_definition} 中 {@code payroll_batch} 流程的节点办理人保持一致：
- * 算薪/提交由财务与店长办理，审核与锁定由总监办理。
- * </p>
+ * 审批动作（审核通过 / 驳回 / 锁定）已全部收敛到 warm-flow 的 payroll_batch 流程，
+ * 由「我的待办」按 flow_user 名单判权办理；本控制器只保留
+ * 算薪（calculate）/ 提交（submit）/ 标记发放（pay）与查询端点。
  */
 @RestController
 @RequestMapping("/payroll/batch")
@@ -49,32 +49,11 @@ public class PayrollController {
         return R.ok(batchService.calculate(id, LoginHelper.getUserId()));
     }
 
-    /** 提交审核 */
+    /** 提交审核（发起 payroll_batch 流程；审批与锁定由工作流节点办理） */
     @SaCheckPermission("payroll:batch:submit")
     @PostMapping("/{id}/submit")
     public R<PayrollBatch> submit(@PathVariable Long id) {
         return R.ok(batchService.submit(id, LoginHelper.getUserId()));
-    }
-
-    /** 审批通过（总监节点） */
-    @SaCheckPermission("payroll:batch:approve")
-    @PostMapping("/{id}/approve")
-    public R<PayrollBatch> approve(@PathVariable Long id) {
-        return R.ok(batchService.approve(id, LoginHelper.getUserId()));
-    }
-
-    /** 驳回（总监节点） */
-    @SaCheckPermission("payroll:batch:reject")
-    @PostMapping("/{id}/reject")
-    public R<PayrollBatch> reject(@PathVariable Long id) {
-        return R.ok(batchService.reject(id, LoginHelper.getUserId()));
-    }
-
-    /** 锁定 */
-    @SaCheckPermission("payroll:batch:lock")
-    @PostMapping("/{id}/lock")
-    public R<PayrollBatch> lock(@PathVariable Long id) {
-        return R.ok(batchService.lock(id, LoginHelper.getUserId()));
     }
 
     /** 标记发放 */

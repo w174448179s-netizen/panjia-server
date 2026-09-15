@@ -222,26 +222,7 @@ public class WorkflowServiceImpl implements WorkflowService {
         return ObjectUtil.isNotNull(task) ? task.getNodeCode() : null;
     }
 
-    /**
-     * 驳回当前待办任务（系统身份忽略权限，驳回到流程申请人节点）。
-     */
-    @Override
-    public boolean rejectTask(Long taskId, String message) {
-        List<FlowTask> tasks = flwTaskService.selectByIdList(Collections.singletonList(taskId));
-        if (tasks == null || tasks.isEmpty()) {
-            throw new IllegalStateException("待办任务不存在：taskId=" + taskId);
-        }
-        FlowTask task = tasks.get(0);
-        String applyNodeCode = flwCommonService.applyNodeCode(task.getDefinitionId());
 
-        BackProcessBo bo = new BackProcessBo();
-        bo.setTaskId(taskId);
-        bo.setNodeCode(applyNodeCode);
-        bo.setMessage(message);
-        bo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
-        bo.getVariables().put("ignore", true);
-        return flwTaskService.backProcess(bo);
-    }
 
     /**
      * 超时自动通过：扫描指定节点集合上的待办中间任务，创建时间超过 timeoutHours 的系统自动办理。

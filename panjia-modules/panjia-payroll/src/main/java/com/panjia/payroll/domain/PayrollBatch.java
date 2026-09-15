@@ -46,6 +46,9 @@ public class PayrollBatch implements Serializable {
     private Integer attempt;
     private String inputHash;
 
+    /** Warm-Flow 流程实例 ID（payroll_batch：提交算薪 → 总监审核 → 总监锁定） */
+    private String processInstanceId;
+
     private LocalDateTime lockedAt;
     private Long lockedBy;
     private Long operatorId;
@@ -57,6 +60,8 @@ public class PayrollBatch implements Serializable {
     private LocalDateTime updateTime;
 
     // ==================== 状态机断言（只能通过这些方法推进） ====================
+    // 审批态（REVIEWING→APPROVED→LOCKED）由工作流事件回调推进，
+    // 不再提供 approve/reject/lock 的业务断言。
 
     public void assertCanCalculate() {
         if (status == null || !status.canCalculate()) {
@@ -67,24 +72,6 @@ public class PayrollBatch implements Serializable {
     public void assertCanSubmit() {
         if (status == null || !status.canSubmit()) {
             throw new ServiceException("当前状态「" + statusName() + "」不允许提交审核");
-        }
-    }
-
-    public void assertCanApprove() {
-        if (status == null || !status.canApprove()) {
-            throw new ServiceException("当前状态「" + statusName() + "」不允许审批通过");
-        }
-    }
-
-    public void assertCanReject() {
-        if (status == null || !status.canReject()) {
-            throw new ServiceException("当前状态「" + statusName() + "」不允许驳回");
-        }
-    }
-
-    public void assertCanLock() {
-        if (status == null || !status.canLock()) {
-            throw new ServiceException("当前状态「" + statusName() + "」不允许锁定");
         }
     }
 

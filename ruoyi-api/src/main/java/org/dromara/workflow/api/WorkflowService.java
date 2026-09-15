@@ -125,16 +125,6 @@ public interface WorkflowService {
      * @return 当前节点编码（如 FINANCE/DIRECTOR），无待办任务时返回 {@code null}
      */
     String getCurrentNodeCode(String businessId);
-
-    /**
-     * 驳回当前待办任务（系统后台身份，忽略权限，驳回到流程申请人节点）。
-     *
-     * @param taskId  当前待办任务 ID
-     * @param message 驳回意见
-     * @return 办理成功返回 {@code true}
-     */
-    boolean rejectTask(Long taskId, String message);
-
     /**
      * 扫描指定节点集合上的待办任务，将创建时间超过 timeoutHours 小时的任务以系统身份自动通过。
      * <p>用于「总监超时自动审批」等可配置超时策略；timeoutHours &lt;= 0 时直接返回 0（不处理）。</p>

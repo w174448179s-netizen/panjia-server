@@ -19,6 +19,9 @@ import com.panjia.payroll.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.workflow.api.WorkflowService;
+import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
+import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -55,6 +58,7 @@ public class PayrollBatchService {
     private final SalaryCalculationEngine engine;
     private final ManualItemService manualItemService;
     private final ApplicationEventPublisher eventPublisher;
+    private final WorkflowService workflowService;
 
     // ==================== 创建 ====================
 
@@ -279,8 +283,19 @@ public class PayrollBatchService {
         return input;
     }
 
-    // ==================== 状态流转 ====================
+    // ==================== 状态流转（工作流驱动） ====================
 
+    private static final String FLOW_CODE = "payroll_batch";
+
+    /**
+     * 提交审核：CALCULATED → REVIEWING，并发起/推进 payroll_batch 流程。
+     * <p>
+     * 首次提交：发起流程并自动办理「提交算薪」节点（提交动作本身即该节点的办理，
+     * HTTP 入口已有 payroll:batch:submit 权限码把关，与节点办理人集合一致）；
+     * 总监驳回后重新提交：办理停留在 payroll_submit 的任务。
+     * 后续 审核通过（payroll_lock 任务创建）/ 驳回（back 事件）/ 锁定（finish 事件）
+     * 全部由 {@code PayrollBatchWorkflowListener} 按工作流事件推进，无业务直批路径。
+     */
     @Transactional(rollbackFor = Exception.class)
     public PayrollBatch submit(Long batchId, Long operatorId) {
         PayrollBatch b = getOrThrow(batchId);
@@ -288,53 +303,61 @@ public class PayrollBatchService {
         b.setStatus(BatchStatus.REVIEWING);
         b.setOperatorId(operatorId);
         batchMapper.updateById(b);
+
+        if (b.getProcessInstanceId() == null || b.getProcessInstanceId().isBlank()) {
+            startWorkflow(b, operatorId);
+        } else {
+            // 驳回后流程停在「提交算薪」节点：办理该任务重新提交
+            Long taskId = workflowService.getCurrentTaskId(String.valueOf(batchId));
+            if (taskId == null) {
+                throw new ServiceException("审批流程任务不存在，请联系管理员");
+            }
+            workflowService.completeTask(taskId, "重新提交");
+        }
+        log.info("[薪酬] 批次已提交审核：id={}, period={}, operator={}", batchId, b.getPeriod(), operatorId);
         return b;
     }
 
-    @Transactional(rollbackFor = Exception.class)
-    public PayrollBatch approve(Long batchId, Long operatorId) {
-        PayrollBatch b = getOrThrow(batchId);
-        b.assertCanApprove();
-        b.setStatus(BatchStatus.APPROVED);
-        b.setOperatorId(operatorId);
-        batchMapper.updateById(b);
-        return b;
+    /**
+     * 启动 payroll_batch 流程并自动办理「提交算薪」首节点。
+     */
+    private void startWorkflow(PayrollBatch batch, Long operatorId) {
+        StartProcessDTO start = new StartProcessDTO();
+        start.setBusinessId(String.valueOf(batch.getId()));
+        start.setFlowCode(FLOW_CODE);
+        start.setHandler(String.valueOf(operatorId));
+        Map<String, Object> variables = new HashMap<>(2);
+        variables.put("ignore", true);
+        start.setVariables(variables);
+        start.setBizExt(buildBizExt(batch));
+        try {
+            boolean ok = workflowService.startCompleteTask(start);
+            if (!ok) {
+                throw new ServiceException("算薪审批流程发起失败");
+            }
+        } catch (Exception e) {
+            log.error("[薪酬] 流程发起异常：batchId={}", batch.getId(), e);
+            throw new ServiceException("算薪审批流程发起失败：{}", e.getMessage());
+        }
+        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(batch.getId()));
+        if (instanceId != null) {
+            batch.setProcessInstanceId(String.valueOf(instanceId));
+            batchMapper.updateById(batch);
+        }
     }
 
-    @Transactional(rollbackFor = Exception.class)
-    public PayrollBatch reject(Long batchId, Long operatorId) {
-        PayrollBatch b = getOrThrow(batchId);
-        b.assertCanReject();
-        b.setStatus(BatchStatus.CALCULATED);
-        b.setOperatorId(operatorId);
-        batchMapper.updateById(b);
-        return b;
-    }
-
-    @Transactional(rollbackFor = Exception.class)
-    public PayrollBatch lock(Long batchId, Long operatorId) {
-        PayrollBatch b = getOrThrow(batchId);
-        b.assertCanLock();
-        b.setStatus(BatchStatus.LOCKED);
-        b.setLockedBy(operatorId);
-        b.setLockedAt(java.time.LocalDateTime.now());
-        b.setOperatorId(operatorId);
-        batchMapper.updateById(b);
-
-        // 发布工资锁定事件 → performance 域自动封账对应业绩月（V4.2 §13.1）
-        List<PayrollDetail> details = detailMapper.selectByBatchId(batchId);
-        List<Long> itemIds = details.stream().map(PayrollDetail::getId).toList();
-        List<PayrollLockedEvent.DeptCostSummary> deptCosts = buildDeptCosts(details);
-        PayrollLockedEvent event = new PayrollLockedEvent();
-        event.setEventId(java.util.UUID.randomUUID().toString());
-        event.setPeriod(b.getPeriod());
-        event.setBatchId(batchId);
-        event.setItemIds(itemIds);
-        event.setDeptCosts(deptCosts);
-        eventPublisher.publishEvent(event);
-        log.info("[工资锁定] 批次 {} 已锁定，发布 PayrollLockedEvent（period={}, itemCount={}）",
-            batchId, b.getPeriod(), itemIds.size());
-        return b;
+    /**
+     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     */
+    private FlowInstanceBizExtDTO buildBizExt(PayrollBatch batch) {
+        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
+        bizExt.setBusinessId(String.valueOf(batch.getId()));
+        bizExt.setBusinessCode(batch.getPeriod());
+        bizExt.setBusinessTitle("算薪审批｜" + batch.getPeriod()
+            + "｜范围" + ("ALL".equals(batch.getDeptScope()) ? "全部门店" : batch.getDeptScope())
+            + "｜人数" + (batch.getEmployeeCount() == null ? 0 : batch.getEmployeeCount())
+            + "｜实发" + (batch.getNetTotal() == null ? "0" : batch.getNetTotal()));
+        return bizExt;
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -345,6 +368,108 @@ public class PayrollBatchService {
         b.setOperatorId(operatorId);
         batchMapper.updateById(b);
         return b;
+    }
+
+    // ==================== 工作流回调（PayrollBatchWorkflowListener 调用） ====================
+
+    /**
+     * payroll_batch 流程实例级事件处理。
+     * <ul>
+     *   <li>finish（总监锁定节点办理完成）：APPROVED → LOCKED，落 locked_by/locked_at，
+     *       发布 PayrollLockedEvent → performance 域自动封账对应业绩月（V4.2 §13.1）；</li>
+     *   <li>back（总监审核驳回，退回「提交算薪」节点）：REVIEWING → CALCULATED；</li>
+     *   <li>cancel/invalid/termination：退回 CALCULATED 并解除实例绑定，可重新发起。</li>
+     * </ul>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void handleWorkflowEvent(Long batchId, String status, String handler, String message) {
+        PayrollBatch batch = batchMapper.selectById(batchId);
+        if (batch == null) {
+            log.warn("[薪酬工作流] 批次不存在，忽略：id={}, status={}", batchId, status);
+            return;
+        }
+        Long handlerId = parseHandlerId(handler);
+        switch (status == null ? "" : status) {
+            case "finish" -> {
+                if (batch.getStatus() == BatchStatus.LOCKED || batch.getStatus() == BatchStatus.PAID) {
+                    return;
+                }
+                batch.setStatus(BatchStatus.LOCKED);
+                batch.setLockedBy(handlerId != null ? handlerId : batch.getOperatorId());
+                batch.setLockedAt(java.time.LocalDateTime.now());
+                batchMapper.updateById(batch);
+
+                List<PayrollDetail> details = detailMapper.selectByBatchId(batchId);
+                List<Long> itemIds = details.stream().map(PayrollDetail::getId).toList();
+                List<PayrollLockedEvent.DeptCostSummary> deptCosts = buildDeptCosts(details);
+                PayrollLockedEvent event = new PayrollLockedEvent();
+                event.setEventId(java.util.UUID.randomUUID().toString());
+                event.setPeriod(batch.getPeriod());
+                event.setBatchId(batchId);
+                event.setItemIds(itemIds);
+                event.setDeptCosts(deptCosts);
+                eventPublisher.publishEvent(event);
+                log.info("[薪酬工作流] 批次已锁定：id={}, period={}, itemCount={}",
+                    batchId, batch.getPeriod(), itemIds.size());
+            }
+            case "back" -> {
+                if (batch.getStatus() != BatchStatus.REVIEWING && batch.getStatus() != BatchStatus.APPROVED) {
+                    return;
+                }
+                batch.setStatus(BatchStatus.CALCULATED);
+                batchMapper.updateById(batch);
+                log.info("[薪酬工作流] 总监驳回，退回已计算：id={}, message={}", batchId, message);
+            }
+            case "cancel", "invalid", "termination" -> {
+                batch.setStatus(BatchStatus.CALCULATED);
+                batch.setProcessInstanceId(null);
+                batchMapper.updateById(batch);
+                log.info("[薪酬工作流] 流程终止，退回已计算：id={}, status={}", batchId, status);
+            }
+            default -> log.info("[薪酬工作流] 忽略状态：id={}, status={}", batchId, status);
+        }
+    }
+
+    /**
+     * 流程进入指定节点（任务创建事件）：推进批次审批态。
+     * <ul>
+     *   <li>payroll_review（总监审核任务创建）：→ REVIEWING。
+     *       覆盖「驳回后从我的待办直接办理重新提交」的路径（业务提交入口已先行置 REVIEWING，幂等）；</li>
+     *   <li>payroll_lock（总监锁定任务创建，即总监审核已通过）：→ APPROVED。</li>
+     * </ul>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void handleTaskNodeEvent(Long batchId, String nodeCode) {
+        PayrollBatch batch = batchMapper.selectById(batchId);
+        if (batch == null) {
+            log.warn("[薪酬工作流] 批次不存在，忽略节点事件：id={}, node={}", batchId, nodeCode);
+            return;
+        }
+        if ("payroll_review".equals(nodeCode)) {
+            if (batch.getStatus() == BatchStatus.REVIEWING) {
+                return;
+            }
+            batch.setStatus(BatchStatus.REVIEWING);
+            batchMapper.updateById(batch);
+        } else if ("payroll_lock".equals(nodeCode)) {
+            if (batch.getStatus() == BatchStatus.APPROVED || batch.getStatus() == BatchStatus.LOCKED) {
+                return;
+            }
+            batch.setStatus(BatchStatus.APPROVED);
+            batchMapper.updateById(batch);
+            log.info("[薪酬工作流] 总监审核通过，待锁定：id={}", batchId);
+        }
+    }
+
+    private Long parseHandlerId(String handler) {
+        if (handler == null || handler.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(handler.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ==================== 查询 ====================

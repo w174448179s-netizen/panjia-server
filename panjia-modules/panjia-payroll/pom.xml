@@ -28,6 +28,12 @@
             <artifactId>panjia-common</artifactId>
         </dependency>
 
+        <!-- RuoYi API（WorkflowService 启动/办理工作流，ProcessEvent/ProcessTaskEvent 审批回调） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-api</artifactId>
+        </dependency>
+
         <!-- 底座 JSON -->
         <dependency>
             <groupId>org.dromara</groupId>

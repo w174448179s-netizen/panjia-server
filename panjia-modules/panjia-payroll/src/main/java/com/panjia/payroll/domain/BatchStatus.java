@@ -8,8 +8,12 @@ import lombok.Getter;
  * <p>
  * DRAFT ──calculate──▶ CALCULATING ──success──▶ CALCULATED
  *                             └──failure──▶ FAILED
- * CALCULATED ──submit──▶ REVIEWING ──approve──▶ APPROVED ──lock──▶ LOCKED ──pay──▶ PAID
- *                       └──reject──▶ CALCULATED
+ * CALCULATED ──submit(发起 payroll_batch 流程)──▶ REVIEWING ──总监审核通过──▶ APPROVED
+ *                       └──总监驳回(back 事件)──▶ CALCULATED
+ * APPROVED ──总监锁定节点通过(finish 事件)──▶ LOCKED ──pay──▶ PAID
+ * <p>
+ * REVIEWING → APPROVED → LOCKED 由工作流事件回调推进（PayrollBatchWorkflowListener），
+ * 不存在业务直批路径。
  */
 @Getter
 public enum BatchStatus {
@@ -48,18 +52,6 @@ public enum BatchStatus {
 
     public boolean canSubmit() {
         return this == CALCULATED;
-    }
-
-    public boolean canApprove() {
-        return this == REVIEWING;
-    }
-
-    public boolean canReject() {
-        return this == REVIEWING;
-    }
-
-    public boolean canLock() {
-        return this == APPROVED;
     }
 
     public boolean canPay() {
