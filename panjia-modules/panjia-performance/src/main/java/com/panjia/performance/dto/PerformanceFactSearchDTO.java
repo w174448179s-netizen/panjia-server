@@ -32,8 +32,11 @@ public class PerformanceFactSearchDTO {
     /** 业绩归属期间 */
     private String period;
 
-    /** 新签业绩金额合计（ACTIVE 的 PERF_EXPECT） */
+    /** 新签业绩金额合计（ACTIVE 的 PERF_EXPECT，调整后当前值） */
     private BigDecimal expectAmount;
+
+    /** 新签金额合计（调整前：按 source_key 回溯 REVERSED 事实，未调整时 = expectAmount） */
+    private BigDecimal expectOriginalAmount;
 
     /** 实收业绩金额合计（ACTIVE 的 PERF_REAL） */
     private BigDecimal realAmount;

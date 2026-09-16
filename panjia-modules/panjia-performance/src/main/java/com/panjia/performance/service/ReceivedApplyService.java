@@ -94,6 +94,17 @@ public interface ReceivedApplyService {
      */
     void handleWorkflowEvent(Long applyId, String status, String handler, String message);
 
+    /**
+     * 流程进入总监节点时回填最近审批人/审批时间（ReceivedWorkflowListener 任务级事件调用）。
+     * <p>财务节点办理完成只会触发任务级事件（下一节点任务创建），不触发实例级事件；
+     * 此前 approverId/approveTime 仅在 finish（终审）时写入，
+     * 导致总监待审期间审批单上审批人/审批时间显示为空。
+     *
+     * @param applyId   审批单 ID
+     * @param handlerId 财务节点办理人 ID（任务事件 params.handler）
+     */
+    void stampApproverOnDirectorNode(Long applyId, Long handlerId);
+
     /** 分页查询 */
     PageResult<ReceivedApply> list(ReceivedApplyQuery query, PageQuery pageQuery);
 

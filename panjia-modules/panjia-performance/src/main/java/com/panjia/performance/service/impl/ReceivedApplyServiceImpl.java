@@ -435,8 +435,11 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             case "back" -> {
                 apply.setStatus(ReceivedApplyStatus.REJECTED);
                 apply.setCurrentNode(null);
+                // 与调整单口径一致：驳回也留痕审批人/审批时间
+                apply.setApproverId(handlerId);
+                apply.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(apply);
-                log.info("[实收审批工作流] 驳回：applyId={}, message={}", applyId, message);
+                log.info("[实收审批工作流] 驳回：applyId={}, handler={}, message={}", applyId, handler, message);
             }
             case "cancel" -> {
                 apply.setStatus(ReceivedApplyStatus.CANCELLED);
@@ -452,6 +455,29 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             }
             default -> log.info("[实收审批工作流] 忽略状态：applyId={}, status={}", applyId, status);
         }
+    }
+
+    /**
+     * 流程进入总监节点 = 财务节点已办理完成：回填最近审批人/审批时间。
+     * <p>覆盖「我的待办 → 去处理 → 通过」的原生 completeTask 路径（不经过业务 approve 入口），
+     * 否则财务审批后、总监终审前，审批单上的审批人/审批时间为空。
+     * <p>幂等：非审批中状态直接跳过；重放时重复写入相同值无副作用。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void stampApproverOnDirectorNode(Long applyId, Long handlerId) {
+        if (applyId == null || handlerId == null) {
+            return;
+        }
+        ReceivedApply apply = applyMapper.selectById(applyId);
+        if (apply == null || apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
+            return;
+        }
+        apply.setApproverId(handlerId);
+        apply.setApproveTime(LocalDateTime.now());
+        // 复用 refreshCurrentNode：currentNode 回写 + updateById（fresh 实体，避免乐观锁失效）
+        refreshCurrentNode(apply);
+        log.info("[实收审批工作流] 财务已通过，回填审批人留痕：applyId={}, handlerId={}", applyId, handlerId);
     }
 
     // ==================== 查询 ====================

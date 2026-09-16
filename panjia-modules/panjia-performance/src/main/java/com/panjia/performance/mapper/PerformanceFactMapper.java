@@ -1279,6 +1279,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "signDate",
                cp.max_period AS "period",
                COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
+               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN
+                   COALESCE((SELECT pf.performance_amount FROM pj_perf_fact pf
+                             WHERE pf.source_key = f.source_key
+                               AND pf.fact_type = 'PERF_EXPECT'
+                               AND pf.fact_status = 'REVERSED'
+                             ORDER BY pf.id ASC LIMIT 1), f.performance_amount)
+                   ELSE 0 END), 0) AS "expectOriginalAmount",
                COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
                BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
                COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
