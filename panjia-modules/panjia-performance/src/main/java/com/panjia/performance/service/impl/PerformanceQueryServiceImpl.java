@@ -18,6 +18,7 @@ import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
+import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.PerformanceQueryService;
@@ -440,5 +441,20 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             : factMapper.selectFactSearchByContract(period, deptId, keyword, offset, size);
 
         return new PageResult<>(rows, total);
+    }
+
+    /**
+     * 完整业绩查询·按业务键查询合同下明细。
+     * <p>
+     * 业务键口径见 {@link PerformanceQueryService#searchDetails}：一手房、房产金融、
+     * 家装荐客为订单号，其余为合同号（空回退订单号）。查询覆盖该业务键全部期间，
+     * 与列表行的合同全周期聚合口径一致。
+     */
+    @Override
+    public List<PerformanceSearchDetailDTO> searchDetails(String bizNo) {
+        if (StringUtils.isBlank(bizNo)) {
+            return List.of();
+        }
+        return factMapper.selectSearchDetailRows(bizNo.trim());
     }
 }

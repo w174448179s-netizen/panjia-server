@@ -7,6 +7,7 @@ import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
+import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
@@ -161,4 +162,15 @@ public interface PerformanceQueryService {
      */
     PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
                                                           String keyword, Integer pageNum, Integer pageSize);
+
+    /**
+     * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
+     * <p>
+     * 业务键口径：一手房、房产金融、家装荐客传订单号，其余传合同号（合同号为空回退订单号），
+     * 即列表行展示的合同号/订单号。返回该业务键全部期间（含应收/实收双口径）的明细行。
+     *
+     * @param bizNo 业务键（合同号或订单号，按业务类型取）
+     * @return 该业务键下全部明细行（按期间倒序、姓名、角色排序）
+     */
+    List<PerformanceSearchDetailDTO> searchDetails(String bizNo);
 }

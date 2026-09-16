@@ -8,6 +8,7 @@ import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
+import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import com.panjia.performance.service.PerformanceEngine;
 import com.panjia.performance.service.PerformanceFactVoidService;
 import com.panjia.performance.service.PerformanceQueryService;
@@ -276,5 +277,20 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(defaultValue = "1") Integer pageNum,
             @RequestParam(defaultValue = "20") Integer pageSize) {
         return R.ok(queryService.searchByContract(period, deptId, keyword, pageNum, pageSize));
+    }
+
+    /**
+     * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗）。
+     * <p>
+     * 业务键口径：一手房、房产金融、家装荐客传订单号，其余传合同号（合同号为空回退订单号），
+     * 即列表行展示的合同号/订单号。返回该业务键全部期间的明细行（应收/实收双口径）。
+     *
+     * @param bizNo 业务键（合同号或订单号）
+     * @return 合同下明细行
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/search/details")
+    public R<List<PerformanceSearchDetailDTO>> searchDetails(@RequestParam String bizNo) {
+        return R.ok(queryService.searchDetails(bizNo));
     }
 }

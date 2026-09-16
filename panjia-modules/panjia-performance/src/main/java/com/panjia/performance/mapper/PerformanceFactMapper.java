@@ -8,6 +8,7 @@ import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
+import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import com.panjia.performance.dto.ReceivedContractMetricsDTO;
 import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import org.apache.ibatis.annotations.Mapper;
@@ -313,7 +314,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT COUNT(*) AS "detailCount",
-               COUNT(DISTINCT rs.contract_no) AS "contractCount",
+               COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(rs.order_no, rs.contract_no)
+                                   ELSE COALESCE(rs.contract_no, rs.order_no) END) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COALESCE(SUM(f.performance_amount), 0) AS "totalAmount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
@@ -400,10 +403,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
 
     // ==================== 合同维度 ====================
 
+    /*
+     * 业务键（合同号/订单号）统一口径——凡按「合同」聚合/匹配的查询均使用该规则
+     * （前端 src/utils/panjiaBiz.ts 的 resolveBizNo 与之同步，改动须两侧一致）：
+     * - 一手房、房产金融、家装荐客：以订单号为准（订单号为空回退合同号）；
+     * - 其它类型：以合同号为准（合同号为空回退订单号）。
+     * 键表达式（f/rs 为本 Mapper 查询的固定别名）：
+     *   CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+     *        THEN COALESCE(rs.order_no, rs.contract_no)
+     *        ELSE COALESCE(rs.contract_no, rs.order_no) END
+     * 单据（调整/实收/结佣）按单据上存的合同号匹配时用「或」形式（兼容合同号/订单号两种落库键）。
+     */
+
     /**
-     * 业绩管理合同维度分页（以「合同号」为分页维度）。
+     * 业绩管理合同维度分页（以「业务键」为分页维度）。
      * <p>
-     * 每合同一行：合同号/订单号/业务类型/房源地址/签约日期/合同金额合计/涉及人数/明细数/未结算数。
+     * 每业务键一行：合同号/订单号/业务类型/房源地址/签约日期/合同金额合计/涉及人数/明细数/未结算数。
+     * 一手房、房产金融、家装荐客按订单号聚合；其它按合同号聚合（合同号为空回退订单号）。
      * 合同下的签约人明细由 {@link #selectManageListByContractNos} 懒加载。仅查 ACTIVE 事实。
      *
      * @param period   归属期间（必填）
@@ -418,7 +434,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        SELECT rs.contract_no AS "contractNo",
+        SELECT MAX(rs.contract_no) AS "contractNo",
                MAX(rs.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(rs.raw_json -&gt;&gt; 'propertyAddress') AS "propertyAddress",
@@ -446,7 +462,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no IS NOT NULL
+          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                   THEN COALESCE(rs.order_no, rs.contract_no)
+                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -480,8 +498,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
-        GROUP BY rs.contract_no
-        ORDER BY "businessDate" DESC, rs.contract_no
+        GROUP BY CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                     THEN COALESCE(rs.order_no, rs.contract_no)
+                     ELSE COALESCE(rs.contract_no, rs.order_no) END
+        ORDER BY "businessDate" DESC, "contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
@@ -496,11 +516,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("pageSize") int pageSize);
 
     /**
-     * 统计符合条件的合同数（分页 total）。参数语义同 {@link #selectManagePageContracts}。
+     * 统计符合条件的合同数（分页 total，按业务键去重：订单键类型按订单号，其余按合同号）。
+     * 参数语义同 {@link #selectManagePageContracts}。
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT rs.contract_no)
+        SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                                    THEN COALESCE(rs.order_no, rs.contract_no)
+                                    ELSE COALESCE(rs.contract_no, rs.order_no) END)
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
@@ -510,7 +533,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no IS NOT NULL
+          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                   THEN COALESCE(rs.order_no, rs.contract_no)
+                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -555,12 +580,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                               @Param("selfEmployeeId") Long selfEmployeeId);
 
     /**
-     * 按合同号集合查询业绩明细（合同维度树表懒加载数据源）。
+     * 按业务键集合查询业绩明细（合同维度树表懒加载数据源）。
      * <p>
-     * 过滤条件与 {@link #selectManagePageContracts} 一致，返回该合同下所有签约人的明细行，
+     * 键口径与 {@link #selectManagePageContracts} 一致：一手房、房产金融、家装荐客传订单号，
+     * 其余传合同号（合同号为空回退订单号，即列表行展示的键）。
+     * 过滤条件与 {@link #selectManagePageContracts} 一致，返回该业务键下所有签约人的明细行，
      * 前端按「合同 → 人 → 明细」组装树。
      *
-     * @param contractNos 合同号集合（不能为空）
+     * @param contractNos 业务键集合（不能为空；列表行展示的合同号/订单号）
      */
     @Select("""
         <script>
@@ -616,7 +643,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no IN
+          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                   THEN COALESCE(rs.order_no, rs.contract_no)
+                   ELSE COALESCE(rs.contract_no, rs.order_no) END IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
@@ -677,7 +706,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no = #{contractNo}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
@@ -837,7 +869,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no = #{contractNo}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
@@ -894,7 +929,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = 'PERF_REAL'
-          AND rs.contract_no = #{contractNo}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
         </script>
         """)
@@ -902,19 +940,21 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                            @Param("contractNo") String contractNo);
 
     /**
-     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数、应收合计）。
+     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数、应收合计），每传入键一行。
      * <p>
      * 实收审批单表不存这几个字段，列表页按 (period, contractNo) 从 ACTIVE 事实聚合回填，
      * 口径与详情弹窗的「每人实收明细」一致（同期间同口径）。
      * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
+     * 匹配口径：传入键既可命中按合同号落库的事实，也可命中按订单号聚合的事实
+     * （一手房、房产金融、家装荐客以订单号为准）。
      *
      * @param period      归属期间
-     * @param contractNos 合同号集合（不可为空，调用方需先过滤）
-     * @return 合同维度的业务类型、涉及人数与应收合计
+     * @param contractNos 单据上的合同号/业务键集合（不可为空，调用方需先过滤）
+     * @return 每键一行的业务类型、涉及人数与应收合计
      */
     @Select("""
         <script>
-        SELECT rs.contract_no AS "contractNo",
+        SELECT k.key AS "contractNo",
                MAX(f.biz_type) AS "bizType",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COALESCE((
@@ -923,17 +963,25 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
                    JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+                     AND e.period = #{period}
+                     AND (ers.contract_no = k.key
+                          OR (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(ers.order_no, ers.contract_no)
+                                   ELSE COALESCE(ers.contract_no, ers.order_no) END) = k.key)
                ), 0) AS "expectedAmount"
-        FROM pj_perf_fact f
+        FROM (VALUES
+          <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
+        ) AS k(key)
+        JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
+                           AND f.fact_type = 'PERF_REAL'
+                           AND f.period = #{period}
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = 'PERF_REAL'
-          AND f.period = #{period}
-          AND rs.contract_no IN
-          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
-        GROUP BY rs.contract_no
+        WHERE (rs.contract_no = k.key
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = k.key)
+        GROUP BY k.key
         </script>
         """)
     List<ReceivedContractMetricsDTO> selectReceivedContractMetrics(
@@ -943,52 +991,73 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。
      * <p>
-     * 仅合同号非空的 ACTIVE 事实参与聚合；deptId 非空时含下级部门（与业绩明细页口径一致）。
+     * 按业务键聚合：一手房/房产金融/家装荐客以订单号为准（空回退合同号），
+     * 其余以合同号为准（空回退订单号）；返回的 contractNo 即业务键，
+     * 结佣申请单的存储键与幂等匹配（findActiveApplication / uk_capp_period_contract）均以此为准。
+     * deptId 非空时含下级部门（与业绩明细页口径一致）。
      *
      * @param period   归属期间
      * @param factType 事实口径
      * @param deptId   门店 ID（可空）
-     * @return 合同维度摘要列表
+     * @return 合同维度摘要列表（contractNo = 业务键）
      */
     @Select("""
         <script>
-        SELECT rs.contract_no AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
-               MAX(f.biz_type) AS "bizType",
-               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
-               COALESCE(SUM(f.performance_amount), 0) AS "amount",
+        SELECT s.biz_key AS "contractNo",
+               MAX(s.order_no) AS "orderNo",
+               MAX(s.biz_type) AS "bizType",
+               MAX(s.property_address) AS "propertyAddress",
+               MAX(s.business_date) AS "businessDate",
+               COALESCE(SUM(s.amount), 0) AS "amount",
                COALESCE((
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
                    JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
                    JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+                     AND e.period = #{period}
+                     AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
+                               THEN COALESCE(ers.order_no, ers.contract_no)
+                               ELSE COALESCE(ers.contract_no, ers.order_no) END) = s.biz_key
                ), 0) AS "expectedAmount",
                CASE
-                   WHEN bool_or(ra.status = 'SUBMITTED') THEN 'SUBMITTED'
-                   WHEN bool_or(ra.status = 'DRAFT') THEN 'DRAFT'
-                   WHEN COUNT(*) = COUNT(ra.id) FILTER (WHERE ra.status = 'APPROVED') THEN 'APPROVED'
+                   WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
+                   WHEN bool_or(s.ra_status = 'DRAFT') THEN 'DRAFT'
+                   WHEN COUNT(*) = COUNT(s.ra_id) FILTER (WHERE s.ra_status = 'APPROVED') THEN 'APPROVED'
                    ELSE NULL
                END AS "receivedStatus",
-               COUNT(DISTINCT f.employee_id) AS "employeeCount",
+               COUNT(DISTINCT s.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount"
-        FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
-          AND f.fact_type = #{factType}
-          AND rs.contract_no IS NOT NULL
-          <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
-                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
-          </if>
-        GROUP BY rs.contract_no
-        ORDER BY "businessDate" DESC, rs.contract_no
+        FROM (
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
+                   rs.order_no,
+                   f.biz_type,
+                   rs.raw_json ->> 'propertyAddress' AS property_address,
+                   COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS business_date,
+                   f.performance_amount AS amount,
+                   ra.status AS ra_status,
+                   ra.id AS ra_id,
+                   f.employee_id
+            FROM pj_perf_fact f
+            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+            LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.period = #{period}
+              AND f.fact_type = #{factType}
+              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                       THEN COALESCE(rs.order_no, rs.contract_no)
+                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+            <if test="deptId != null">
+              AND (f.dept_id = #{deptId}
+                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                              AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+            </if>
+        ) s
+        GROUP BY s.biz_key
+        ORDER BY MAX(s.business_date) DESC, s.biz_key
         </script>
         """)
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
@@ -999,39 +1068,55 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 按导入批次聚合「实收业绩合同组」（实收审批单自动建单用，§2.1）。
      * <p>
      * 仅取本批新建、ACTIVE、尚未挂实收审批单（received_apply_id IS NULL）的 PERF_REAL 事实，
-     * 按合同号聚合：实收合计、同合同应收合计（PERF_EXPECT）、快照字段、明细条数。
+     * 按业务键聚合（一手房/房产金融/家装荐客取订单号，其余取合同号、空回退订单号）：
+     * 实收合计、同键应收合计（PERF_EXPECT）、快照字段、明细条数。
+     * 输出的 contractNo 即业务键，实收审批单的存储键 / 批量审批匹配均以此为准。
      *
      * @param batchId 导入批次 ID
      * @param period  归属期间
-     * @return 合同聚合组列表
+     * @return 合同聚合组列表（contractNo = 业务键）
      */
     @Select("""
-        SELECT rs.contract_no AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
-               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
-               COALESCE(SUM(f.performance_amount), 0) AS "receivedAmount",
+        SELECT s.biz_key AS "contractNo",
+               MAX(s.order_no) AS "orderNo",
+               MAX(s.property_address) AS "propertyAddress",
+               MAX(s.business_date) AS "businessDate",
+               COALESCE(SUM(s.amount), 0) AS "receivedAmount",
                COALESCE((
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
                    JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
                    JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period} AND ers.contract_no = rs.contract_no
+                     AND e.period = #{period}
+                     AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
+                               THEN COALESCE(ers.order_no, ers.contract_no)
+                               ELSE COALESCE(ers.contract_no, ers.order_no) END) = s.biz_key
                ), 0) AS "expectedAmount",
                COUNT(*) AS "itemCount"
-        FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = 'PERF_REAL'
-          AND f.batch_id = #{batchId}
-          AND f.period = #{period}
-          AND f.received_apply_id IS NULL
-          AND rs.contract_no IS NOT NULL
-        GROUP BY rs.contract_no
-        HAVING COALESCE(SUM(f.performance_amount), 0) <> 0
-        ORDER BY rs.contract_no
+        FROM (
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
+                   rs.order_no,
+                   rs.raw_json ->> 'propertyAddress' AS property_address,
+                   COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS business_date,
+                   f.performance_amount AS amount
+            FROM pj_perf_fact f
+            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_REAL'
+              AND f.batch_id = #{batchId}
+              AND f.period = #{period}
+              AND f.received_apply_id IS NULL
+              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                       THEN COALESCE(rs.order_no, rs.contract_no)
+                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+        ) s
+        GROUP BY s.biz_key
+        HAVING COALESCE(SUM(s.amount), 0) <> 0
+        ORDER BY s.biz_key
         """)
     List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
         @Param("batchId") Long batchId, @Param("period") String period);
@@ -1065,7 +1150,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
-        SELECT rs.contract_no AS "contractNo",
+        SELECT COALESCE(rs.contract_no, MAX(rs.order_no)) AS "contractNo",
                MAX(rs.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
@@ -1075,7 +1160,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
-          AND rs.contract_no = #{contractNo}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
         GROUP BY rs.contract_no
         """)
     java.util.Map<String, Object> selectContractInfoByContractNo(
@@ -1131,7 +1219,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no = #{contractNo}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
         """)
     List<AdjustFactDetailDTO> selectAdjustFactDetails(@Param("period") String period,
@@ -1139,12 +1230,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                        @Param("factType") String factType);
 
     /**
-     * 完整业绩查询（合同维度聚合）。
+     * 完整业绩查询（业务键维度聚合）。
      * <p>
-     * 以合同号 + 期间为维度，聚合新签业绩、实收业绩、调整状态、实收审批状态、结佣状态。
-     * 仅查 ACTIVE 事实，按合同号分组。
+     * 以业务键（一手房、房产金融、家装荐客按订单号，其余按合同号、合同号为空回退订单号）
+     * + 期间为维度，聚合新签业绩、实收业绩、调整状态、实收审批状态、结佣状态。
+     * 仅查 ACTIVE 事实；单据（调整/实收/结佣）按单据号或订单号匹配（兼容两种落库键）。
      *
-     * @param period     归属期间
+     * @param period     归属期间（CTE 过滤：该期间有事实的合同才参与）
      * @param deptId     部门 ID（可选，含子部门）
      * @param keyword    关键字（可选：合同号/订单号/物业地址）
      * @param offset     偏移量
@@ -1154,11 +1246,17 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         WITH contract_period AS (
-            SELECT rs.contract_no, MAX(f.period) AS max_period
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
+                   MAX(f.period) AS max_period
             FROM pj_perf_fact f
             JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
             JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-            WHERE f.fact_status = 'ACTIVE' AND rs.contract_no IS NOT NULL
+            WHERE f.fact_status = 'ACTIVE'
+              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                       THEN COALESCE(rs.order_no, rs.contract_no)
+                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
             <if test="period != null and period != ''">
               AND f.period = #{period}
             </if>
@@ -1172,9 +1270,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
                 OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%'))
             </if>
-            GROUP BY rs.contract_no
+            GROUP BY 1
         )
-        SELECT rs.contract_no AS "contractNo",
+        SELECT MAX(rs.contract_no) AS "contractNo",
                MAX(rs.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
@@ -1185,45 +1283,56 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
                COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
                (SELECT pa.status FROM pj_perf_adjust pa
-                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
+                  AND pa.period = cp.max_period
                 ORDER BY pa.id DESC LIMIT 1) AS "adjustStatus",
                (SELECT pa.adjust_no FROM pj_perf_adjust pa
-                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
+                  AND pa.period = cp.max_period
                 ORDER BY pa.id DESC LIMIT 1) AS "adjustNo",
                (SELECT pa.adjust_type FROM pj_perf_adjust pa
-                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
+                  AND pa.period = cp.max_period
                 ORDER BY pa.id DESC LIMIT 1) AS "adjustType",
                (SELECT ra.status FROM pj_perf_received_apply ra
-                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
+                  AND ra.period = cp.max_period
                 ORDER BY ra.id DESC LIMIT 1) AS "receivedStatus",
                (SELECT ra.apply_no FROM pj_perf_received_apply ra
-                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
+                  AND ra.period = cp.max_period
                 ORDER BY ra.id DESC LIMIT 1) AS "receivedApplyNo",
                (SELECT ra.expected_amount FROM pj_perf_received_apply ra
-                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
+                  AND ra.period = cp.max_period
                 ORDER BY ra.id DESC LIMIT 1) AS "receivedExpectedAmount",
                (SELECT ra.received_amount FROM pj_perf_received_apply ra
-                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
+                  AND ra.period = cp.max_period
                 ORDER BY ra.id DESC LIMIT 1) AS "receivedRealAmount",
                (SELECT ca.status FROM pj_commission_application ca
-                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
+                  AND ca.period = cp.max_period
                 ORDER BY ca.id DESC LIMIT 1) AS "commissionStatus",
                (SELECT ca.apply_no FROM pj_commission_application ca
-                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
+                  AND ca.period = cp.max_period
                 ORDER BY ca.id DESC LIMIT 1) AS "commissionApplyNo",
                (SELECT ca.total_amount FROM pj_commission_application ca
-                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
+                  AND ca.period = cp.max_period
                 ORDER BY ca.id DESC LIMIT 1) AS "commissionAmount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount"
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        JOIN contract_period cp ON cp.contract_no = rs.contract_no
+        JOIN contract_period cp ON cp.biz_key = CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                                                     THEN COALESCE(rs.order_no, rs.contract_no)
+                                                     ELSE COALESCE(rs.contract_no, rs.order_no) END
         WHERE f.fact_status = 'ACTIVE'
-          AND rs.contract_no = cp.contract_no
-        GROUP BY rs.contract_no, cp.max_period
-        ORDER BY "signDate" DESC, rs.contract_no
+        GROUP BY cp.biz_key, cp.max_period
+        ORDER BY "signDate" DESC, "contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
@@ -1235,16 +1344,20 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("pageSize") int pageSize);
 
     /**
-     * 完整业绩查询的合同数（分页 total）。
+     * 完整业绩查询的合同数（分页 total，按业务键去重）。
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT rs.contract_no)
+        SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                                    THEN COALESCE(rs.order_no, rs.contract_no)
+                                    ELSE COALESCE(rs.contract_no, rs.order_no) END)
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
-          AND rs.contract_no IS NOT NULL
+          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                   THEN COALESCE(rs.order_no, rs.contract_no)
+                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
           <if test="period != null and period != ''">
             AND f.period = #{period}
           </if>
@@ -1266,5 +1379,77 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("period") String period,
             @Param("deptId") Long deptId,
             @Param("keyword") String keyword);
+
+    /**
+     * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
+     * <p>
+     * 以 PERF_EXPECT（新签/应收）ACTIVE 事实为基准行，按 source_key 配对同业务的
+     * PERF_REAL（实收）金额，一行同时展示应收/实收双口径；含该业务键全部期间
+     * （与 {@link #selectFactSearchByContract} 的合同全周期聚合口径一致）。
+     * 业务键口径：一手房、房产金融、家装荐客传订单号，其余传合同号（空则订单号）。
+     *
+     * @param bizNo 业务键（列表行展示的合同号/订单号）
+     * @return 该业务键下全部明细行（按期间倒序、姓名、角色排序）
+     */
+    @Select("""
+        SELECT f.id AS "factId",
+               f.period AS "period",
+               f.employee_id AS "employeeId",
+               COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
+               e.employee_name AS "employeeName",
+               CASE
+                   WHEN array_length(string_to_array(d.ancestors, ','), 1) >= 3 THEN
+                       CONCAT_WS('-',
+                           NULLIF(gp.dept_name, 'tenant_name'),
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           CASE WHEN d.dept_name = p.dept_name THEN NULL
+                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
+                   ELSE
+                       CONCAT_WS('-',
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           NULLIF(d.dept_name, 'tenant_name'))
+               END AS "deptPath",
+               COALESCE(nr.role_type, f.role_type) AS "roleType",
+               rs.role_name AS "roleName",
+               f.share_ratio AS "shareRatio",
+               COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS "businessDate",
+               f.performance_amount AS "expectAmount",
+               COALESCE(
+                 (SELECT pf.performance_amount FROM pj_perf_fact pf
+                  WHERE pf.source_key = f.source_key
+                    AND pf.fact_type = 'PERF_EXPECT'
+                    AND pf.fact_status = 'REVERSED'
+                  ORDER BY pf.id ASC LIMIT 1),
+                 f.performance_amount
+               ) AS "originalExpectAmount",
+               COALESCE(
+                 (SELECT pr.performance_amount FROM pj_perf_fact pr
+                  WHERE pr.source_key = f.source_key
+                    AND pr.fact_type = 'PERF_REAL'
+                    AND pr.fact_status = 'ACTIVE'
+                  ORDER BY pr.id DESC LIMIT 1),
+                 0
+               ) AS "realAmount",
+               (ci.id IS NOT NULL) AS "settled",
+               ca.lock_time AS "settleDate"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
+        LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
+        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
+        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
+                                       AND ci.status <> 'REVERSED'
+        LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
+                                              AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_EXPECT'
+          AND (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                    THEN COALESCE(rs.order_no, rs.contract_no)
+                    ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{bizNo}
+        ORDER BY f.period DESC, e.employee_name, d.dept_id, nr.role_type, f.id
+        """)
+    List<PerformanceSearchDetailDTO> selectSearchDetailRows(@Param("bizNo") String bizNo);
 }
 

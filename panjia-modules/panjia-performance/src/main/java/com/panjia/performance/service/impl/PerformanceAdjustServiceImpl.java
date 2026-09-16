@@ -709,8 +709,18 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             PerformanceAdjust::getStatus, AdjustStatus.fromCode(query.getStatus()));
         wrapper.eq(query.getEmployeeId() != null,
             PerformanceAdjust::getEmployeeId, query.getEmployeeId());
-        wrapper.eq(query.getDeptId() != null,
-            PerformanceAdjust::getDeptId, query.getDeptId());
+        // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
+        // 调整单除原部门外，调拨（TRANSFER）的目标部门命中也视为相关，便于按门店追溯去向。
+        if (query.getDeptId() != null) {
+            Long deptId = query.getDeptId();
+            String subtree = "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))";
+            wrapper.and(w -> w.apply(subtree, deptId)
+                .or().apply(
+                    "target_dept_id = {0} OR target_dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                        + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))",
+                    deptId));
+        }
         return wrapper;
     }
 

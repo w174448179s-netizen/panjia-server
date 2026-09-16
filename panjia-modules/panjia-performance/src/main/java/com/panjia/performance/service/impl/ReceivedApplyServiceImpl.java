@@ -467,7 +467,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
             .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
-            .eq(effectiveDeptId != null, ReceivedApply::getDeptId, effectiveDeptId)
             .eq(StringUtils.isNotBlank(query.getCurrentNode()),
                 ReceivedApply::getCurrentNode, query.getCurrentNode())
             .ne(StringUtils.isBlank(query.getStatus()),
@@ -479,6 +478,14 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 .or().like(ReceivedApply::getOrderNo, query.getKeyword())
                 .or().like(ReceivedApply::getPropertyAddress, query.getKeyword()))
             .orderByDesc(ReceivedApply::getCreateTime);
+        // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
+        // 子查询直接用 sys_dept.ancestors 匹配，避免逐层展开。
+        if (effectiveDeptId != null) {
+            wrapper.and(w -> w.apply(
+                "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                    + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))",
+                effectiveDeptId));
+        }
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
         List<ReceivedApply> records = page.getRecords();
         fillContractMetrics(records);
