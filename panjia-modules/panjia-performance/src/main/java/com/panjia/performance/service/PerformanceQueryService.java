@@ -2,6 +2,7 @@ package com.panjia.performance.service;
 
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
@@ -144,4 +145,20 @@ public interface PerformanceQueryService {
      * @return 期间列表（YYYY-MM）
      */
     List<String> listManagePeriods();
+
+    /**
+     * 完整业绩查询（合同维度）。
+     * <p>
+     * 以合同为维度，聚合展示新签业绩、实收业绩、调整状态与金额、实收审批状态、结佣状态。
+     * 支持按期间、部门、关键字（合同号/订单号/物业地址）筛选。
+     *
+     * @param period   归属期间（可选，为空时查全部期间）
+     * @param deptId   部门 ID（可选，含子部门）
+     * @param keyword  关键字（可选：合同号/订单号/物业地址）
+     * @param pageNum  页码（从 1 开始）
+     * @param pageSize 每页条数
+     * @return 合同维度业绩汇总分页结果
+     */
+    PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
+                                                          String keyword, Integer pageNum, Integer pageSize);
 }

@@ -4,6 +4,7 @@ import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.dto.AdjustFactDetailDTO;
+import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
@@ -1136,4 +1137,134 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<AdjustFactDetailDTO> selectAdjustFactDetails(@Param("period") String period,
                                                        @Param("contractNo") String contractNo,
                                                        @Param("factType") String factType);
+
+    /**
+     * 完整业绩查询（合同维度聚合）。
+     * <p>
+     * 以合同号 + 期间为维度，聚合新签业绩、实收业绩、调整状态、实收审批状态、结佣状态。
+     * 仅查 ACTIVE 事实，按合同号分组。
+     *
+     * @param period     归属期间
+     * @param deptId     部门 ID（可选，含子部门）
+     * @param keyword    关键字（可选：合同号/订单号/物业地址）
+     * @param offset     偏移量
+     * @param pageSize   每页条数
+     * @return 合同维度业绩汇总列表
+     */
+    @Select("""
+        <script>
+        WITH contract_period AS (
+            SELECT rs.contract_no, MAX(f.period) AS max_period
+            FROM pj_perf_fact f
+            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+            WHERE f.fact_status = 'ACTIVE' AND rs.contract_no IS NOT NULL
+            <if test="period != null and period != ''">
+              AND f.period = #{period}
+            </if>
+            <if test="deptId != null">
+              AND (f.dept_id = #{deptId}
+                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                              AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+            </if>
+            <if test="keyword != null and keyword != ''">
+              AND (rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%'))
+            </if>
+            GROUP BY rs.contract_no
+        )
+        SELECT rs.contract_no AS "contractNo",
+               MAX(rs.order_no) AS "orderNo",
+               MAX(f.biz_type) AS "bizType",
+               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "signDate",
+               cp.max_period AS "period",
+               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
+               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
+               BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
+               COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
+               (SELECT pa.status FROM pj_perf_adjust pa
+                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                ORDER BY pa.id DESC LIMIT 1) AS "adjustStatus",
+               (SELECT pa.adjust_no FROM pj_perf_adjust pa
+                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                ORDER BY pa.id DESC LIMIT 1) AS "adjustNo",
+               (SELECT pa.adjust_type FROM pj_perf_adjust pa
+                WHERE pa.contract_no = rs.contract_no AND pa.period = cp.max_period
+                ORDER BY pa.id DESC LIMIT 1) AS "adjustType",
+               (SELECT ra.status FROM pj_perf_received_apply ra
+                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                ORDER BY ra.id DESC LIMIT 1) AS "receivedStatus",
+               (SELECT ra.apply_no FROM pj_perf_received_apply ra
+                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                ORDER BY ra.id DESC LIMIT 1) AS "receivedApplyNo",
+               (SELECT ra.expected_amount FROM pj_perf_received_apply ra
+                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                ORDER BY ra.id DESC LIMIT 1) AS "receivedExpectedAmount",
+               (SELECT ra.received_amount FROM pj_perf_received_apply ra
+                WHERE ra.contract_no = rs.contract_no AND ra.period = cp.max_period
+                ORDER BY ra.id DESC LIMIT 1) AS "receivedRealAmount",
+               (SELECT ca.status FROM pj_commission_application ca
+                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                ORDER BY ca.id DESC LIMIT 1) AS "commissionStatus",
+               (SELECT ca.apply_no FROM pj_commission_application ca
+                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                ORDER BY ca.id DESC LIMIT 1) AS "commissionApplyNo",
+               (SELECT ca.total_amount FROM pj_commission_application ca
+                WHERE ca.contract_no = rs.contract_no AND ca.period = cp.max_period
+                ORDER BY ca.id DESC LIMIT 1) AS "commissionAmount",
+               COUNT(DISTINCT f.employee_id) AS "employeeCount",
+               COUNT(*) AS "detailCount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        JOIN contract_period cp ON cp.contract_no = rs.contract_no
+        WHERE f.fact_status = 'ACTIVE'
+          AND rs.contract_no = cp.contract_no
+        GROUP BY rs.contract_no, cp.max_period
+        ORDER BY "signDate" DESC, rs.contract_no
+        LIMIT #{pageSize} OFFSET #{offset}
+        </script>
+        """)
+    List<PerformanceFactSearchDTO> selectFactSearchByContract(
+            @Param("period") String period,
+            @Param("deptId") Long deptId,
+            @Param("keyword") String keyword,
+            @Param("offset") long offset,
+            @Param("pageSize") int pageSize);
+
+    /**
+     * 完整业绩查询的合同数（分页 total）。
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(DISTINCT rs.contract_no)
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND rs.contract_no IS NOT NULL
+          <if test="period != null and period != ''">
+            AND f.period = #{period}
+          </if>
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+          <if test="keyword != null and keyword != ''">
+            AND (
+              rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
+            )
+          </if>
+        </script>
+        """)
+    long countFactSearchByContract(
+            @Param("period") String period,
+            @Param("deptId") Long deptId,
+            @Param("keyword") String keyword);
 }
+

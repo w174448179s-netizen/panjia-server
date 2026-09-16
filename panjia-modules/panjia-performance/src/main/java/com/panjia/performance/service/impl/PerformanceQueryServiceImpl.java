@@ -13,6 +13,7 @@ import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManageEmployeeVO;
@@ -424,5 +425,20 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         dto.setSource(fact.getSource() != null ? fact.getSource().getCode() : null);
         dto.setCreateTime(fact.getCreateTime());
         return dto;
+    }
+
+    @Override
+    public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
+                                                                  String keyword, Integer pageNum, Integer pageSize) {
+        int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
+        int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
+        long offset = (long) (page - 1) * size;
+
+        long total = factMapper.countFactSearchByContract(period, deptId, keyword);
+        List<PerformanceFactSearchDTO> rows = total == 0
+            ? List.of()
+            : factMapper.selectFactSearchByContract(period, deptId, keyword, offset, size);
+
+        return new PageResult<>(rows, total);
     }
 }
