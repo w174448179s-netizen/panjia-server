@@ -44,6 +44,8 @@ public class NormalizedRecord implements Serializable {
     private BigDecimal receivedAmount;
     /** 合同累计应收（贝壳「总应收业绩」列），跨月应收只认一次的增量基准 */
     private BigDecimal totalReceivableAmount;
+    /** 合同累计实收（贝壳「总实收业绩」列），PERF_REAL 按总实收落库 */
+    private BigDecimal totalReceivedAmount;
     private BigDecimal shareRatio;
     private String roleType;
 

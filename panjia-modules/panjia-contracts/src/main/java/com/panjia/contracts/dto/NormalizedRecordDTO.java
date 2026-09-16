@@ -79,6 +79,13 @@ public class NormalizedRecordDTO {
      */
     private BigDecimal totalReceivableAmount;
 
+    /**
+     * 合同累计实收金额（贝壳「总实收业绩」列）。
+     * <p>
+     * PERF_REAL 按总实收落库，不取当月实收，避免签约月之后的月份实收为 0 的问题。
+     */
+    private BigDecimal totalReceivedAmount;
+
     /** 分摊比例 */
     private BigDecimal shareRatio;
 

@@ -429,15 +429,9 @@ public class PerformanceEngine {
                 + "sourceKey={}, factType={}", sourceKey, factType);
         }
 
-        // ========== 0.5 跨月应收「只认一次」增量认定（仅 SIGNED 正数 PERF_EXPECT 行） ==========
-        // 贝壳 9 月回款表会把 8 月合同行整行重复带出（「当月应收业绩」仍有值）。
-        // 业务铁律：同一合同+角色人+费项的应收只认一次，重复行认 0（仍落 0 元事实留痕），
-        // 合同累计应收（总应收业绩）增长时当月行视为增量全额认列。
-        if (factType == FactType.PERF_EXPECT
-            && RECORD_TYPE_SIGNED.equals(record.getRecordType())
-            && currentAmount != null && currentAmount.signum() > 0) {
-            currentAmount = recognizeCrossMonthIncrement(record, currentAmount);
-        }
+        // ========== 0.5 新签直接取当月应收，不做跨月增量计算 ==========
+        // 贝壳业绩按签约(成销)时间判断当月是否为 0：签约月有当月新签，后续月份当月应收为 0。
+        // 扣款时当月应收为负。直接落库，不查历史增量。
 
         // ========== 1. 员工归属查询 ==========
         // EmployeeSnapshotQueryPort 已由 PeopleSnapshotAdapter 真实实现（contracts 员工主数据端口）；
@@ -446,8 +440,8 @@ public class PerformanceEngine {
 
         // ========== 2. 计算业绩金额 ==========
         // ★ 金额口径由 factType 决定：
-        //  PERF_REAL   → 当月实收 receivedAmount（结佣计薪业绩）
-        //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，店长/总监团队提成基数）
+        //  PERF_REAL   → 总实收 totalReceivedAmount（结佣计薪业绩，签约月后续月份总实收不变）
+        //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，签约月后续月份为 0，扣款为负）
         // 贝壳导入的金额就是折后金额（performance_amount 口径），直接使用，不再乘以分摊比例；
         // 分摊比例仅作展示用，不参与计算
         BigDecimal performanceAmount = MoneyUtil.round2(currentAmount);
@@ -725,7 +719,10 @@ public class PerformanceEngine {
             }
             return dualCaliber ? BigDecimal.ZERO : record.getOriginAmount();
         }
-        // PERF_REAL 及其余口径默认实收
+        // PERF_REAL：优先取总实收（贝壳「总实收业绩」列），签约月之后当月实收为 0 但总实收不变
+        if (record.getTotalReceivedAmount() != null) {
+            return record.getTotalReceivedAmount();
+        }
         if (record.getReceivedAmount() != null) {
             return record.getReceivedAmount();
         }

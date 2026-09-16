@@ -515,6 +515,7 @@ public class ImportEngine {
                 nr.setReceivableAmount(decimal(json, "currentReceivable"));
                 nr.setReceivedAmount(decimal(json, "currentReceived"));
                 nr.setTotalReceivableAmount(decimal(json, "totalReceivable"));
+                nr.setTotalReceivedAmount(decimal(json, "totalReceived"));
                 nr.setShareRatio(decimal(json, "shareRatio"));
                 nr.setRoleType(str(json, "roleType"));
             }

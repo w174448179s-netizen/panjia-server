@@ -166,6 +166,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setReceivableAmount(r.getReceivableAmount());
         dto.setReceivedAmount(r.getReceivedAmount());
         dto.setTotalReceivableAmount(r.getTotalReceivableAmount());
+        dto.setTotalReceivedAmount(r.getTotalReceivedAmount());
         dto.setOriginAmount(resolveOriginAmount(r));
         dto.setShareRatio(r.getShareRatio());
         dto.setRoleType(r.getRoleType());
