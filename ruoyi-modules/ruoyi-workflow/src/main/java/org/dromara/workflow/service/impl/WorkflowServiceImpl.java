@@ -5,8 +5,6 @@ import cn.hutool.core.util.ObjectUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.utils.StringUtils;
-import org.dromara.warm.flow.core.FlowEngine;
-import org.dromara.warm.flow.core.entity.Task;
 import org.dromara.warm.flow.orm.entity.FlowInstance;
 import org.dromara.warm.flow.orm.entity.FlowTask;
 import org.dromara.workflow.api.WorkflowService;
@@ -16,7 +14,6 @@ import org.dromara.workflow.api.domain.StartProcessReturnDTO;
 import org.dromara.workflow.common.ConditionalOnEnable;
 import org.dromara.workflow.common.enums.MessageTypeEnum;
 import org.dromara.workflow.domain.FlowInstanceBizExt;
-import org.dromara.workflow.domain.bo.BackProcessBo;
 import org.dromara.workflow.domain.bo.CompleteTaskBo;
 import org.dromara.workflow.domain.bo.StartProcessBo;
 import org.dromara.workflow.service.IFlwCommonService;
@@ -26,10 +23,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 通用 工作流服务实现
@@ -220,44 +215,5 @@ public class WorkflowServiceImpl implements WorkflowService {
     public String getCurrentNodeCode(String businessId) {
         FlowTask task = currentTask(businessId);
         return ObjectUtil.isNotNull(task) ? task.getNodeCode() : null;
-    }
-
-
-
-    /**
-     * 超时自动通过：扫描指定节点集合上的待办中间任务，创建时间超过 timeoutHours 的系统自动办理。
-     */
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public int autoCompleteTimeoutTasks(Set<String> nodeCodes, int timeoutHours, String message) {
-        if (nodeCodes == null || nodeCodes.isEmpty() || timeoutHours <= 0) {
-            return 0;
-        }
-        Date deadline = new Date(System.currentTimeMillis() - timeoutHours * 3600_000L);
-        List<Task> allTasks = FlowEngine.taskService().list(new FlowTask());
-        int done = 0;
-        for (Task task : allTasks) {
-            if (!Integer.valueOf(1).equals(task.getNodeType())
-                || task.getNodeCode() == null || !nodeCodes.contains(task.getNodeCode())
-                || task.getCreateTime() == null || task.getCreateTime().after(deadline)) {
-                continue;
-            }
-            CompleteTaskBo taskBo = new CompleteTaskBo();
-            taskBo.setTaskId(task.getId());
-            taskBo.setMessage(message);
-            taskBo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
-            taskBo.getVariables().put("ignore", true);
-            try {
-                flwTaskService.completeTask(taskBo);
-                done++;
-                log.info("[工作流-超时自动审批] taskId={}, nodeCode={}, instanceId={}",
-                    task.getId(), task.getNodeCode(), task.getInstanceId());
-            } catch (Exception e) {
-                // 单条失败不阻断其余任务（如流程状态已被人工抢先办理）
-                log.warn("[工作流-超时自动审批] 自动办理失败：taskId={}, nodeCode={}, reason={}",
-                    task.getId(), task.getNodeCode(), e.getMessage());
-            }
-        }
-        return done;
     }
 }

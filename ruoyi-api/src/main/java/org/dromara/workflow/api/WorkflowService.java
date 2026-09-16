@@ -6,7 +6,6 @@ import org.dromara.workflow.api.domain.StartProcessReturnDTO;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 通用 工作流服务
@@ -125,14 +124,4 @@ public interface WorkflowService {
      * @return 当前节点编码（如 FINANCE/DIRECTOR），无待办任务时返回 {@code null}
      */
     String getCurrentNodeCode(String businessId);
-    /**
-     * 扫描指定节点集合上的待办任务，将创建时间超过 timeoutHours 小时的任务以系统身份自动通过。
-     * <p>用于「总监超时自动审批」等可配置超时策略；timeoutHours &lt;= 0 时直接返回 0（不处理）。</p>
-     *
-     * @param nodeCodes    节点编码集合（如 rcv_director / capp_director / perf_director）
-     * @param timeoutHours 超时时长（小时，&gt;0 生效）
-     * @param message      自动通过意见
-     * @return 实际自动办理的任务数
-     */
-    int autoCompleteTimeoutTasks(Set<String> nodeCodes, int timeoutHours, String message);
 }

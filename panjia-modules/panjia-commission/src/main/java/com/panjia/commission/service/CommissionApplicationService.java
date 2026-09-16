@@ -858,7 +858,7 @@ public class CommissionApplicationService {
      * 任务持久化。</p>
      */
     @Transactional(rollbackFor = Exception.class)
-    public void afterDirectorPassed(Long applicationId, Long financeTaskId, Long operatorId) {
+    public void afterDirectorPassed(Long applicationId, Long operatorId) {
         CommissionApplication application = applicationMapper.selectById(applicationId);
         if (application == null) {
             log.warn("[结佣-总监通过联动] 申请单不存在，忽略：id={}", applicationId);

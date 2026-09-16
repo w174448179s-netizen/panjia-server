@@ -84,7 +84,7 @@ public class CommissionApplyWorkflowListener {
             }
             log.info("[结佣工作流] 总监已通过，进入财务节点联动：applicationId={}, taskId={}",
                 applicationId, taskId);
-            applicationService.afterDirectorPassed(applicationId, taskId, operatorId);
+            applicationService.afterDirectorPassed(applicationId, operatorId);
         } catch (Exception e) {
             log.error("[结佣工作流] 财务节点联动处理失败：{}", approvalTaskEvent, e);
         }
