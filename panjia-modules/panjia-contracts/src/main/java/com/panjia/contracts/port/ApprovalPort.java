@@ -3,6 +3,7 @@ package com.panjia.contracts.port;
 import com.panjia.contracts.constant.BizType;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 审批端口：业务域经此依赖工作流能力，禁止直接依赖 ruoyi-workflow。
@@ -73,4 +74,19 @@ public interface ApprovalPort {
      * 按业务 ID 查流程业务状态（finish/back/审批中等）。
      */
     String businessStatus(String bizType, Long bizId);
+
+    /**
+     * 设置流程变量（用于网关 skip_condition 求值，T-04 条件跳过财务）。
+     * <p>
+     * 业务域在关键节点办理前调用，写入变量供引擎路由判断。例如结佣流程
+     * 在总监办理前写入 realAmount / expectedAmount，互斥网关按
+     * {@code eq@@${realAmount}@@${expectedAmount}} 求值决定是否跳过财务节点。
+     * <p>
+     * 设计依据：《审批集成设计说明 V1.0》§2.3 / §七。
+     *
+     * @param bizType   业务类型（{@link BizType}）
+     * @param bizId     业务单据 ID（businessId）
+     * @param variables 流程变量键值对
+     */
+    void setVariable(String bizType, Long bizId, Map<String, Object> variables);
 }

@@ -117,6 +117,17 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
         return workflowService.getBusinessStatus(String.valueOf(bizId));
     }
 
+    @Override
+    public void setVariable(String bizType, Long bizId, Map<String, Object> variables) {
+        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(bizId));
+        if (instanceId == null) {
+            throw new ServiceException("流程实例不存在，无法设置流程变量：bizType=" + bizType + ", bizId=" + bizId);
+        }
+        workflowService.setVariable(instanceId, variables);
+        log.info("[审批适配器] 设置流程变量：bizType={}, bizId={}, instanceId={}, keys={}",
+            bizType, bizId, instanceId, variables == null ? null : variables.keySet());
+    }
+
     // ==================== 内部 ====================
 
     private StartProcessDTO toStartProcess(String bizType, Long bizId, ApprovalStartCmd cmd) {

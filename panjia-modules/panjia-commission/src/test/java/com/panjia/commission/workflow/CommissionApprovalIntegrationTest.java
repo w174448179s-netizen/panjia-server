@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -37,51 +38,89 @@ class CommissionApprovalIntegrationTest {
         return Files.readString(path, StandardCharsets.UTF_8);
     }
 
-    // ==================== S16-8：条件跳过财务（当前业务层实现） ====================
+    // ==================== S16-8：条件跳过财务（T-04 互斥网关落地） ====================
 
     /**
-     * S16-8：条件跳过财务（当前业务层实现，互斥网关路径待 T-04）。
+     * S16-8：条件跳过财务（T-04 落地后，由互斥网关 skip_condition 决定）。
      * <p>设计文档 §三要求：实收 == 应收 → 网关跳过财务；有差异正常走。
-     * 当前实现：{@link CommissionApplicationService#afterDirectorPassed} 在总监通过后判断
-     * 实收/应收差异，若 {@code panjia.flow.skip_finance=true} 或无差异 →
-     * 调 {@code approvalPort.completeAsSys} 自动完成财务节点。
-     * <p>静态契约校验：
+     * T-04 改造后：
+     * <ul>
+     *   <li>流程定义新增 flow_skip {@code capp_director→capp_end, skip_condition=eq@@${realAmount}@@${expectedAmount}}
+     *       （见 V150004 迁移脚本）；</li>
+     *   <li>{@link CommissionApplicationService#afterDirectorPassed} 仅保留实收对齐逻辑，
+     *       <b>不再调 {@code approvalPort.completeAsSys}</b> 旁路完成财务节点——
+     *       无差异时网关直接跳到 capp_end，capp_finance 节点不创建，监听器不触发。</li>
+     * </ul>
+     * 静态契约校验：
      * <ul>
      *   <li>存在 {@code afterDirectorPassed} 公共方法签名（监听器可调用）；</li>
-     *   <li>方法体内必须调 {@code approvalPort.completeAsSys(...)}（系统办理财务节点）；</li>
-     *   <li>必须存在差异判断分支（{@code hasDiff} 或 {@code skip_finance} 配置项）。</li>
+     *   <li>方法体内必须保留实收对齐分支（{@code hasDiff} + {@code alignReceivedToExpected}）；</li>
+     *   <li>方法体内<b>不得</b>调 {@code approvalPort.completeAsSys}（旁路已移除，交由网关）。</li>
      * </ul>
-     * 互斥网关 + skipCondition 改造依赖 T-04（P3 可选，待产品批准），未批准前以本静态校验护栏。
      */
     @Test
-    void S16_8_afterDirectorPassedAutoCompletesFinanceWhenNoDiff() throws IOException {
+    void S16_8_afterDirectorPassedNoLongerBypassesFinance() throws IOException {
         String content = read(APPLICATION_SERVICE);
         assertTrue(content.contains("afterDirectorPassed("),
-            "S16-8 违规：缺少 afterDirectorPassed 方法，总监通过后无法自动完成财务节点");
+            "S16-8 违规：缺少 afterDirectorPassed 方法，总监通过后无法触发实收对齐");
 
-        // 抽取 afterDirectorPassed 方法体（从签名到下一个 public/protected/private 方法或类尾）
+        // 抽取 afterDirectorPassed 方法体
         int idx = content.indexOf("afterDirectorPassed(");
         int methodStart = content.lastIndexOf("public", idx);
         assertTrue(methodStart > 0, "未找到 afterDirectorPassed 的 public 修饰符");
-        // 取方法体到下一个 public 方法或类结束
         int nextPublic = content.indexOf("\n    public ", methodStart + 10);
         String body = nextPublic > 0
             ? content.substring(methodStart, nextPublic)
             : content.substring(methodStart);
 
-        // 必须有差异判断分支
-        boolean hasDiffBranch = body.contains("hasDiff") || body.contains("skip_finance");
-        assertTrue(hasDiffBranch,
-            "S16-8 违规：afterDirectorPassed 缺少差异/配置判断分支，无条件跳过财务逻辑");
+        // 必须保留实收对齐分支（hasDiff + alignReceivedToExpected）
+        assertTrue(body.contains("hasDiff"),
+            "S16-8 违规：afterDirectorPassed 缺少 hasDiff 差异判断分支");
+        assertTrue(body.contains("alignReceivedToExpected"),
+            "S16-8 违规：afterDirectorPassed 缺少 alignReceivedToExpected 调用，实收对齐逻辑丢失");
 
-        // 必须调用 approvalPort.completeAsSys 系统办理财务节点
-        assertTrue(body.contains("approvalPort.completeAsSys("),
-            "S16-8 违规：afterDirectorPassed 未调 approvalPort.completeAsSys，无法系统自动完成财务节点");
+        // 不得再调 approvalPort.completeAsSys（旁路已移除，交由互斥网关 skip_condition）
+        assertFalse(body.contains("approvalPort.completeAsSys("),
+            "S16-8 违规：afterDirectorPassed 仍调 approvalPort.completeAsSys，未移交互斥网关路由");
+    }
 
-        // 错误信息应区分「全局跳过」与「无差异自动过」（业务可读）
-        boolean hasSkipReason = body.contains("全局跳过财务") || body.contains("无差异");
-        assertTrue(hasSkipReason,
-            "S16-8 违规：afterDirectorPassed 的 completeAsSys 调用缺少区分性 reason 提示");
+    /**
+     * S16-8 补强：approve 在总监办理前更新流程变量（供网关 skip_condition 求值）。
+     * <p>T-04 落地：{@link CommissionApplicationService#approve} 在 NODE_DIRECTOR 分支
+     * 必须调 {@code approvalPort.setVariable} 更新 realAmount/expectedAmount 为最新值。
+     */
+    @Test
+    void S16_8_approveUpdatesAmountVariablesBeforeDirectorComplete() throws IOException {
+        String content = read(APPLICATION_SERVICE);
+        // approve 方法存在
+        int approveIdx = content.indexOf("public void approve(Long applicationId)");
+        assertTrue(approveIdx > 0, "未找到 approve(Long applicationId) 方法");
+        // 取 approve 方法体（到下一个 public）
+        int nextPublic = content.indexOf("\n    public ", approveIdx + 10);
+        String body = nextPublic > 0
+            ? content.substring(approveIdx, nextPublic)
+            : content.substring(approveIdx);
+
+        // 必须在总监分支前调 updateAmountVariables
+        assertTrue(body.contains("NODE_DIRECTOR.equals(node)"),
+            "S16-8 违规：approve 缺少 NODE_DIRECTOR 判断分支");
+        assertTrue(body.contains("updateAmountVariables("),
+            "S16-8 违规：approve 未在总监办理前调 updateAmountVariables 更新流程变量");
+
+        // updateAmountVariables 必须用 approvalPort.setVariable 写入 realAmount/expectedAmount
+        int updateIdx = content.indexOf("private void updateAmountVariables(");
+        assertTrue(updateIdx > 0, "未找到 updateAmountVariables 方法");
+        int updateNext = content.indexOf("\n    private ", updateIdx + 10);
+        int updateEnd = updateNext > 0 ? updateNext : content.indexOf("\n    public ", updateIdx + 10);
+        String updateBody = updateEnd > 0
+            ? content.substring(updateIdx, updateEnd)
+            : content.substring(updateIdx);
+        assertTrue(updateBody.contains("approvalPort.setVariable("),
+            "S16-8 违规：updateAmountVariables 未调 approvalPort.setVariable");
+        assertTrue(updateBody.contains("realAmount"),
+            "S16-8 违规：updateAmountVariables 未写入 realAmount 变量");
+        assertTrue(updateBody.contains("expectedAmount"),
+            "S16-8 违规：updateAmountVariables 未写入 expectedAmount 变量");
     }
 
     /**

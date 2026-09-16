@@ -35,7 +35,6 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
-import org.dromara.system.api.ConfigService;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -64,7 +63,7 @@ import java.util.stream.Collectors;
  *   <li>仅可对<b>实收审批通过</b>（received_apply APPROVED）的实收业绩发起（§3.2）；</li>
  *   <li>金额为结佣业绩金额（PERF_REAL 原样透传），0 值实收不入单（ADR B14）；</li>
  *   <li>审批流 commission_apply：申请人 → 总监 → 财务；总监发起时系统自动过总监节点（§3.1）；</li>
- *   <li>实收=应收无差异：总监通过后不流转财务（§3.4）；skip_finance=true 全局跳过财务；</li>
+ *   <li>实收=应收无差异：互斥网关 skip_condition 跳过财务，总监通过后直接结束（§3.4 / T-04）；</li>
  *   <li>有差异：总监通过时系统自动把实收对齐应收（合同+每人明细都改），再流转财务人工审批（§3.5）；</li>
  *   <li>审批通过月 = 工资归属月 approved_month（V4.2 硬要求 1）。</li>
  * </ul>
@@ -84,7 +83,6 @@ public class CommissionApplicationService {
     private static final String NODE_FINANCE = "capp_finance";
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
     private static final String ROLE_DIRECTOR = "director";
-    private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
 
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
     public static final String ROW_STATUS_NONE = "NONE";
@@ -97,7 +95,6 @@ public class CommissionApplicationService {
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
     private final ApprovalPort approvalPort;
-    private final ConfigService configService;
 
     // ==================== 发起结佣（按合同） ====================
 
@@ -411,8 +408,25 @@ public class CommissionApplicationService {
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
         }
+        // T-04：总监办理前更新流程变量 realAmount/expectedAmount 为最新值，
+        // 互斥网关按 eq@@${realAmount}@@${expectedAmount} 求值决定是否跳过财务
+        if (NODE_DIRECTOR.equals(node)) {
+            updateAmountVariables(application);
+        }
         completeTaskAsLoginUser(applicationId, NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过");
         refreshCurrentNode(application);
+    }
+
+    /**
+     * 更新流程变量 realAmount / expectedAmount（供互斥网关 skip_condition 求值，T-04）。
+     */
+    private void updateAmountVariables(CommissionApplication application) {
+        Map<String, Object> vars = new HashMap<>(2);
+        vars.put("realAmount",
+            application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount());
+        vars.put("expectedAmount",
+            application.getExpectedAmount() == null ? BigDecimal.ZERO : application.getExpectedAmount());
+        approvalPort.setVariable(BizType.COMMISSION, application.getId(), vars);
     }
 
     /**
@@ -792,8 +806,14 @@ public class CommissionApplicationService {
                 + " " + text(application.getPropertyAddress())
                 + "｜账期" + text(application.getPeriod())
                 + "｜应收" + text(application.getTotalAmount()));
-        Map<String, Object> variables = new HashMap<>(2);
+        Map<String, Object> variables = new HashMap<>(4);
         variables.put("ignore", true);
+        // T-04：发起流程时写入 realAmount/expectedAmount 初值，供互斥网关 skip_condition 求值；
+        // 总监办理前 approve() 会再次更新为最新值
+        variables.put("realAmount",
+            application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount());
+        variables.put("expectedAmount",
+            application.getExpectedAmount() == null ? BigDecimal.ZERO : application.getExpectedAmount());
         cmd.setVariables(variables);
         return cmd;
     }
@@ -824,18 +844,18 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 总监节点办理完成后的联动（§3.4/§3.5，由 capp_finance 任务创建事件驱动）。
+     * 总监节点办理完成后的联动（§3.5 实收对齐，由 capp_finance 任务创建事件驱动）。
      * <p>
-     * 无论总监从「我的待办」（原生 completeTask）还是业务页/Excel 批量审批通过，
-     * 流程进入财务节点即触发本方法，保证 §3.5 对齐不因审批入口不同而被跳过：
+     * T-04 改造后：实收==应收时互斥网关 skip_condition 直接跳到 capp_end，
+     * 财务节点不创建，本方法不触发；本方法仅在「有差异进入财务节点」时执行实收对齐。
      * </p>
      * <ol>
      *   <li>比对单内实收合计与应收合计：有差异且未对齐 → 调业绩域对齐端口，
      *       实收事实（合同+每人明细）supersede 为应收口径，结佣明细按映射重绑事实+金额并重算；</li>
-     *   <li>无差异（或全局 skip_finance）→ 系统自动办理财务节点，流程结束；有差异 → 停留财务人工审批。</li>
+     *   <li>对齐后停留财务节点，由财务人工审批（网关已路由到 capp_finance，不再旁路 completeAsSys）。</li>
      * </ol>
      * <p>监听器在总监 completeTask 的事务内同步执行；warm-flow 引擎在进入监听前已完成
-     * 任务持久化，此处的嵌套 completeTask 不会覆盖引擎状态（已按 1.8.9 字节码取证确认）。</p>
+     * 任务持久化。</p>
      */
     @Transactional(rollbackFor = Exception.class)
     public void afterDirectorPassed(Long applicationId, Long financeTaskId, Long operatorId) {
@@ -858,14 +878,7 @@ public class CommissionApplicationService {
             application.setAligned(true);
             recalcAggregates(application.getId(), application);
         }
-
-        // §3.4 无差异不流转财务（或全局跳过财务）→ 系统自动完成财务节点
-        // 注意：此处为「系统自动审批」（无登录办理人），必须保留 ignore=true，不属于越权。
-        boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));
-        if (!hasDiff || skipFinance) {
-            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS,
-                hasDiff ? "全局跳过财务，系统自动通过" : "实收应收无差异，系统自动完成财务节点");
-        }
+        // T-04：不再调 completeAsSys 旁路完成财务节点——交由互斥网关 skip_condition 决定路由
         refreshCurrentNode(application);
     }
 
