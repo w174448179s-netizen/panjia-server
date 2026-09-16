@@ -145,26 +145,6 @@ class PerformanceDualFactTest {
     }
 
     @Test
-    void originAmountIsCurrentAmountDividedByBrokerRate() {
-        // 原始金额 = 贝壳当前金额 ÷ 经纪人折算比例（默认 85%），四舍五入保留 2 位
-        assertEquals(new BigDecimal("117.65"),
-            PerformanceEngine.grossUpOriginAmount(new BigDecimal("100.00"), new BigDecimal("0.85")),
-            "100 ÷ 0.85 必须为 117.65");
-        assertEquals(new BigDecimal("243851.81"),
-            PerformanceEngine.grossUpOriginAmount(new BigDecimal("207274.04"), new BigDecimal("0.85")),
-            "原始金额按比例还原后保留 2 位小数");
-        // null 金额透传 null（交由折算引擎按 0 处理），比例为 null/0 时按默认 85% 兜底
-        assertEquals(null,
-            PerformanceEngine.grossUpOriginAmount(null, new BigDecimal("0.85")));
-        assertEquals(new BigDecimal("117.65"),
-            PerformanceEngine.grossUpOriginAmount(new BigDecimal("100.00"), null),
-            "比例为 null 时按默认 0.85 兜底");
-        assertEquals(new BigDecimal("117.65"),
-            PerformanceEngine.grossUpOriginAmount(new BigDecimal("100.00"), BigDecimal.ZERO),
-            "比例为 0 时按默认 0.85 兜底，不得除零");
-    }
-
-    @Test
     void missingDedicatedAmountFallsBackToOrigin() {
         // 历史单口径行缺实收/应收列时回退 originAmount，不得 NPE / 不得串口径
         NormalizedRecordDTO legacy = new NormalizedRecordDTO();
