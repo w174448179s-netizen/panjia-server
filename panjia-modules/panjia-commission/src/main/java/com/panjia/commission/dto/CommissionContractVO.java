@@ -2,6 +2,8 @@ package com.panjia.commission.dto;
 
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 
 import java.io.Serial;
 import java.io.Serializable;
@@ -74,6 +76,13 @@ public class CommissionContractVO implements Serializable {
 
     /** 发起人 ID */
     private Long applicantId;
+
+    /**
+     * 发起人昵称（非入库字段；序列化时按 {@link #applicantId} 翻译）。
+     * 业务角色无 system:user:query 权限，前端不查用户表，由后端统一翻译。
+     */
+    @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "applicantId")
+    private String applicantName;
 
     /** 创建时间 */
     private LocalDateTime createTime;

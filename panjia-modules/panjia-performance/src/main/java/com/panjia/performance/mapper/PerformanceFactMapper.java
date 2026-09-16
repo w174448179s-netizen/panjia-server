@@ -1235,6 +1235,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 以业务键（一手房、房产金融、家装荐客按订单号，其余按合同号、合同号为空回退订单号）
      * + 期间为维度，聚合新签业绩、实收业绩、调整状态、实收审批状态、结佣状态。
      * 仅查 ACTIVE 事实；单据（调整/实收/结佣）按单据号或订单号匹配（兼容两种落库键）。
+     * <p>
+     * 性能结构（避免 8s+ 慢查询）：
+     * <ol>
+     *   <li>{@code contract_period}：按筛选条件圈定业务键及最新期间（全周期口径时为全部合同）；</li>
+     *   <li>{@code reversed_expect}：一次性预聚合每个 source_key 最早一条 REVERSED 应收金额，
+     *       替代原聚合内「每行事实一次相关子查询」；</li>
+     *   <li>{@code fact_agg}：对圈定业务键的事实做一次 JOIN 聚合；</li>
+     *   <li>调整/实收/结佣三类单据改为分页结果上的 LATERAL 连接（每合同每类 1 次索引探测），
+     *       替代原「每行结果 10 个相关子查询」。</li>
+     * </ol>
      *
      * @param period     归属期间（CTE 过滤：该期间有事实的合同才参与）
      * @param deptId     部门 ID（可选，含子部门）
@@ -1271,75 +1281,91 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%'))
             </if>
             GROUP BY 1
+        ),
+        reversed_expect AS (
+            SELECT DISTINCT ON (pf.source_key)
+                   pf.source_key, pf.performance_amount
+            FROM pj_perf_fact pf
+            WHERE pf.fact_type = 'PERF_EXPECT'
+              AND pf.fact_status = 'REVERSED'
+            ORDER BY pf.source_key, pf.id ASC
+        ),
+        fact_agg AS (
+            SELECT cp.biz_key AS "bizKey",
+                   cp.max_period AS "period",
+                   MAX(rs.contract_no) AS "contractNo",
+                   MAX(rs.order_no) AS "orderNo",
+                   MAX(f.biz_type) AS "bizType",
+                   MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
+                   MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "signDate",
+                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
+                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT'
+                                     THEN COALESCE(re.performance_amount, f.performance_amount) ELSE 0 END), 0) AS "expectOriginalAmount",
+                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
+                   BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
+                   COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT'
+                                     THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
+                   COUNT(DISTINCT f.employee_id) AS "employeeCount",
+                   COUNT(*) AS "detailCount"
+            FROM contract_period cp
+            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
+            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+                AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                         THEN COALESCE(rs.order_no, rs.contract_no)
+                         ELSE COALESCE(rs.contract_no, rs.order_no) END = cp.biz_key
+            LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+            GROUP BY cp.biz_key, cp.max_period
         )
-        SELECT MAX(rs.contract_no) AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
-               MAX(f.biz_type) AS "bizType",
-               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "signDate",
-               cp.max_period AS "period",
-               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
-               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN
-                   COALESCE((SELECT pf.performance_amount FROM pj_perf_fact pf
-                             WHERE pf.source_key = f.source_key
-                               AND pf.fact_type = 'PERF_EXPECT'
-                               AND pf.fact_status = 'REVERSED'
-                             ORDER BY pf.id ASC LIMIT 1), f.performance_amount)
-                   ELSE 0 END), 0) AS "expectOriginalAmount",
-               COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
-               BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
-               COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
-               (SELECT pa.status FROM pj_perf_adjust pa
-                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
-                  AND pa.period = cp.max_period
-                ORDER BY pa.id DESC LIMIT 1) AS "adjustStatus",
-               (SELECT pa.adjust_no FROM pj_perf_adjust pa
-                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
-                  AND pa.period = cp.max_period
-                ORDER BY pa.id DESC LIMIT 1) AS "adjustNo",
-               (SELECT pa.adjust_type FROM pj_perf_adjust pa
-                WHERE (pa.contract_no = MAX(rs.contract_no) OR pa.contract_no = MAX(rs.order_no))
-                  AND pa.period = cp.max_period
-                ORDER BY pa.id DESC LIMIT 1) AS "adjustType",
-               (SELECT ra.status FROM pj_perf_received_apply ra
-                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
-                  AND ra.period = cp.max_period
-                ORDER BY ra.id DESC LIMIT 1) AS "receivedStatus",
-               (SELECT ra.apply_no FROM pj_perf_received_apply ra
-                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
-                  AND ra.period = cp.max_period
-                ORDER BY ra.id DESC LIMIT 1) AS "receivedApplyNo",
-               (SELECT ra.expected_amount FROM pj_perf_received_apply ra
-                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
-                  AND ra.period = cp.max_period
-                ORDER BY ra.id DESC LIMIT 1) AS "receivedExpectedAmount",
-               (SELECT ra.received_amount FROM pj_perf_received_apply ra
-                WHERE (ra.contract_no = MAX(rs.contract_no) OR ra.contract_no = MAX(rs.order_no))
-                  AND ra.period = cp.max_period
-                ORDER BY ra.id DESC LIMIT 1) AS "receivedRealAmount",
-               (SELECT ca.status FROM pj_commission_application ca
-                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
-                  AND ca.period = cp.max_period
-                ORDER BY ca.id DESC LIMIT 1) AS "commissionStatus",
-               (SELECT ca.apply_no FROM pj_commission_application ca
-                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
-                  AND ca.period = cp.max_period
-                ORDER BY ca.id DESC LIMIT 1) AS "commissionApplyNo",
-               (SELECT ca.total_amount FROM pj_commission_application ca
-                WHERE (ca.contract_no = MAX(rs.contract_no) OR ca.contract_no = MAX(rs.order_no))
-                  AND ca.period = cp.max_period
-                ORDER BY ca.id DESC LIMIT 1) AS "commissionAmount",
-               COUNT(DISTINCT f.employee_id) AS "employeeCount",
-               COUNT(*) AS "detailCount"
-        FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        JOIN contract_period cp ON cp.biz_key = CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                                     THEN COALESCE(rs.order_no, rs.contract_no)
-                                                     ELSE COALESCE(rs.contract_no, rs.order_no) END
-        WHERE f.fact_status = 'ACTIVE'
-        GROUP BY cp.biz_key, cp.max_period
-        ORDER BY "signDate" DESC, "contractNo"
+        SELECT fa."period",
+               fa."contractNo",
+               fa."orderNo",
+               fa."bizType",
+               fa."propertyAddress",
+               fa."signDate",
+               fa."expectAmount",
+               fa."expectOriginalAmount",
+               fa."realAmount",
+               fa."hasAdjust",
+               fa."adjustedAmount",
+               fa."employeeCount",
+               fa."detailCount",
+               la.status AS "adjustStatus",
+               la.adjust_no AS "adjustNo",
+               la.adjust_type AS "adjustType",
+               lr.status AS "receivedStatus",
+               lr.apply_no AS "receivedApplyNo",
+               lr.expected_amount AS "receivedExpectedAmount",
+               lr.received_amount AS "receivedRealAmount",
+               lc.status AS "commissionStatus",
+               lc.apply_no AS "commissionApplyNo",
+               lc.total_amount AS "commissionAmount"
+        FROM fact_agg fa
+        LEFT JOIN LATERAL (
+            SELECT pa.status, pa.adjust_no, pa.adjust_type
+            FROM pj_perf_adjust pa
+            WHERE pa.period = fa."period"
+              AND pa.contract_no IN (fa."contractNo", fa."orderNo")
+            ORDER BY pa.id DESC
+            LIMIT 1
+        ) la ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT ra.status, ra.apply_no, ra.expected_amount, ra.received_amount
+            FROM pj_perf_received_apply ra
+            WHERE ra.period = fa."period"
+              AND ra.contract_no IN (fa."contractNo", fa."orderNo")
+            ORDER BY ra.id DESC
+            LIMIT 1
+        ) lr ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT ca.status, ca.apply_no, ca.total_amount
+            FROM pj_commission_application ca
+            WHERE ca.period = fa."period"
+              AND ca.contract_no IN (fa."contractNo", fa."orderNo")
+            ORDER BY ca.id DESC
+            LIMIT 1
+        ) lc ON TRUE
+        ORDER BY fa."signDate" DESC, fa."contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
