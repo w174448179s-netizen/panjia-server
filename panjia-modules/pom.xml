@@ -59,6 +59,7 @@
         <module>panjia-im-core</module>
         <module>panjia-import</module>
         <module>panjia-contracts</module>
+        <module>panjia-infrastructure</module>
         <module>panjia-outbox</module>
         <module>panjia-people</module>
         <module>panjia-performance</module>

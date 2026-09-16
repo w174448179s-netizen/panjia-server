@@ -23,12 +23,12 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.port.ApprovalAction;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
-import org.dromara.workflow.api.WorkflowService;
-import org.dromara.workflow.api.domain.CompleteTaskDTO;
-import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
-import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -56,7 +56,6 @@ import java.util.Set;
 @RequiredArgsConstructor
 public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
-    private static final String FLOW_CODE = "perf_received";
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
     /** 店长角色 ID（仅本店数据权限） */
@@ -69,7 +68,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     private final ReceivedApplyMapper applyMapper;
     private final PerformanceFactMapper factMapper;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
     private final ConfigService configService;
 
     // ==================== 导入自动建单（§2.1） ====================
@@ -184,11 +183,11 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             return apply;
         }
         // 驳回后流程停在申请人节点：办理申请人任务重新提交，并按当前发起人角色路由
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(id));
+        Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, id);
         if (taskId == null) {
             throw new ServiceException("审批流程任务不存在，请联系管理员");
         }
-        workflowService.completeTask(taskId, "重新提交");
+        approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, "重新提交");
         routeAfterApplicant(apply, currentRoles());
         return apply;
     }
@@ -202,16 +201,14 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             throw new ServiceException("仅审批中的单据可审批（当前：" + apply.getStatus().getDesc() + "）");
         }
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(id));
+        Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, id);
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
         }
         // 以当前登录人身份办理：不设置 ignore，由流程引擎按 flow_user 中的本节点办理人判权。
         // 财务在总监节点、或任何非本节点办理人调用，都会被引擎拒绝（不能再用 ignore 绕过）。
-        CompleteTaskDTO completeTask = new CompleteTaskDTO();
-        completeTask.setTaskId(taskId);
-        completeTask.setMessage(StringUtils.isBlank(message) ? "审批通过" : message);
-        completeTaskAsLoginUser(completeTask);
+        String comment = StringUtils.isBlank(message) ? "审批通过" : message;
+        completeTaskAsLoginUser(id, comment);
         refreshCurrentNode(apply);
     }
 
@@ -220,15 +217,15 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
      * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
      */
-    private void completeTaskAsLoginUser(CompleteTaskDTO completeTask) {
+    private void completeTaskAsLoginUser(Long id, String message) {
         // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
         // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
         if (LoginHelper.isSuperAdmin()) {
-            workflowService.completeTask(completeTask.getTaskId(), completeTask.getMessage());
+            approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, message);
             return;
         }
         try {
-            workflowService.completeTask(completeTask);
+            approvalPort.complete(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, message);
         } catch (RuntimeException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
             if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {
@@ -249,7 +246,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         unbindFacts(id);
         if (StringUtils.isNotBlank(apply.getProcessInstanceId())) {
             // 终止运行中的流程实例（触发 cancel 事件，监听器幂等置 CANCELLED）
-            workflowService.deleteInstance(List.of(String.valueOf(id)));
+            approvalPort.cancel(BizType.REAL_CONFIRM, id);
             // cancel 事件在同一事务内已用新版本对象置 CANCELLED，重新加载避免 @Version 乐观锁更新丢失
             apply = applyMapper.selectById(id);
             if (apply != null && apply.getStatus() == ReceivedApplyStatus.CANCELLED) {
@@ -344,7 +341,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                         "金额不匹配，单据实收=" + apply.getReceivedAmount());
                     continue;
                 }
-                Long taskId = workflowService.getCurrentTaskId(String.valueOf(apply.getId()));
+                Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
                 if (taskId == null) {
                     result.addFailure(row.getContractNo(), row.getAmountText(), "当前无待办任务");
                     continue;
@@ -510,17 +507,16 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     // ==================== 内部方法 ====================
 
     /**
-     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * 构建审批启动命令（业务编码/标题 + 办理人 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
      */
-    private FlowInstanceBizExtDTO buildBizExt(ReceivedApply apply) {
-        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
-        bizExt.setBusinessId(String.valueOf(apply.getId()));
-        bizExt.setBusinessCode(text(apply.getApplyNo()));
-        bizExt.setBusinessTitle("实收审批｜" + text(apply.getContractNo())
-            + " " + text(apply.getPropertyAddress())
-            + "｜账期" + text(apply.getPeriod())
-            + "｜实收" + text(apply.getReceivedAmount()));
-        return bizExt;
+    private ApprovalStartCmd buildStartCmd(ReceivedApply apply) {
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(
+            text(apply.getApplyNo()),
+            "实收审批｜" + text(apply.getContractNo())
+                + " " + text(apply.getPropertyAddress())
+                + "｜账期" + text(apply.getPeriod())
+                + "｜实收" + text(apply.getReceivedAmount()));
+        return cmd;
     }
 
     private static String text(Object value) {
@@ -550,18 +546,15 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             initiator = 1L;
         }
 
-        StartProcessDTO start = new StartProcessDTO();
-        start.setBusinessId(String.valueOf(apply.getId()));
-        start.setFlowCode(FLOW_CODE);
-        start.setHandler(String.valueOf(initiator));
+        ApprovalStartCmd cmd = buildStartCmd(apply);
+        cmd.setHandler(String.valueOf(initiator));
         Map<String, Object> variables = new HashMap<>(4);
         variables.put("ignore", true);
         variables.put("initiator", String.valueOf(initiator));
         variables.put("initiatorDeptId", apply.getDeptId());
-        start.setVariables(variables);
-        start.setBizExt(buildBizExt(apply));
+        cmd.setVariables(variables);
         try {
-            boolean ok = workflowService.startCompleteTask(start);
+            boolean ok = approvalPort.startAndCompleteFirst(BizType.REAL_CONFIRM, apply.getId(), cmd);
             if (!ok) {
                 throw new ServiceException("实收审批流程发起失败");
             }
@@ -569,7 +562,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             log.error("[实收审批] 流程发起异常：applyId={}", apply.getId(), e);
             throw new ServiceException("实收审批流程发起失败：{}", e.getMessage());
         }
-        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(apply.getId()));
+        Long instanceId = approvalPort.instanceId(BizType.REAL_CONFIRM, apply.getId());
         if (instanceId != null) {
             apply.setProcessInstanceId(String.valueOf(instanceId));
             applyMapper.updateById(apply);
@@ -590,7 +583,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (director || finance || skipFinance) {
             Long financeTask = taskAtNode(apply.getId(), NODE_FINANCE);
             if (financeTask != null) {
-                workflowService.completeTask(financeTask,
+                approvalPort.completeAsSys(BizType.REAL_CONFIRM, apply.getId(), ApprovalAction.PASS,
                     director ? "总监发起，系统自动流转" : "财务发起，系统自动流转");
             }
         }
@@ -598,20 +591,21 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (director) {
             Long directorTask = taskAtNode(apply.getId(), NODE_DIRECTOR);
             if (directorTask != null) {
-                workflowService.completeTask(directorTask, "总监发起，系统自动审批通过");
+                approvalPort.completeAsSys(BizType.REAL_CONFIRM, apply.getId(), ApprovalAction.PASS,
+                    "总监发起，系统自动审批通过");
             }
         }
         refreshCurrentNode(apply);
     }
 
     private Long taskAtNode(Long applyId, String nodeCode) {
-        String current = workflowService.getCurrentNodeCode(String.valueOf(applyId));
-        return nodeCode.equals(current) ? workflowService.getCurrentTaskId(String.valueOf(applyId)) : null;
+        String current = approvalPort.currentNodeCode(BizType.REAL_CONFIRM, applyId);
+        return nodeCode.equals(current) ? approvalPort.currentTaskId(BizType.REAL_CONFIRM, applyId) : null;
     }
 
     /** 从工作流回写当前节点（rcv_finance→FINANCE / rcv_director→DIRECTOR / 已结束→null）。 */
     private void refreshCurrentNode(ReceivedApply apply) {
-        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(apply.getId()));
+        String nodeCode = approvalPort.currentNodeCode(BizType.REAL_CONFIRM, apply.getId());
         String shortNode;
         if (NODE_FINANCE.equals(nodeCode)) {
             shortNode = "FINANCE";

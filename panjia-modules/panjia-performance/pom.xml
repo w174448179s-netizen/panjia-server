@@ -64,12 +64,6 @@
             <artifactId>ruoyi-system</artifactId>
         </dependency>
 
-        <!-- RuoYi API（WorkflowService 启动/办理工作流，ProcessEvent 审批回调） -->
-        <dependency>
-            <groupId>org.dromara</groupId>
-            <artifactId>ruoyi-api</artifactId>
-        </dependency>
-
         <!-- Apache POI：实收审批 Excel 批量审批解析（.xlsx/.xls 真二进制解析，禁止 CSV 兜底） -->
         <dependency>
             <groupId>org.apache.poi</groupId>

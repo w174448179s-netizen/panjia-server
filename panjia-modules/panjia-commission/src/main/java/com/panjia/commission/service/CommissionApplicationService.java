@@ -15,12 +15,16 @@ import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.commission.util.CommissionBatchExcelParser;
+import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.event.CommissionApprovedEvent;
 import com.panjia.contracts.event.EventPort;
+import com.panjia.contracts.port.ApprovalAction;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
@@ -32,10 +36,6 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
-import org.dromara.workflow.api.WorkflowService;
-import org.dromara.workflow.api.domain.CompleteTaskDTO;
-import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
-import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -80,7 +80,6 @@ public class CommissionApplicationService {
     /** 结佣口径：实收业绩（结佣确认对象） */
     private static final String FACT_TYPE_REAL = "PERF_REAL";
 
-    private static final String FLOW_CODE = "commission_apply";
     private static final String NODE_DIRECTOR = "capp_director";
     private static final String NODE_FINANCE = "capp_finance";
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
@@ -97,7 +96,7 @@ public class CommissionApplicationService {
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
     private final ConfigService configService;
 
     // ==================== 发起结佣（按合同） ====================
@@ -372,11 +371,11 @@ public class CommissionApplicationService {
             startWorkflow(application);
         } else {
             // 驳回后流程停在申请人节点：办理申请人任务重新提交
-            Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+            Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, applicationId);
             if (taskId == null) {
                 throw new ServiceException("审批流程任务不存在，请联系管理员");
             }
-            workflowService.completeTask(taskId, "重新提交");
+            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS, "重新提交");
         }
 
         // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
@@ -386,10 +385,7 @@ public class CommissionApplicationService {
             if (directorTask == null) {
                 throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
             }
-            CompleteTaskDTO directorComplete = new CompleteTaskDTO();
-            directorComplete.setTaskId(directorTask);
-            directorComplete.setMessage("总监发起，系统自动审批");
-            completeTaskAsLoginUser(directorComplete);
+            completeTaskAsLoginUser(applicationId, "总监发起，系统自动审批");
         }
         refreshCurrentNode(application);
         log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
@@ -407,18 +403,15 @@ public class CommissionApplicationService {
     @Transactional(rollbackFor = Exception.class)
     public void approve(Long applicationId) {
         CommissionApplication application = requireSubmitted(applicationId);
-        String node = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
+        String node = approvalPort.currentNodeCode(BizType.COMMISSION, applicationId);
         if (!NODE_DIRECTOR.equals(node) && !NODE_FINANCE.equals(node)) {
             throw new ServiceException("当前无可审批节点（节点=" + node + "）");
         }
-        Long taskId = workflowService.getCurrentTaskId(String.valueOf(applicationId));
+        Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, applicationId);
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
         }
-        CompleteTaskDTO completeTask = new CompleteTaskDTO();
-        completeTask.setTaskId(taskId);
-        completeTask.setMessage(NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过");
-        completeTaskAsLoginUser(completeTask);
+        completeTaskAsLoginUser(applicationId, NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过");
         refreshCurrentNode(application);
     }
 
@@ -427,15 +420,15 @@ public class CommissionApplicationService {
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
      * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
      */
-    private void completeTaskAsLoginUser(CompleteTaskDTO completeTask) {
+    private void completeTaskAsLoginUser(Long applicationId, String message) {
         // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
         // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
         if (LoginHelper.isSuperAdmin()) {
-            workflowService.completeTask(completeTask.getTaskId(), completeTask.getMessage());
+            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS, message);
             return;
         }
         try {
-            workflowService.completeTask(completeTask);
+            approvalPort.complete(BizType.COMMISSION, applicationId, ApprovalAction.PASS, message);
         } catch (RuntimeException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
             if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {
@@ -510,7 +503,7 @@ public class CommissionApplicationService {
         }
         if (StringUtils.isNotBlank(application.getProcessInstanceId())) {
             // 终止运行中的流程实例（触发 cancel 事件，监听器置 CANCELLED + 冲销明细，幂等）
-            workflowService.deleteInstance(List.of(String.valueOf(applicationId)));
+            approvalPort.cancel(BizType.COMMISSION, applicationId);
         }
         // 草稿无流程实例：本地直接置 CANCELLED 并冲销明细
         reverseUnapprovedItems(applicationId);
@@ -787,20 +780,22 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * 构建审批启动命令（业务编码/标题 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
      * <p>
      * 不填的后果：flow_instance_biz_ext.business_title 为空，待办列表业务编码/业务标题两列全空，
      * 审批人只能看到一串技术编码，无法分辨审的是哪张单。
      */
-    private FlowInstanceBizExtDTO buildBizExt(CommissionApplication application) {
-        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
-        bizExt.setBusinessId(String.valueOf(application.getId()));
-        bizExt.setBusinessCode(text(application.getApplyNo()));
-        bizExt.setBusinessTitle("结佣审批｜" + text(application.getContractNo())
-            + " " + text(application.getPropertyAddress())
-            + "｜账期" + text(application.getPeriod())
-            + "｜应收" + text(application.getTotalAmount()));
-        return bizExt;
+    private ApprovalStartCmd buildStartCmd(CommissionApplication application) {
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(
+            text(application.getApplyNo()),
+            "结佣审批｜" + text(application.getContractNo())
+                + " " + text(application.getPropertyAddress())
+                + "｜账期" + text(application.getPeriod())
+                + "｜应收" + text(application.getTotalAmount()));
+        Map<String, Object> variables = new HashMap<>(2);
+        variables.put("ignore", true);
+        cmd.setVariables(variables);
+        return cmd;
     }
 
     private static String text(Object value) {
@@ -811,15 +806,9 @@ public class CommissionApplicationService {
      * 启动 commission_apply 流程并办理申请人首节点。
      */
     private void startWorkflow(CommissionApplication application) {
-        StartProcessDTO start = new StartProcessDTO();
-        start.setBusinessId(String.valueOf(application.getId()));
-        start.setFlowCode(FLOW_CODE);
-        Map<String, Object> variables = new HashMap<>(2);
-        variables.put("ignore", true);
-        start.setVariables(variables);
-        start.setBizExt(buildBizExt(application));
+        ApprovalStartCmd cmd = buildStartCmd(application);
         try {
-            boolean ok = workflowService.startCompleteTask(start);
+            boolean ok = approvalPort.startAndCompleteFirst(BizType.COMMISSION, application.getId(), cmd);
             if (!ok) {
                 throw new ServiceException("结佣审批流程发起失败");
             }
@@ -827,7 +816,7 @@ public class CommissionApplicationService {
             log.error("[结佣] 流程发起异常：id={}", application.getId(), e);
             throw new ServiceException("结佣审批流程发起失败：{}", e.getMessage());
         }
-        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(application.getId()));
+        Long instanceId = approvalPort.instanceId(BizType.COMMISSION, application.getId());
         if (instanceId != null) {
             application.setProcessInstanceId(String.valueOf(instanceId));
             applicationMapper.updateById(application);
@@ -874,7 +863,7 @@ public class CommissionApplicationService {
         // 注意：此处为「系统自动审批」（无登录办理人），必须保留 ignore=true，不属于越权。
         boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));
         if (!hasDiff || skipFinance) {
-            workflowService.completeTask(financeTaskId,
+            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS,
                 hasDiff ? "全局跳过财务，系统自动通过" : "实收应收无差异，系统自动完成财务节点");
         }
         refreshCurrentNode(application);
@@ -904,15 +893,15 @@ public class CommissionApplicationService {
     }
 
     private Long taskAtNode(Long applicationId, String nodeCode) {
-        String current = workflowService.getCurrentNodeCode(String.valueOf(applicationId));
-        return nodeCode.equals(current) ? workflowService.getCurrentTaskId(String.valueOf(applicationId)) : null;
+        String current = approvalPort.currentNodeCode(BizType.COMMISSION, applicationId);
+        return nodeCode.equals(current) ? approvalPort.currentTaskId(BizType.COMMISSION, applicationId) : null;
     }
 
     /** 从工作流回写当前节点（capp_director→DIRECTOR / capp_finance→FINANCE / 已结束→null）。
      * <p>只更新 current_node 列：事件监听器可能在嵌套 completeTask 内被触发，
      * 此时持有的实体已过期（状态/版本已被 finish 回调推进），整实体 updateById 会静默失败或回写脏状态。</p> */
     private void refreshCurrentNode(CommissionApplication application) {
-        String nodeCode = workflowService.getCurrentNodeCode(String.valueOf(application.getId()));
+        String nodeCode = approvalPort.currentNodeCode(BizType.COMMISSION, application.getId());
         String shortNode;
         if (NODE_DIRECTOR.equals(nodeCode)) {
             shortNode = "DIRECTOR";

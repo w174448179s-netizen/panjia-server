@@ -1,23 +1,24 @@
 package com.panjia.payroll.handler;
 
+import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.event.ApprovalEvent;
+import com.panjia.contracts.event.ApprovalTaskEvent;
 import com.panjia.payroll.service.PayrollBatchService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.dromara.workflow.api.event.ProcessEvent;
-import org.dromara.workflow.api.event.ProcessTaskEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
 /**
- * 算薪批次工作流回调监听器（flowCode = payroll_batch）。
+ * 算薪批次工作流回调监听器（bizType = {@link BizType#PAYROLL_BATCH}）。
  * <p>
- * 实例级 {@link ProcessEvent}：finish（总监锁定节点办理完成）→ 批次 LOCKED +
+ * 实例级 {@link ApprovalEvent}：finish（总监锁定节点办理完成）→ 批次 LOCKED +
  * 发布 PayrollLockedEvent；back（总监审核驳回）→ CALCULATED；
  * cancel/invalid/termination → CALCULATED 并解除实例绑定。
  * <p>
- * 任务级 {@link ProcessTaskEvent}：payroll_review 任务创建 → REVIEWING；
+ * 任务级 {@link ApprovalTaskEvent}：payroll_review 任务创建 → REVIEWING；
  * payroll_lock 任务创建（总监审核已通过）→ APPROVED。
  * <p>
  * 审批动作全部经「我的待办」由引擎按 flow_user 名单判权办理，
@@ -28,24 +29,22 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class PayrollBatchWorkflowListener {
 
-    private static final String FLOW_CODE = "payroll_batch";
     private static final String NODE_REVIEW = "payroll_review";
     private static final String NODE_LOCK = "payroll_lock";
 
     private final PayrollBatchService batchService;
 
-    @EventListener(condition = "#processEvent.flowCode == '" + FLOW_CODE + "'")
-    public void onProcessEvent(ProcessEvent processEvent) {
+    @EventListener(condition = "#approvalEvent.bizType == '" + BizType.PAYROLL_BATCH + "'")
+    public void onApprovalEvent(ApprovalEvent approvalEvent) {
         try {
-            String businessId = processEvent.getBusinessId();
-            if (businessId == null || businessId.isBlank()) {
-                log.warn("[薪酬工作流] businessId 为空，跳过：{}", processEvent);
+            Long batchId = approvalEvent.getBizId();
+            if (batchId == null) {
+                log.warn("[薪酬工作流] bizId 为空，跳过：{}", approvalEvent);
                 return;
             }
-            Long batchId = Long.valueOf(businessId);
             String handler = null;
             String message = null;
-            Map<String, Object> params = processEvent.getParams();
+            Map<String, Object> params = approvalEvent.getParams();
             if (params != null) {
                 Object h = params.get("handler");
                 Object m = params.get("message");
@@ -53,28 +52,27 @@ public class PayrollBatchWorkflowListener {
                 message = m == null ? null : m.toString();
             }
             log.info("[薪酬工作流] 回调：batchId={}, status={}, nodeCode={}",
-                batchId, processEvent.getStatus(), processEvent.getNodeCode());
-            batchService.handleWorkflowEvent(batchId, processEvent.getStatus(), handler, message);
+                batchId, approvalEvent.getStatus(), approvalEvent.getNodeCode());
+            batchService.handleWorkflowEvent(batchId, approvalEvent.getStatus(), handler, message);
         } catch (Exception e) {
-            log.error("[薪酬工作流] 回调处理失败：{}", processEvent, e);
+            log.error("[薪酬工作流] 回调处理失败：{}", approvalEvent, e);
         }
     }
 
-    @EventListener(condition = "#processTaskEvent.flowCode == '" + FLOW_CODE
-        + "' && (#processTaskEvent.nodeCode == '" + NODE_REVIEW
-        + "' || #processTaskEvent.nodeCode == '" + NODE_LOCK + "')")
-    public void onTaskNodeCreated(ProcessTaskEvent processTaskEvent) {
+    @EventListener(condition = "#approvalTaskEvent.bizType == '" + BizType.PAYROLL_BATCH
+        + "' && (#approvalTaskEvent.nodeCode == '" + NODE_REVIEW
+        + "' || #approvalTaskEvent.nodeCode == '" + NODE_LOCK + "')")
+    public void onTaskNodeCreated(ApprovalTaskEvent approvalTaskEvent) {
         try {
-            String businessId = processTaskEvent.getBusinessId();
-            if (businessId == null || businessId.isBlank()) {
-                log.warn("[薪酬工作流] 任务事件 businessId 为空，跳过：{}", processTaskEvent);
+            Long batchId = approvalTaskEvent.getBizId();
+            if (batchId == null) {
+                log.warn("[薪酬工作流] 任务事件 bizId 为空，跳过：{}", approvalTaskEvent);
                 return;
             }
-            Long batchId = Long.valueOf(businessId);
-            log.info("[薪酬工作流] 节点任务创建：batchId={}, node={}", batchId, processTaskEvent.getNodeCode());
-            batchService.handleTaskNodeEvent(batchId, processTaskEvent.getNodeCode());
+            log.info("[薪酬工作流] 节点任务创建：batchId={}, node={}", batchId, approvalTaskEvent.getNodeCode());
+            batchService.handleTaskNodeEvent(batchId, approvalTaskEvent.getNodeCode());
         } catch (Exception e) {
-            log.error("[薪酬工作流] 节点事件处理失败：{}", processTaskEvent, e);
+            log.error("[薪酬工作流] 节点事件处理失败：{}", approvalTaskEvent, e);
         }
     }
 }

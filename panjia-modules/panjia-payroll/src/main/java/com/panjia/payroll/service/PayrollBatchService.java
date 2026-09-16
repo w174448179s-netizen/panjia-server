@@ -18,10 +18,11 @@ import com.panjia.payroll.mapper.PayrollEmployeeSnapshotMapper;
 import com.panjia.payroll.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.port.ApprovalAction;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.core.exception.ServiceException;
-import org.dromara.workflow.api.WorkflowService;
-import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
-import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -58,7 +59,7 @@ public class PayrollBatchService {
     private final SalaryCalculationEngine engine;
     private final ManualItemService manualItemService;
     private final ApplicationEventPublisher eventPublisher;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
 
     // ==================== 创建 ====================
 
@@ -285,8 +286,6 @@ public class PayrollBatchService {
 
     // ==================== 状态流转（工作流驱动） ====================
 
-    private static final String FLOW_CODE = "payroll_batch";
-
     /**
      * 提交审核：CALCULATED → REVIEWING，并发起/推进 payroll_batch 流程。
      * <p>
@@ -308,11 +307,11 @@ public class PayrollBatchService {
             startWorkflow(b, operatorId);
         } else {
             // 驳回后流程停在「提交算薪」节点：办理该任务重新提交
-            Long taskId = workflowService.getCurrentTaskId(String.valueOf(batchId));
+            Long taskId = approvalPort.currentTaskId(BizType.PAYROLL_BATCH, batchId);
             if (taskId == null) {
                 throw new ServiceException("审批流程任务不存在，请联系管理员");
             }
-            workflowService.completeTask(taskId, "重新提交");
+            approvalPort.completeAsSys(BizType.PAYROLL_BATCH, batchId, ApprovalAction.PASS, "重新提交");
         }
         log.info("[薪酬] 批次已提交审核：id={}, period={}, operator={}", batchId, b.getPeriod(), operatorId);
         return b;
@@ -322,16 +321,9 @@ public class PayrollBatchService {
      * 启动 payroll_batch 流程并自动办理「提交算薪」首节点。
      */
     private void startWorkflow(PayrollBatch batch, Long operatorId) {
-        StartProcessDTO start = new StartProcessDTO();
-        start.setBusinessId(String.valueOf(batch.getId()));
-        start.setFlowCode(FLOW_CODE);
-        start.setHandler(String.valueOf(operatorId));
-        Map<String, Object> variables = new HashMap<>(2);
-        variables.put("ignore", true);
-        start.setVariables(variables);
-        start.setBizExt(buildBizExt(batch));
+        ApprovalStartCmd cmd = buildStartCmd(batch, operatorId);
         try {
-            boolean ok = workflowService.startCompleteTask(start);
+            boolean ok = approvalPort.startAndCompleteFirst(BizType.PAYROLL_BATCH, batch.getId(), cmd);
             if (!ok) {
                 throw new ServiceException("算薪审批流程发起失败");
             }
@@ -339,7 +331,7 @@ public class PayrollBatchService {
             log.error("[薪酬] 流程发起异常：batchId={}", batch.getId(), e);
             throw new ServiceException("算薪审批流程发起失败：{}", e.getMessage());
         }
-        Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(batch.getId()));
+        Long instanceId = approvalPort.instanceId(BizType.PAYROLL_BATCH, batch.getId());
         if (instanceId != null) {
             batch.setProcessInstanceId(String.valueOf(instanceId));
             batchMapper.updateById(batch);
@@ -347,17 +339,20 @@ public class PayrollBatchService {
     }
 
     /**
-     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * 构建审批启动命令（业务编码/标题 + 办理人 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
      */
-    private FlowInstanceBizExtDTO buildBizExt(PayrollBatch batch) {
-        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
-        bizExt.setBusinessId(String.valueOf(batch.getId()));
-        bizExt.setBusinessCode(batch.getPeriod());
-        bizExt.setBusinessTitle("算薪审批｜" + batch.getPeriod()
-            + "｜范围" + ("ALL".equals(batch.getDeptScope()) ? "全部门店" : batch.getDeptScope())
-            + "｜人数" + (batch.getEmployeeCount() == null ? 0 : batch.getEmployeeCount())
-            + "｜实发" + (batch.getNetTotal() == null ? "0" : batch.getNetTotal()));
-        return bizExt;
+    private ApprovalStartCmd buildStartCmd(PayrollBatch batch, Long operatorId) {
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(
+            batch.getPeriod(),
+            "算薪审批｜" + batch.getPeriod()
+                + "｜范围" + ("ALL".equals(batch.getDeptScope()) ? "全部门店" : batch.getDeptScope())
+                + "｜人数" + (batch.getEmployeeCount() == null ? 0 : batch.getEmployeeCount())
+                + "｜实发" + (batch.getNetTotal() == null ? "0" : batch.getNetTotal()));
+        cmd.setHandler(String.valueOf(operatorId));
+        Map<String, Object> variables = new HashMap<>(2);
+        variables.put("ignore", true);
+        cmd.setVariables(variables);
+        return cmd;
     }
 
     @Transactional(rollbackFor = Exception.class)

@@ -2,6 +2,7 @@ package com.panjia.performance.handler;
 
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchRevokedEvent;
+import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
@@ -10,7 +11,6 @@ import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.dromara.workflow.api.WorkflowService;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
@@ -37,7 +37,7 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
     private final PerformanceFactMapper factMapper;
     private final ReceivedApplyMapper receivedApplyMapper;
     private final PerformanceConsumeLogMapper consumeLogMapper;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -68,12 +68,11 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
         List<ReceivedApply> applies = receivedApplyMapper.selectList(
             new LambdaQueryWrapper<ReceivedApply>().eq(ReceivedApply::getBatchId, batchId));
         if (!applies.isEmpty()) {
-            List<String> businessIds = applies.stream()
-                .map(a -> String.valueOf(a.getId())).toList();
+            List<Long> bizIds = applies.stream().map(ReceivedApply::getId).toList();
             // 删流程实例（含任务/历史/实例/业务扩展，业务数据由本处理器自行清理，故走系统级链路）
-            boolean wfDeleted = workflowService.deleteInstanceSys(businessIds);
-            log.info("[批次撤销-业绩域] 关联流程实例删除：batchId={}, applyCount={}, result={}",
-                batchId, applies.size(), wfDeleted);
+            approvalPort.cancelBatch(bizIds);
+            log.info("[批次撤销-业绩域] 关联流程实例删除：batchId={}, applyCount={}",
+                batchId, applies.size());
             // 删实收审批单
             receivedApplyMapper.delete(
                 new LambdaQueryWrapper<ReceivedApply>().eq(ReceivedApply::getBatchId, batchId));

@@ -64,12 +64,6 @@
             <artifactId>ruoyi-common-translation</artifactId>
         </dependency>
 
-        <!-- RuoYi API（WorkflowService 启动/办理工作流，ProcessEvent 审批回调） -->
-        <dependency>
-            <groupId>org.dromara</groupId>
-            <artifactId>ruoyi-api</artifactId>
-        </dependency>
-
         <!-- Apache POI：结佣 Excel 批量发起/审批（.xlsx/.xls 真二进制解析） -->
         <dependency>
             <groupId>org.apache.poi</groupId>
@@ -82,6 +76,13 @@
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <scope>provided</scope>
+        </dependency>
+
+        <!-- ArchUnit 架构守护测试（审批集成 T-02：禁止依赖 org.dromara.workflow） -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
         </dependency>
 
         <!-- JUnit5（纯逻辑单测 / 静态契约校验）；显式 5.x：JUnit 6 与 surefire 3.5.5 注入的 launcher 不兼容会 0 tests -->

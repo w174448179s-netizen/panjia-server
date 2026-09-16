@@ -159,6 +159,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-outbox</artifactId>
         </dependency>
+        <!-- 基础设施适配层（ApprovalPort → Warm-Flow 桥接 / 事件转译） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-infrastructure</artifactId>
+        </dependency>
 
         <!-- Spring Boot Admin 客户端 -->
         <dependency>

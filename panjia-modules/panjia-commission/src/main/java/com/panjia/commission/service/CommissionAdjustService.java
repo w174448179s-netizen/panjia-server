@@ -14,6 +14,9 @@ import com.panjia.commission.dto.AdjustCreateDTO;
 import com.panjia.commission.dto.AdjustQuery;
 import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
+import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,9 +24,6 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
-import org.dromara.workflow.api.WorkflowService;
-import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
-import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -57,9 +57,6 @@ public class CommissionAdjustService {
 
     private static final DateTimeFormatter ADJUST_NO_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
 
-    /** 结佣调整审批流编码（flow_definition.flow_code） */
-    private static final String FLOW_CODE_COMMISSION_ADJUST = "commission_adjust";
-
     /** 工作流状态：审批通过 */
     private static final String WF_STATUS_FINISH = "finish";
     /** 工作流状态：作废 */
@@ -74,7 +71,7 @@ public class CommissionAdjustService {
     private final CommissionApplicationService applicationService;
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final ObjectMapper objectMapper;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
 
     // ==================== 发起 ====================
 
@@ -149,19 +146,12 @@ public class CommissionAdjustService {
         adjust.setApplicantId(operatorId);
         adjustMapper.insert(adjust);
 
-        // 发起 RuoYi 工作流审批（businessId=调整单ID），失败则整体回滚
-        StartProcessDTO startProcess = new StartProcessDTO();
-        startProcess.setBusinessId(String.valueOf(adjust.getId()));
-        startProcess.setFlowCode(FLOW_CODE_COMMISSION_ADJUST);
-        Map<String, Object> variables = new HashMap<>(2);
-        // 后端发起无登录用户上下文，忽略权限
-        variables.put("ignore", true);
-        startProcess.setVariables(variables);
-        startProcess.setBizExt(buildBizExt(adjust));
+        // 发起审批流程（bizType=COMMISSION_ADJUST，businessId=调整单ID），失败则整体回滚
+        ApprovalStartCmd cmd = buildStartCmd(adjust);
 
         boolean started;
         try {
-            started = workflowService.startCompleteTask(startProcess);
+            started = approvalPort.startAndCompleteFirst(BizType.COMMISSION_ADJUST, adjust.getId(), cmd);
         } catch (Exception e) {
             log.error("[结佣-调整] 审批流程发起异常：adjustId={}", adjust.getId(), e);
             throw new ServiceException("结佣调整审批流程发起失败：" + e.getMessage());
@@ -172,7 +162,7 @@ public class CommissionAdjustService {
 
         // 回填流程实例 ID（回调以 businessId 路由，回填失败不阻断主流程）
         try {
-            Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(adjust.getId()));
+            Long instanceId = approvalPort.instanceId(BizType.COMMISSION_ADJUST, adjust.getId());
             if (instanceId != null) {
                 adjust.setProcessInstanceId(String.valueOf(instanceId));
                 adjustMapper.updateById(adjust);
@@ -246,17 +236,20 @@ public class CommissionAdjustService {
     }
 
     /**
-     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * 构建审批启动命令（业务编码/标题 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
      */
-    private FlowInstanceBizExtDTO buildBizExt(CommissionAdjust adjust) {
-        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
-        bizExt.setBusinessId(String.valueOf(adjust.getId()));
-        bizExt.setBusinessCode(text(adjust.getAdjustNo()));
-        bizExt.setBusinessTitle("结佣调整｜账期" + text(adjust.getPeriod())
-            + "｜类型" + text(adjust.getAdjustType())
-            + "｜差额" + text(adjust.getDiffAmount())
-            + "｜单号" + text(adjust.getAdjustNo()));
-        return bizExt;
+    private ApprovalStartCmd buildStartCmd(CommissionAdjust adjust) {
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(
+            text(adjust.getAdjustNo()),
+            "结佣调整｜账期" + text(adjust.getPeriod())
+                + "｜类型" + text(adjust.getAdjustType())
+                + "｜差额" + text(adjust.getDiffAmount())
+                + "｜单号" + text(adjust.getAdjustNo()));
+        Map<String, Object> variables = new HashMap<>(2);
+        // 后端发起无登录用户上下文，忽略权限
+        variables.put("ignore", true);
+        cmd.setVariables(variables);
+        return cmd;
     }
 
     private static String text(Object value) {

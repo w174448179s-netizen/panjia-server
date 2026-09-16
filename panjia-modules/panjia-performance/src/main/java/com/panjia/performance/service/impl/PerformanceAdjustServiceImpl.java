@@ -20,6 +20,9 @@ import com.panjia.performance.service.PerformanceAdjustService;
 import com.panjia.performance.service.PeriodCloseService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
+import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -27,9 +30,6 @@ import org.dromara.common.core.enums.BusinessStatusEnum;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
-import org.dromara.workflow.api.WorkflowService;
-import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
-import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -74,9 +74,6 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     /** 调整单号日期格式 */
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    /** 业绩调整审批流编码（flow_definition.flow_code） */
-    private static final String FLOW_CODE_PERF_ADJUST = "perf_adjust";
-
     /** 调整范围：合同级 */
     private static final String SCOPE_CONTRACT = "CONTRACT";
     /** 调整范围：明细级 */
@@ -99,7 +96,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final PerformanceAdjustMapper adjustMapper;
     private final PerformanceFactMapper factMapper;
     private final ReverseService reverseService;
-    private final WorkflowService workflowService;
+    private final ApprovalPort approvalPort;
     private final PeriodCloseService periodCloseService;
 
     @Override
@@ -429,19 +426,12 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
         adjustMapper.insert(adjust);
 
-        // 3. 发起 RuoYi 工作流审批（businessId=调整单ID），失败则整体回滚
-        StartProcessDTO startProcess = new StartProcessDTO();
-        startProcess.setBusinessId(String.valueOf(adjust.getId()));
-        startProcess.setFlowCode(FLOW_CODE_PERF_ADJUST);
-        Map<String, Object> variables = new HashMap<>(2);
-        // 后端发起无登录用户上下文，忽略权限
-        variables.put("ignore", true);
-        startProcess.setVariables(variables);
-        startProcess.setBizExt(buildBizExt(adjust));
+        // 3. 发起审批流程（bizId=调整单ID），失败则整体回滚
+        ApprovalStartCmd cmd = buildStartCmd(adjust);
 
         boolean started;
         try {
-            started = workflowService.startCompleteTask(startProcess);
+            started = approvalPort.startAndCompleteFirst(BizType.PERF_ADJUST, adjust.getId(), cmd);
         } catch (Exception e) {
             log.error("[调整单] 审批流程发起异常：adjustId={}", adjust.getId(), e);
             throw new ServiceException("业绩调整审批流程发起失败：{}", e.getMessage());
@@ -452,7 +442,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
         // 4. 回填流程实例 ID
         try {
-            Long instanceId = workflowService.getInstanceIdByBusinessId(String.valueOf(adjust.getId()));
+            Long instanceId = approvalPort.instanceId(BizType.PERF_ADJUST, adjust.getId());
             if (instanceId != null) {
                 adjust.setProcessInstanceId(String.valueOf(instanceId));
                 adjustMapper.updateById(adjust);
@@ -551,7 +541,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         // 终止运行中的审批流程实例（触发 cancel 事件，监听器幂等置 CANCELLED），与实收/结佣作废一致
         if (StringUtils.isNotBlank(adjust.getProcessInstanceId())) {
             try {
-                workflowService.deleteInstance(List.of(String.valueOf(id)));
+                approvalPort.cancel(BizType.PERF_ADJUST, id);
             } catch (Exception e) {
                 log.warn("[调整单] 取消时终止流程实例失败，按业务取消继续：adjustId={}", id, e);
             }
@@ -663,13 +653,10 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     // ==================== 内部方法 ====================
 
     /**
-     * 构建流程业务扩展信息，供「我的待办 / 我发起的」列表直接展示"在审什么"。
+     * 构建审批启动命令（业务编码/标题 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
      * <p>合同级调整以合同号作为主标识；明细级调整（无合同号）以员工姓名作为主标识。
      */
-    private FlowInstanceBizExtDTO buildBizExt(PerformanceAdjust adjust) {
-        FlowInstanceBizExtDTO bizExt = new FlowInstanceBizExtDTO();
-        bizExt.setBusinessId(String.valueOf(adjust.getId()));
-        bizExt.setBusinessCode(text(adjust.getAdjustNo()));
+    private ApprovalStartCmd buildStartCmd(PerformanceAdjust adjust) {
         // 合同级有合同号 → 用合同号；否则用员工姓名作为主标识
         String subject;
         if (StringUtils.isNotBlank(adjust.getContractNo())) {
@@ -677,12 +664,18 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         } else {
             subject = "员工" + resolveEmployeeName(adjust.getEmployeeId());
         }
-        bizExt.setBusinessTitle("业绩调整｜" + subject
-            + "｜账期" + text(adjust.getPeriod())
-            + "｜类型" + text(adjust.getAdjustType())
-            + "｜目标金额" + text(adjust.getTargetAmount())
-            + "｜单号" + text(adjust.getAdjustNo()));
-        return bizExt;
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(
+            text(adjust.getAdjustNo()),
+            "业绩调整｜" + subject
+                + "｜账期" + text(adjust.getPeriod())
+                + "｜类型" + text(adjust.getAdjustType())
+                + "｜目标金额" + text(adjust.getTargetAmount())
+                + "｜单号" + text(adjust.getAdjustNo()));
+        Map<String, Object> variables = new HashMap<>(2);
+        // 后端发起无登录用户上下文，忽略权限
+        variables.put("ignore", true);
+        cmd.setVariables(variables);
+        return cmd;
     }
 
     /**
@@ -1118,7 +1111,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         }
         String wfStatus;
         try {
-            wfStatus = workflowService.getBusinessStatus(String.valueOf(adjust.getId()));
+            wfStatus = approvalPort.businessStatus(BizType.PERF_ADJUST, adjust.getId());
         } catch (Exception e) {
             log.warn("[调整单状态自愈] 查询工作流状态失败，跳过：adjustId={}", adjust.getId(), e);
             return adjust;
