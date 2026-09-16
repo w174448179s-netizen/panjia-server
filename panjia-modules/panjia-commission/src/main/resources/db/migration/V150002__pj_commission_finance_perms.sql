@@ -61,7 +61,7 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000012, 1761400000000011828)
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- 5c. 业绩明细：重新消费
+-- 5c. 新签明细：重新消费
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000012, 1761400000000002612)
 ON CONFLICT (role_id, menu_id) DO NOTHING;

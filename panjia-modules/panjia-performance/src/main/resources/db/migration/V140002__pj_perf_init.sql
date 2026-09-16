@@ -259,7 +259,7 @@ COMMENT ON COLUMN pj_perf_received_apply.dept_id IS '归属门店ID(跨门店合
 COMMENT ON COLUMN pj_perf_received_apply.batch_id IS '首次生成该单的导入批次ID';
 COMMENT ON COLUMN pj_perf_received_apply.received_amount IS '实收业绩合计(合同当月全部PERF_REAL事实净额)';
 COMMENT ON COLUMN pj_perf_received_apply.expected_amount IS '应收业绩合计(合同当月全部PERF_EXPECT事实净额，展示实收/应收差异用)';
-COMMENT ON COLUMN pj_perf_received_apply.item_count IS '实收业绩明细条数';
+COMMENT ON COLUMN pj_perf_received_apply.item_count IS '实收新签明细条数';
 COMMENT ON COLUMN pj_perf_received_apply.status IS '状态 DRAFT=草稿 SUBMITTED=审批中 APPROVED=已通过 REJECTED=已驳回 CANCELLED=已作废';
 COMMENT ON COLUMN pj_perf_received_apply.current_node IS '当前审批节点 FINANCE=财务审批 DIRECTOR=总监审批';
 COMMENT ON COLUMN pj_perf_received_apply.process_instance_id IS 'Warm-Flow 流程实例ID';
@@ -278,12 +278,12 @@ VALUES (1761600000000000002, '总监审批自动通过超时(小时)', 'panjia.f
 ON CONFLICT (config_id) DO NOTHING;
 
 -- ============================================================
--- 业绩调整审批流程（perf_adjust）
+-- 新签调整审批流程（perf_adjust）
 -- 链路：开始 → 申请人(${initiator}) → 总监审批(role:1761300000000000010) → 结束
 -- 审批通过后由 AdjustWorkflowListener 自动执行业绩调整
 -- ============================================================
 INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000801, 'perf_adjust', '业绩调整审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
+VALUES (1762400000000000801, 'perf_adjust', '新签调整审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
 
 INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
 VALUES (1762400000000000810, 0, 1762400000000000801, 'perf_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');

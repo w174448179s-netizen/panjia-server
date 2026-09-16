@@ -15,6 +15,7 @@ import org.dromara.warm.flow.core.utils.ExpressionUtil;
 import org.dromara.warm.flow.ui.service.NodeExtService;
 import org.dromara.warm.flow.ui.vo.NodeExt;
 import org.dromara.workflow.common.ConditionalOnEnable;
+import org.dromara.workflow.common.enums.AutoApprovalEnum;
 import org.dromara.workflow.common.enums.ButtonPermissionEnum;
 import org.dromara.workflow.common.enums.CopySettingEnum;
 import org.dromara.workflow.common.enums.NodeExtEnum;
@@ -68,6 +69,14 @@ public class FlwNodeExtServiceImpl implements NodeExtService, IFlwNodeExtService
                 "must", false,
                 "multiple", true,
                 "desc", "控制该节点的按钮权限"
+            ),
+            AutoApprovalEnum.class.getSimpleName(),
+            Map.of(
+                "label", "超时自动审批",
+                "type", 1,
+                "must", false,
+                "multiple", false,
+                "desc", "超时自动办理，格式：hours=72,skipType=PASS 或简写 72（默认skipType=PASS）"
             )
         );
     }
@@ -84,7 +93,7 @@ public class FlwNodeExtServiceImpl implements NodeExtService, IFlwNodeExtService
         List<NodeExt> nodeExtList = new ArrayList<>();
         // 构建基础设置页面
         nodeExtList.add(buildNodeExt("wf_basic_tab", "基础设置", 1,
-            List.of(CopySettingEnum.class, VariablesEnum.class)));
+            List.of(CopySettingEnum.class, VariablesEnum.class, AutoApprovalEnum.class)));
         // 构建按钮权限页面
         nodeExtList.add(buildNodeExt("wf_button_tab", "权限", 2,
             List.of(ButtonPermissionEnum.class)));
@@ -136,8 +145,8 @@ public class FlwNodeExtServiceImpl implements NodeExtService, IFlwNodeExtService
         String simpleName = enumClass.getSimpleName();
         NodeExt.ChildNode childNode = new NodeExt.ChildNode();
         Map<String, Object> map = CHILD_NODE_MAP.get(simpleName);
-        // 编码，此json中唯
-        childNode.setCode(simpleName);
+        // 编码，AutoApprovalEnum 在 ext JSON 中的 code 为 "AutoApproval"（与 WorkflowGlobalListener 匹配一致）
+        childNode.setCode("AutoApprovalEnum".equals(simpleName) ? "AutoApproval" : simpleName);
         // label名称
         childNode.setLabel(Convert.toStr(map.get("label")));
         // 1：输入框 2：文本域 3：下拉框 4：选择框 5：用户选择器

@@ -1,7 +1,7 @@
 -- ============================================================================
 -- V100005 业务角色权限全面补全
 -- 梳理所有 @SaCheckPermission 权限，补齐各角色缺失的业务操作权限：
---   总监：结佣审批、业绩调整审批、期间查看、数据导入
+--   总监：结佣审批、新签调整审批、期间查看、数据导入
 --   人事：全部数据导入、员工模板、工作流任务
 --   店长：结佣详情查看、工作流任务
 --   经纪人：工作流任务、结佣详情查看
@@ -49,7 +49,7 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000011813)   -- import:issue:ignore
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- 业绩明细：重新消费
+-- 新签明细：重新消费
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000002612)   -- perf:fact:build
 ON CONFLICT (role_id, menu_id) DO NOTHING;
@@ -78,7 +78,7 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000013, 1761400000000011629)   -- workflow:instance:currentList
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- 业绩明细：查看（人事可查看业绩数据）
+-- 新签明细：查看（人事可查看业绩数据）
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000013, 1761400000000002610),  -- perf:fact:list
 (1761300000000000013, 1761400000000002611)   -- perf:fact:query
@@ -95,7 +95,7 @@ INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000011, 1761400000000011832)   -- commission:consumelog:list
 ON CONFLICT (role_id, menu_id) DO NOTHING;
 
--- 业绩明细：重新消费
+-- 新签明细：重新消费
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000011, 1761400000000002612)   -- perf:fact:build
 ON CONFLICT (role_id, menu_id) DO NOTHING;

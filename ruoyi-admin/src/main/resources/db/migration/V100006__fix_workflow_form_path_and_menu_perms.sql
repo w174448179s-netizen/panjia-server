@@ -40,7 +40,7 @@ UPDATE flow_definition SET form_path = '/performance/apply', update_time = now()
 UPDATE flow_definition SET form_path = '/performance/adjust', update_time = now()
  WHERE flow_code = 'commission_adjust';       -- 结佣调整审批
 UPDATE flow_definition SET form_path = '/performance/adjustment', update_time = now()
- WHERE flow_code = 'perf_adjust';             -- 业绩调整审批
+ WHERE flow_code = 'perf_adjust';             -- 新签调整审批
 UPDATE flow_definition SET form_path = '/performance/received', update_time = now()
  WHERE flow_code = 'perf_received';           -- 实收业绩审批
 UPDATE flow_definition SET form_path = '/payroll/bonus', update_time = now()
@@ -107,7 +107,7 @@ UPDATE sys_menu SET parent_id = 1761400000000002100
 --   无审批权限、发起业绩调整申请。
 --
 -- 实测人事现状（10 项）与差距：
---   [断裂] 业绩明细(2610)      缺父 业绩管理(2200)
+--   [断裂] 新签明细(2610)      缺父 业绩管理(2200)
 --   [断裂] 我发起的(11629)     缺父 我的任务(11618)
 --   [断裂] 我的待办(11619)     缺父 我的任务(11618)
 --   [断裂] 模板管理 4 个按钮   缺父 模板管理(2510)（由第三节修好）
@@ -156,7 +156,7 @@ UPDATE sys_role SET data_scope = '1', update_time = now()
 -- 包括 4 个写操作按钮（上传/重新归一化/归档/忽略问题）。
 -- 且这 4 个页面因缺父目录「数据导入」(2100) 本就渲染不出来 ——
 -- 属于纯孤儿绑定，移除后界面零变化、只收回越权能力。
--- 总监的"查看全部数据"由 业绩明细 / 结佣申请 / 流水追踪 / 工资明细 覆盖。
+-- 总监的"查看全部数据"由 新签明细 / 结佣申请 / 流水追踪 / 工资明细 覆盖。
 -- ----------------------------------------------------------------------------
 DELETE FROM sys_role_menu
  WHERE role_id = 1761300000000000010
@@ -198,7 +198,7 @@ DELETE FROM sys_role_menu
 -- ============================================================================
 -- 七、经纪人权限纠偏
 -- ============================================================================
--- V4.6 §2 经纪人：查看个人业绩明细、个人工资明细；查看本人参与合同的完整
+-- V4.6 §2 经纪人：查看个人新签明细、个人工资明细；查看本人参与合同的完整
 --   业绩构成；对合同内业绩发起异议/业绩调整申请；不能修改任何数据。
 --
 -- 7.1 去掉「结佣申请」(2202)、「结佣调整」(2203) 两个页面 ——
@@ -206,7 +206,7 @@ DELETE FROM sys_role_menu
 --     ⚠ 只解绑菜单页面，**刻意保留**这两个页面下的 F 按钮权限：
 --       commission:apply:query / commission:item:list 被后端
 --       CommissionApplyController / CommissionItemController 的
---       @SaCheckPermission 强制校验，而「业绩明细」页需要它们，
+--       @SaCheckPermission 强制校验，而「新签明细」页需要它们，
 --       一起删会导致经纪人查业绩直接 403。
 -- ----------------------------------------------------------------------------
 DELETE FROM sys_role_menu

@@ -35,6 +35,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.system.api.ConfigService;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -84,6 +85,9 @@ public class CommissionApplicationService {
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
     private static final String ROLE_DIRECTOR = "director";
 
+    /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
+    private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
+
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
     public static final String ROW_STATUS_NONE = "NONE";
 
@@ -95,6 +99,7 @@ public class CommissionApplicationService {
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
     private final ApprovalPort approvalPort;
+    private final ConfigService configService;
 
     // ==================== 发起结佣（按合同） ====================
 
@@ -433,13 +438,24 @@ public class CommissionApplicationService {
 
     /**
      * 更新流程变量 realAmount / expectedAmount（供互斥网关 skip_condition 求值，T-04）。
+     * <p>当配置开关 {@code panjia.commission.skip_finance_when_match} 关闭时，
+     * 故意将 realAmount 设为与 expectedAmount 不同的值，使条件线不命中，
+     * 流程走默认分支进财务人工审批。</p>
      */
     private void updateAmountVariables(CommissionApplication application) {
+        boolean skipEnabled = Boolean.TRUE.equals(
+            configService.getConfigBool(CONFIG_SKIP_FINANCE_WHEN_MATCH));
+        BigDecimal realAmount = application.getTotalAmount() == null
+            ? BigDecimal.ZERO : application.getTotalAmount();
+        BigDecimal expectedAmount = application.getExpectedAmount() == null
+            ? BigDecimal.ZERO : application.getExpectedAmount();
+        if (!skipEnabled) {
+            // 开关关闭：故意写入不相等的值，条件线不命中，走财务节点
+            realAmount = expectedAmount.add(BigDecimal.ONE);
+        }
         Map<String, Object> vars = new HashMap<>(2);
-        vars.put("realAmount",
-            application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount());
-        vars.put("expectedAmount",
-            application.getExpectedAmount() == null ? BigDecimal.ZERO : application.getExpectedAmount());
+        vars.put("realAmount", realAmount);
+        vars.put("expectedAmount", expectedAmount);
         approvalPort.setVariable(BizType.COMMISSION, application.getId(), vars);
     }
 

@@ -11,8 +11,8 @@
 --   * 删除原 2600「业绩管理（运维侧）」中间层（与 V100001 创建的 2200「业绩管理」
 --     顶级菜单重复，构成"数据管理-业绩管理" 与 顶级"业绩管理" 双菜单树）
 --   * 2610/2620/2630 直接挂到顶级 2200 下，与业务侧 2201/2202/2203 并列
---   * 2201「业绩明细」业务侧残留已从 V100001 删除（其 perms=performance:fact:* 后端不存在），
---     2610 为唯一「业绩明细」菜单；业务角色（店长/财务/经纪人）在 V100001 中直接绑 2610/2611
+--   * 2201「新签明细」业务侧残留已从 V100001 删除（其 perms=performance:fact:* 后端不存在），
+--     2610 为唯一「新签明细」菜单；业务角色（店长/财务/经纪人）在 V100001 中直接绑 2610/2611
 --   * 数据管理 (2530) 顶级保留，供未来 import/outbox/people 等运维菜单挂载
 --   * sys_role_menu 中绑定 2600 的行整行删除（2600 不再存在）
 -- =====================================================
@@ -23,13 +23,13 @@ BEGIN;
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002530, '数据管理', 0, 80, 'data', NULL, NULL, 'N', 'Y', 'M', '0', '0', '', 'DataBoard', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '数据管理顶级目录（运维聚合，import/outbox/people 等挂载点）');
 
--- 业绩明细（合同维度：合同→人→明细 树表，新签/结佣双口径）
+-- 新签明细（合同维度：合同→人→明细 树表，新签/结佣双口径）
 -- 统一以合同为视角：总监据此调整/结佣，经纪人可看到同一合同下其他人的分成
 -- perms=perf:fact:list 与 PerformanceFactController 对齐
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002610, '业绩明细', 1761400000000002200, 1, 'manage', 'performance/contract/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'list', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩明细（合同→人→明细 树表）');
+VALUES (1761400000000002610, '新签明细', 1761400000000002200, 1, 'manage', 'performance/contract/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'list', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '新签明细（合同→人→明细 树表）');
 
--- 业绩明细按钮权限
+-- 新签明细按钮权限
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002611, '业绩查询', 1761400000000002610, 1, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:fact:query', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');
 
@@ -40,7 +40,7 @@ VALUES (1761400000000002612, '重新消费', 1761400000000002610, 2, NULL, NULL,
 -- 注：path=adjustment——V100001 的 2203「结佣调整」(commission/adjust/index) 已占用
 --     /performance/adjust，同 path 会让两个菜单点谁都路由到同一个页面
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002620, '业绩调整', 1761400000000002200, 5, 'adjustment', 'performance/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:adjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩调整单管理');
+VALUES (1761400000000002620, '新签调整', 1761400000000002200, 5, 'adjustment', 'performance/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:adjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩调整单管理');
 
 -- 调整单按钮权限
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
@@ -74,7 +74,7 @@ VALUES (1761400000000002633, '反结账', 1761400000000002630, 3, NULL, NULL, NU
 
 -- 实收业绩审批（合同维度，需求文档 §2：导入自动提交 财务→总监；支持 Excel 批量审批）
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002640, '实收明细', 1761400000000002200, 2, 'received', 'performance/received/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:received:list', 'validCode', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '实收业绩明细（合同维度）');
+VALUES (1761400000000002640, '实收明细', 1761400000000002200, 2, 'received', 'performance/received/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:received:list', 'validCode', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '实收新签明细（合同维度）');
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002641, '实收单查询', 1761400000000002640, 1, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:received:query', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '');

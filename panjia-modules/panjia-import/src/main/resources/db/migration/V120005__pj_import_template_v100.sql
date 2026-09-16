@@ -16,7 +16,7 @@ VALUES (
     1761500000000000012,
     'KE_NEW_SIGN',
     'V100',
-    '贝壳·新签业绩明细（应收）',
+    '贝壳·新签新签明细（应收）',
     'KE_NEW_SIGN',
     'EXCEL',
     NULL, 1, 2,
@@ -36,7 +36,7 @@ VALUES (
             {"field":"receivableAmount","rule":"gte:0","message":"应收业绩必须>=0"}
         ]
     }'::jsonb,
-    '贝壳新签业绩明细（应收），用于店长团队提成/保底、总监门店提成。',
+    '贝壳新签新签明细（应收），用于店长团队提成/保底、总监门店提成。',
     'KE_NEW_SIGN_202609',
     true, '2026-09-01'::date, NULL,
     'V1.4 新签模板', 'admin', now(), NULL, now()
@@ -127,7 +127,7 @@ VALUES (
 );
 
 -- 5. 贝壳结佣（KE_SIGNED）V200：贝壳·经纪人业绩结算明细（结佣业绩·应收+实收）
--- 数据来源：经纪人业绩明细表-246555.xlsx 第 4 个 sheet「经纪人业绩结算明细表」
+-- 数据来源：经纪人新签明细表-246555.xlsx 第 4 个 sheet「经纪人业绩结算明细表」
 -- 两行表头：第 1 行分组、第 2 行列名，数据从第 3 行开始（header_row/data_start_row 为 1-based）
 -- 共 30 列 A-AD；引擎消费 10 字段：arriveMonth/bizType/orderNo/contractNo/roleSysNo/roleName/roleType/
 -- shareRatio/currentReceivable/currentReceived；其余 20 列随 rawJson 归档
@@ -182,10 +182,10 @@ INSERT INTO pj_import_template (
             {"field":"currentReceived","rule":"gte:0","message":"当月实收业绩必须>=0"}
         ]
     }'::jsonb,
-    '贝壳·经纪人业绩明细表第 4 个 sheet「经纪人业绩结算明细表」原始导出，直接上传原文件，无需下载模板',
+    '贝壳·经纪人新签明细表第 4 个 sheet「经纪人业绩结算明细表」原始导出，直接上传原文件，无需下载模板',
     'KE_SIGNED_202608',
     true, '2026-09-01'::date, NULL,
-    '对应贝壳·经纪人业绩明细表（两行表头：第1行分组、第2行列名，数据从第3行开始，共30列A-AD）',
+    '对应贝壳·经纪人新签明细表（两行表头：第1行分组、第2行列名，数据从第3行开始，共30列A-AD）',
     'admin', now(), NULL, now()
 ) ON CONFLICT (template_code, template_version) DO NOTHING;
 
