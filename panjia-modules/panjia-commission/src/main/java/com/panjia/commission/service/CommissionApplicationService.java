@@ -132,7 +132,10 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 批量发起：为期间内所有「未发起且有非零实收」的合同逐张建单（草稿，不自动提交）。
+     * 批量发起并提交：为期间内所有「未发起/已驳回且有非零实收」的合同逐张发起并提交进入审批流。
+     * <p>
+     * 已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单的合同跳过；已有 REJECTED 单的合同由 {@link #apply}
+     * 自动识别并重新提交（不新建单）。单合同失败不阻断整批，收集后统一提示。
      */
     @Transactional(rollbackFor = Exception.class)
     public int batchApply(String period, Long deptId, Long operatorId) {
@@ -160,7 +163,7 @@ public class CommissionApplicationService {
                 continue;
             }
             try {
-                doApply(period, contract.getContractNo(), operatorId);
+                apply(period, contract.getContractNo(), operatorId);
                 created++;
             } catch (ServiceException e) {
                 // 单合同失败（如实收未审批 / 员工无法归属）不阻断整批，收集后统一提示
