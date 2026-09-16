@@ -367,6 +367,48 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         return result;
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReceivedBatchApproveResult batchApproveByContract(String period, List<String> contractNos) {
+        if (StringUtils.isBlank(period)) {
+            throw new ServiceException("结算月不能为空");
+        }
+        if (contractNos == null || contractNos.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
+        }
+        ReceivedBatchApproveResult result = new ReceivedBatchApproveResult();
+        for (String contractNo : contractNos) {
+            String trimmed = contractNo == null ? "" : contractNo.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            try {
+                ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
+                    .eq(ReceivedApply::getPeriod, period)
+                    .eq(ReceivedApply::getContractNo, trimmed)
+                    .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
+                    .orderByDesc(ReceivedApply::getId)
+                    .last("LIMIT 1"));
+                if (apply == null) {
+                    result.addFailure(trimmed, "", "无审批中的实收审批单");
+                    continue;
+                }
+                Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
+                if (taskId == null) {
+                    result.addFailure(trimmed, "", "当前无待办任务");
+                    continue;
+                }
+                approve(apply.getId(), "批量审批通过");
+                result.addSuccess();
+            } catch (Exception e) {
+                result.addFailure(trimmed, "", e.getMessage());
+            }
+        }
+        log.info("[实收审批] 合同号批量审批完成：period={}, 成功={}, 失败={}",
+            period, result.getSuccessCount(), result.getFailedRows().size());
+        return result;
+    }
+
     // ==================== 工作流回调 ====================
 
     @Override

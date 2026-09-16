@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
+import com.panjia.commission.dto.BatchApproveByContractRequest;
 import com.panjia.commission.dto.CommissionBatchResult;
 import com.panjia.commission.service.CommissionApplicationService;
 import com.panjia.contracts.port.ApprovalAction;
@@ -147,6 +148,19 @@ public class CommissionApplyController extends BaseController {
     public R<CommissionBatchResult> batchApprove(@RequestParam("file") MultipartFile file,
                                                  @RequestParam("period") String period) {
         return R.ok(applicationService.batchApprove(period, file));
+    }
+
+    /**
+     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点）。
+     *
+     * @param request 批量审批请求（period + contractNos）
+     * @return 成功/失败明细
+     */
+    @SaCheckPermission("commission:apply:batch")
+    @Log(title = "结佣批量审批", businessType = BusinessType.UPDATE)
+    @PostMapping("/batch-approve-by-contract")
+    public R<CommissionBatchResult> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
+        return R.ok(applicationService.batchApproveByContract(request.getPeriod(), request.getContractNos()));
     }
 
     /**

@@ -79,6 +79,17 @@ public interface ReceivedApplyService {
     ReceivedBatchApproveResult batchApprove(String period, MultipartFile file);
 
     /**
+     * 按合同号批量审批（双入口 §三：录入合同号列表，逐单办理当前待办节点）。
+     * <p>与 {@link #batchApprove} 核心逻辑一致，但输入为合同号列表而非 Excel 文件，
+     * 不做金额匹配校验（用户在业务列表页已可见金额）。
+     *
+     * @param period     结算月（必填，防止跨月误批）
+     * @param contractNos 合同号列表
+     * @return 成功/失败明细
+     */
+    ReceivedBatchApproveResult batchApproveByContract(String period, List<String> contractNos);
+
+    /**
      * 工作流回调（ReceivedWorkflowListener 调用）。
      */
     void handleWorkflowEvent(Long applyId, String status, String handler, String message);

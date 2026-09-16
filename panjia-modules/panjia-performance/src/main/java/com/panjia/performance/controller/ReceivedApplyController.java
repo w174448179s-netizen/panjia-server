@@ -3,6 +3,7 @@ package com.panjia.performance.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
+import com.panjia.performance.dto.BatchApproveByContractRequest;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import com.panjia.performance.service.ReceivedApplyService;
@@ -94,6 +95,16 @@ public class ReceivedApplyController extends BaseController {
     public R<ReceivedBatchApproveResult> batchApprove(@RequestParam("file") MultipartFile file,
                                                       @RequestParam("period") String period) {
         return R.ok(receivedApplyService.batchApprove(period, file));
+    }
+
+    /**
+     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点）。
+     */
+    @SaCheckPermission("perf:received:batch")
+    @Log(title = "实收业绩批量审批", businessType = BusinessType.UPDATE)
+    @PostMapping("/batch-approve-by-contract")
+    public R<ReceivedBatchApproveResult> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
+        return R.ok(receivedApplyService.batchApproveByContract(request.getPeriod(), request.getContractNos()));
     }
 
     /**

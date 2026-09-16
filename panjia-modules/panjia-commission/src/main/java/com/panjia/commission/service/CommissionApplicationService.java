@@ -520,6 +520,46 @@ public class CommissionApplicationService {
     }
 
     /**
+     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点，不做金额匹配）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionBatchResult batchApproveByContract(String period, List<String> contractNos) {
+        if (StringUtils.isBlank(period)) {
+            throw new ServiceException("结算月不能为空");
+        }
+        if (contractNos == null || contractNos.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
+        }
+        CommissionBatchResult result = new CommissionBatchResult();
+        for (String contractNo : contractNos) {
+            String trimmed = contractNo == null ? "" : contractNo.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            try {
+                CommissionApplication application = applicationMapper.selectOne(
+                    new LambdaQueryWrapper<CommissionApplication>()
+                        .eq(CommissionApplication::getPeriod, period)
+                        .eq(CommissionApplication::getContractNo, trimmed)
+                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
+                        .orderByDesc(CommissionApplication::getId)
+                        .last("LIMIT 1"));
+                if (application == null) {
+                    result.addFailure(trimmed, "", "无审批中的结佣申请单");
+                    continue;
+                }
+                approve(application.getId());
+                result.addSuccess();
+            } catch (Exception e) {
+                result.addFailure(trimmed, "", e.getMessage());
+            }
+        }
+        log.info("[结佣-合同号批量审批] period={}, 成功={}, 失败={}",
+            period, result.getSuccessCount(), result.getFailedRows().size());
+        return result;
+    }
+
+    /**
      * 作废申请单：DRAFT/SUBMITTED 可作废；运行中的流程先终止（cancel 事件回调冲销明细）。
      */
     @Transactional(rollbackFor = Exception.class)
