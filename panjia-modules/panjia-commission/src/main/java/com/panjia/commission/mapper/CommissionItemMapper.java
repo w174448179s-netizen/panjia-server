@@ -33,7 +33,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ci.performance_fact_id AS "factId",
                ci.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
-               COALESCE(e.employee_name, ci.employee_name) AS "employeeName",
+               e.employee_name AS "employeeName",
                CASE
                    WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
                        CONCAT_WS('-',

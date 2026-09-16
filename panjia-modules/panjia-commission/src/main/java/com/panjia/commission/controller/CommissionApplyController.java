@@ -2,7 +2,6 @@ package com.panjia.commission.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionApplication;
-import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
 import com.panjia.commission.dto.CommissionBatchResult;
@@ -86,9 +85,11 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 发起结佣（合同 + 月）。
+     * 发起结佣（合同 + 月）：一次操作完成发起并提交审批，直接进入审批流。
      * <p>
-     * 幂等：该合同当月已有未完结单时拒绝；已审批/锁定拒绝，变更走调整单。
+     * 幂等：该合同当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
+     * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
+     * 已审批/锁定拒绝，变更走调整单。
      *
      * @param dto 发起请求（period + contractNo）
      * @return 申请单 ID
@@ -115,20 +116,6 @@ public class CommissionApplyController extends BaseController {
         int created = applicationService.batchApply(
             dto.getPeriod(), dto.getDeptId(), LoginHelper.getUserId());
         return R.ok("批量发起完成，共创建 " + created + " 张申请单", created);
-    }
-
-    /**
-     * 提交审批：DRAFT / REJECTED → SUBMITTED。
-     *
-     * @param id 申请单 ID
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:submit")
-    @Log(title = "结佣申请单提交", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/submit")
-    public R<Void> submit(@PathVariable Long id) {
-        applicationService.submit(id, LoginHelper.getUserId());
-        return R.ok();
     }
 
     /**

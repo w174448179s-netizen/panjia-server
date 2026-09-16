@@ -103,14 +103,16 @@ public class CommissionApplicationService {
     // ==================== 发起结佣（按合同） ====================
 
     /**
-     * 发起结佣（拉取该合同当月事实 → 生成明细，§4.1）。
+     * 发起结佣并提交审批（拉取该合同当月事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
      * <p>
+     * 业务人员一次操作即完成发起+提交，无需再单独点"提交"按钮。
+     * 兼容驳回重提：该合同当月已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
      * 新流程前置（§3.2）：合同实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
      *
      * @param period     业绩归属月（结算月 YYYY-MM）
      * @param contractNo 合同号
      * @param operatorId 发起人 ID
-     * @return 申请单（草稿）
+     * @return 申请单（已提交，进入审批流）
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId) {
@@ -118,7 +120,15 @@ public class CommissionApplicationService {
             throw new ServiceException("结算月与合同号不能为空");
         }
         checkPeriodOpen(period, "发起结佣");
-        return doApply(period, contractNo, operatorId);
+        // 驳回单重提：该合同当月已有 REJECTED 单时，直接重新提交，不新建单
+        CommissionApplication rejected = findRejectedApplication(period, contractNo);
+        if (rejected != null) {
+            submit(rejected.getId(), operatorId);
+            return rejected;
+        }
+        CommissionApplication application = doApply(period, contractNo, operatorId);
+        submit(application.getId(), operatorId);
+        return application;
     }
 
     /**
@@ -948,6 +958,19 @@ public class CommissionApplicationService {
             .eq(CommissionApplication::getContractNo, contractNo)
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
+            .orderByDesc(CommissionApplication::getCreateTime)
+            .last("LIMIT 1"));
+    }
+
+    /**
+     * 查询该合同当月最近一张驳回单（REJECTED），供 add 兼容驳回重提使用。
+     * 多张驳回单取最新一张，其余保留不动。
+     */
+    private CommissionApplication findRejectedApplication(String period, String contractNo) {
+        return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getPeriod, period)
+            .eq(CommissionApplication::getContractNo, contractNo)
+            .eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED)
             .orderByDesc(CommissionApplication::getCreateTime)
             .last("LIMIT 1"));
     }
