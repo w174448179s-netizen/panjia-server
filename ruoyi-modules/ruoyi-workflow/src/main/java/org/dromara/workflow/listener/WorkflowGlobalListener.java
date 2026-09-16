@@ -2,6 +2,7 @@ package org.dromara.workflow.listener;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.convert.Convert;
+import cn.hutool.core.lang.Dict;
 import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.core.util.ObjectUtil;
@@ -11,6 +12,7 @@ import org.dromara.common.core.enums.BusinessStatusEnum;
 import org.dromara.common.core.utils.SpringUtils;
 import org.dromara.common.core.utils.StreamUtils;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.system.api.UserService;
 import org.dromara.warm.flow.core.FlowEngine;
 import org.dromara.warm.flow.core.dto.FlowParams;
@@ -21,8 +23,12 @@ import org.dromara.warm.flow.core.listener.GlobalListener;
 import org.dromara.warm.flow.core.listener.ListenerVariable;
 import org.dromara.workflow.common.ConditionalOnEnable;
 import org.dromara.workflow.common.constant.FlowConstant;
+import org.dromara.workflow.common.enums.MessageTypeEnum;
 import org.dromara.workflow.common.enums.TaskStatusEnum;
+import org.dromara.workflow.domain.bo.BackProcessBo;
+import org.dromara.workflow.domain.bo.CompleteTaskBo;
 import org.dromara.workflow.domain.bo.FlowCopyBo;
+import org.dromara.workflow.domain.vo.FlowTaskVo;
 import org.dromara.workflow.domain.vo.NodeExtVo;
 import org.dromara.workflow.event.WorkflowCopyEvent;
 import org.dromara.workflow.event.WorkflowResultMessageEvent;
@@ -32,8 +38,11 @@ import org.dromara.workflow.service.IFlwCommonService;
 import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwNodeExtService;
 import org.dromara.workflow.service.IFlwTaskService;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,13 +67,159 @@ public class WorkflowGlobalListener implements GlobalListener {
     private final UserService userService;
 
     /**
-     * 任务创建回调，当前预留扩展。
+     * 任务创建回调：超时自动审批调度（T-03）。
+     * <p>
+     * 设计依据：《审批集成设计说明 V1.0》§六 坑①——节点创建监听器启动定时器，
+     * 任务滞留超 {@code ext.autoApproval} 小时后系统自动办理。
+     * <ul>
+     *   <li>读取节点 {@code ext} 中 {@code code = "AutoApproval"} 的项；
+     *     value 格式 {@code hours=72,skipType=PASS} 或简写 {@code 72}（仅 hours，skipType 默认 PASS）；</li>
+     *   <li>未配置 autoApproval / hours ≤ 0 时不启动定时器（与设计文档 §三 #2「超时未启用时仅提醒」语义一致）；</li>
+     *   <li>应用关停时定时器丢失，由 {@link org.dromara.workflow.job.DirectorTimeoutJob} 全局扫描兜底；</li>
+     *   <li>多节点部署时只有一个节点收到 create 回调并启动定时器，与设计文档「创建监听器」语义一致。</li>
+     * </ul>
+     * <p>
+     * 配置示例（节点 ext JSON）：
+     * <pre>{@code
+     * [{"code":"AutoApproval","value":"hours=72,skipType=PASS"}]
+     * }</pre>
      *
      * @param listenerVariable 监听器变量
      */
     @Override
     public void create(ListenerVariable listenerVariable) {
+        Task task = listenerVariable.getTask();
+        if (task == null || task.getId() == null) {
+            return;
+        }
+        String ext = listenerVariable.getNode() != null ? listenerVariable.getNode().getExt() : null;
+        if (StringUtils.isBlank(ext)) {
+            return;
+        }
+        // 解析 ext JSON 找 code = "AutoApproval" 的项
+        List<Dict> extMap = JsonUtils.parseArrayMap(ext);
+        if (CollUtil.isEmpty(extMap)) {
+            return;
+        }
+        for (Dict item : extMap) {
+            if (!"AutoApproval".equals(item.getStr("code"))) {
+                continue;
+            }
+            String value = item.getStr("value");
+            if (StringUtils.isBlank(value)) {
+                continue;
+            }
+            AutoApprovalConfig cfg = parseAutoApproval(value);
+            if (cfg == null || cfg.hours <= 0) {
+                continue;
+            }
+            scheduleAutoApproval(task.getId(), cfg);
+            log.info("[工作流-超时自动审批] 节点创建监听器注册定时器：taskId={}, nodeCode={}, hours={}, skipType={}",
+                task.getId(), task.getNodeCode(), cfg.hours, cfg.skipType);
+        }
+    }
 
+    /**
+     * 解析 AutoApproval value 字符串。
+     * <p>支持两种格式：
+     * <ul>
+     *   <li>{@code hours=72,skipType=PASS} 完整格式</li>
+     *   <li>{@code 72} 简写（仅 hours，skipType 默认 PASS）</li>
+     * </ul>
+     */
+    private AutoApprovalConfig parseAutoApproval(String value) {
+        String trimmed = value.trim();
+        // 简写：纯数字
+        if (trimmed.matches("\\d+(\\.\\d+)?")) {
+            return new AutoApprovalConfig(Double.parseDouble(trimmed), "PASS");
+        }
+        // 完整格式：hours=72,skipType=PASS
+        String hours = null;
+        String skipType = "PASS";
+        for (String kv : trimmed.split(",")) {
+            String[] pair = kv.trim().split("=", 2);
+            if (pair.length != 2) {
+                continue;
+            }
+            String k = pair[0].trim();
+            String v = pair[1].trim();
+            if ("hours".equalsIgnoreCase(k)) {
+                hours = v;
+            } else if ("skipType".equalsIgnoreCase(k)) {
+                skipType = v.toUpperCase();
+            }
+        }
+        if (hours == null || !hours.matches("\\d+(\\.\\d+)?")) {
+            return null;
+        }
+        return new AutoApprovalConfig(Double.parseDouble(hours), skipType);
+    }
+
+    /**
+     * 注册超时自动审批定时任务。
+     * <p>用 Spring {@link TaskScheduler} 延时调度，到点检查任务仍未办理则系统自动办理。
+     * 应用关停时定时器丢失，{@link org.dromara.workflow.job.DirectorTimeoutJob} 兜底。
+     */
+    private void scheduleAutoApproval(Long taskId, AutoApprovalConfig cfg) {
+        try {
+            TaskScheduler scheduler = SpringUtils.getBean(TaskScheduler.class);
+            Instant triggerTime = Instant.now().plusSeconds((long) (cfg.hours * 3600));
+            scheduler.schedule(() -> {
+                try {
+                    executeAutoApproval(taskId, cfg);
+                } catch (Exception e) {
+                    log.warn("[工作流-超时自动审批] 定时任务执行失败：taskId={}, reason={}",
+                        taskId, e.getMessage());
+                }
+            }, triggerTime);
+        } catch (Exception e) {
+            // TaskScheduler Bean 缺失或调度失败，由 DirectorTimeoutJob 兜底
+            log.warn("[工作流-超时自动审批] 注册定时器失败，由 DirectorTimeoutJob 兜底：taskId={}, reason={}",
+                taskId, e.getMessage());
+        }
+    }
+
+    /**
+     * 执行超时自动审批：检查任务仍待办 + 按 skipType 分流 PASS/REJECT。
+     */
+    private void executeAutoApproval(Long taskId, AutoApprovalConfig cfg) {
+        FlowTaskVo task = flwTaskService.selectById(taskId);
+        if (task == null) {
+            // 任务已办理或不复存在，跳过
+            log.info("[工作流-超时自动审批] 任务已办理或不复存在，跳过：taskId={}", taskId);
+            return;
+        }
+        String message = "超时自动审批 " + cfg.hours + " 小时，系统自动通过";
+        if ("REJECT".equalsIgnoreCase(cfg.skipType)) {
+            message = "超时自动驳回 " + cfg.hours + " 小时，系统自动驳回";
+            BackProcessBo bo = new BackProcessBo();
+            bo.setTaskId(taskId);
+            bo.setMessage(message);
+            bo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
+            flwTaskService.backProcess(bo);
+            log.info("[工作流-超时自动审批] 超时自动驳回执行：taskId={}, nodeCode={}",
+                taskId, task.getNodeCode());
+            return;
+        }
+        // 默认 PASS
+        CompleteTaskBo taskBo = new CompleteTaskBo();
+        taskBo.setTaskId(taskId);
+        taskBo.setMessage(message);
+        taskBo.setMessageType(Collections.singletonList(MessageTypeEnum.SYSTEM_MESSAGE.getCode()));
+        taskBo.getVariables().put("ignore", true);
+        flwTaskService.completeTask(taskBo);
+        log.info("[工作流-超时自动审批] 超时自动通过执行：taskId={}, nodeCode={}",
+            taskId, task.getNodeCode());
+    }
+
+    /** AutoApproval 配置项。 */
+    private static class AutoApprovalConfig {
+        final double hours;
+        final String skipType;
+        AutoApprovalConfig(double hours, String skipType) {
+            this.hours = hours;
+            this.skipType = skipType;
+        }
     }
 
     /**

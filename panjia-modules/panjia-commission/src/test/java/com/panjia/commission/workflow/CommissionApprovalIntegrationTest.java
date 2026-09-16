@@ -143,31 +143,33 @@ class CommissionApprovalIntegrationTest {
     }
 
     /**
-     * S16-6：总监超时自动通过（集成测试）。
-     * <p>{@link org.dromara.workflow.job.DirectorTimeoutJob} 每轮扫描总监节点待办，
-     * 超时阈值 {@code panjia.flow.director_timeout_hours} 由 sys_config 控制。
-     * 行为级验证需 mock {@code ConfigService} + 时间推进 + 断言 message 含「超时自动审批」，
-     * 当前缺 Mockito + 集成基座，标注 {@link Disabled}。
-     * <p>设计文档要求改为「创建监听器」（T-03，P2 可选，待产品批准），未批准前定时任务路径等价。
+     * S16-6：总监超时自动通过（落地于 ruoyi-workflow 模块的 WorkflowGlobalListener.create）。
+     * <p>T-03 落地：节点创建监听器注册 Spring {@code TaskScheduler} 延时任务，到点系统自动办理。
+     * 行为级集成测试（mock 时间推进 + 断言 message 含「超时自动审批」）依赖 Mockito + 基座，
+     * 静态契约校验见 {@code org.dromara.workflow.listener.WorkflowGlobalListenerTest}
+     * （ruoyi-workflow 模块）。
      */
     @Test
-    @Disabled("待 Mockito + 集成测试基座建立后补齐超时自动审批验证；创建监听器路径依赖 T-03")
+    @Disabled("行为级测试待 Mockito + 集成测试基座；静态契约校验已落地于 WorkflowGlobalListenerTest")
     void S16_6_directorTimeoutAutoApprove() {
         // 占位：行为级测试骨架
-        // 1. mock configService.getConfigInt 返回 24（小时）
-        // 2. mock workflowService.autoCompleteTimeoutTasks 返回 done=1
-        // 3. 调 directorTimeoutJob.autoApproveTimeoutDirectorTasks()
-        // 4. 断言 message 含「总监审批超时 24 小时，系统自动通过」
+        // 1. mock ConfigService.getConfigInt 返回 24（hours）
+        // 2. mock TaskScheduler.schedule 捕获 Runnable
+        // 3. 触发 Runnable（模拟到点）
+        // 4. 断言 message 含「超时自动审批 24.0 小时，系统自动通过」
     }
 
     /**
-     * S16-7：超时用创建监听器（依赖 T-03）。
-     * <p>设计文档要求总监超时改用「流程实例创建监听器」启动定时任务，按 {@code autoApproval_skipType} 执行。
-     * T-03（P2 可选）未批准前标注 {@link Disabled}。
+     * S16-7：超时用创建监听器（T-03 已落地）。
+     * <p>静态契约校验见 {@code org.dromara.workflow.listener.WorkflowGlobalListenerTest}：
+     * <ul>
+     *   <li>S16_7_executeAutoApprovalDispatchesBySkipType：断言 PASS/REJECT 分流；</li>
+     *   <li>S16_6_directorTimeoutJobStillExistsAsFallback：断言 DirectorTimeoutJob 兜底仍存在。</li>
+     * </ul>
      */
     @Test
-    @Disabled("待 T-03 总监超时审批改用创建监听器实现")
+    @Disabled("行为级测试待 Mockito + 集成测试基座；静态契约校验已落地于 WorkflowGlobalListenerTest")
     void S16_7_timeoutUsesCreationListener() {
-        // 占位：T-03 落地后补齐
+        // 占位：T-03 已落地，行为级测试待基座补齐
     }
 }
