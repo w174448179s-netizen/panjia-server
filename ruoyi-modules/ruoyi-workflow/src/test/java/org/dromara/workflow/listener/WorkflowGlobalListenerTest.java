@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -93,16 +94,44 @@ class WorkflowGlobalListenerTest {
     }
 
     /**
-     * S16-6 / S16-7 共同前置：DirectorTimeoutJob 兜底仍存在。
-     * <p>设计文档 §2.3 要求：监听器为主、定时任务为辅。两者并存，监听器丢失时兜底。
+     * S16-6 / S16-7 共同前置：启动重扫补偿（替代原 DirectorTimeoutJob 兜底）。
+     * <p>用户决策（2026-09-16）：删除 DirectorTimeoutJob 每 10 分钟轮询兜底，
+     * 改用 WorkflowGlobalListener.rescheduleAutoApprovalOnStartup @PostConstruct
+     * 启动时一次性扫描所有未办理任务，按剩余时长重新注册 TaskScheduler 定时器，
+     * 已超时的立即触发。解决应用重启丢定时器问题。
      */
     @Test
-    void S16_6_directorTimeoutJobStillExistsAsFallback() throws IOException {
+    void S16_6_startupRescheduleCompensatesLostTimers() throws IOException {
+        String content = read();
+
+        // 必须有 @PostConstruct 启动重扫方法
+        assertTrue(content.contains("@PostConstruct"),
+            "S16-6 违规：缺少 @PostConstruct，无启动重扫补偿入口");
+        assertTrue(content.contains("rescheduleAutoApprovalOnStartup("),
+            "S16-6 违规：缺少 rescheduleAutoApprovalOnStartup 方法");
+
+        // 必须调 pageByAllTaskWait 拉所有未办理任务
+        assertTrue(content.contains("flwTaskService.pageByAllTaskWait("),
+            "S16-6 违规：启动重扫未调 pageByAllTaskWait，无法拉取未办理任务");
+
+        // 必须按剩余时长重新注册（已超时立即触发）
+        assertTrue(content.contains("remainingSeconds"),
+            "S16-6 违规：缺少 remainingSeconds 计算，无法按剩余时长补偿");
+        assertTrue(content.contains("remainingSeconds <= 0"),
+            "S16-6 违规：缺少已超时立即触发分支，超时任务不会被立即执行");
+
+        // 必须用 Duration 计算已耗时
+        assertTrue(content.contains("Duration.between("),
+            "S16-6 违规：未用 Duration.between 计算已耗时，无法精确补偿");
+    }
+
+    /**
+     * S16-6 兜底机制已切换：DirectorTimeoutJob 类应已删除。
+     */
+    @Test
+    void S16_6_directorTimeoutJobClassDeleted() throws IOException {
         Path jobFile = Paths.get("src/main/java/org/dromara/workflow/job/DirectorTimeoutJob.java");
-        assertTrue(Files.exists(jobFile),
-            "S16-6 违规：DirectorTimeoutJob 兜底类被删除，定时器丢失时无补救路径");
-        String content = Files.readString(jobFile, StandardCharsets.UTF_8);
-        assertTrue(content.contains("autoCompleteTimeoutTasks"),
-            "S16-6 违规：DirectorTimeoutJob 兜底未调 autoCompleteTimeoutTasks，丢失兜底能力");
+        assertFalse(Files.exists(jobFile),
+            "S16-6 违规：DirectorTimeoutJob.java 仍存在，应已删除切换为启动重扫补偿");
     }
 }
