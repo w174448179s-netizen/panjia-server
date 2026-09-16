@@ -78,9 +78,10 @@ class ApprovalIntegrationTest {
     @Test
     void S16_3_detailEntryMustNotBypassAuthForAllRoles() throws IOException {
         String content = Files.readString(RECEIVED_APPLY_SERVICE, StandardCharsets.UTF_8);
-        String signature = "public void approve(Long id, String message)";
+        // 双入口改造后：主方法签名是 approve(Long id, ApprovalAction action, String comment)
+        String signature = "public void approve(Long id, ApprovalAction action, String comment)";
         int sigIdx = content.indexOf(signature);
-        assertTrue(sigIdx > 0, "未找到 approve(Long id, String message) 方法");
+        assertTrue(sigIdx > 0, "未找到 approve(Long id, ApprovalAction action, String comment) 方法");
         // 找方法体起始 { 和结束 }（紧邻的 \n    }）
         int braceStart = content.indexOf('{', sigIdx);
         int braceEnd = content.indexOf("\n    }", braceStart);

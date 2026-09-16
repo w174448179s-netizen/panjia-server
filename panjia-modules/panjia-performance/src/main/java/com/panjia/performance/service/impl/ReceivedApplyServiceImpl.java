@@ -196,7 +196,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void approve(Long id, String message) {
+    public void approve(Long id, ApprovalAction action, String comment) {
         ReceivedApply apply = getAndCheck(id);
         if (apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             throw new ServiceException("仅审批中的单据可审批（当前：" + apply.getStatus().getDesc() + "）");
@@ -207,9 +207,16 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         }
         // 以当前登录人身份办理：不设置 ignore，由流程引擎按 flow_user 中的本节点办理人判权。
         // 财务在总监节点、或任何非本节点办理人调用，都会被引擎拒绝（不能再用 ignore 绕过）。
-        String comment = StringUtils.isBlank(message) ? "审批通过" : message;
-        completeTaskAsLoginUser(id, comment);
+        String defaultComment = action == ApprovalAction.PASS ? "审批通过" : "审批驳回";
+        String message = StringUtils.isBlank(comment) ? defaultComment : comment;
+        completeTaskAsLoginUser(id, action, message);
         refreshCurrentNode(apply);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void approve(Long id, String message) {
+        approve(id, ApprovalAction.PASS, message);
     }
 
     /**
@@ -217,15 +224,15 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
      * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
      */
-    private void completeTaskAsLoginUser(Long id, String message) {
+    private void completeTaskAsLoginUser(Long id, ApprovalAction action, String message) {
         // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
         // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
         if (LoginHelper.isSuperAdmin()) {
-            approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, message);
+            approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, action, message);
             return;
         }
         try {
-            approvalPort.complete(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, message);
+            approvalPort.complete(BizType.REAL_CONFIRM, id, action, message);
         } catch (RuntimeException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
             if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {

@@ -1,5 +1,6 @@
 package com.panjia.performance.service;
 
+import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.dto.ReceivedBatchApproveResult;
@@ -44,7 +45,17 @@ public interface ReceivedApplyService {
     ReceivedApply resubmit(Long id);
 
     /**
-     * 审批通过（办理当前待办节点：财务节点 → 总监；总监节点 → 完成）。
+     * 业务明细直接审批（双入口 §三）：支持 PASS 通过 / REJECT 驳回。
+     * <p>与「我的待办」共用同一底层 completeTask，留痕一致；服务端鉴权由流程引擎原生权限校验保障。
+     *
+     * @param id      审批单 ID
+     * @param action  审批动作（PASS / REJECT）
+     * @param comment 审批意见（可选，留空时按动作给默认值）
+     */
+    void approve(Long id, ApprovalAction action, String comment);
+
+    /**
+     * 便捷方法：默认 PASS 通过。
      *
      * @param id      审批单 ID
      * @param message 审批意见

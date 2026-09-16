@@ -6,6 +6,7 @@ import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
 import com.panjia.commission.dto.CommissionBatchResult;
 import com.panjia.commission.service.CommissionApplicationService;
+import com.panjia.contracts.port.ApprovalAction;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -159,6 +160,29 @@ public class CommissionApplyController extends BaseController {
     @PostMapping("/{id}/cancel")
     public R<Void> cancel(@PathVariable Long id) {
         applicationService.cancel(id, LoginHelper.getUserId());
+        return R.ok();
+    }
+
+    /**
+     * 业务明细直接审批（双入口 §三）：从结佣申请单详情页直接审批，与「我的待办」共用同一审批服务。
+     * <p>设计文档 §3.3 三条底线：
+     * <ol>
+     *   <li>调用同一 {@link CommissionApplicationService#approve} 方法，留痕一致；</li>
+     *   <li>服务端鉴权由 {@code completeTaskAsLoginUser} 走流程引擎原生权限校验；</li>
+     *   <li>非当前节点审批人 → 服务端拒绝（前端隐藏按钮 ≠ 安全）。</li>
+     * </ol>
+     *
+     * @param id     申请单 ID
+     * @param action 审批动作（PASS / REJECT）
+     * @param comment 审批意见（可选，留空时按节点+动作给默认值）
+     */
+    @SaCheckPermission("commission:apply:approve")
+    @Log(title = "结佣申请单审批", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/approve")
+    public R<Void> approve(@PathVariable Long id,
+                           @RequestParam ApprovalAction action,
+                           @RequestParam(required = false) String comment) {
+        applicationService.approve(id, action, comment);
         return R.ok();
     }
 }

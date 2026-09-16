@@ -382,7 +382,7 @@ public class CommissionApplicationService {
             if (directorTask == null) {
                 throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
             }
-            completeTaskAsLoginUser(applicationId, "总监发起，系统自动审批");
+            completeTaskAsLoginUser(applicationId, ApprovalAction.PASS, "总监发起，系统自动审批");
         }
         refreshCurrentNode(application);
         log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
@@ -398,7 +398,7 @@ public class CommissionApplicationService {
      * </p>
      */
     @Transactional(rollbackFor = Exception.class)
-    public void approve(Long applicationId) {
+    public void approve(Long applicationId, ApprovalAction action, String comment) {
         CommissionApplication application = requireSubmitted(applicationId);
         String node = approvalPort.currentNodeCode(BizType.COMMISSION, applicationId);
         if (!NODE_DIRECTOR.equals(node) && !NODE_FINANCE.equals(node)) {
@@ -408,13 +408,27 @@ public class CommissionApplicationService {
         if (taskId == null) {
             throw new ServiceException("当前无待办任务");
         }
-        // T-04：总监办理前更新流程变量 realAmount/expectedAmount 为最新值，
-        // 互斥网关按 eq@@${realAmount}@@${expectedAmount} 求值决定是否跳过财务
-        if (NODE_DIRECTOR.equals(node)) {
+        // T-04：总监 PASS 前更新流程变量 realAmount/expectedAmount 为最新值，
+        // 互斥网关按 eq@@${realAmount}@@${expectedAmount} 求值决定是否跳过财务。
+        // REJECT 不触发互斥网关，无需更新金额变量。
+        if (NODE_DIRECTOR.equals(node) && action == ApprovalAction.PASS) {
             updateAmountVariables(application);
         }
-        completeTaskAsLoginUser(applicationId, NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过");
+        String defaultComment = action == ApprovalAction.PASS
+            ? (NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过")
+            : (NODE_DIRECTOR.equals(node) ? "总监审批驳回" : "财务审批驳回");
+        String message = StringUtils.isBlank(comment) ? defaultComment : comment;
+        completeTaskAsLoginUser(applicationId, action, message);
         refreshCurrentNode(application);
+    }
+
+    /**
+     * 便捷方法：默认 PASS 通过，无意见。
+     * <p>批量审批 / 内部自动审批场景使用，保持向后兼容。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void approve(Long applicationId) {
+        approve(applicationId, ApprovalAction.PASS, null);
     }
 
     /**
@@ -434,15 +448,15 @@ public class CommissionApplicationService {
      * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
      * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
      */
-    private void completeTaskAsLoginUser(Long applicationId, String message) {
+    private void completeTaskAsLoginUser(Long applicationId, ApprovalAction action, String message) {
         // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
         // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
         if (LoginHelper.isSuperAdmin()) {
-            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS, message);
+            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, action, message);
             return;
         }
         try {
-            approvalPort.complete(BizType.COMMISSION, applicationId, ApprovalAction.PASS, message);
+            approvalPort.complete(BizType.COMMISSION, applicationId, action, message);
         } catch (RuntimeException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
             if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {

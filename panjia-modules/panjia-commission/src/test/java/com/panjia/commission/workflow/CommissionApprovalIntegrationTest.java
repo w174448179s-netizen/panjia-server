@@ -92,9 +92,9 @@ class CommissionApprovalIntegrationTest {
     @Test
     void S16_8_approveUpdatesAmountVariablesBeforeDirectorComplete() throws IOException {
         String content = read(APPLICATION_SERVICE);
-        // approve 方法存在
-        int approveIdx = content.indexOf("public void approve(Long applicationId)");
-        assertTrue(approveIdx > 0, "未找到 approve(Long applicationId) 方法");
+        // 双入口改造后：主方法签名是 approve(Long applicationId, ApprovalAction action, String comment)
+        int approveIdx = content.indexOf("public void approve(Long applicationId, ApprovalAction action, String comment)");
+        assertTrue(approveIdx > 0, "未找到 approve(Long applicationId, ApprovalAction action, String comment) 方法");
         // 取 approve 方法体（到下一个 public）
         int nextPublic = content.indexOf("\n    public ", approveIdx + 10);
         String body = nextPublic > 0
