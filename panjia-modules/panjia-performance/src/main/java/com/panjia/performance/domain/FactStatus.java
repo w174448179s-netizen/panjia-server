@@ -3,10 +3,14 @@ package com.panjia.performance.domain;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 业绩事实状态枚举（两态状态机）。
+ * 业绩事实状态枚举（三态状态机）。
  * <p>
- * 状态流转：{@link #ACTIVE} → {@link #REVERSED}（冲销）；
- * {@link #REVERSED} 为终态，不可再流转。
+ * 状态流转：
+ * <ul>
+ *   <li>{@link #ACTIVE} → {@link #REVERSED}（冲销，终态）</li>
+ *   <li>{@link #ACTIVE} ↔ {@link #VOIDED}（总监作废/恢复，可逆）</li>
+ * </ul>
+ * {@link #REVERSED} 为终态，不可再流转；{@link #VOIDED} 可恢复回 {@link #ACTIVE}。
  * <p>
  * 存储约定：DB 字段 fact_status VARCHAR(16) 存 code（code 固定取枚举名），
  * MyBatis-Plus 默认按枚举 name() 映射；Jackson 经 {@link JsonValue @JsonValue} 输出 code。
@@ -15,6 +19,9 @@ public enum FactStatus {
 
     /** 有效 */
     ACTIVE("有效"),
+
+    /** 已作废（总监可逆操作，不参与算薪/结佣，可恢复为 ACTIVE） */
+    VOIDED("已作废"),
 
     /** 已冲销（终态） */
     REVERSED("已冲销");
@@ -70,7 +77,12 @@ public enum FactStatus {
     /**
      * 判断是否可流转到目标状态。
      * <p>
-     * 合法流转：ACTIVE → REVERSED（冲销）；
+     * 合法流转：
+     * <ul>
+     *   <li>ACTIVE → REVERSED（冲销，终态）</li>
+     *   <li>ACTIVE → VOIDED（总监作废）</li>
+     *   <li>VOIDED → ACTIVE（总监恢复）</li>
+     * </ul>
      * 终态不可再流转，不允许自流转。
      *
      * @param target 目标状态
@@ -81,7 +93,10 @@ public enum FactStatus {
             return false;
         }
         if (this == ACTIVE) {
-            return target == REVERSED;
+            return target == REVERSED || target == VOIDED;
+        }
+        if (this == VOIDED) {
+            return target == ACTIVE;
         }
         return false;
     }
@@ -96,7 +111,7 @@ public enum FactStatus {
     }
 
     /**
-     * 是否进行中（ACTIVE：有效，尚未冲销）。
+     * 是否进行中（ACTIVE：有效，尚未冲销/作废）。
      *
      * @return true 表示进行中
      */

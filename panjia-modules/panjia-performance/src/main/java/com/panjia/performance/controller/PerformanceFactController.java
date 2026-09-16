@@ -8,6 +8,7 @@ import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.service.PerformanceEngine;
+import com.panjia.performance.service.PerformanceFactVoidService;
 import com.panjia.performance.service.PerformanceQueryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +45,7 @@ public class PerformanceFactController extends BaseController {
 
     private final PerformanceQueryService queryService;
     private final PerformanceEngine performanceEngine;
+    private final PerformanceFactVoidService voidService;
 
     /**
      * 分页查询业绩事实列表。
@@ -220,5 +222,41 @@ public class PerformanceFactController extends BaseController {
     @GetMapping("/manage/periods")
     public R<java.util.List<String>> managePeriods() {
         return R.ok(queryService.listManagePeriods());
+    }
+
+    /**
+     * 作废业绩事实（ACTIVE → VOIDED）。
+     * <p>
+     * 作废后该笔业绩不参与算薪/结佣，可由总监恢复。
+     * 仅 ACTIVE 状态可作废，封账后禁止操作。
+     *
+     * @param id     事实 ID
+     * @param reason 作废原因
+     * @return 操作结果
+     */
+    @SaCheckPermission("perf:fact:void")
+    @Log(title = "业绩作废", businessType = BusinessType.UPDATE)
+    @PostMapping("/void/{id}")
+    public R<Void> voidFact(@PathVariable Long id, @RequestParam String reason) {
+        voidService.voidFact(id, reason);
+        return R.ok();
+    }
+
+    /**
+     * 恢复业绩事实（VOIDED → ACTIVE），period 改为当前月。
+     * <p>
+     * 恢复后业绩落入当月算薪，算作当月新签。
+     * 仅 VOIDED 状态可恢复，当前期间封账后禁止恢复。
+     *
+     * @param id     事实 ID
+     * @param reason 恢复原因
+     * @return 操作结果
+     */
+    @SaCheckPermission("perf:fact:void")
+    @Log(title = "业绩恢复", businessType = BusinessType.UPDATE)
+    @PostMapping("/restore/{id}")
+    public R<Void> restoreFact(@PathVariable Long id, @RequestParam String reason) {
+        voidService.restoreFact(id, reason);
+        return R.ok();
     }
 }

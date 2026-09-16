@@ -26,7 +26,10 @@ public enum ReversedReason {
     CANCEL("撤销导入"),
 
     /** 整批撤销（导入归属月选错，整批作废重导） */
-    BATCH_REVOKE("整批撤销");
+    BATCH_REVOKE("整批撤销"),
+
+    /** 总监作废（可逆，不参与当月算薪） */
+    DIRECTOR_VOID("总监作废");
 
     /** 冲销原因码（DB / JSON 存储值，与枚举名一致） */
     private final String code;
