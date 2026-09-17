@@ -21,14 +21,26 @@ public enum FactType {
     /** 是否缴社保 */
     SOCIAL("社保"),
 
+    /** 社保金额（自定义；null=用全局默认算法，仅 SOCIAL=true 时生效） */
+    SOCIAL_FEE("社保金额"),
+
     /** 是否缴公积金 */
     HOUSING("公积金"),
+
+    /** 公积金金额（自定义；null=用全局默认，仅 HOUSING=true 时生效） */
+    HOUSING_FUND("公积金金额"),
 
     /** 是否买商业保险 */
     COMMERCIAL("商业保险"),
 
+    /** 商业保险金额（自定义；null=用全局默认 21 元，仅 COMMERCIAL=true 时生效） */
+    COMMERCIAL_FEE("商业保险金额"),
+
     /** 是否住宿舍 */
     DORMITORY("宿舍"),
+
+    /** 宿舍费金额（自定义；null=用全局默认，仅 DORMITORY=true 时生效） */
+    DORMITORY_FEE("宿舍费金额"),
 
     /** 是否兼职 */
     PARTTIME("兼职"),

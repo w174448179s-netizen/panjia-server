@@ -3,6 +3,7 @@ package com.panjia.contracts.snapshot;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 
@@ -65,17 +66,29 @@ public class EmployeeSnapshot implements Serializable {
 
     // ==================== 社保（只有开关/标签，金额与比例在规则侧） ====================
 
-    /** 是否参保（SOCIAL 事实） */
+    /** 是否参保（SOCIAL 事实开关） */
     private Boolean socialInsured;
 
-    /** 是否缴公积金（HOUSING 事实；员工自缴金额不在人身上，归规则/导入） */
+    /** 社保金额（SOCIAL_FEE 事实；null=用全局默认算法，仅 socialInsured=true 时生效） */
+    private BigDecimal socialFee;
+
+    /** 是否缴公积金（HOUSING 事实开关） */
     private Boolean housingInsured;
 
-    /** 是否买商业保险（COMMERCIAL 事实；21 元标准在规则侧） */
+    /** 公积金金额（HOUSING_FUND 事实；null=用全局默认，仅 housingInsured=true 时生效） */
+    private BigDecimal housingFund;
+
+    /** 是否买商业保险（COMMERCIAL 事实开关） */
     private Boolean commercialInsured;
 
-    /** 是否住宿舍（DORMITORY 事实；管理费金额在规则侧） */
+    /** 商业保险金额（COMMERCIAL_FEE 事实；null=用全局默认 21 元，仅 commercialInsured=true 时生效） */
+    private BigDecimal commercialFee;
+
+    /** 是否住宿舍（DORMITORY 事实开关） */
     private Boolean dormitory;
+
+    /** 宿舍费金额（DORMITORY_FEE 事实；null=用全局默认，仅 dormitory=true 时生效） */
+    private BigDecimal dormitoryFee;
 
     /**
      * 参保标签（普通 / HIGH，触发 payroll policy_rule 三级覆盖中的"标签级"规则）。

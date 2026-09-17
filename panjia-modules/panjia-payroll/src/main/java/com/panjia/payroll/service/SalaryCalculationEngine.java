@@ -192,19 +192,21 @@ public class SalaryCalculationEngine {
 
             // 社保
             // 档位与职级无关、按人核定（2026-08 实测：同为 A2 有 0/70%/100%/固定档多种），
-            // 故支持三级取值：员工固定额 employeeOverride.socialFee > 职级固定额 socialFixedFee > 职级比例 socialSettlementRatio × baseSocial
+            // 优先取员工级自定义金额（SalaryFact SOCIAL_FEE），null 则走三级取值：
+            // 职级固定额 socialFixedFee > 职级比例 socialSettlementRatio × baseSocial
             BigDecimal socialFee = BigDecimal.ZERO;
             BigDecimal employerSocial = BigDecimal.ZERO;
             if (!parttime && Boolean.TRUE.equals(emp.getSocialInsured())) {
-                BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
-                JsonNode empSocialOverride = snap.employeeOverride(emp.getEmployeeCode());
-                if (empSocialOverride.has("socialFee")) {
-                    socialFee = bd(empSocialOverride.path("socialFee").asText("0"));
+                if (emp.getSocialFee() != null) {
+                    socialFee = emp.getSocialFee();
+                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
                 } else if (policy.path("socialFixedFee").has(level)) {
+                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     socialFee = bd(policy.path("socialFixedFee").path(level).asText("0"));
                     employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
                 } else {
+                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
                     socialFee = MoneyUtil.round2(baseSocial.multiply(ratio));
                     employerSocial = MoneyUtil.round2(baseSocial.multiply(BigDecimal.ONE.subtract(ratio)));
@@ -216,9 +218,9 @@ public class SalaryCalculationEngine {
             // 公积金
             BigDecimal housingFund = BigDecimal.ZERO;
             if (!parttime && Boolean.TRUE.equals(emp.getHousingInsured())) {
-                JsonNode empOverride = snap.employeeOverride(emp.getEmployeeCode());
-                if (empOverride.has("housingFund")) {
-                    housingFund = bd(empOverride.path("housingFund").asText("0"));
+                // 优先取员工级自定义金额（SalaryFact HOUSING_FUND），null 则回退全局默认
+                if (emp.getHousingFund() != null) {
+                    housingFund = emp.getHousingFund();
                 } else {
                     housingFund = bd(policy.path("housingFund").asText("0"));
                 }
@@ -237,16 +239,27 @@ public class SalaryCalculationEngine {
             d.setPointsFee(MoneyUtil.round2(pointsFee));
 
             // 商业保险
+            // 优先取员工级自定义金额（SalaryFact COMMERCIAL_FEE），null 则取全局默认 21 元
             BigDecimal commercialInsurance = BigDecimal.ZERO;
             if (Boolean.TRUE.equals(emp.getCommercialInsured())) {
-                commercialInsurance = bd(policy.path("commercialInsurance").asText("21"));
+                if (emp.getCommercialFee() != null) {
+                    commercialInsurance = emp.getCommercialFee();
+                } else {
+                    commercialInsurance = bd(policy.path("commercialInsurance").asText("21"));
+                }
             }
             d.setCommercialInsurance(MoneyUtil.round2(commercialInsurance));
 
             // 宿舍管理费
+            // 优先取员工级自定义金额（SalaryFact DORMITORY_FEE），null 则回退全局默认；
+            // 仅当员工「住宿舍」开关开启时才扣。
             BigDecimal dormitoryFee = BigDecimal.ZERO;
             if (Boolean.TRUE.equals(emp.getDormitory())) {
-                dormitoryFee = bd(policy.path("dormitoryFee").asText("0"));
+                if (emp.getDormitoryFee() != null) {
+                    dormitoryFee = emp.getDormitoryFee();
+                } else {
+                    dormitoryFee = bd(policy.path("dormitoryFee").asText("0"));
+                }
             }
             d.setDormitoryFee(MoneyUtil.round2(dormitoryFee));
 

@@ -2,6 +2,7 @@ package com.panjia.people.dto;
 
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -41,14 +42,26 @@ public class EmployeeVO {
     /** 是否缴社保 */
     private Boolean socialInsured;
 
+    /** 社保金额（自定义；null=用全局默认算法） */
+    private BigDecimal socialFee;
+
     /** 是否缴公积金 */
     private Boolean housingInsured;
+
+    /** 公积金金额（自定义；null=用全局默认） */
+    private BigDecimal housingFund;
 
     /** 是否买商业保险 */
     private Boolean commercialInsured;
 
+    /** 商业保险金额（自定义；null=用全局默认 21 元） */
+    private BigDecimal commercialFee;
+
     /** 是否住宿舍 */
     private Boolean dormitory;
+
+    /** 宿舍费金额（自定义；null=用全局默认） */
+    private BigDecimal dormitoryFee;
 
     /** 是否兼职 */
     private Boolean isPartTime;

@@ -38,6 +38,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -405,6 +406,10 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setDormitory(bool(row, "dormitory"));
         dto.setParttime(bool(row, "parttime"));
         dto.setMentorCode(str(row, "mentor_code"));
+        dto.setSocialFee(decimal(row, "social_fee"));
+        dto.setCommercialFee(decimal(row, "commercial_fee"));
+        dto.setHousingFund(decimal(row, "housing_fund"));
+        dto.setDormitoryFee(decimal(row, "dormitory_fee"));
         // 兼职员工初始状态 = PARTTIME，其余 ACTIVE
         dto.setStatus(Boolean.TRUE.equals(bool(row, "parttime"))
             ? EmployeeStatus.PARTTIME.getCode()
@@ -550,6 +555,18 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     private LocalDate date(ParsedRow row, String field) {
         Object v = row.getValues().get(field);
         return v instanceof LocalDate d ? d : null;
+    }
+
+    private BigDecimal decimal(ParsedRow row, String field) {
+        String v = str(row, field);
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(v.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private String generateBatchNo() {

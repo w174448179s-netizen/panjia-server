@@ -174,15 +174,20 @@ public class EmployeeServiceImpl implements EmployeeService {
         initFact(emp.getEmployeeId(), FactType.LEVEL, dto.getLevelCode(), effect);
         initFact(emp.getEmployeeId(), FactType.STATUS, emp.getStatus().getCode(), effect);
         initFact(emp.getEmployeeId(), FactType.SOCIAL, boolVal(dto.getSocialInsured()), effect);
+        initFact(emp.getEmployeeId(), FactType.SOCIAL_FEE, decimalVal(dto.getSocialFee()), effect);
         initFact(emp.getEmployeeId(), FactType.HOUSING, boolVal(dto.getHousingInsured()), effect);
         initFact(emp.getEmployeeId(), FactType.COMMERCIAL, boolVal(dto.getCommercialInsured()), effect);
+        initFact(emp.getEmployeeId(), FactType.COMMERCIAL_FEE, decimalVal(dto.getCommercialFee()), effect);
         initFact(emp.getEmployeeId(), FactType.DORMITORY, boolVal(dto.getDormitory()), effect);
+        initFact(emp.getEmployeeId(), FactType.HOUSING_FUND, decimalVal(dto.getHousingFund()), effect);
+        initFact(emp.getEmployeeId(), FactType.DORMITORY_FEE, decimalVal(dto.getDormitoryFee()), effect);
         initFact(emp.getEmployeeId(), FactType.PARTTIME, boolVal(dto.getParttime()), effect);
         initFact(emp.getEmployeeId(), FactType.MENTOR,
             mentorId != null ? String.valueOf(mentorId) : NO_MENTOR, effect);
 
         writeLog(emp.getEmployeeId(), CHANGE_FIELD_ALL, null, "入职初始化", effect, operator);
         refreshRecord(emp);
+
         return emp.getEmployeeId();
     }
 
@@ -257,11 +262,15 @@ public class EmployeeServiceImpl implements EmployeeService {
             }
         }
 
-        // ⑤ 算薪开关（只走 fact）
+        // ⑤ 算薪开关/金额（只走 fact）
         changeBoolFact(employeeId, FactType.SOCIAL, dto.getSocialInsured(), effect, operator);
+        changeDecimalFact(employeeId, FactType.SOCIAL_FEE, dto.getSocialFee(), effect, operator);
         changeBoolFact(employeeId, FactType.HOUSING, dto.getHousingInsured(), effect, operator);
         changeBoolFact(employeeId, FactType.COMMERCIAL, dto.getCommercialInsured(), effect, operator);
+        changeDecimalFact(employeeId, FactType.COMMERCIAL_FEE, dto.getCommercialFee(), effect, operator);
         changeBoolFact(employeeId, FactType.DORMITORY, dto.getDormitory(), effect, operator);
+        changeDecimalFact(employeeId, FactType.HOUSING_FUND, dto.getHousingFund(), effect, operator);
+        changeDecimalFact(employeeId, FactType.DORMITORY_FEE, dto.getDormitoryFee(), effect, operator);
         changeBoolFact(employeeId, FactType.PARTTIME, dto.getParttime(), effect, operator);
 
         // ⑥ 归属部门变更 → 同步 sys_user.dept_id
@@ -393,7 +402,12 @@ public class EmployeeServiceImpl implements EmployeeService {
             snap.setCommercialInsured(parseBoolFact(factValues.get(FactType.COMMERCIAL.getCode())));
             snap.setDormitory(parseBoolFact(factValues.get(FactType.DORMITORY.getCode())));
             snap.setIsPartTime(parseBoolFact(factValues.get(FactType.PARTTIME.getCode())));
-            // 师徒：空串/空白=无师傅；非数字防御性按无师傅处理
+            // 金额类事实
+            snap.setSocialFee(parseDecimalFact(factValues.get(FactType.SOCIAL_FEE.getCode())));
+            snap.setCommercialFee(parseDecimalFact(factValues.get(FactType.COMMERCIAL_FEE.getCode())));
+            snap.setHousingFund(parseDecimalFact(factValues.get(FactType.HOUSING_FUND.getCode())));
+            snap.setDormitoryFee(parseDecimalFact(factValues.get(FactType.DORMITORY_FEE.getCode())));
+            // 师徒
             snap.setMentorId(parseMentorFact(factValues.get(FactType.MENTOR.getCode())));
         }
         snap.setSnapshotDate(point);
@@ -407,6 +421,28 @@ public class EmployeeServiceImpl implements EmployeeService {
             return null;
         }
         return Boolean.parseBoolean(value.trim());
+    }
+
+    /** 金额事实值解析：空/非数字 → null */
+    private java.math.BigDecimal parseDecimalFact(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return new java.math.BigDecimal(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 金额事实值解析（refreshRecord 用）：空/非数字 → null */
+    private java.math.BigDecimal parseDecimal(String value) {
+        return parseDecimalFact(value);
+    }
+
+    /** BigDecimal → 事实存储字符串；null → null */
+    private String decimalVal(java.math.BigDecimal val) {
+        return val != null ? val.toPlainString() : null;
     }
 
     /** MENTOR 事实值解析：空串/空白/非数字 → null（无师傅） */
@@ -485,6 +521,19 @@ public class EmployeeServiceImpl implements EmployeeService {
         }
     }
 
+    /** 金额事实变更（null=不修改；0/null → 存 null 表示用全局默认） */
+    private void changeDecimalFact(Long employeeId, FactType type, java.math.BigDecimal newValue,
+                                   LocalDate effect, Long operatorId) {
+        if (newValue == null) {
+            return;
+        }
+        String target = decimalVal(newValue);
+        String current = salaryFactMapper.selectValueAt(employeeId, type, effect);
+        if (!target.equals(current != null ? current : "")) {
+            changeFact(employeeId, type, target, effect, operatorId);
+        }
+    }
+
     /**
      * 写变更日志。
      */
@@ -511,9 +560,13 @@ public class EmployeeServiceImpl implements EmployeeService {
         record.setStatus(emp.getStatus());
         record.setLevelCode(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.LEVEL, point));
         record.setSocialInsured(parseBool(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.SOCIAL, point)));
+        record.setSocialFee(parseDecimal(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.SOCIAL_FEE, point)));
         record.setHousingInsured(parseBool(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.HOUSING, point)));
         record.setCommercialInsured(parseBool(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.COMMERCIAL, point)));
+        record.setCommercialFee(parseDecimal(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.COMMERCIAL_FEE, point)));
         record.setDormitory(parseBool(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.DORMITORY, point)));
+        record.setHousingFund(parseDecimal(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.HOUSING_FUND, point)));
+        record.setDormitoryFee(parseDecimal(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.DORMITORY_FEE, point)));
         record.setIsPartTime(parseBool(salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.PARTTIME, point)));
         String mentorValue = salaryFactMapper.selectValueAt(emp.getEmployeeId(), FactType.MENTOR, point);
         record.setMentorEmployeeId(StringUtils.isNotBlank(mentorValue) ? Long.valueOf(mentorValue) : null);

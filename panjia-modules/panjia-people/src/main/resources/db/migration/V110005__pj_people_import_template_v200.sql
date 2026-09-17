@@ -24,8 +24,8 @@ VALUES (
     'V200',
     '[
       {"colName":"大区","field":"dept_level1","type":"STRING","required":true,"deptLevel":1},
-      {"colName":"门店","field":"dept_level2","type":"STRING","required":true,"deptLevel":2},
-      {"colName":"小组","field":"dept_level3","type":"STRING","required":true,"deptLevel":3},
+      {"colName":"门店","field":"dept_level2","type":"STRING","required":false,"deptLevel":2},
+      {"colName":"小组","field":"dept_level3","type":"STRING","required":false,"deptLevel":3},
       {"colName":"工号","field":"employee_code","type":"STRING","required":true,"maxLength":32},
       {"colName":"姓名","field":"employee_name","type":"STRING","required":true,"maxLength":64},
       {"colName":"职级","field":"level","type":"STRING","required":true,"dictType":"panjia_employee_level"},
@@ -39,7 +39,12 @@ VALUES (
       {"colName":"商业保险","field":"commercial","type":"BOOL","required":true},
       {"colName":"宿舍","field":"dormitory","type":"BOOL","required":true},
       {"colName":"兼职","field":"parttime","type":"BOOL","required":true},
-      {"colName":"师傅工号","field":"mentor_code","type":"STRING","required":false,"maxLength":32}
+      {"colName":"师傅工号","field":"mentor_code","type":"STRING","required":false,"maxLength":32},
+      {"colName":"社保金额","field":"social_fee","type":"DECIMAL","required":false,"precision":10,"scale":2},
+      {"colName":"商业保险金额","field":"commercial_fee","type":"DECIMAL","required":false,"precision":10,"scale":2},
+      {"colName":"公积金金额","field":"housing_fund","type":"DECIMAL","required":false,"precision":10,"scale":2},
+      {"colName":"宿舍费金额","field":"dormitory_fee","type":"DECIMAL","required":false,"precision":10,"scale":2}
+
     ]'::jsonb,
     1
 )
