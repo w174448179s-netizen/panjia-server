@@ -27,4 +27,7 @@ public class ApplyQuery implements Serializable {
 
     /** 关键字（合同号 / 订单号 / 房源地址） */
     private String keyword;
+
+    /** 当前审批节点（DIRECTOR/FINANCE） */
+    private String currentNode;
 }

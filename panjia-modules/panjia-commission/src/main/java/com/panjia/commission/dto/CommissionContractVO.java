@@ -50,6 +50,9 @@ public class CommissionContractVO implements Serializable {
     /** 应收业绩合计（差异判定展示） */
     private BigDecimal expectedAmount;
 
+    /** 应收已被调整（当前 ACTIVE 应收与提交快照不一致时置 true） */
+    private Boolean expectedAdjusted;
+
     /** 是否已发生实收对齐应收 */
     private Boolean aligned;
 

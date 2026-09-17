@@ -99,7 +99,11 @@ public class ReceivedApplyController extends BaseController {
             .thenApply(result -> R.ok(
                 "批量审批完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
                     + " 个，失败 " + result.getFailed() + " 个",
-                result));
+                result))
+            .exceptionally(ex -> {
+                log.error("[实收批量审批] 异步处理异常", ex);
+                return R.fail("批量审批处理异常：" + ex.getCause().getMessage());
+            });
     }
 
     /**

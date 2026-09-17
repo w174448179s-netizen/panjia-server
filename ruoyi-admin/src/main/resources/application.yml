@@ -88,6 +88,12 @@ panjia:
 spring:
   application:
     name: RuoYi-Vue-Plus
+  mvc:
+    async:
+      request-timeout: 300000
+    static-path-pattern: /static/**
+    format:
+      date-time: yyyy-MM-dd HH:mm:ss
   flyway:
     enabled: true
     locations: classpath:db/migration
@@ -130,11 +136,7 @@ spring:
       max-file-size: 10MB
       # 设置总上传的文件大小
       max-request-size: 20MB
-  mvc:
-    # 设置静态资源路径 防止所有请求都去查静态资源
-    static-path-pattern: /static/**
-    format:
-      date-time: yyyy-MM-dd HH:mm:ss
+
   jackson:
     serialization:
       # 格式化输出

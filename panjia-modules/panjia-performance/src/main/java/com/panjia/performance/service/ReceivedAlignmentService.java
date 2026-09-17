@@ -7,6 +7,7 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.system.api.ConfigService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,8 +32,13 @@ public class ReceivedAlignmentService {
     private static final String FACT_TYPE_REAL = "PERF_REAL";
     private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
 
+    /** 配置项：实收应收差异容忍阈值（元），默认 1。 */
+    private static final String CONFIG_DIFF_TOLERANCE = "panjia.commission.diff_tolerance";
+    private static final BigDecimal DEFAULT_DIFF_TOLERANCE = BigDecimal.ONE;
+
     private final PerformanceFactMapper factMapper;
     private final ReverseService reverseService;
+    private final ConfigService configService;
 
     /**
      * 执行实收对齐应收。
@@ -73,9 +79,10 @@ public class ReceivedAlignmentService {
                     realFact.getId(), realFact.getSourceKey());
                 continue;
             }
-            // 仅比较 performance_amount：shareRatio 仅展示用，不作为对齐判定依据
-            if (eq(realFact.getPerformanceAmount(), expect.getPerformanceAmount())) {
-                // 金额口径已一致：不替换
+            // 仅比较 performance_amount：shareRatio 仅展示用，不作为对齐判定依据。
+            // 差异在 1 元以内视为无差异，不做对齐，保持实收原样。
+            if (withinTolerance(realFact.getPerformanceAmount(), expect.getPerformanceAmount())) {
+                // 金额口径一致（含小额尾差）：不替换
                 continue;
             }
             PerformanceFact newFact = copyAsAligned(realFact, expect);
@@ -151,13 +158,16 @@ public class ReceivedAlignmentService {
             .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
-    private boolean eq(BigDecimal a, BigDecimal b) {
-        if (a == null && b == null) {
-            return true;
-        }
-        if (a == null || b == null) {
-            return false;
-        }
-        return a.compareTo(b) == 0;
+    /** 实收/应收差异容忍阈值（元），从系统参数读取，缺失回退默认 1 元。 */
+    private BigDecimal getDiffTolerance() {
+        BigDecimal v = configService.getConfigDecimal(CONFIG_DIFF_TOLERANCE);
+        return v == null ? DEFAULT_DIFF_TOLERANCE : v;
+    }
+
+    /** 金额容忍判定：|a - b| <= 容忍阈值（默认 1 元）视为一致，不触发对齐。阈值可在系统参数中调整。 */
+    private boolean withinTolerance(BigDecimal a, BigDecimal b) {
+        BigDecimal av = a == null ? BigDecimal.ZERO : a;
+        BigDecimal bv = b == null ? BigDecimal.ZERO : b;
+        return av.subtract(bv).abs().compareTo(getDiffTolerance()) <= 0;
     }
 }

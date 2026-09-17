@@ -436,4 +436,9 @@ public class SysDeptServiceImpl implements ISysDeptService, DeptService {
         return StreamUtils.toMap(list, SysDept::getDeptId, SysDept::getDeptName);
     }
 
+    @Override
+    public List<Long> selectDeptAndChildById(Long deptId) {
+        return deptMapper.selectDeptAndChildById(deptId);
+    }
+
 }

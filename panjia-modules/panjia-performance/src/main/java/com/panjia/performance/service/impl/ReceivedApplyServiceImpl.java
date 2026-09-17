@@ -334,10 +334,51 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         } catch (Exception e) {
             throw new ServiceException("无法获取当前登录用户信息，请重新登录");
         }
-        log.info("[实收审批] 批量审批已提交：period={}, total={}, operator={}",
-            period, deduped.size(), operatorName);
+        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，用 isMyTask 检查权限
+        // 只把当前用户有权办理的单子提交给异步线程，避免越权审批
+        LinkedHashSet<String> myTasks = new LinkedHashSet<>();
+        BatchApproveResultDTO result = new BatchApproveResultDTO();
+        result.setTotal(deduped.size());
+        for (String contractNo : deduped) {
+            try {
+                ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
+                    .eq(ReceivedApply::getPeriod, period)
+                    .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
+                        .or().eq(ReceivedApply::getOrderNo, contractNo))
+                    .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
+                    .orderByDesc(ReceivedApply::getId)
+                    .last("LIMIT 1"));
+                if (apply == null) {
+                    result.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                if (!approvalPort.isMyTask(BizType.REAL_CONFIRM, apply.getId())) {
+                    result.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                myTasks.add(contractNo);
+            } catch (Exception e) {
+                result.getFailedContracts().add(contractNo);
+                log.warn("[实收审批] 批量审批预检失败：period={}, contractNo={}, reason={}",
+                    period, contractNo, e.getMessage());
+            }
+        }
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[实收审批] 批量审批已提交：period={}, total={}, myTasks={}, skipped={}, operator={}",
+            period, deduped.size(), myTasks.size(), result.getSkipped(), operatorName);
+        final BatchApproveResultDTO syncResult = result;
         return CompletableFuture.supplyAsync(
-            () -> doBatchApprove(period, deduped, operatorId, operatorName), taskExecutor);
+            () -> {
+                BatchApproveResultDTO asyncResult = doBatchApprove(period, myTasks, operatorId, operatorName);
+                // 合并同步阶段已跳过/失败的
+                syncResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
+                syncResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
+                asyncResult.setTotal(syncResult.getTotal());
+                asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
+                asyncResult.setFailed(asyncResult.getFailedContracts().size());
+                return asyncResult;
+            }, taskExecutor);
     }
 
     /**
@@ -352,7 +393,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             try {
                 ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
                     .eq(ReceivedApply::getPeriod, period)
-                    .eq(ReceivedApply::getContractNo, contractNo)
+                    .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
+                        .or().eq(ReceivedApply::getOrderNo, contractNo))
                     .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
                     .orderByDesc(ReceivedApply::getId)
                     .last("LIMIT 1"));
@@ -823,7 +865,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         // 但 autoCreateForBatch 的 else 分支会对 APPROVED 单跳过合并事实，避免改 receivedAmount。
         return applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
-            .eq(ReceivedApply::getContractNo, contractNo)
+            .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
+                .or().eq(ReceivedApply::getOrderNo, contractNo))
             .in(ReceivedApply::getStatus,
                 ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
             .orderByDesc(ReceivedApply::getId)

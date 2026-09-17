@@ -41,6 +41,15 @@ public interface ApprovalPort {
     boolean completeAsSys(String bizType, Long bizId, ApprovalAction action, String comment);
 
     /**
+     * 检查当前登录用户是否有权办理该单的当前待办节点。
+     * <p>用于批量审批前同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，
+     * 查 flow_user.processedBy 是否包含当前用户 ID。
+     *
+     * @return true=当前用户有权办理该单当前节点；false=无权或无待办
+     */
+    boolean isMyTask(String bizType, Long bizId);
+
+    /**
      * 撤销流程实例（系统级、无用户上下文，硬删实例/任务/历史）。
      * <p>必须走完整 LiteFlow 删除链路（加载→校验→发事件→执行删除），禁止手写 SQL 删 flow_* 表。
      */

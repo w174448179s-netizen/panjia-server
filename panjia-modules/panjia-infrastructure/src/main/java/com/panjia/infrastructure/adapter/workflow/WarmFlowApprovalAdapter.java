@@ -6,14 +6,23 @@ import com.panjia.contracts.port.ApprovalStartCmd;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.workflow.api.WorkflowService;
 import org.dromara.workflow.api.domain.CompleteTaskDTO;
 import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.dromara.workflow.api.domain.StartProcessReturnDTO;
 import org.dromara.workflow.domain.bo.BackProcessBo;
+import org.dromara.workflow.mapper.FlwUserMapper;
+import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwTaskService;
+import org.dromara.warm.flow.orm.entity.FlowInstance;
+import org.dromara.warm.flow.orm.entity.FlowTask;
+import org.dromara.warm.flow.orm.entity.FlowUser;
 import org.springframework.stereotype.Component;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 
 import java.util.List;
 import java.util.Map;
@@ -34,6 +43,8 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
 
     private final WorkflowService workflowService;
     private final IFlwTaskService flwTaskService;
+    private final IFlwInstanceService flwInstanceService;
+    private final FlwUserMapper flwUserMapper;
 
     @Override
     public Long start(String bizType, Long bizId, ApprovalStartCmd cmd) {
@@ -100,6 +111,28 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
     @Override
     public Long currentTaskId(String bizType, Long bizId) {
         return workflowService.getCurrentTaskId(String.valueOf(bizId));
+    }
+
+    @Override
+    public boolean isMyTask(String bizType, Long bizId) {
+        FlowInstance instance = flwInstanceService.selectInstByBusinessId(String.valueOf(bizId));
+        if (instance == null) {
+            return false;
+        }
+        List<FlowTask> tasks = flwTaskService.selectByInstId(instance.getId());
+        FlowTask task = tasks.stream()
+            .filter(t -> Integer.valueOf(1).equals(t.getNodeType()))
+            .findFirst()
+            .orElse(null);
+        if (task == null) {
+            return false;
+        }
+        String userId = LoginHelper.getUserIdStr();
+        LambdaQueryWrapper<FlowUser> qw = Wrappers.lambdaQuery(FlowUser.class)
+            .eq(FlowUser::getAssociated, task.getId())
+            .eq(FlowUser::getProcessedBy, userId);
+        Long count = flwUserMapper.selectCount(qw);
+        return count != null && count > 0;
     }
 
     @Override

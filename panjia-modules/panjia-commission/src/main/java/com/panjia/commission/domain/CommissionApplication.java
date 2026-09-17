@@ -101,6 +101,10 @@ public class CommissionApplication implements Serializable {
     @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
     private String approverName;
 
+    /** 应收已被调整（非入库字段；当前 ACTIVE 应收与提交快照不一致时置 true，用于展示「已调整」标记） */
+    @TableField(exist = false)
+    private Boolean expectedAdjusted;
+
     /** 锁定时间 */
     private LocalDateTime lockTime;
 

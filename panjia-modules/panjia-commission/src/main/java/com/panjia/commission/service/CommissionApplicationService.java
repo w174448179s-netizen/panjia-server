@@ -36,6 +36,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
+import org.dromara.system.api.DeptService;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -82,6 +83,9 @@ public class CommissionApplicationService {
     /** 结佣口径：实收业绩（结佣确认对象） */
     private static final String FACT_TYPE_REAL = "PERF_REAL";
 
+    /** 业绩口径：应收业绩（参照口径，非审批对象） */
+    private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
+
     private static final String NODE_DIRECTOR = "capp_director";
     private static final String NODE_FINANCE = "capp_finance";
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
@@ -89,6 +93,10 @@ public class CommissionApplicationService {
 
     /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
     private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
+
+    /** 配置项：实收应收差异容忍阈值（元），默认 1。 */
+    private static final String CONFIG_DIFF_TOLERANCE = "panjia.commission.diff_tolerance";
+    private static final BigDecimal DEFAULT_DIFF_TOLERANCE = BigDecimal.ONE;
 
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
     public static final String ROW_STATUS_NONE = "NONE";
@@ -102,9 +110,44 @@ public class CommissionApplicationService {
     private final EventPort eventPort;
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
+    private final DeptService deptService;
     private final TaskExecutor taskExecutor;
 
     // ==================== 发起结佣（按合同） ====================
+
+    /**
+     * 门店数据权限校验：非超管用户只能发起自己门店（含下级）的合同。
+     * 在 HTTP 线程中调用（依赖 LoginHelper 获取当前用户）。
+     */
+    void checkContractDeptScope(Long contractDeptId) {
+        if (LoginHelper.isSuperAdmin()) {
+            return;
+        }
+        if (contractDeptId == null) {
+            throw new ServiceException("该合同无归属门店，无法发起结佣");
+        }
+        Long myDeptId = LoginHelper.getDeptId();
+        if (myDeptId == null) {
+            throw new ServiceException("当前用户无归属门店，无法发起结佣");
+        }
+        List<Long> myDeptAndChild = deptService.selectDeptAndChildById(myDeptId);
+        if (myDeptAndChild == null || !myDeptAndChild.contains(contractDeptId)) {
+            throw new ServiceException("无权发起该门店的合同结佣");
+        }
+    }
+
+    /**
+     * 查合同实收事实的门店 ID（取首条事实的 deptId）。
+     */
+    Long resolveContractDeptId(String period, String contractNo) {
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort
+            .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+        return facts.stream()
+            .map(PerformanceFactSummaryDTO::getDeptId)
+            .filter(java.util.Objects::nonNull)
+            .findFirst()
+            .orElse(null);
+    }
 
     /**
      * 发起结佣并提交审批（拉取该合同当月事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
@@ -124,6 +167,9 @@ public class CommissionApplicationService {
             throw new ServiceException("结算月与合同号不能为空");
         }
         checkPeriodOpen(period, "发起结佣");
+        // 门店数据权限校验：非超管只能发起自己门店（含下级）的合同
+        Long contractDeptId = resolveContractDeptId(period, contractNo);
+        checkContractDeptScope(contractDeptId);
         // 驳回单重提：该合同当月已有 REJECTED 单时，直接重新提交，不新建单
         CommissionApplication rejected = findRejectedApplication(period, contractNo);
         if (rejected != null) {
@@ -133,53 +179,6 @@ public class CommissionApplicationService {
         CommissionApplication application = doApply(period, contractNo, operatorId);
         submit(application.getId(), operatorId);
         return application;
-    }
-
-    /**
-     * 批量发起并提交：为期间内所有「未发起/已驳回且有非零实收」的合同逐张发起并提交进入审批流。
-     * <p>
-     * 已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单的合同跳过；已有 REJECTED 单的合同由 {@link #apply}
-     * 自动识别并重新提交（不新建单）。单合同失败不阻断整批，收集后统一提示。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public int batchApply(String period, Long deptId, Long operatorId) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("结算月不能为空");
-        }
-        checkPeriodOpen(period, "批量发起结佣");
-
-        List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(period, deptId, FACT_TYPE_REAL);
-        Set<String> activeContractNos = listActiveApplications(period).stream()
-            .map(CommissionApplication::getContractNo)
-            .collect(Collectors.toSet());
-
-        int created = 0;
-        List<String> failed = new ArrayList<>();
-        for (PerformanceContractSummaryDTO contract : contracts) {
-            if (contract.getAmount() == null || contract.getAmount().compareTo(BigDecimal.ZERO) == 0) {
-                continue;
-            }
-            if (activeContractNos.contains(contract.getContractNo())) {
-                continue;
-            }
-            if (!"APPROVED".equals(contract.getReceivedStatus())) {
-                continue;
-            }
-            try {
-                apply(period, contract.getContractNo(), operatorId);
-                created++;
-            } catch (ServiceException e) {
-                // 单合同失败（如实收未审批 / 员工无法归属）不阻断整批，收集后统一提示
-                log.warn("[结佣-批量发起] 合同 {} 发起失败：{}", contract.getContractNo(), e.getMessage());
-                failed.add(contract.getContractNo());
-            }
-        }
-        log.info("[结佣-批量发起] period={}, deptId={}, 创建={}, 失败={}", period, deptId, created, failed.size());
-        if (!failed.isEmpty()) {
-            throw new ServiceException("成功发起 " + created + " 张；以下合同失败：" + failed);
-        }
-        return created;
     }
 
     /**
@@ -210,9 +209,37 @@ public class CommissionApplicationService {
             throw new ServiceException("合同号列表不能为空");
         }
         checkPeriodOpen(period, "批量发起结佣");
-        log.info("[结佣-批量发起] period={}, total={}, operator={}", period, deduped.size(), operatorId);
+        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，校验门店权限
+        // 非超管用户只能发起自己门店（含下级）的合同，无权的直接计入跳过
+        LinkedHashSet<String> myContracts = new LinkedHashSet<>();
+        BatchResultDTO syncResult = new BatchResultDTO();
+        syncResult.setTotal(deduped.size());
+        for (String contractNo : deduped) {
+            try {
+                Long contractDeptId = resolveContractDeptId(period, contractNo);
+                if (contractDeptId == null) {
+                    syncResult.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                checkContractDeptScope(contractDeptId);
+                myContracts.add(contractNo);
+            } catch (ServiceException e) {
+                syncResult.getSkippedContracts().add(contractNo);
+                log.warn("[结佣-批量发起] 合同 {} 门店权限校验失败：{}", contractNo, e.getMessage());
+            }
+        }
+        syncResult.setSkipped(syncResult.getSkippedContracts().size());
+        log.info("[结佣-批量发起] period={}, total={}, myContracts={}, skipped={}, operator={}",
+            period, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
+        final BatchResultDTO preResult = syncResult;
         return CompletableFuture.supplyAsync(
-            () -> doBatchApply(period, deduped, operatorId), taskExecutor);
+            () -> {
+                BatchResultDTO asyncResult = doBatchApply(period, myContracts, operatorId);
+                preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
+                asyncResult.setTotal(preResult.getTotal());
+                asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
+                return asyncResult;
+            }, taskExecutor);
     }
 
     /**
@@ -310,7 +337,8 @@ public class CommissionApplicationService {
         CommissionApplication application = new CommissionApplication();
         application.setApplyNo("CAPP" + LocalDateTime.now().format(APPLY_NO_FORMATTER));
         application.setPeriod(period);
-        application.setContractNo(contractNo);
+        // 存事实中的真实合同号（用户可能输入订单号，需归一化为 contract_no）
+        application.setContractNo(first.getContractNo() != null ? first.getContractNo() : contractNo);
         application.setOrderNo(orderNo);
         application.setPropertyAddress(propertyAddress);
         application.setBusinessDate(businessDate != null ? businessDate.atStartOfDay() : null);
@@ -345,6 +373,26 @@ public class CommissionApplicationService {
             .findFirst()
             .map(PerformanceContractSummaryDTO::getExpectedAmount)
             .orElse(BigDecimal.ZERO);
+    }
+
+    /**
+     * 实收/应收差异容忍阈值（元），从系统参数 {@code panjia.commission.diff_tolerance} 读取，
+     * 缺失时回退默认值 1 元。
+     */
+    private BigDecimal getDiffTolerance() {
+        BigDecimal v = configService.getConfigDecimal(CONFIG_DIFF_TOLERANCE);
+        return v == null ? DEFAULT_DIFF_TOLERANCE : v;
+    }
+
+    /**
+     * 实收/应收差异容忍判定：|a - b| <= 容忍阈值（默认 1 元）视为无差异。
+     * <p>用于：① 互斥网关是否跳过财务节点；② 是否触发实收对齐应收；③ 前端「有差异」标签展示。
+     * 容忍范围内的小额尾差不做对齐，保持实收原样。阈值可在系统参数中调整，无需改代码。</p>
+     */
+    public boolean isWithinTolerance(BigDecimal a, BigDecimal b) {
+        BigDecimal av = a == null ? BigDecimal.ZERO : a;
+        BigDecimal bv = b == null ? BigDecimal.ZERO : b;
+        return av.subtract(bv).abs().compareTo(getDiffTolerance()) <= 0;
     }
 
     /**
@@ -469,6 +517,9 @@ public class CommissionApplicationService {
         if (!skipEnabled) {
             // 开关关闭：故意写入不相等的值，条件线不命中，走财务节点
             realAmount = expectedAmount.add(BigDecimal.ONE);
+        } else if (isWithinTolerance(realAmount, expectedAmount)) {
+            // 差异在容忍阈值（1 元）以内：视为无差异，令网关 eq 命中跳过财务节点
+            realAmount = expectedAmount;
         }
         Map<String, Object> vars = new HashMap<>(2);
         vars.put("realAmount", realAmount);
@@ -526,9 +577,50 @@ public class CommissionApplicationService {
         if (deduped.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        log.info("[结佣-批量审批] period={}, total={}, operator={}", period, deduped.size(), operatorId);
+        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，用 isMyTask 检查权限
+        // 只把当前用户有权办理的单子提交给异步线程，避免越权审批
+        LinkedHashSet<String> myTasks = new LinkedHashSet<>();
+        BatchResultDTO syncResult = new BatchResultDTO();
+        syncResult.setTotal(deduped.size());
+        for (String contractNo : deduped) {
+            try {
+                CommissionApplication application = applicationMapper.selectOne(
+                    new LambdaQueryWrapper<CommissionApplication>()
+                        .eq(CommissionApplication::getPeriod, period)
+                        .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
+                            .or().eq(CommissionApplication::getOrderNo, contractNo))
+                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
+                        .orderByDesc(CommissionApplication::getId)
+                        .last("LIMIT 1"));
+                if (application == null) {
+                    syncResult.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                if (!approvalPort.isMyTask(BizType.COMMISSION, application.getId())) {
+                    syncResult.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                myTasks.add(contractNo);
+            } catch (Exception e) {
+                syncResult.getFailedContracts().add(contractNo);
+                log.warn("[结佣-批量审批] 预检失败：contractNo={}, reason={}", contractNo, e.getMessage());
+            }
+        }
+        syncResult.setSkipped(syncResult.getSkippedContracts().size());
+        syncResult.setFailed(syncResult.getFailedContracts().size());
+        log.info("[结佣-批量审批] period={}, total={}, myTasks={}, skipped={}, operator={}",
+            period, deduped.size(), myTasks.size(), syncResult.getSkipped(), operatorId);
+        final BatchResultDTO preResult = syncResult;
         return CompletableFuture.supplyAsync(
-            () -> doBatchApprove(period, deduped), taskExecutor);
+            () -> {
+                BatchResultDTO asyncResult = doBatchApprove(period, myTasks);
+                preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
+                preResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
+                asyncResult.setTotal(preResult.getTotal());
+                asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
+                asyncResult.setFailed(asyncResult.getFailedContracts().size());
+                return asyncResult;
+            }, taskExecutor);
     }
 
     /**
@@ -544,7 +636,8 @@ public class CommissionApplicationService {
                 CommissionApplication application = applicationMapper.selectOne(
                     new LambdaQueryWrapper<CommissionApplication>()
                         .eq(CommissionApplication::getPeriod, period)
-                        .eq(CommissionApplication::getContractNo, contractNo)
+                        .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
+                            .or().eq(CommissionApplication::getOrderNo, contractNo))
                         .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
                         .orderByDesc(CommissionApplication::getId)
                         .last("LIMIT 1"));
@@ -710,22 +803,39 @@ public class CommissionApplicationService {
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
             .orderByDesc(CommissionApplication::getId));
+        // 同时按 contractNo 和 orderNo 建索引，支持一手房/房产金融/家装荐客以订单号为准
         Map<String, CommissionApplication> appMap = new LinkedHashMap<>();
         for (CommissionApplication app : applications) {
-            appMap.putIfAbsent(app.getContractNo(), app);
+            if (StringUtils.isNotBlank(app.getContractNo())) {
+                appMap.putIfAbsent(app.getContractNo(), app);
+            }
+            if (StringUtils.isNotBlank(app.getOrderNo())) {
+                appMap.putIfAbsent(app.getOrderNo(), app);
+            }
         }
 
         String keyword = StringUtils.trimToNull(query.getKeyword());
+        String filterNode = StringUtils.trimToNull(query.getCurrentNode());
 
         List<CommissionContractVO> all = new ArrayList<>(contracts.size());
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
+            if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
+                app = appMap.get(c.getOrderNo());
+            }
             String status = app != null && app.getStatus() != null ? app.getStatus().getCode() : ROW_STATUS_NONE;
             if (app == null && !"APPROVED".equals(c.getReceivedStatus())) {
                 continue;
             }
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
+            }
+            // 按审批节点过滤
+            if (filterNode != null) {
+                String node = app != null ? app.getCurrentNode() : null;
+                if (!filterNode.equals(node)) {
+                    continue;
+                }
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
                 continue;
@@ -777,8 +887,10 @@ public class CommissionApplicationService {
             vo.setDetailCount(app.getItemCount() == null ? 0 : app.getItemCount());
             vo.setAligned(app.getAligned());
             vo.setCurrentNode(app.getCurrentNode());
-            if (app.getExpectedAmount() != null) {
-                vo.setExpectedAmount(app.getExpectedAmount());
+            // 应收展示当前 ACTIVE 值（含已生效调整），与快照不一致时标「已调整」
+            if (app.getExpectedAmount() != null && c.getExpectedAmount() != null
+                && app.getExpectedAmount().compareTo(c.getExpectedAmount()) != 0) {
+                vo.setExpectedAdjusted(true);
             }
         } else {
             vo.setAmount(c.getAmount());
@@ -798,7 +910,30 @@ public class CommissionApplicationService {
         if (application == null) {
             throw new ServiceException("结佣申请单不存在：" + applicationId);
         }
+        // 应收展示当前 ACTIVE 值（含已生效调整），与快照不一致时标「已调整」
+        fillExpectedAdjusted(application);
         return application;
+    }
+
+    /**
+     * 查当前 ACTIVE PERF_EXPECT 合计，与申请单快照比较：
+     * 不一致时置 expectedAdjusted=true，并用当前值覆盖 expectedAmount 供前端展示。
+     */
+    private void fillExpectedAdjusted(CommissionApplication app) {
+        if (app == null || StringUtils.isBlank(app.getPeriod())
+            || (StringUtils.isBlank(app.getContractNo()) && StringUtils.isBlank(app.getOrderNo()))) {
+            return;
+        }
+        String lookupKey = StringUtils.isNotBlank(app.getContractNo()) ? app.getContractNo() : app.getOrderNo();
+        List<PerformanceFactSummaryDTO> expectFacts =
+            performanceQueryPort.findActiveByContract(app.getPeriod(), lookupKey, FACT_TYPE_EXPECT);
+        BigDecimal currentExpected = expectFacts.stream()
+            .map(PerformanceFactSummaryDTO::getAmount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (app.getExpectedAmount() != null && app.getExpectedAmount().compareTo(currentExpected) != 0) {
+            app.setExpectedAdjusted(true);
+        }
+        app.setExpectedAmount(currentExpected);
     }
 
     public List<CommissionItem> listItems(Long applicationId) {
@@ -882,11 +1017,21 @@ public class CommissionApplicationService {
         Map<String, Object> variables = new HashMap<>(4);
         variables.put("ignore", true);
         // T-04：发起流程时写入 realAmount/expectedAmount 初值，供互斥网关 skip_condition 求值；
-        // 总监办理前 approve() 会再次更新为最新值
-        variables.put("realAmount",
-            application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount());
-        variables.put("expectedAmount",
-            application.getExpectedAmount() == null ? BigDecimal.ZERO : application.getExpectedAmount());
+        // 总监办理前 approve() 会再次更新为最新值。差异容忍（≤1 元）逻辑与 updateAmountVariables 保持一致，
+        // 以覆盖总监发起时系统自动过总监节点的场景（该路径不经 approve，不会再次修改变量）。
+        BigDecimal realAmount = application.getTotalAmount() == null
+            ? BigDecimal.ZERO : application.getTotalAmount();
+        BigDecimal expectedAmount = application.getExpectedAmount() == null
+            ? BigDecimal.ZERO : application.getExpectedAmount();
+        boolean skipEnabled = Boolean.TRUE.equals(
+            configService.getConfigBool(CONFIG_SKIP_FINANCE_WHEN_MATCH));
+        if (!skipEnabled) {
+            realAmount = expectedAmount.add(BigDecimal.ONE);
+        } else if (isWithinTolerance(realAmount, expectedAmount)) {
+            realAmount = expectedAmount;
+        }
+        variables.put("realAmount", realAmount);
+        variables.put("expectedAmount", expectedAmount);
         cmd.setVariables(variables);
         return cmd;
     }
@@ -940,7 +1085,8 @@ public class CommissionApplicationService {
         BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
         BigDecimal expected = application.getExpectedAmount() == null
             ? BigDecimal.ZERO : application.getExpectedAmount();
-        boolean hasDiff = received.compareTo(expected) != 0;
+        // 差异在容忍阈值（1 元）以内视为无差异，不触发实收对齐应收，保持实收原样
+        boolean hasDiff = !isWithinTolerance(received, expected);
 
         if (hasDiff && !Boolean.TRUE.equals(application.getAligned())) {
             log.info("[结佣-对齐] 实收与应收存在差异，触发自动对齐：id={}, received={}, expected={}",
@@ -1033,7 +1179,8 @@ public class CommissionApplicationService {
     private CommissionApplication findActiveApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
-            .eq(CommissionApplication::getContractNo, contractNo)
+            .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
+                .or().eq(CommissionApplication::getOrderNo, contractNo))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
             .orderByDesc(CommissionApplication::getCreateTime)
@@ -1047,7 +1194,8 @@ public class CommissionApplicationService {
     private CommissionApplication findRejectedApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
-            .eq(CommissionApplication::getContractNo, contractNo)
+            .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
+                .or().eq(CommissionApplication::getOrderNo, contractNo))
             .eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED)
             .orderByDesc(CommissionApplication::getCreateTime)
             .last("LIMIT 1"));

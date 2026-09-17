@@ -106,21 +106,6 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 批量发起结佣：为期间内所有未发起且有非零实收的合同逐张建草稿单。
-     *
-     * @param dto 批量请求（period 必填，deptId 可选）
-     * @return 新创建申请单数量
-     */
-    @SaCheckPermission("commission:apply:add")
-    @Log(title = "结佣批量发起", businessType = BusinessType.INSERT)
-    @PostMapping("/batch")
-    public R<Integer> batchAdd(@Validated @RequestBody ApplyCreateDTO dto) {
-        int created = applicationService.batchApply(
-            dto.getPeriod(), dto.getDeptId(), LoginHelper.getUserId());
-        return R.ok("批量发起完成，共创建 " + created + " 张申请单", created);
-    }
-
-    /**
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐张发起+提交）。
      * <p>去重合同号，已有未完结单的跳过，REJECTED 自动重提。前端设 5 分钟超时 + loading。
      *
@@ -136,7 +121,11 @@ public class CommissionApplyController extends BaseController {
             .thenApply(result -> R.ok(
                 "批量发起完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
                     + " 个，失败 " + result.getFailed() + " 个",
-                result));
+                result))
+            .exceptionally(ex -> {
+                log.error("[结佣批量发起] 异步处理异常", ex);
+                return R.fail("批量发起处理异常：" + ex.getCause().getMessage());
+            });
     }
 
     /**
@@ -155,7 +144,11 @@ public class CommissionApplyController extends BaseController {
             .thenApply(result -> R.ok(
                 "批量审批完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
                     + " 个，失败 " + result.getFailed() + " 个",
-                result));
+                result))
+            .exceptionally(ex -> {
+                log.error("[结佣批量审批] 异步处理异常", ex);
+                return R.fail("批量审批处理异常：" + ex.getCause().getMessage());
+            });
     }
 
     /**

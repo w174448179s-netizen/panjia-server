@@ -44,4 +44,13 @@ public interface DeptService {
      */
     Map<Long, String> selectDeptNamesByIds(Collection<Long> deptIds);
 
+    /**
+     * 查询某部门及其所有子部门 ID（含自身）。
+     * 用于数据权限校验：判断目标部门是否在当前用户门店范围内。
+     *
+     * @param deptId 部门 ID
+     * @return 部门 ID 列表（含自身）
+     */
+    List<Long> selectDeptAndChildById(Long deptId);
+
 }
