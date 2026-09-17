@@ -5,7 +5,7 @@ import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.dto.ApplyCreateDTO;
 import com.panjia.commission.dto.ApplyQuery;
 import com.panjia.commission.dto.BatchApproveByContractRequest;
-import com.panjia.commission.dto.CommissionBatchResult;
+import com.panjia.commission.dto.BatchResultDTO;
 import com.panjia.commission.service.CommissionApplicationService;
 import com.panjia.contracts.port.ApprovalAction;
 import lombok.RequiredArgsConstructor;
@@ -25,10 +25,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 结佣申请单管理（按合同发起 / 提交 / 审批锁定）。
@@ -121,46 +121,41 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * Excel 批量发起（§3.2）：按表内合同号逐张发起并自动提交。
+     * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐张发起+提交）。
+     * <p>去重合同号，已有未完结单的跳过，REJECTED 自动重提。前端设 5 分钟超时 + loading。
      *
-     * @param file   Excel（含「合同号」列，金额列可选）
-     * @param period 业绩归属月 YYYY-MM
-     * @return 成功/失败明细
+     * @param request 批量发起请求（period + contractNos）
+     * @return 批量发起结果
      */
-    @SaCheckPermission("commission:apply:batch")
-    @Log(title = "结佣Excel批量发起", businessType = BusinessType.IMPORT)
-    @PostMapping("/batch-initiate")
-    public R<CommissionBatchResult> batchInitiate(@RequestParam("file") MultipartFile file,
-                                                  @RequestParam("period") String period) {
-        return R.ok(applicationService.batchInitiate(period, file, LoginHelper.getUserId()));
+    @SaCheckPermission("commission:apply:add")
+    @Log(title = "结佣批量发起", businessType = BusinessType.INSERT)
+    @PostMapping("/batch-apply-by-contract")
+    public CompletableFuture<R<BatchResultDTO>> batchApplyByContract(@RequestBody BatchApproveByContractRequest request) {
+        return applicationService.batchApplyByContract(
+                request.getPeriod(), request.getContractNos(), LoginHelper.getUserId())
+            .thenApply(result -> R.ok(
+                "批量发起完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
+                    + " 个，失败 " + result.getFailed() + " 个",
+                result));
     }
 
     /**
-     * Excel 批量审批（§3.3）：匹配 合同号+金额 与审批中单据，按当前节点逐张通过。
-     *
-     * @param file   Excel（含「合同号」+实收金额列）
-     * @param period 业绩归属月 YYYY-MM
-     * @return 成功/失败明细
-     */
-    @SaCheckPermission("commission:apply:batch")
-    @Log(title = "结佣Excel批量审批", businessType = BusinessType.IMPORT)
-    @PostMapping("/batch-approve")
-    public R<CommissionBatchResult> batchApprove(@RequestParam("file") MultipartFile file,
-                                                 @RequestParam("period") String period) {
-        return R.ok(applicationService.batchApprove(period, file));
-    }
-
-    /**
-     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点）。
+     * 按合同号批量审批（CompletableFuture 挂起等待，线程池逐单办理当前待办节点）。
+     * <p>去重合同号，非 SUBMITTED 或无待办任务的跳过。前端设 5 分钟超时 + loading。
      *
      * @param request 批量审批请求（period + contractNos）
-     * @return 成功/失败明细
+     * @return 批量审批结果
      */
     @SaCheckPermission("commission:apply:batch")
     @Log(title = "结佣批量审批", businessType = BusinessType.UPDATE)
     @PostMapping("/batch-approve-by-contract")
-    public R<CommissionBatchResult> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
-        return R.ok(applicationService.batchApproveByContract(request.getPeriod(), request.getContractNos()));
+    public CompletableFuture<R<BatchResultDTO>> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
+        return applicationService.batchApproveByContract(
+                request.getPeriod(), request.getContractNos(), LoginHelper.getUserId())
+            .thenApply(result -> R.ok(
+                "批量审批完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
+                    + " 个，失败 " + result.getFailed() + " 个",
+                result));
     }
 
     /**

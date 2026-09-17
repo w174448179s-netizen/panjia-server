@@ -9,12 +9,11 @@ import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
 import com.panjia.commission.dto.ApplyQuery;
-import com.panjia.commission.dto.CommissionBatchResult;
+import com.panjia.commission.dto.BatchResultDTO;
 import com.panjia.commission.dto.CommissionContractVO;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
-import com.panjia.commission.util.CommissionBatchExcelParser;
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
@@ -32,14 +31,15 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.utils.SpringUtils;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -49,9 +49,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
@@ -100,6 +102,7 @@ public class CommissionApplicationService {
     private final EventPort eventPort;
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
+    private final TaskExecutor taskExecutor;
 
     // ==================== 发起结佣（按合同） ====================
 
@@ -180,53 +183,67 @@ public class CommissionApplicationService {
     }
 
     /**
-     * Excel 批量发起（§3.2）：按表内合同号逐张 发起+自动提交；金额列仅用于展示不参与校验。
+     * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐单处理）。
+     * <p>去重合同号，逐张发起并提交审批。已有未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）跳过；
+     * REJECTED 单自动重提。单合同失败不阻断整批。
+     *
+     * @param period      业绩归属月
+     * @param contractNos 合同号列表（允许重复，内部去重）
+     * @param operatorId  发起人 ID
+     * @return 批量发起结果
      */
-    @Transactional(rollbackFor = Exception.class)
-    public CommissionBatchResult batchInitiate(String period, MultipartFile file, Long operatorId) {
+    public CompletableFuture<BatchResultDTO> batchApplyByContract(
+            String period, List<String> contractNos, Long operatorId) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
         }
-        if (file == null || file.isEmpty()) {
-            throw new ServiceException("请上传 Excel 文件（.xlsx/.xls）");
+        if (contractNos == null || contractNos.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
         }
-        List<CommissionBatchExcelParser.ContractAmountRow> rows;
-        try {
-            rows = CommissionBatchExcelParser.parse(file.getInputStream());
-        } catch (Exception e) {
-            throw new ServiceException("Excel 读取失败：{}", e.getMessage());
-        }
-        CommissionBatchResult result = new CommissionBatchResult();
-        Set<String> seen = new HashSet<>();
-        for (CommissionBatchExcelParser.ContractAmountRow row : rows) {
-            if (!seen.add(row.getContractNo())) {
-                continue;
+        LinkedHashSet<String> deduped = new LinkedHashSet<>();
+        for (String c : contractNos) {
+            if (c != null && !c.trim().isEmpty()) {
+                deduped.add(c.trim());
             }
+        }
+        if (deduped.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
+        }
+        checkPeriodOpen(period, "批量发起结佣");
+        log.info("[结佣-批量发起] period={}, total={}, operator={}", period, deduped.size(), operatorId);
+        return CompletableFuture.supplyAsync(
+            () -> doBatchApply(period, deduped, operatorId), taskExecutor);
+    }
+
+    /**
+     * 逐张发起（线程池执行，CompletableFuture 供应方）。
+     * 通过 SpringUtils.getBean 走代理调 apply，确保 @Transactional 生效。
+     * 异步线程无 Sa-Token 上下文，submit 内 currentRoles() 返回空集 →
+     * 跳过总监自动审批节点（总监可后续批量审批），其余逻辑正常执行。
+     */
+    private BatchResultDTO doBatchApply(String period, LinkedHashSet<String> contractNos, Long operatorId) {
+        CommissionApplicationService self = SpringUtils.getBean(CommissionApplicationService.class);
+        BatchResultDTO result = new BatchResultDTO();
+        result.setTotal(contractNos.size());
+        for (String contractNo : contractNos) {
             try {
-                CommissionApplication application;
-                CommissionApplication existing = findActiveApplication(period, row.getContractNo());
-                if (existing != null
-                    && existing.getStatus() != ApplicationStatus.CANCELLED) {
-                    // 已有未完结单：草稿/驳回单直接提交，审批中/已锁定视为成功跳过
-                    if (existing.getStatus() == ApplicationStatus.DRAFT
-                        || existing.getStatus() == ApplicationStatus.REJECTED) {
-                        application = existing;
-                    } else {
-                        result.addSuccess();
-                        continue;
-                    }
-                } else {
-                    checkPeriodOpen(period, "批量发起结佣");
-                    application = doApply(period, row.getContractNo(), operatorId);
+                CommissionApplication existing = findActiveApplication(period, contractNo);
+                if (existing != null && existing.getStatus() != ApplicationStatus.REJECTED) {
+                    result.getSkippedContracts().add(contractNo);
+                    continue;
                 }
-                submit(application.getId(), operatorId);
-                result.addSuccess();
+                self.apply(period, contractNo, operatorId);
+                result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
-                result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
+                result.getFailedContracts().add(contractNo);
+                log.warn("[结佣-批量发起] 合同 {} 发起失败：{}", contractNo, e.getMessage());
             }
         }
-        log.info("[结佣-Excel批量发起] period={}, 成功={}, 失败={}",
-            period, result.getSuccessCount(), result.getFailedRows().size());
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[结佣-批量发起] period={}, 成功={}, 跳过={}, 失败={}",
+            period, result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 
@@ -483,95 +500,81 @@ public class CommissionApplicationService {
     }
 
     /**
-     * Excel 批量审批（§3.3）：匹配 合同号+实收金额 与 SUBMITTED 单据，按当前节点逐张通过。
+     * 按合同号批量审批（CompletableFuture 挂起等待，线程池逐单办理当前待办节点）。
+     * <p>去重合同号，非 SUBMITTED 或无待办任务的跳过。单合同失败不阻断整批。
+     * 异步线程用 completeTaskAsLoginUser 走引擎原生鉴权。
+     *
+     * @param period      结算月
+     * @param contractNos 合同号列表（允许重复，内部去重）
+     * @param operatorId  操作人 ID（异步线程无 Sa-Token 上下文，同步阶段捕获）
+     * @return 批量审批结果
      */
-    @Transactional(rollbackFor = Exception.class)
-    public CommissionBatchResult batchApprove(String period, MultipartFile file) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("结算月不能为空");
-        }
-        if (file == null || file.isEmpty()) {
-            throw new ServiceException("请上传 Excel 文件（.xlsx/.xls）");
-        }
-        List<CommissionBatchExcelParser.ContractAmountRow> rows;
-        try {
-            rows = CommissionBatchExcelParser.parse(file.getInputStream());
-        } catch (Exception e) {
-            throw new ServiceException("Excel 读取失败：{}", e.getMessage());
-        }
-        CommissionBatchResult result = new CommissionBatchResult();
-        for (CommissionBatchExcelParser.ContractAmountRow row : rows) {
-            try {
-                BigDecimal amount = CommissionBatchExcelParser.parseAmount(row.getAmountText());
-                CommissionApplication application = applicationMapper.selectOne(
-                    new LambdaQueryWrapper<CommissionApplication>()
-                        .eq(CommissionApplication::getPeriod, period)
-                        .eq(CommissionApplication::getContractNo, row.getContractNo())
-                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
-                        .orderByDesc(CommissionApplication::getId)
-                        .last("LIMIT 1"));
-                if (application == null) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(), "无审批中的结佣申请单");
-                    continue;
-                }
-                if (amount == null) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(), "金额无法识别");
-                    continue;
-                }
-                if (application.getTotalAmount() == null
-                    || application.getTotalAmount().compareTo(amount) != 0) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(),
-                        "金额不匹配，单据实收=" + application.getTotalAmount());
-                    continue;
-                }
-                approve(application.getId());
-                result.addSuccess();
-            } catch (Exception e) {
-                result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
-            }
-        }
-        log.info("[结佣-Excel批量审批] period={}, 成功={}, 失败={}",
-            period, result.getSuccessCount(), result.getFailedRows().size());
-        return result;
-    }
-
-    /**
-     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点，不做金额匹配）。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public CommissionBatchResult batchApproveByContract(String period, List<String> contractNos) {
+    public CompletableFuture<BatchResultDTO> batchApproveByContract(
+            String period, List<String> contractNos, Long operatorId) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
         }
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        CommissionBatchResult result = new CommissionBatchResult();
-        for (String contractNo : contractNos) {
-            String trimmed = contractNo == null ? "" : contractNo.trim();
-            if (trimmed.isEmpty()) {
-                continue;
+        LinkedHashSet<String> deduped = new LinkedHashSet<>();
+        for (String c : contractNos) {
+            if (c != null && !c.trim().isEmpty()) {
+                deduped.add(c.trim());
             }
+        }
+        if (deduped.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
+        }
+        log.info("[结佣-批量审批] period={}, total={}, operator={}", period, deduped.size(), operatorId);
+        return CompletableFuture.supplyAsync(
+            () -> doBatchApprove(period, deduped), taskExecutor);
+    }
+
+    /**
+     * 逐单审批（线程池执行，CompletableFuture 供应方）。
+     * 异步线程无 Sa-Token 上下文，用 completeAsSys（ignore=true）办理，
+     * 权限由 @SaCheckPermission 前置保障。
+     */
+    private BatchResultDTO doBatchApprove(String period, LinkedHashSet<String> contractNos) {
+        BatchResultDTO result = new BatchResultDTO();
+        result.setTotal(contractNos.size());
+        for (String contractNo : contractNos) {
             try {
                 CommissionApplication application = applicationMapper.selectOne(
                     new LambdaQueryWrapper<CommissionApplication>()
                         .eq(CommissionApplication::getPeriod, period)
-                        .eq(CommissionApplication::getContractNo, trimmed)
+                        .eq(CommissionApplication::getContractNo, contractNo)
                         .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
                         .orderByDesc(CommissionApplication::getId)
                         .last("LIMIT 1"));
                 if (application == null) {
-                    result.addFailure(trimmed, "", "无审批中的结佣申请单");
+                    result.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                approve(application.getId());
-                result.addSuccess();
+                String node = approvalPort.currentNodeCode(BizType.COMMISSION, application.getId());
+                if (!NODE_DIRECTOR.equals(node) && !NODE_FINANCE.equals(node)) {
+                    result.getSkippedContracts().add(contractNo);
+                    continue;
+                }
+                if (NODE_DIRECTOR.equals(node)) {
+                    updateAmountVariables(application);
+                }
+                String defaultComment = NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过";
+                approvalPort.completeAsSys(BizType.COMMISSION, application.getId(),
+                    ApprovalAction.PASS, "批量审批：" + defaultComment);
+                refreshCurrentNode(application);
+                result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
-                result.addFailure(trimmed, "", e.getMessage());
+                result.getFailedContracts().add(contractNo);
+                log.warn("[结佣-批量审批] 合同 {} 审批失败：{}", contractNo, e.getMessage());
             }
         }
-        log.info("[结佣-合同号批量审批] period={}, 成功={}, 失败={}",
-            period, result.getSuccessCount(), result.getFailedRows().size());
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[结佣-批量审批] period={}, 成功={}, 跳过={}, 失败={}",
+            period, result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 
