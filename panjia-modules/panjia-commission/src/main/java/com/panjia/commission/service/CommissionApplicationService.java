@@ -915,6 +915,11 @@ public class CommissionApplicationService {
         return application;
     }
 
+    /** 按申请单 ID 查流程实例 ID */
+    public Long getInstanceId(Long applicationId) {
+        return approvalPort.instanceId(BizType.COMMISSION, applicationId);
+    }
+
     /**
      * 查当前 ACTIVE PERF_EXPECT 合计，与申请单快照比较：
      * 不一致时置 expectedAdjusted=true，并用当前值覆盖 expectedAmount 供前端展示。

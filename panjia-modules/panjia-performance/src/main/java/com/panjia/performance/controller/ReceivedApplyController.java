@@ -56,6 +56,13 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(receivedApplyService.getDetail(id));
     }
 
+    /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
+    @SaCheckPermission("perf:received:query")
+    @GetMapping("/{id}/instance")
+    public R<Map<String, Object>> getInstance(@PathVariable Long id) {
+        return R.ok(Map.of("instanceId", receivedApplyService.getInstanceId(id)));
+    }
+
     /**
      * 手工提交（无单自动建单）：按发起人角色路由。
      * Body: {"period":"2026-08","contractNo":"..."}

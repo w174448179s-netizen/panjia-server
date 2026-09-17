@@ -603,6 +603,11 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         return new ReceivedApplyDetail(apply, facts);
     }
 
+    @Override
+    public Long getInstanceId(Long id) {
+        return approvalPort.instanceId(BizType.REAL_CONFIRM, id);
+    }
+
     // ==================== 内部方法 ====================
 
     /**

@@ -86,6 +86,13 @@ public class CommissionApplyController extends BaseController {
         return R.ok(Map.of("application", application, "items", items));
     }
 
+    /** 按申请单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
+    @SaCheckPermission("commission:apply:query")
+    @GetMapping("/{id}/instance")
+    public R<Map<String, Object>> getInstance(@PathVariable Long id) {
+        return R.ok(Map.of("instanceId", applicationService.getInstanceId(id)));
+    }
+
     /**
      * 发起结佣（合同 + 月）：一次操作完成发起并提交审批，直接进入审批流。
      * <p>

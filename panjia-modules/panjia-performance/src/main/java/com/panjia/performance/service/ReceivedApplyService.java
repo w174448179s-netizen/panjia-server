@@ -107,6 +107,9 @@ public interface ReceivedApplyService {
     /** 详情（含合同下每人实收明细，列口径对齐合同业绩明细） */
     ReceivedApplyDetail getDetail(Long id);
 
+    /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
+    Long getInstanceId(Long id);
+
     /** 实收审批单明细视图 */
     record ReceivedApplyDetail(ReceivedApply apply,
                                List<com.panjia.performance.dto.ReceivedFactDetailDTO> facts) {
