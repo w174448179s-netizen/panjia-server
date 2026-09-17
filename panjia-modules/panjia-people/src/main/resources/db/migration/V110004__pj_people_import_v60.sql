@@ -91,26 +91,7 @@ CREATE TABLE pj_people_import_template (
 
 COMMENT ON TABLE pj_people_import_template IS '员工导入模板（common-import-util ColumnDef 模型持久化）';
 
--- 种子：员工导入模板 V100（field 为 snake_case，与 ParsedRow.values/rawValues 的 key 对齐）
-INSERT INTO pj_people_import_template (id, template_code, template_version, column_json, enabled)
-VALUES (1761600000000000001, 'EMPLOYEE', 'V100', '[
-  {"colName":"门店-组别","field":"dept_full","type":"STRING","required":true},
-  {"colName":"工号","field":"employee_code","type":"STRING","required":true,"maxLength":32},
-  {"colName":"姓名","field":"employee_name","type":"STRING","required":true,"maxLength":64},
-  {"colName":"职级","field":"level","type":"STRING","required":true,"enumValues":["A0","A1","A2","A3","A4","A5","S1","S2"]},
-  {"colName":"职位","field":"post_names","type":"STRING","required":true},
-  {"colName":"电话","field":"phone","type":"STRING","required":false,"maxLength":20},
-  {"colName":"身份证","field":"id_card","type":"STRING","required":false,"maxLength":64},
-  {"colName":"报道时间","field":"report_date","type":"DATE","required":false,"dateFormat":"yyyy-MM-dd"},
-  {"colName":"入职时间","field":"hire_date","type":"DATE","required":true,"dateFormat":"yyyy-MM-dd"},
-  {"colName":"社保","field":"social","type":"BOOL","required":true},
-  {"colName":"公积金","field":"housing","type":"BOOL","required":true},
-  {"colName":"商业保险","field":"commercial","type":"BOOL","required":true},
-  {"colName":"宿舍","field":"dormitory","type":"BOOL","required":true},
-  {"colName":"兼职","field":"parttime","type":"BOOL","required":true},
-  {"colName":"师傅工号","field":"mentor_code","type":"STRING","required":false,"maxLength":32}
-]', 1)
-ON CONFLICT (id) DO NOTHING;
+
 
 -- ---------- 五、菜单备注修正（权限码 people:employee:import 已由 V100017 播种） ----------
 UPDATE sys_menu

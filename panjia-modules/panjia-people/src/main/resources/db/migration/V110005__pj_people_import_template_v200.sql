@@ -15,10 +15,6 @@
 
 BEGIN;
 
--- 1. 停用老模板（保留历史，便于问题排查）
-UPDATE pj_people_import_template
-SET enabled = 0
-WHERE template_code = 'EMPLOYEE' AND template_version = 'V100';
 
 -- 2. 启用新模板 V200：把 dept_full 单列替换为 dept_level1/2/3 三列
 INSERT INTO pj_people_import_template (id, template_code, template_version, column_json, enabled)

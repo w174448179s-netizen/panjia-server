@@ -119,14 +119,18 @@ ON CONFLICT (dict_type) DO UPDATE SET dict_name = EXCLUDED.dict_name, remark = E
 DELETE FROM sys_dict_data WHERE dict_type = 'panjia_employee_level';
 INSERT INTO sys_dict_data (dict_code, dict_sort, dict_label, dict_value, dict_type, list_class, is_default, create_dept, create_by, create_time)
 VALUES
-(1761600000000010001, 1, 'A0（新人）', 'A0', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010001, 1, 'A0', 'A0', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010002, 2, 'A1', 'A1', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010003, 3, 'A2', 'A2', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010004, 4, 'A3', 'A3', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010005, 5, 'A4', 'A4', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010006, 6, 'A5', 'A5', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010007, 7, 'S1', 'S1', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now()),
-(1761600000000010008, 8, 'S2', 'S2', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now());
+(1761600000000010008, 8, 'S2', 'S2', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010009, 9, 'C0', 'C0', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010010, 9, 'C1', 'C1', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010011, 10, 'C2', 'C2', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010012, 11, 'C3', 'C3', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now());
 
 -- 6.3 员工状态字典（V5.2：ACTIVE/PARTTIME/LEFT/PENDING）
 INSERT INTO sys_dict_type (dict_id, dict_name, dict_type, create_dept, create_by, create_time, remark)
