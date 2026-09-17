@@ -8,6 +8,7 @@ import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.domain.ReceivedApplyStatus;
+import com.panjia.performance.dto.BatchApproveResultDTO;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.dto.ReceivedContractGroupDTO;
 import com.panjia.performance.dto.ReceivedContractMetricsDTO;
@@ -41,6 +42,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 实收业绩审批单服务实现（§2）。
@@ -305,17 +307,16 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         }
     }
 
-    // ==================== 异步批量审批（按合同号） ====================
+    // ==================== 批量审批（线程池异步 + CompletableFuture 挂起等待） ====================
 
     @Override
-    public int batchApproveByContractAsync(String period, List<String> contractNos) {
+    public CompletableFuture<BatchApproveResultDTO> batchApproveByContractAsync(String period, List<String> contractNos) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
         }
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        // 同步阶段：去重（保留输入顺序）
         LinkedHashSet<String> deduped = new LinkedHashSet<>();
         for (String c : contractNos) {
             if (c != null && !c.trim().isEmpty()) {
@@ -325,7 +326,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (deduped.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        // 同步阶段捕获操作人（HTTP 线程有 Sa-Token 上下文）
         Long operatorId;
         String operatorName;
         try {
@@ -334,22 +334,22 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         } catch (Exception e) {
             throw new ServiceException("无法获取当前登录用户信息，请重新登录");
         }
-        // 提交异步线程，立即返回
-        taskExecutor.execute(() -> doBatchApproveAsync(period, deduped, operatorId, operatorName));
-        log.info("[实收审批] 异步批量审批已提交：period={}, total={}, operator={}",
+        log.info("[实收审批] 批量审批已提交：period={}, total={}, operator={}",
             period, deduped.size(), operatorName);
-        return deduped.size();
+        return CompletableFuture.supplyAsync(
+            () -> doBatchApprove(period, deduped, operatorId, operatorName), taskExecutor);
     }
 
     /**
-     * 异步逐单办理（TaskExecutor 线程池执行）。
+     * 逐单办理（TaskExecutor 线程池执行，CompletableFuture 供应方）。
      * 不加 @Transactional：逐单处理，单据失败不中断整批，不回滚已处理的单据。
      */
-    private void doBatchApproveAsync(String period, LinkedHashSet<String> contractNos, Long operatorId, String operatorName) {
-        int success = 0, skipped = 0, failed = 0;
+    private BatchApproveResultDTO doBatchApprove(String period, LinkedHashSet<String> contractNos,
+                                                  Long operatorId, String operatorName) {
+        BatchApproveResultDTO result = new BatchApproveResultDTO();
+        result.setTotal(contractNos.size());
         for (String contractNo : contractNos) {
             try {
-                // 查询审批中的实收审批单（非 SUBMITTED = 已审批/已作废，直接跳过）
                 ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
                     .eq(ReceivedApply::getPeriod, period)
                     .eq(ReceivedApply::getContractNo, contractNo)
@@ -357,27 +357,30 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                     .orderByDesc(ReceivedApply::getId)
                     .last("LIMIT 1"));
                 if (apply == null) {
-                    skipped++;
+                    result.getSkippedContracts().add(contractNo);
                     continue;
                 }
                 Long applyTaskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
                 if (applyTaskId == null) {
-                    skipped++;
+                    result.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                // 异步线程无 Sa-Token 上下文，用系统身份办理（ignore=true），审批意见带操作人留痕
                 String approver = operatorName != null ? operatorName : String.valueOf(operatorId);
                 approvalPort.completeAsSys(BizType.REAL_CONFIRM, apply.getId(),
                     ApprovalAction.PASS, "批量审批通过（操作人：" + approver + "）");
-                success++;
+                result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
-                failed++;
-                log.warn("[实收审批] 异步批量审批单据失败：period={}, contractNo={}, reason={}",
+                result.getFailedContracts().add(contractNo);
+                log.warn("[实收审批] 批量审批单据失败：period={}, contractNo={}, reason={}",
                     period, contractNo, e.getMessage());
             }
         }
-        log.info("[实收审批] 异步批量审批完成：period={}, 成功={}, 跳过={}, 失败={}",
-            period, success, skipped, failed);
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[实收审批] 批量审批完成：period={}, 成功={}, 跳过={}, 失败={}",
+            period, result.getSuccess(), result.getSkipped(), result.getFailed());
+        return result;
     }
 
     // ==================== 工作流回调 ====================
@@ -437,16 +440,17 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void stampApproverOnDirectorNode(Long applyId, Long handlerId) {
-        if (applyId == null || handlerId == null) {
+        if (applyId == null) {
             return;
         }
         ReceivedApply apply = applyMapper.selectById(applyId);
         if (apply == null || apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             return;
         }
-        apply.setApproverId(handlerId);
-        apply.setApproveTime(LocalDateTime.now());
-        // 复用 refreshCurrentNode：currentNode 回写 + updateById（fresh 实体，避免乐观锁失效）
+        if (handlerId != null) {
+            apply.setApproverId(handlerId);
+            apply.setApproveTime(LocalDateTime.now());
+        }
         refreshCurrentNode(apply);
         log.info("[实收审批工作流] 财务已通过，回填审批人留痕：applyId={}, handlerId={}", applyId, handlerId);
     }

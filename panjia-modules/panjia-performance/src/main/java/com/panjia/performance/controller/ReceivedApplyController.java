@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.dto.BatchApproveByContractRequest;
+import com.panjia.performance.dto.BatchApproveResultDTO;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import com.panjia.performance.service.ReceivedApplyService;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 实收业绩审批（合同维度，§2 实收业绩流程）。
@@ -85,16 +87,19 @@ public class ReceivedApplyController extends BaseController {
     }
 
     /**
-     * 按合同号异步批量审批（解决大量合同号一次性提交 HTTP 超时）。
-     * <p>后台线程逐单办理，去重 + 跳过已审批（非 SUBMITTED 或无待办）。
-     * 立即返回待审批数量，前端给友好提示即可。
+     * 按合同号批量审批（线程池异步执行，Spring MVC 通过 CompletableFuture 挂起请求等待完成）。
+     * <p>逐单办理，去重 + 跳过已审批（非 SUBMITTED 或无待办）。
+     * 前端请求超时设 5 分钟，期间显示 loading；完成后返回每张单的处理结果。
      */
     @SaCheckPermission("perf:received:batch")
-    @Log(title = "实收业绩异步批量审批", businessType = BusinessType.UPDATE)
+    @Log(title = "实收业绩批量审批", businessType = BusinessType.UPDATE)
     @PostMapping("/batch-approve-by-contract-async")
-    public R<Integer> batchApproveByContractAsync(@RequestBody BatchApproveByContractRequest request) {
-        int count = receivedApplyService.batchApproveByContractAsync(request.getPeriod(), request.getContractNos());
-        return R.ok("已提交 " + count + " 个合同号，正在后台批量审批，请稍后查看结果", count);
+    public CompletableFuture<R<BatchApproveResultDTO>> batchApproveByContractAsync(@RequestBody BatchApproveByContractRequest request) {
+        return receivedApplyService.batchApproveByContractAsync(request.getPeriod(), request.getContractNos())
+            .thenApply(result -> R.ok(
+                "批量审批完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
+                    + " 个，失败 " + result.getFailed() + " 个",
+                result));
     }
 
     /**

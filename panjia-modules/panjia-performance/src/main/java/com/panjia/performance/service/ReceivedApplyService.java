@@ -2,11 +2,13 @@ package com.panjia.performance.service;
 
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
+import com.panjia.performance.dto.BatchApproveResultDTO;
 import com.panjia.performance.dto.ReceivedApplyQuery;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 实收业绩审批单服务（§2 实收业绩流程）。
@@ -68,8 +70,9 @@ public interface ReceivedApplyService {
     void cancel(Long id);
 
     /**
-     * 按合同号异步批量审批（后台线程逐单办理，解决一次性提交大量合同号 HTTP 超时问题）。
-     * <p>同步阶段去重合同号 + 捕获操作人姓名，立即返回；异步线程逐单办理当前待办节点。
+     * 按合同号批量审批（线程池异步执行，CompletableFuture 让 Spring MVC 挂起请求等待完成）。
+     * <p>同步阶段去重合同号 + 捕获操作人信息；异步线程逐单办理当前待办节点。
+     * 前端请求超时设 5 分钟，期间显示 loading；完成后返回每张单的处理结果。
      * <ul>
      *   <li>去重：相同合同号只处理一次；</li>
      *   <li>跳过已审批：非 SUBMITTED 状态或无待办任务的合同号直接跳过；</li>
@@ -78,9 +81,9 @@ public interface ReceivedApplyService {
      *
      * @param period     结算月（必填）
      * @param contractNos 合同号列表（允许重复，内部去重）
-     * @return 去重后待审批的合同号数量
+     * @return 批量审批结果（成功/跳过/失败 + 合同号列表）
      */
-    int batchApproveByContractAsync(String period, List<String> contractNos);
+    CompletableFuture<BatchApproveResultDTO> batchApproveByContractAsync(String period, List<String> contractNos);
 
     /**
      * 工作流回调（ReceivedWorkflowListener 调用）。

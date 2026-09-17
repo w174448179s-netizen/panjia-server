@@ -81,12 +81,7 @@ public class ReceivedWorkflowListener {
                     }
                 }
             }
-            if (handlerId == null) {
-                log.info("[实收审批工作流] 任务事件无办理人，跳过留痕：applyId={}, taskId={}",
-                    applyId, approvalTaskEvent.getTaskId());
-                return;
-            }
-            log.info("[实收审批工作流] 财务已通过进入总监节点，回填审批人：applyId={}, handlerId={}",
+            log.info("[实收审批工作流] 财务已通过进入总监节点：applyId={}, handlerId={}",
                 applyId, handlerId);
             receivedApplyService.stampApproverOnDirectorNode(applyId, handlerId);
         } catch (Exception e) {
