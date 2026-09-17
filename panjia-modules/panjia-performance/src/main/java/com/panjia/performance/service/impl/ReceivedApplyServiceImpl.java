@@ -510,8 +510,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
             .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
-            .eq(StringUtils.isNotBlank(query.getCurrentNode()),
-                ReceivedApply::getCurrentNode, query.getCurrentNode())
             .ne(StringUtils.isBlank(query.getStatus()),
                 ReceivedApply::getStatus, ReceivedApplyStatus.CANCELLED)
             .eq(StringUtils.isNotBlank(query.getStatus()),
@@ -521,6 +519,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 .or().like(ReceivedApply::getOrderNo, query.getKeyword())
                 .or().like(ReceivedApply::getPropertyAddress, query.getKeyword()))
             .orderByDesc(ReceivedApply::getCreateTime);
+        // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）
+        applyApprovalNodeScope(wrapper);
         // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
         // 子查询直接用 sys_dept.ancestors 匹配，避免逐层展开。
         if (effectiveDeptId != null) {
@@ -886,6 +886,42 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             throw new ServiceException("实收审批单不存在：" + id);
         }
         return apply;
+    }
+
+    /**
+     * 审批节点数据隔离（列表查询用）。
+     * <p>
+     * 审批中（SUBMITTED）单据只允许本人角色对应节点可见：
+     * 财务 → FINANCE，总监 → DIRECTOR；兼有两角色则两个节点均可见；
+     * 无审批角色者看不到任何审批中单据。非审批中（草稿/已通过/已驳回/已作废）不受限制。
+     * 超管看全部。
+     */
+    private void applyApprovalNodeScope(LambdaQueryWrapper<ReceivedApply> wrapper) {
+        if (LoginHelper.isSuperAdmin()) {
+            return;
+        }
+        List<String> myNodes = new ArrayList<>();
+        try {
+            if (LoginHelper.isLogin() && LoginHelper.getLoginUser() != null) {
+                Set<String> roles = LoginHelper.getLoginUser().getRolePermission();
+                if (roles != null) {
+                    if (roles.contains("finance")) {
+                        myNodes.add("FINANCE");
+                    }
+                    if (roles.contains("director")) {
+                        myNodes.add("DIRECTOR");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[实收审批] 无登录上下文，不授予任何审批节点可见性：{}", e.getMessage());
+        }
+        if (myNodes.isEmpty()) {
+            wrapper.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED);
+        } else {
+            wrapper.and(w -> w.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
+                .or().in(ReceivedApply::getCurrentNode, myNodes));
+        }
     }
 
     private Set<String> currentRoles() {

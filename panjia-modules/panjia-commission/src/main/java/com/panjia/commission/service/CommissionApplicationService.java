@@ -37,6 +37,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.dromara.system.api.DeptService;
+import org.dromara.system.api.domain.DeptDTO;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -116,10 +117,18 @@ public class CommissionApplicationService {
     // ==================== 发起结佣（按合同） ====================
 
     /**
-     * 门店数据权限校验：非超管用户只能发起自己门店（含下级）的合同。
+     * 门店数据权限校验：非超管用户只能发起归属部门为「本部门或本部门下级」的合同。
+     * 判定方向：从合同归属部门沿 parentId 向上递归，父链（含自身）命中当前用户部门才放行。
      * 在 HTTP 线程中调用（依赖 LoginHelper 获取当前用户）。
      */
     void checkContractDeptScope(Long contractDeptId) {
+        checkContractDeptScope(contractDeptId, loadDeptParentMap());
+    }
+
+    /**
+     * 门店数据权限校验（批量场景复用同一份部门父链映射，避免逐单查库）。
+     */
+    void checkContractDeptScope(Long contractDeptId, Map<Long, Long> deptParentMap) {
         if (LoginHelper.isSuperAdmin()) {
             return;
         }
@@ -130,10 +139,36 @@ public class CommissionApplicationService {
         if (myDeptId == null) {
             throw new ServiceException("当前用户无归属门店，无法发起结佣");
         }
-        List<Long> myDeptAndChild = deptService.selectDeptAndChildById(myDeptId);
-        if (myDeptAndChild == null || !myDeptAndChild.contains(contractDeptId)) {
-            throw new ServiceException("无权发起该门店的合同结佣");
+        // 从合同归属部门开始沿父链向上找：命中用户部门（含恰好同级）即放行
+        Long currentDeptId = contractDeptId;
+        while (currentDeptId != null) {
+            if (myDeptId.equals(currentDeptId)) {
+                return;
+            }
+            Long parentId = deptParentMap == null ? null : deptParentMap.get(currentDeptId);
+            // parentId 为 0（RuoYi 虚拟根）、缺失或自引用时终止，避免死循环
+            if (parentId == null || parentId == 0L || parentId.equals(currentDeptId)) {
+                break;
+            }
+            currentDeptId = parentId;
         }
+        throw new ServiceException("无权发起该门店的合同结佣");
+    }
+
+    /**
+     * 加载正常状态部门的 deptId → parentId 映射，用于沿父链向上做归属校验。
+     */
+    private Map<Long, Long> loadDeptParentMap() {
+        List<DeptDTO> depts = deptService.selectDeptsByList();
+        Map<Long, Long> parentMap = new HashMap<>();
+        if (depts != null) {
+            for (DeptDTO dept : depts) {
+                if (dept.getDeptId() != null) {
+                    parentMap.put(dept.getDeptId(), dept.getParentId());
+                }
+            }
+        }
+        return parentMap;
     }
 
     /**
@@ -210,7 +245,9 @@ public class CommissionApplicationService {
         }
         checkPeriodOpen(period, "批量发起结佣");
         // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，校验门店权限
-        // 非超管用户只能发起自己门店（含下级）的合同，无权的直接计入跳过
+        // 非超管用户只能发起归属部门在本部门（含本部门下级）链路上的合同，无权的直接计入跳过；
+        // 部门父链映射只加载一次，逐单沿父链向上校验
+        Map<Long, Long> deptParentMap = LoginHelper.isSuperAdmin() ? null : loadDeptParentMap();
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
         BatchResultDTO syncResult = new BatchResultDTO();
         syncResult.setTotal(deduped.size());
@@ -221,7 +258,7 @@ public class CommissionApplicationService {
                     syncResult.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                checkContractDeptScope(contractDeptId);
+                checkContractDeptScope(contractDeptId, deptParentMap);
                 myContracts.add(contractNo);
             } catch (ServiceException e) {
                 syncResult.getSkippedContracts().add(contractNo);
@@ -815,7 +852,9 @@ public class CommissionApplicationService {
         }
 
         String keyword = StringUtils.trimToNull(query.getKeyword());
-        String filterNode = StringUtils.trimToNull(query.getCurrentNode());
+        // 审批节点数据隔离：审批中单据仅本人角色对应节点可见（财务→FINANCE，总监→DIRECTOR），超管看全部
+        boolean nodeScopeAll = LoginHelper.isSuperAdmin();
+        Set<String> myNodes = nodeScopeAll ? Set.of() : currentApprovalNodes();
 
         List<CommissionContractVO> all = new ArrayList<>(contracts.size());
         for (PerformanceContractSummaryDTO c : contracts) {
@@ -830,12 +869,10 @@ public class CommissionApplicationService {
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
             }
-            // 按审批节点过滤
-            if (filterNode != null) {
-                String node = app != null ? app.getCurrentNode() : null;
-                if (!filterNode.equals(node)) {
-                    continue;
-                }
+            // 审批节点数据隔离：审批中（SUBMITTED）单据仅本人角色对应节点可见；非审批中/未发起单据不受限
+            if (!nodeScopeAll && ApplicationStatus.SUBMITTED.getCode().equals(status)
+                && (app == null || !myNodes.contains(app.getCurrentNode()))) {
+                continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
                 continue;
@@ -1292,6 +1329,23 @@ public class CommissionApplicationService {
             log.debug("[结佣] 无登录上下文：{}", e.getMessage());
         }
         return Set.of();
+    }
+
+    /**
+     * 当前登录用户可见的审批节点短码集合（列表数据隔离用）：
+     * 财务角色 → FINANCE，总监角色 → DIRECTOR，可兼有；无审批角色返回空集。
+     * 超管不经过此判定（调用方直接放行全部）。
+     */
+    private Set<String> currentApprovalNodes() {
+        Set<String> roles = currentRoles();
+        Set<String> nodes = new HashSet<>();
+        if (roles.contains("finance")) {
+            nodes.add("FINANCE");
+        }
+        if (roles.contains(ROLE_DIRECTOR)) {
+            nodes.add("DIRECTOR");
+        }
+        return nodes;
     }
 
     private Long parseHandlerId(String handler) {
