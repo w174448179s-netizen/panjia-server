@@ -161,7 +161,8 @@ public interface PerformanceQueryService {
      * @return 合同维度业绩汇总分页结果
      */
     PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
-                                                          String keyword, Integer pageNum, Integer pageSize);
+                                                          String keyword, String factStatus,
+                                                          Integer pageNum, Integer pageSize);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。

@@ -18,6 +18,9 @@ public class PerformanceSearchDetailDTO {
     /** 应收事实 ID（行主键） */
     private Long factId;
 
+    /** 事实状态（ACTIVE/VOIDED） */
+    private String factStatus;
+
     /** 归属期间（明细含该业务键全部期间，与列表的合同全周期聚合口径一致） */
     private String period;
 

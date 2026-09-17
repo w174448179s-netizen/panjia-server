@@ -430,15 +430,16 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     @Override
     public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
-                                                                  String keyword, Integer pageNum, Integer pageSize) {
+                                                                  String keyword, String factStatus,
+                                                                  Integer pageNum, Integer pageSize) {
         int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
         int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
         long offset = (long) (page - 1) * size;
 
-        long total = factMapper.countFactSearchByContract(period, deptId, keyword);
+        long total = factMapper.countFactSearchByContract(period, deptId, keyword, factStatus);
         List<PerformanceFactSearchDTO> rows = total == 0
             ? List.of()
-            : factMapper.selectFactSearchByContract(period, deptId, keyword, offset, size);
+            : factMapper.selectFactSearchByContract(period, deptId, keyword, factStatus, offset, size);
 
         return new PageResult<>(rows, total);
     }
