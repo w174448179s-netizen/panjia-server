@@ -1,5 +1,9 @@
 package com.panjia.commission.service;
 
+import cn.dev33.satoken.SaManager;
+import cn.dev33.satoken.context.mock.SaRequestForMock;
+import cn.dev33.satoken.context.mock.SaResponseForMock;
+import cn.dev33.satoken.context.mock.SaStorageForMock;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.panjia.commission.domain.ApplicationStatus;
@@ -31,6 +35,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.core.utils.ServletUtils;
 import org.dromara.common.core.utils.SpringUtils;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -198,13 +203,28 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId) {
+        return apply(period, contractNo, operatorId, false);
+    }
+
+    /**
+     * 发起结佣并提交审批。
+     *
+     * @param skipDeptScope 是否跳过门店数据权限校验。批量发起时门店权限已在 HTTP 线程的同步阶段
+     *                      逐个校验过；异步线程无 Sa-Token 上下文，而门店校验查询的部门表带
+     *                      {@code @DataPermission}，拦截器取登录态会抛 SaTokenContextException，
+     *                      故异步路径必须跳过（不构成越权：同步阶段已过滤）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionApplication apply(String period, String contractNo, Long operatorId, boolean skipDeptScope) {
         if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
             throw new ServiceException("结算月与合同号不能为空");
         }
         checkPeriodOpen(period, "发起结佣");
         // 门店数据权限校验：非超管只能发起自己门店（含下级）的合同
-        Long contractDeptId = resolveContractDeptId(period, contractNo);
-        checkContractDeptScope(contractDeptId);
+        if (!skipDeptScope) {
+            Long contractDeptId = resolveContractDeptId(period, contractNo);
+            checkContractDeptScope(contractDeptId);
+        }
         // 驳回单重提：该合同当月已有 REJECTED 单时，直接重新提交，不新建单
         CommissionApplication rejected = findRejectedApplication(period, contractNo);
         if (rejected != null) {
@@ -244,6 +264,11 @@ public class CommissionApplicationService {
             throw new ServiceException("合同号列表不能为空");
         }
         checkPeriodOpen(period, "批量发起结佣");
+        // 在 HTTP 线程捕获本次请求的 token：异步线程无 Sa-Token 上下文，
+        // 需在线程内安装携带该 token 的 Mock 上下文（会话仍从 Redis 读取），
+        // 否则流程发起人变量(initiator)为空、总监发起无法自动过总监节点、数据权限拦截报错
+        String tokenName = SaManager.getConfig().getTokenName();
+        String tokenValue = ServletUtils.getRequest().getHeader(tokenName);
         // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，校验门店权限
         // 非超管用户只能发起归属部门在本部门（含本部门下级）链路上的合同，无权的直接计入跳过；
         // 部门父链映射只加载一次，逐单沿父链向上校验
@@ -270,20 +295,40 @@ public class CommissionApplicationService {
             period, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
         final BatchResultDTO preResult = syncResult;
         return CompletableFuture.supplyAsync(
-            () -> {
+            () -> runWithOperatorToken(tokenName, tokenValue, () -> {
                 BatchResultDTO asyncResult = doBatchApply(period, myContracts, operatorId);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
                 asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
                 return asyncResult;
-            }, taskExecutor);
+            }), taskExecutor);
+    }
+
+    /**
+     * 为异步线程安装携带操作人 token 的 Sa-Token Mock 上下文，执行完毕后清理。
+     * <p>
+     * 线程池线程本身无 HTTP 请求，{@code StpUtil} 取不到会话。安装后 LoginHelper、
+     * 工作流发起链路（initiator/initiatorDeptId 变量、办理人）、数据权限拦截器、
+     * 总监发起自动审批等行为与 HTTP 线程完全一致；会话数据仍统一从 Redis 读取，无伪造登录。
+     */
+    private <T> T runWithOperatorToken(String tokenName, String tokenValue, java.util.function.Supplier<T> action) {
+        SaRequestForMock mockRequest = new SaRequestForMock();
+        if (StringUtils.isNotBlank(tokenValue)) {
+            mockRequest.headerMap.put(tokenName, tokenValue);
+        }
+        SaManager.getSaTokenContext().setContext(mockRequest, new SaResponseForMock(), new SaStorageForMock());
+        try {
+            return action.get();
+        } finally {
+            SaManager.getSaTokenContext().clearContext();
+        }
     }
 
     /**
      * 逐张发起（线程池执行，CompletableFuture 供应方）。
      * 通过 SpringUtils.getBean 走代理调 apply，确保 @Transactional 生效。
-     * 异步线程无 Sa-Token 上下文，submit 内 currentRoles() 返回空集 →
-     * 跳过总监自动审批节点（总监可后续批量审批），其余逻辑正常执行。
+     * 调用前已由 {@link #runWithOperatorToken} 安装操作人 Sa-Token Mock 上下文，
+     * 流程发起、总监自动审批、监听器等行为与 HTTP 线程单个发起一致。
      */
     private BatchResultDTO doBatchApply(String period, LinkedHashSet<String> contractNos, Long operatorId) {
         CommissionApplicationService self = SpringUtils.getBean(CommissionApplicationService.class);
@@ -296,7 +341,8 @@ public class CommissionApplicationService {
                     result.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                self.apply(period, contractNo, operatorId);
+                // 门店权限已在批量入口的 HTTP 线程同步阶段校验，异步线程跳过，避免 @DataPermission 取登录态报错
+                self.apply(period, contractNo, operatorId, true);
                 result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
                 result.getFailedContracts().add(contractNo);
@@ -772,10 +818,12 @@ public class CommissionApplicationService {
                 application.setStatus(ApplicationStatus.LOCKED);
                 application.setCurrentNode(null);
                 application.setApprovedMonth(approvedMonth);
+                LocalDateTime approvedAt = LocalDateTime.now();
                 if (handlerId != null) {
                     application.setApproverId(handlerId);
                 }
-                application.setLockTime(LocalDateTime.now());
+                application.setApproveTime(approvedAt);
+                application.setLockTime(approvedAt);
                 applicationMapper.updateById(application);
 
                 CommissionApprovedEvent event = new CommissionApprovedEvent();
@@ -794,6 +842,11 @@ public class CommissionApplicationService {
                 }
                 application.setStatus(ApplicationStatus.REJECTED);
                 application.setCurrentNode(null);
+                // 与实收审批单口径一致：驳回也留痕审批人/审批时间
+                if (handlerId != null) {
+                    application.setApproverId(handlerId);
+                    application.setApproveTime(LocalDateTime.now());
+                }
                 applicationMapper.updateById(application);
                 log.info("[结佣工作流] 驳回：id={}, message={}", applicationId, message);
             }
@@ -1123,6 +1176,17 @@ public class CommissionApplicationService {
         if (application == null) {
             log.warn("[结佣-总监通过联动] 申请单不存在，忽略：id={}", applicationId);
             return;
+        }
+        // 流程进入财务节点 = 总监节点已办理：回填最近审批人/审批时间（与实收 stampApproverOnDirectorNode 同口径）。
+        // 定向更新两列，避免触碰 current_node/version；同时写回内存实体，防止下方对齐分支整实体 updateById 覆盖。
+        if (application.getStatus() == ApplicationStatus.SUBMITTED && operatorId != null) {
+            LocalDateTime approvedAt = LocalDateTime.now();
+            applicationMapper.update(null, new LambdaUpdateWrapper<CommissionApplication>()
+                .eq(CommissionApplication::getId, applicationId)
+                .set(CommissionApplication::getApproverId, operatorId)
+                .set(CommissionApplication::getApproveTime, approvedAt));
+            application.setApproverId(operatorId);
+            application.setApproveTime(approvedAt);
         }
         BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
         BigDecimal expected = application.getExpectedAmount() == null

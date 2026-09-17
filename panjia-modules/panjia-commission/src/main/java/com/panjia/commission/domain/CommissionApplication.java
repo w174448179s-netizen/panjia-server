@@ -101,6 +101,9 @@ public class CommissionApplication implements Serializable {
     @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
     private String approverName;
 
+    /** 审批时间（最近节点办理留痕：总监通过/终审锁定/驳回；与实收审批单口径一致） */
+    private LocalDateTime approveTime;
+
     /** 应收已被调整（非入库字段；当前 ACTIVE 应收与提交快照不一致时置 true，用于展示「已调整」标记） */
     @TableField(exist = false)
     private Boolean expectedAdjusted;
