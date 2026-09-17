@@ -189,10 +189,11 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) String bizType,
             @RequestParam(required = false) Boolean settled,
             @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String factStatus,
             @RequestParam(required = false, defaultValue = "1") Integer pageNum,
             @RequestParam(required = false, defaultValue = "20") Integer pageSize) {
         return R.ok(queryService.pageManageByContract(period, factType, deptId, bizType, settled,
-            keyword, pageNum, pageSize));
+            keyword, factStatus, pageNum, pageSize));
     }
 
     /**
@@ -274,10 +275,9 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) String period,
             @RequestParam(required = false) Long deptId,
             @RequestParam(required = false) String keyword,
-            @RequestParam(required = false) String factStatus,
             @RequestParam(defaultValue = "1") Integer pageNum,
             @RequestParam(defaultValue = "20") Integer pageSize) {
-        return R.ok(queryService.searchByContract(period, deptId, keyword, factStatus, pageNum, pageSize));
+        return R.ok(queryService.searchByContract(period, deptId, keyword, pageNum, pageSize));
     }
 
     /**

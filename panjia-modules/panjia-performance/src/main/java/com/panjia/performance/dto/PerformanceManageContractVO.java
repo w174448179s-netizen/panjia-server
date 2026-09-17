@@ -48,4 +48,7 @@ public class PerformanceManageContractVO {
 
     /** 未结算条数 */
     private long unsettledCount;
+
+    /** 聚合状态（存在任一 ACTIVE → ACTIVE，否则 VOIDED） */
+    private String factStatus;
 }

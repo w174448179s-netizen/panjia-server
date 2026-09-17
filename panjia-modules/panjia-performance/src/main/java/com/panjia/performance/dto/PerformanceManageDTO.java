@@ -25,6 +25,9 @@ public class PerformanceManageDTO {
     /** 业绩事实 ID */
     private Long id;
 
+    /** 事实状态（ACTIVE 有效 / VOIDED 已作废） */
+    private String factStatus;
+
     /** 事实口径（PERF_REAL / PERF_EXPECT） */
     private String factType;
 

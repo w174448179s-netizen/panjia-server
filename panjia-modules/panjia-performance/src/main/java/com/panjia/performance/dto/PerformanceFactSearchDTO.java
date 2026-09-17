@@ -82,7 +82,4 @@ public class PerformanceFactSearchDTO {
 
     /** 明细条数 */
     private Integer detailCount;
-
-    /** 事实状态（ACTIVE/VOIDED；合同维度聚合时取该状态下事实） */
-    private String factStatus;
 }

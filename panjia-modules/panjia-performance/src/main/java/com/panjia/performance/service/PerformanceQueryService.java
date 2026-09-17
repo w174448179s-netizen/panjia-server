@@ -125,7 +125,7 @@ public interface PerformanceQueryService {
      */
     PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
                                        Long deptId, String bizType, Boolean settled, String keyword,
-                                       Integer pageNum, Integer pageSize);
+                                       String factStatus, Integer pageNum, Integer pageSize);
 
     /**
      * 按合同号集合查询业绩管理明细（合同维度树表懒加载数据源）。
@@ -161,8 +161,7 @@ public interface PerformanceQueryService {
      * @return 合同维度业绩汇总分页结果
      */
     PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
-                                                          String keyword, String factStatus,
-                                                          Integer pageNum, Integer pageSize);
+                                                          String keyword, Integer pageNum, Integer pageSize);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。

@@ -209,6 +209,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT f.id,
+               f.fact_status AS "factStatus",
                f.fact_type AS factType,
                f.period,
                COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp) AS businessDate,
@@ -326,7 +327,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
                                        AND ci.status &lt;&gt; 'REVERSED'
-        WHERE f.fact_status = 'ACTIVE'
+        WHERE
+        <choose>
+          <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
+          <otherwise>f.fact_status = 'ACTIVE'</otherwise>
+        </choose>
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           <if test="deptId != null">
@@ -370,6 +376,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                       @Param("bizType") String bizType,
                                                       @Param("settled") Boolean settled,
                                                       @Param("keyword") String keyword,
+                                                      @Param("factStatus") String factStatus,
                                                       @Param("selfEmployeeId") Long selfEmployeeId);
 
 
@@ -452,14 +459,20 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ), 0) AS "originalAmount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
-               COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
+               COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount",
+               CASE WHEN BOOL_OR(f.fact_status = 'ACTIVE') THEN 'ACTIVE' ELSE 'VOIDED' END AS "factStatus"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
                                        AND ci.status &lt;&gt; 'REVERSED'
-        WHERE f.fact_status = 'ACTIVE'
+        WHERE
+        <choose>
+          <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
+          <otherwise>f.fact_status = 'ACTIVE'</otherwise>
+        </choose>
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
@@ -511,6 +524,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("bizType") String bizType,
                                             @Param("settled") Boolean settled,
                                             @Param("keyword") String keyword,
+                                            @Param("factStatus") String factStatus,
                                             @Param("selfEmployeeId") Long selfEmployeeId,
                                             @Param("offset") long offset,
                                             @Param("pageSize") int pageSize);
@@ -530,7 +544,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
                                        AND ci.status &lt;&gt; 'REVERSED'
-        WHERE f.fact_status = 'ACTIVE'
+        WHERE
+        <choose>
+          <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
+          <otherwise>f.fact_status = 'ACTIVE'</otherwise>
+        </choose>
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
@@ -577,6 +596,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                               @Param("bizType") String bizType,
                               @Param("settled") Boolean settled,
                               @Param("keyword") String keyword,
+                              @Param("factStatus") String factStatus,
                               @Param("selfEmployeeId") Long selfEmployeeId);
 
     /**
@@ -592,6 +612,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT f.id,
+               f.fact_status AS "factStatus",
                f.fact_type AS factType,
                f.period,
                COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp) AS businessDate,
@@ -640,7 +661,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                        AND ci.status &lt;&gt; 'REVERSED'
         LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
                                               AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
-        WHERE f.fact_status = 'ACTIVE'
+        WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
@@ -1267,18 +1288,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact f
             JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
             JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-            WHERE
-            <choose>
-              <when test="factStatus == 'ALL'">
-                f.fact_status IN ('ACTIVE', 'VOIDED')
-              </when>
-              <when test="factStatus != null and factStatus != ''">
-                f.fact_status = #{factStatus}
-              </when>
-              <otherwise>
-                f.fact_status = 'ACTIVE'
-              </otherwise>
-            </choose>
+            WHERE f.fact_status = 'ACTIVE'
               AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
                        THEN COALESCE(rs.order_no, rs.contract_no)
                        ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
@@ -1323,18 +1333,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    COUNT(DISTINCT f.employee_id) AS "employeeCount",
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
-            JOIN pj_perf_fact f ON
-            <choose>
-              <when test="factStatus == 'ALL'">
-                f.fact_status IN ('ACTIVE', 'VOIDED')
-              </when>
-              <when test="factStatus != null and factStatus != ''">
-                f.fact_status = #{factStatus}
-              </when>
-              <otherwise>
-                f.fact_status = 'ACTIVE'
-              </otherwise>
-            </choose>
+            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
             JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
             JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
                 AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
@@ -1356,11 +1355,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                fa."adjustedAmount",
                fa."employeeCount",
                fa."detailCount",
-               <choose>
-                 <when test="factStatus == 'ALL'">'ALL'</when>
-                 <when test="factStatus != null and factStatus != ''">#{factStatus}</when>
-                 <otherwise>'ACTIVE'</otherwise>
-               </choose> AS "factStatus",
                la.status AS "adjustStatus",
                la.adjust_no AS "adjustNo",
                la.adjust_type AS "adjustType",
@@ -1404,7 +1398,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("period") String period,
             @Param("deptId") Long deptId,
             @Param("keyword") String keyword,
-            @Param("factStatus") String factStatus,
             @Param("offset") long offset,
             @Param("pageSize") int pageSize);
 
@@ -1419,21 +1412,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        WHERE
-        <choose>
-          <when test="factStatus == 'ALL'">
-            f.fact_status IN ('ACTIVE', 'VOIDED')
-          </when>
-          <when test="factStatus != null and factStatus != ''">
-            f.fact_status = #{factStatus}
-          </when>
-          <otherwise>
-            f.fact_status = 'ACTIVE'
-          </otherwise>
-        </choose>
+        WHERE f.fact_status = 'ACTIVE'
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                    THEN COALESCE(rs.order_no, rs.contract_no)
-                    ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                   THEN COALESCE(rs.order_no, rs.contract_no)
+                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
           <if test="period != null and period != ''">
             AND f.period = #{period}
           </if>
@@ -1454,8 +1436,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long countFactSearchByContract(
             @Param("period") String period,
             @Param("deptId") Long deptId,
-            @Param("keyword") String keyword,
-            @Param("factStatus") String factStatus);
+            @Param("keyword") String keyword);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
@@ -1470,7 +1451,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         SELECT f.id AS "factId",
-               f.fact_status AS "factStatus",
                f.period AS "period",
                f.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
@@ -1521,7 +1501,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                        AND ci.status <> 'REVERSED'
         LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
                                               AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
-        WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
+        WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
           AND (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
                     THEN COALESCE(rs.order_no, rs.contract_no)

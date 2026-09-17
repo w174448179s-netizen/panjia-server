@@ -200,7 +200,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, bizType, settled, kw, selfEmployeeId);
+            period, factType, deptId, bizType, settled, kw, null, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
@@ -228,7 +228,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     @Override
     public PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
                                               Long deptId, String bizType, Boolean settled, String keyword,
-                                              Integer pageNum, Integer pageSize) {
+                                              String factStatus, Integer pageNum, Integer pageSize) {
         PerformanceManagePageVO<PerformanceManageContractVO> vo = new PerformanceManagePageVO<>();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
             vo.setTotal(0);
@@ -247,20 +247,20 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             deptId = enforceStoreManagerDeptFilter(deptId);
         }
 
-        long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
+        long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
         vo.setTotal(total);
 
         List<PerformanceManageContractVO> contracts = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
-                period, factType, deptId, bizType, settled, kw, selfEmployeeId, offset, size);
+                period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId, offset, size);
         }
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, bizType, settled, kw, selfEmployeeId);
+            period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
@@ -430,16 +430,15 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     @Override
     public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
-                                                                  String keyword, String factStatus,
-                                                                  Integer pageNum, Integer pageSize) {
+                                                                  String keyword, Integer pageNum, Integer pageSize) {
         int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
         int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
         long offset = (long) (page - 1) * size;
 
-        long total = factMapper.countFactSearchByContract(period, deptId, keyword, factStatus);
+        long total = factMapper.countFactSearchByContract(period, deptId, keyword);
         List<PerformanceFactSearchDTO> rows = total == 0
             ? List.of()
-            : factMapper.selectFactSearchByContract(period, deptId, keyword, factStatus, offset, size);
+            : factMapper.selectFactSearchByContract(period, deptId, keyword, offset, size);
 
         return new PageResult<>(rows, total);
     }
