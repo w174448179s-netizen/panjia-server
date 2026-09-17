@@ -5,7 +5,6 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.dto.BatchApproveByContractRequest;
 import com.panjia.performance.dto.ReceivedApplyQuery;
-import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import com.panjia.performance.service.ReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,7 +22,6 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.util.Map;
 
@@ -87,24 +85,16 @@ public class ReceivedApplyController extends BaseController {
     }
 
     /**
-     * Excel 批量审批（合同号 + 实收金额 匹配）。
+     * 按合同号异步批量审批（解决大量合同号一次性提交 HTTP 超时）。
+     * <p>后台线程逐单办理，去重 + 跳过已审批（非 SUBMITTED 或无待办）。
+     * 立即返回待审批数量，前端给友好提示即可。
      */
     @SaCheckPermission("perf:received:batch")
-    @Log(title = "实收业绩Excel批量审批", businessType = BusinessType.IMPORT)
-    @PostMapping("/batch-approve")
-    public R<ReceivedBatchApproveResult> batchApprove(@RequestParam("file") MultipartFile file,
-                                                      @RequestParam("period") String period) {
-        return R.ok(receivedApplyService.batchApprove(period, file));
-    }
-
-    /**
-     * 按合同号批量审批（录入合同号列表，逐单办理当前待办节点）。
-     */
-    @SaCheckPermission("perf:received:batch")
-    @Log(title = "实收业绩批量审批", businessType = BusinessType.UPDATE)
-    @PostMapping("/batch-approve-by-contract")
-    public R<ReceivedBatchApproveResult> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
-        return R.ok(receivedApplyService.batchApproveByContract(request.getPeriod(), request.getContractNos()));
+    @Log(title = "实收业绩异步批量审批", businessType = BusinessType.UPDATE)
+    @PostMapping("/batch-approve-by-contract-async")
+    public R<Integer> batchApproveByContractAsync(@RequestBody BatchApproveByContractRequest request) {
+        int count = receivedApplyService.batchApproveByContractAsync(request.getPeriod(), request.getContractNos());
+        return R.ok("已提交 " + count + " 个合同号，正在后台批量审批，请稍后查看结果", count);
     }
 
     /**

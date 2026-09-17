@@ -3,10 +3,8 @@ package com.panjia.performance.service;
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.dto.ReceivedApplyQuery;
-import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -70,24 +68,19 @@ public interface ReceivedApplyService {
     void cancel(Long id);
 
     /**
-     * Excel 批量审批（§2.3：匹配 合同号 + 实收金额，逐单办理当前待办节点）。
+     * 按合同号异步批量审批（后台线程逐单办理，解决一次性提交大量合同号 HTTP 超时问题）。
+     * <p>同步阶段去重合同号 + 捕获操作人姓名，立即返回；异步线程逐单办理当前待办节点。
+     * <ul>
+     *   <li>去重：相同合同号只处理一次；</li>
+     *   <li>跳过已审批：非 SUBMITTED 状态或无待办任务的合同号直接跳过；</li>
+     *   <li>权限由 @SaCheckPermission 前置保障，异步线程用系统身份办理。</li>
+     * </ul>
      *
-     * @param period 结算月（必填，防止跨月误批）
-     * @param file   Excel 文件（.xlsx/.xls，含「合同号」「实收金额」列）
-     * @return 成功/失败明细
+     * @param period     结算月（必填）
+     * @param contractNos 合同号列表（允许重复，内部去重）
+     * @return 去重后待审批的合同号数量
      */
-    ReceivedBatchApproveResult batchApprove(String period, MultipartFile file);
-
-    /**
-     * 按合同号批量审批（双入口 §三：录入合同号列表，逐单办理当前待办节点）。
-     * <p>与 {@link #batchApprove} 核心逻辑一致，但输入为合同号列表而非 Excel 文件，
-     * 不做金额匹配校验（用户在业务列表页已可见金额）。
-     *
-     * @param period     结算月（必填，防止跨月误批）
-     * @param contractNos 合同号列表
-     * @return 成功/失败明细
-     */
-    ReceivedBatchApproveResult batchApproveByContract(String period, List<String> contractNos);
+    int batchApproveByContractAsync(String period, List<String> contractNos);
 
     /**
      * 工作流回调（ReceivedWorkflowListener 调用）。

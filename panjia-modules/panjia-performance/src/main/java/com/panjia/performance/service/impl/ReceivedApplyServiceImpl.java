@@ -9,14 +9,12 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.dto.ReceivedApplyQuery;
-import com.panjia.performance.dto.ReceivedBatchApproveResult;
 import com.panjia.performance.dto.ReceivedContractGroupDTO;
 import com.panjia.performance.dto.ReceivedContractMetricsDTO;
 import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.performance.service.ReceivedApplyService;
-import com.panjia.performance.util.ExcelContractAmountParser;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -29,10 +27,10 @@ import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -70,6 +68,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     private final PerformanceFactMapper factMapper;
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
+    private final TaskExecutor taskExecutor;
 
     // ==================== 导入自动建单（§2.1） ====================
 
@@ -306,107 +305,79 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         }
     }
 
-    // ==================== Excel 批量审批（§2.3） ====================
+    // ==================== 异步批量审批（按合同号） ====================
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public ReceivedBatchApproveResult batchApprove(String period, MultipartFile file) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("结算月不能为空");
-        }
-        if (file == null || file.isEmpty()) {
-            throw new ServiceException("请上传 Excel 文件（.xlsx/.xls）");
-        }
-        List<ExcelContractAmountParser.ContractAmountRow> rows;
-        try {
-            rows = ExcelContractAmountParser.parse(file.getInputStream());
-        } catch (Exception e) {
-            throw new ServiceException("Excel 读取失败：{}", e.getMessage());
-        }
-
-        ReceivedBatchApproveResult result = new ReceivedBatchApproveResult();
-        for (ExcelContractAmountParser.ContractAmountRow row : rows) {
-            try {
-                BigDecimal amount = ExcelContractAmountParser.parseAmount(row.getAmountText());
-                ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
-                    .eq(ReceivedApply::getPeriod, period)
-                    .eq(ReceivedApply::getContractNo, row.getContractNo())
-                    .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
-                    .orderByDesc(ReceivedApply::getId)
-                    .last("LIMIT 1"));
-                if (apply == null) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(), "无审批中的实收审批单");
-                    continue;
-                }
-                if (amount == null) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(), "金额无法识别");
-                    continue;
-                }
-                if (apply.getReceivedAmount() == null
-                    || apply.getReceivedAmount().compareTo(amount) != 0) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(),
-                        "金额不匹配，单据实收=" + apply.getReceivedAmount());
-                    continue;
-                }
-                Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
-                if (taskId == null) {
-                    result.addFailure(row.getContractNo(), row.getAmountText(), "当前无待办任务");
-                    continue;
-                }
-                // 复用单张审批：与「我的待办 → 去处理」同一条鉴权路径，由引擎按 flow_user 名单判权。
-                // 越权行（如财务对停在总监节点的单据）抛 ServiceException，被上方 catch 记为该行失败并透出原因，不中断整批。
-                // 此前直接 completeTask(taskId, ...)（内部 ignore=true）会让任何持有本接口权限的角色批量批掉他人节点的单据。
-                approve(apply.getId(), "Excel 批量审批通过");
-                result.addSuccess();
-            } catch (Exception e) {
-                result.addFailure(row.getContractNo(), row.getAmountText(), e.getMessage());
-            }
-        }
-        log.info("[实收审批] Excel 批量审批完成：period={}, 成功={}, 失败={}",
-            period, result.getSuccessCount(), result.getFailedRows().size());
-        return result;
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public ReceivedBatchApproveResult batchApproveByContract(String period, List<String> contractNos) {
+    public int batchApproveByContractAsync(String period, List<String> contractNos) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
         }
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        ReceivedBatchApproveResult result = new ReceivedBatchApproveResult();
-        for (String contractNo : contractNos) {
-            String trimmed = contractNo == null ? "" : contractNo.trim();
-            if (trimmed.isEmpty()) {
-                continue;
+        // 同步阶段：去重（保留输入顺序）
+        LinkedHashSet<String> deduped = new LinkedHashSet<>();
+        for (String c : contractNos) {
+            if (c != null && !c.trim().isEmpty()) {
+                deduped.add(c.trim());
             }
+        }
+        if (deduped.isEmpty()) {
+            throw new ServiceException("合同号列表不能为空");
+        }
+        // 同步阶段捕获操作人（HTTP 线程有 Sa-Token 上下文）
+        Long operatorId;
+        String operatorName;
+        try {
+            operatorId = LoginHelper.getUserId();
+            operatorName = LoginHelper.getUsername();
+        } catch (Exception e) {
+            throw new ServiceException("无法获取当前登录用户信息，请重新登录");
+        }
+        // 提交异步线程，立即返回
+        taskExecutor.execute(() -> doBatchApproveAsync(period, deduped, operatorId, operatorName));
+        log.info("[实收审批] 异步批量审批已提交：period={}, total={}, operator={}",
+            period, deduped.size(), operatorName);
+        return deduped.size();
+    }
+
+    /**
+     * 异步逐单办理（TaskExecutor 线程池执行）。
+     * 不加 @Transactional：逐单处理，单据失败不中断整批，不回滚已处理的单据。
+     */
+    private void doBatchApproveAsync(String period, LinkedHashSet<String> contractNos, Long operatorId, String operatorName) {
+        int success = 0, skipped = 0, failed = 0;
+        for (String contractNo : contractNos) {
             try {
+                // 查询审批中的实收审批单（非 SUBMITTED = 已审批/已作废，直接跳过）
                 ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
                     .eq(ReceivedApply::getPeriod, period)
-                    .eq(ReceivedApply::getContractNo, trimmed)
+                    .eq(ReceivedApply::getContractNo, contractNo)
                     .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
                     .orderByDesc(ReceivedApply::getId)
                     .last("LIMIT 1"));
                 if (apply == null) {
-                    result.addFailure(trimmed, "", "无审批中的实收审批单");
+                    skipped++;
                     continue;
                 }
-                Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
-                if (taskId == null) {
-                    result.addFailure(trimmed, "", "当前无待办任务");
+                Long applyTaskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
+                if (applyTaskId == null) {
+                    skipped++;
                     continue;
                 }
-                approve(apply.getId(), "批量审批通过");
-                result.addSuccess();
+                // 异步线程无 Sa-Token 上下文，用系统身份办理（ignore=true），审批意见带操作人留痕
+                String approver = operatorName != null ? operatorName : String.valueOf(operatorId);
+                approvalPort.completeAsSys(BizType.REAL_CONFIRM, apply.getId(),
+                    ApprovalAction.PASS, "批量审批通过（操作人：" + approver + "）");
+                success++;
             } catch (Exception e) {
-                result.addFailure(trimmed, "", e.getMessage());
+                failed++;
+                log.warn("[实收审批] 异步批量审批单据失败：period={}, contractNo={}, reason={}",
+                    period, contractNo, e.getMessage());
             }
         }
-        log.info("[实收审批] 合同号批量审批完成：period={}, 成功={}, 失败={}",
-            period, result.getSuccessCount(), result.getFailedRows().size());
-        return result;
+        log.info("[实收审批] 异步批量审批完成：period={}, 成功={}, 跳过={}, 失败={}",
+            period, success, skipped, failed);
     }
 
     // ==================== 工作流回调 ====================
