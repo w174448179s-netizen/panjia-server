@@ -18,21 +18,27 @@ public interface SalaryRecordMapper extends BaseMapperPlus<SalaryRecord, SalaryR
      */
     @org.apache.ibatis.annotations.Insert("""
         INSERT INTO pj_people_salary_record
-            (employee_id, dept_id, status, level_code, social_insured,
-             housing_insured, commercial_insured, dormitory, is_part_time,
+            (employee_id, dept_id, status, level_code, social_insured, social_fee,
+             housing_insured, housing_fund, commercial_insured, commercial_fee,
+             dormitory, dormitory_fee, is_part_time,
              mentor_employee_id, refresh_time)
         VALUES
-            (#{employeeId}, #{deptId}, #{status}, #{levelCode}, #{socialInsured},
-             #{housingInsured}, #{commercialInsured}, #{dormitory}, #{isPartTime},
+            (#{employeeId}, #{deptId}, #{status}, #{levelCode}, #{socialInsured}, #{socialFee},
+             #{housingInsured}, #{housingFund}, #{commercialInsured}, #{commercialFee},
+             #{dormitory}, #{dormitoryFee}, #{isPartTime},
              #{mentorEmployeeId}, NOW())
         ON CONFLICT (employee_id) DO UPDATE SET
             dept_id            = EXCLUDED.dept_id,
             status             = EXCLUDED.status,
             level_code         = EXCLUDED.level_code,
             social_insured     = EXCLUDED.social_insured,
+            social_fee         = EXCLUDED.social_fee,
             housing_insured    = EXCLUDED.housing_insured,
+            housing_fund       = EXCLUDED.housing_fund,
             commercial_insured = EXCLUDED.commercial_insured,
+            commercial_fee     = EXCLUDED.commercial_fee,
             dormitory          = EXCLUDED.dormitory,
+            dormitory_fee      = EXCLUDED.dormitory_fee,
             is_part_time       = EXCLUDED.is_part_time,
             mentor_employee_id = EXCLUDED.mentor_employee_id,
             refresh_time       = NOW()

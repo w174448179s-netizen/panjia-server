@@ -81,7 +81,8 @@ public class EmployeeServiceImpl implements EmployeeService {
             .like(StringUtils.isNotBlank(query.getEmployeeName()), Employee::getEmployeeName, query.getEmployeeName())
             .eq(StringUtils.isNotBlank(query.getStatus()),
                 Employee::getStatus, EmployeeStatus.fromCode(query.getStatus()))
-            .orderByDesc(Employee::getCreateTime);
+            .orderByDesc(Employee::getCreateTime)
+            .orderByDesc(Employee::getEmployeeId);
 
         if (query.getDeptId() != null) {
             List<Long> deptIds = deptPort.findDeptAndChildIds(query.getDeptId());
@@ -616,9 +617,13 @@ public class EmployeeServiceImpl implements EmployeeService {
             if (record != null) {
                 vo.setLevelCode(record.getLevelCode());
                 vo.setSocialInsured(record.getSocialInsured());
+                vo.setSocialFee(record.getSocialFee());
                 vo.setHousingInsured(record.getHousingInsured());
+                vo.setHousingFund(record.getHousingFund());
                 vo.setCommercialInsured(record.getCommercialInsured());
+                vo.setCommercialFee(record.getCommercialFee());
                 vo.setDormitory(record.getDormitory());
+                vo.setDormitoryFee(record.getDormitoryFee());
                 vo.setIsPartTime(record.getIsPartTime());
                 if (vo.getMentorEmployeeId() == null) {
                     vo.setMentorEmployeeId(record.getMentorEmployeeId());
