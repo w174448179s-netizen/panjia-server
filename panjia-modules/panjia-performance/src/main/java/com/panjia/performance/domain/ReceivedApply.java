@@ -86,6 +86,10 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private Boolean expectedAdjusted;
 
+    /** 提交时快照应收（非入库字段；getDetail 时保留原始值供前端展示「调整前」） */
+    @TableField(exist = false)
+    private BigDecimal originalExpectedAmount;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 

@@ -918,6 +918,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    AND pe.source_key = f.source_key
                  ORDER BY pe.id
                  LIMIT 1) AS "expectedAmount",
+               EXISTS(SELECT 1 FROM pj_perf_fact pe2
+                 WHERE pe2.fact_status = 'REVERSED'
+                   AND pe2.fact_type = 'PERF_EXPECT'
+                   AND pe2.source_key = f.source_key) AS "expectedAdjusted",
                f.performance_amount AS "amount"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id

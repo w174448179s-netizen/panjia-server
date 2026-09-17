@@ -596,6 +596,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             BigDecimal expected = sumExpect(apply.getPeriod(), apply.getContractNo());
             apply.setExpectedAdjusted(apply.getExpectedAmount() != null
                 && apply.getExpectedAmount().compareTo(expected) != 0);
+            // 保留快照供前端展示「调整前」，再覆盖为当前值
+            apply.setOriginalExpectedAmount(apply.getExpectedAmount());
             apply.setExpectedAmount(expected);
         }
         List<ReceivedFactDetailDTO> facts = factMapper.selectReceivedFactDetails(

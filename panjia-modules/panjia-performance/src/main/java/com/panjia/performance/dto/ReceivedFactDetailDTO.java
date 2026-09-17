@@ -46,6 +46,9 @@ public class ReceivedFactDetailDTO implements Serializable {
     /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额） */
     private BigDecimal expectedAmount;
 
+    /** 该行的应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
+    private Boolean expectedAdjusted;
+
     /** 实收金额（PERF_REAL 事实金额） */
     private BigDecimal amount;
 }
