@@ -18,8 +18,10 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 薪酬规则服务（职级/政策/折算三类规则 + 快照冻结）。
@@ -45,11 +47,55 @@ public class RuleService {
         return policyRuleMapper.selectList(null);
     }
 
+    /**
+     * 取含底薪（base_salary &gt; 0）或保底（min_salary &gt; 0）的职级编码。
+     * <p>算薪名单扩展用：这些职级的在职员工即使当月无业绩也应进入算薪名单。
+     */
+    public Set<String> levelsWithBaseOrMin() {
+        Set<String> codes = new HashSet<>();
+        for (RankRule r : rankRuleMapper.selectList(null)) {
+            boolean hasBase = r.getBaseSalary() != null && r.getBaseSalary().compareTo(java.math.BigDecimal.ZERO) > 0;
+            boolean hasMin = r.getMinSalary() != null && r.getMinSalary().compareTo(java.math.BigDecimal.ZERO) > 0;
+            if (hasBase || hasMin) {
+                codes.add(r.getLevelCode());
+            }
+        }
+        return codes;
+    }
+
+    /**
+     * 取当前生效的员工级政策覆盖（EMPLOYEE scope）涉及的员工工号集合。
+     * <p>算薪名单扩展用：仅有社保/公积金等个人政策覆盖的员工（当月无业绩、
+     * 无手工项）也应进名单完成当月结算，否则个人代扣会整月漏算。
+     */
+    public Set<String> employeePolicyScopeKeys() {
+        LocalDate today = LocalDate.now();
+        Set<String> keys = new HashSet<>();
+        for (PolicyRule p : policyRuleMapper.selectList(null)) {
+            if (!"EMPLOYEE".equals(p.getScopeType())) {
+                continue;
+            }
+            if (p.getEffectiveFrom() != null && p.getEffectiveFrom().isAfter(today)) {
+                continue;
+            }
+            if (p.getEffectiveTo() != null && p.getEffectiveTo().isBefore(today)) {
+                continue;
+            }
+            if (p.getScopeKey() != null && !p.getScopeKey().isBlank()) {
+                keys.add(p.getScopeKey());
+            }
+        }
+        return keys;
+    }
+
     public List<ConversionRule> listConversionRules() {
         return conversionRuleMapper.selectList(null);
     }
 
     public void saveRankRule(RankRule rule) {
+        if (rule.getEffectiveFrom() == null) {
+            rule.setEffectiveFrom(LocalDate.now());
+        }
         if (rule.getId() == null) {
             rankRuleMapper.insert(rule);
         } else {
@@ -58,6 +104,9 @@ public class RuleService {
     }
 
     public void savePolicyRule(PolicyRule rule) {
+        if (rule.getEffectiveFrom() == null) {
+            rule.setEffectiveFrom(LocalDate.now());
+        }
         if (rule.getId() == null) {
             policyRuleMapper.insert(rule);
         } else {
@@ -66,6 +115,9 @@ public class RuleService {
     }
 
     public void saveConversionRule(ConversionRule rule) {
+        if (rule.getEffectiveFrom() == null) {
+            rule.setEffectiveFrom(LocalDate.now());
+        }
         if (rule.getId() == null) {
             conversionRuleMapper.insert(rule);
         } else {

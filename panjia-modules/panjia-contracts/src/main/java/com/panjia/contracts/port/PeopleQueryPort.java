@@ -67,4 +67,15 @@ public interface PeopleQueryPort {
      * @return employeeId → 员工快照（入参存在但员工已删除的 ID 不在结果中）
      */
     Map<Long, EmployeeSnapshot> getEmployeeSnapshots(Collection<Long> employeeIds, LocalDate pointInMonth);
+
+    /**
+     * 按职级查指定月份在职（ACTIVE/PARTTIME）员工的 ID 集合。
+     * <p>算薪名单扩展用：职级规则含底薪/保底的员工（店长、带底薪职级）
+     * 即使当月无结佣/手工项也应进入算薪名单。
+     *
+     * @param levelCodes   职级编码集合
+     * @param pointInMonth 算薪月份内任意一天
+     * @return 持有这些职级事实且未离职的员工 ID
+     */
+    Collection<Long> findEmployeeIdsByLevels(Collection<String> levelCodes, LocalDate pointInMonth);
 }

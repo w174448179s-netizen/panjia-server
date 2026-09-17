@@ -35,6 +35,7 @@ public class AttendanceDataSource extends AbstractDataSource {
             raw.setAttendDate(date(row, "attendDate"));
             raw.setLateCount(integer(row, "lateCount"));
             raw.setAbsentDays(decimal(row, "absentDays"));
+            raw.setLeaveAmount(decimal(row, "leaveAmount"));
 
             result.addRow(raw);
         }

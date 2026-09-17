@@ -106,11 +106,30 @@ public class PayrollBatchService {
             String period = batch.getPeriod();
             List<CommissionItemDTO> lockedItems = commissionQueryPort.findLocked(period, null);
             List<CommissionItemDTO> newsignItems = commissionQueryPort.findNewSignByDept(period, null);
+            LocalDate pointInMonth = YearMonth.parse(period).atDay(1);
 
-            // 收集员工 ID
+            // 收集员工 ID：结佣 + 新签
             Set<Long> empIds = new HashSet<>();
             for (CommissionItemDTO it : lockedItems) if (it.getEmployeeId() != null) empIds.add(it.getEmployeeId());
             for (CommissionItemDTO it : newsignItems) if (it.getEmployeeId() != null) empIds.add(it.getEmployeeId());
+
+            // 名单扩展①：当期手工项涉及的员工（纯扣款/奖金人员无结佣也需算薪，
+            // 否则无业绩但有扣款/奖励的人会整月漏算——2026-08 实测漏 14/59 人）
+            empIds.addAll(manualItemService.loadApprovedForPeriod(period).keySet());
+
+            // 名单扩展②：职级含底薪/保底的在职员工（店长保底、带底薪职级，
+            // 无业绩也应入名单走保底/底薪计算）
+            Set<String> baseLevels = ruleService.levelsWithBaseOrMin();
+            if (!baseLevels.isEmpty()) {
+                empIds.addAll(peopleQueryPort.findEmployeeIdsByLevels(baseLevels, pointInMonth));
+            }
+
+            // 名单扩展③：当期有员工级政策覆盖的人（个人社保/公积金固定额等），
+            // 仅有代扣类政策覆盖的员工同样需要进名单完成当月结算
+            Set<String> policyCodes = ruleService.employeePolicyScopeKeys();
+            if (!policyCodes.isEmpty()) {
+                empIds.addAll(peopleQueryPort.findEmployeeIdsByCodes(policyCodes).values());
+            }
 
             if (empIds.isEmpty()) {
                 batch.setStatus(BatchStatus.CALCULATED);
@@ -122,7 +141,6 @@ public class PayrollBatchService {
             }
 
             // 2. 取员工快照
-            LocalDate pointInMonth = YearMonth.parse(period).atDay(1);
             Map<Long, EmployeeSnapshot> empMap = peopleQueryPort.getEmployeeSnapshots(empIds, pointInMonth);
             if (empMap.isEmpty()) {
                 throw new ServiceException("未获取到员工快照，请确认员工数据已导入");

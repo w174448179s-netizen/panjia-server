@@ -360,6 +360,15 @@ public class EmployeeServiceImpl implements EmployeeService {
         return result;
     }
 
+    @Override
+    public Collection<Long> findEmployeeIdsByLevels(Collection<String> levelCodes, LocalDate pointInMonth) {
+        if (levelCodes == null || levelCodes.isEmpty()) {
+            return List.of();
+        }
+        return salaryFactMapper.selectEmployeeIdsByFactValue(
+            List.copyOf(levelCodes), FactType.LEVEL, monthEnd(pointInMonth));
+    }
+
     /**
      * 组装 §10.6 强类型快照：身份取员工主数据当前行，事实取月末闭开区间切片。
      * <p>

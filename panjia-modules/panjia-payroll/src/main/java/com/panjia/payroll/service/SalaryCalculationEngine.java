@@ -108,6 +108,11 @@ public class SalaryCalculationEngine {
             }
 
             BigDecimal finalRate = baseRate.add(perfDeduct).add(mentorAdd);
+            // EMPLOYEE 级提点覆盖（一级一价，覆盖 baseRate + perfDeduct + mentorAdd 全部）
+            JsonNode rateOverride = snap.employeeOverride(emp.getEmployeeCode());
+            if (rateOverride != null && rateOverride.has("rate")) {
+                finalRate = bd(rateOverride.path("rate").asText());
+            }
             if (finalRate.compareTo(BigDecimal.ZERO) < 0) {
                 finalRate = BigDecimal.ZERO;
             }
@@ -166,10 +171,8 @@ public class SalaryCalculationEngine {
                 storeIncome = calcDirectorStoreIncome(emp, input, rank);
                 d.setStoreIncome(storeIncome);
             } else {
-                // 经纪人底薪：A0 = 4500
-                if ("A0".equals(level)) {
-                    baseSalary = bd(rank.path("baseSalary").asText("4500"));
-                }
+                // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
+                baseSalary = bd(rank.path("baseSalary").asText("0"));
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
@@ -188,13 +191,24 @@ public class SalaryCalculationEngine {
             JsonNode policy = snap.policy();
 
             // 社保
+            // 档位与职级无关、按人核定（2026-08 实测：同为 A2 有 0/70%/100%/固定档多种），
+            // 故支持三级取值：员工固定额 employeeOverride.socialFee > 职级固定额 socialFixedFee > 职级比例 socialSettlementRatio × baseSocial
             BigDecimal socialFee = BigDecimal.ZERO;
             BigDecimal employerSocial = BigDecimal.ZERO;
             if (!parttime && Boolean.TRUE.equals(emp.getSocialInsured())) {
                 BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
-                BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
-                socialFee = MoneyUtil.round2(baseSocial.multiply(ratio));
-                employerSocial = MoneyUtil.round2(baseSocial.multiply(BigDecimal.ONE.subtract(ratio)));
+                JsonNode empSocialOverride = snap.employeeOverride(emp.getEmployeeCode());
+                if (empSocialOverride.has("socialFee")) {
+                    socialFee = bd(empSocialOverride.path("socialFee").asText("0"));
+                    employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
+                } else if (policy.path("socialFixedFee").has(level)) {
+                    socialFee = bd(policy.path("socialFixedFee").path(level).asText("0"));
+                    employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
+                } else {
+                    BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
+                    socialFee = MoneyUtil.round2(baseSocial.multiply(ratio));
+                    employerSocial = MoneyUtil.round2(baseSocial.multiply(BigDecimal.ONE.subtract(ratio)));
+                }
             }
             d.setSocialFee(socialFee);
             d.setEmployerSocial(employerSocial);
