@@ -116,10 +116,24 @@ public class PayrollController {
         return R.ok(batchService.listMyCommissionTrace(LoginHelper.getUserId(), period));
     }
 
+    /** 我的门店新签明细（店长查看所在门店团队成员的新签业绩） */
+    @SaCheckPermission("payroll:my:query")
+    @GetMapping("/my/team-newsign")
+    public R<List<CommissionItemDTO>> myTeamNewSign(@RequestParam String period) {
+        return R.ok(batchService.listMyTeamNewSign(LoginHelper.getUserId(), period));
+    }
+
     /** 组织视角结佣追溯（总监/财务查指定员工的结佣明细） */
     @SaCheckPermission("payroll:detail:list")
     @GetMapping("/commission-trace")
     public R<List<CommissionItemDTO>> commissionTrace(@RequestParam String period, @RequestParam Long employeeId) {
         return R.ok(batchService.listCommissionTrace(period, employeeId));
+    }
+
+    /** 组织视角门店新签明细（总监/财务查指定门店团队成员的新签业绩） */
+    @SaCheckPermission("payroll:detail:list")
+    @GetMapping("/team-newsign")
+    public R<List<CommissionItemDTO>> teamNewSign(@RequestParam String period, @RequestParam Long deptId) {
+        return R.ok(batchService.listTeamNewSign(period, deptId));
     }
 }

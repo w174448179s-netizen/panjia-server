@@ -66,9 +66,11 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
 
     @Override
     public List<CommissionItemDTO> findNewSignByDept(String period, Long deptId) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort
+        List<PerformanceFactSummaryDTO> baseFacts = performanceQueryPort
             .findActiveByDept(period, deptId, FACT_TYPE_EXPECT);
-        return facts.stream().map(this::fromFact).toList();
+        if (baseFacts.isEmpty()) return Collections.emptyList();
+        List<Long> factIds = baseFacts.stream().map(PerformanceFactSummaryDTO::getFactId).toList();
+        return performanceQueryPort.findActiveByFacts(factIds).stream().map(this::fromFact).toList();
     }
 
     @Override
