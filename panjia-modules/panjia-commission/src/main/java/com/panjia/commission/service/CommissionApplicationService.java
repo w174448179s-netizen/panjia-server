@@ -1110,6 +1110,8 @@ public class CommissionApplicationService {
         }
         // 应收展示当前 ACTIVE 值（含已生效调整），与快照不一致时标「已调整」
         fillExpectedAdjusted(application);
+        // 签约/认购时间同口径回填：快照为发起时 LocalDate.atStartOfDay() 丢失时分秒，详情取实时事实值
+        fillBusinessDateFromFact(application);
         return application;
     }
 
@@ -1139,6 +1141,29 @@ public class CommissionApplicationService {
         // 保留提交快照作为「调整前」值，再覆盖为当前值（供详情「应收合计」展示「原值 → 调整后值」）
         app.setOriginalExpectedAmount(app.getExpectedAmount());
         app.setExpectedAmount(currentExpected);
+    }
+
+    /**
+     * 签约/认购时间实时回填（仅覆盖内存展示值，不落库）。
+     * <p>
+     * 申请单 business_date 快照在发起时由 {@code LocalDate.atStartOfDay()} 写入，时分秒恒为 00:00:00；
+     * 列表行始终取实时事实聚合 {@code MAX(COALESCE(raw_json.signDate, business_date))}（含真实时分秒），
+     * 详情按与列表完全同源的合同汇总回填，保证两者口径一致；合同已无 ACTIVE 事实时保留原快照。
+     */
+    private void fillBusinessDateFromFact(CommissionApplication app) {
+        if (app == null || StringUtils.isBlank(app.getPeriod())
+            || (StringUtils.isBlank(app.getContractNo()) && StringUtils.isBlank(app.getOrderNo()))) {
+            return;
+        }
+        performanceQueryPort.listContractSummaries(app.getPeriod(), null, FACT_TYPE_REAL).stream()
+            .filter(c -> (StringUtils.isNotBlank(app.getContractNo())
+                && app.getContractNo().equals(c.getContractNo()))
+                || (StringUtils.isNotBlank(app.getOrderNo())
+                && app.getOrderNo().equals(c.getOrderNo())))
+            .map(PerformanceContractSummaryDTO::getBusinessDate)
+            .filter(Objects::nonNull)
+            .findFirst()
+            .ifPresent(app::setBusinessDate);
     }
 
     public List<CommissionItem> listItems(Long applicationId) {
