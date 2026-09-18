@@ -151,17 +151,30 @@ public interface PerformanceQueryService {
      * 完整业绩查询（合同维度）。
      * <p>
      * 以合同为维度，聚合展示新签业绩、实收业绩、调整状态与金额、实收审批状态、结佣状态。
-     * 支持按期间、部门、关键字（合同号/订单号/物业地址）筛选。
+     * 支持按期间、部门、业务类型、关键字（合同号/订单号/物业地址）筛选。
      *
      * @param period   归属期间（可选，为空时查全部期间）
      * @param deptId   部门 ID（可选，含子部门）
+     * @param bizType  业务类型（可选，精确匹配）
      * @param keyword  关键字（可选：合同号/订单号/物业地址）
      * @param pageNum  页码（从 1 开始）
      * @param pageSize 每页条数
      * @return 合同维度业绩汇总分页结果
      */
-    PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
+    PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId, String bizType,
                                                           String keyword, Integer pageNum, Integer pageSize);
+
+    /**
+     * 完整业绩查询的业务类型下拉选项。
+     * <p>
+     * 在与 {@link #searchByContract} 相同的数据权限范围（期间/部门子树/经纪人本人）内
+     * 对 ACTIVE 事实的业务类型去重，不含关键字与类型本身的过滤。
+     *
+     * @param period 归属期间（可选，为空时查全部期间）
+     * @param deptId 部门 ID（可选，含子部门）
+     * @return 业务类型名称列表（升序）
+     */
+    List<String> searchBizTypes(String period, Long deptId);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。

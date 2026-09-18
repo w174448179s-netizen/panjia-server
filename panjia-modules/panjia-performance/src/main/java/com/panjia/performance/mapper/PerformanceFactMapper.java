@@ -1384,6 +1384,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             <if test="employeeId != null">
               AND f.employee_id = #{employeeId}
             </if>
+            <if test="bizType != null and bizType != ''">
+              AND f.biz_type = #{bizType}
+            </if>
             <if test="keyword != null and keyword != ''">
               AND (rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
                 OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
@@ -1481,6 +1484,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceFactSearchDTO> selectFactSearchByContract(
             @Param("period") String period,
             @Param("deptId") Long deptId,
+            @Param("bizType") String bizType,
             @Param("keyword") String keyword,
             @Param("employeeId") Long employeeId,
             @Param("offset") long offset,
@@ -1512,6 +1516,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="employeeId != null">
             AND f.employee_id = #{employeeId}
           </if>
+          <if test="bizType != null and bizType != ''">
+            AND f.biz_type = #{bizType}
+          </if>
           <if test="keyword != null and keyword != ''">
             AND (
               rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
@@ -1524,7 +1531,37 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long countFactSearchByContract(
             @Param("period") String period,
             @Param("deptId") Long deptId,
+            @Param("bizType") String bizType,
             @Param("keyword") String keyword,
+            @Param("employeeId") Long employeeId);
+
+    /**
+     * 完整业绩查询的业务类型下拉选项：在与列表完全相同的数据范围（期间/部门子树/经纪人本人）
+     * 内，对 ACTIVE 事实的 biz_type 去重排序；不含关键字过滤，避免输入关键字后选项被清空。
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT f.biz_type
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.biz_type IS NOT NULL
+          <if test="period != null and period != ''">
+            AND f.period = #{period}
+          </if>
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
+        ORDER BY 1
+        </script>
+        """)
+    List<String> selectSearchBizTypes(
+            @Param("period") String period,
+            @Param("deptId") Long deptId,
             @Param("employeeId") Long employeeId);
 
     /**
