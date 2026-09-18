@@ -47,6 +47,21 @@ public class PerformanceFactSearchDTO {
     /** 调整后新签金额（adjust_id IS NOT NULL 的 PERF_EXPECT 合计） */
     private BigDecimal adjustedAmount;
 
+    /**
+     * 新签业绩折算后金额（expectOriginalAmount × 本行 bizType 的当前生效折算因子）。
+     * 因子经 {@code ConversionFactorPort} 取用，本 DTO 不携带因子本身。
+     */
+    private BigDecimal expectConvertedAmount;
+
+    /** 调整业绩折算后金额（adjustedAmount × 本行 bizType 的折算因子） */
+    private BigDecimal adjustedConvertedAmount;
+
+    /** 实收业绩折算后金额（realAmount × 本行 bizType 的折算因子） */
+    private BigDecimal realConvertedAmount;
+
+    /** 结佣业绩折算后金额（commissionAmount × 本行 bizType 的折算因子） */
+    private BigDecimal commissionConvertedAmount;
+
     /** 调整单状态（最近一条） */
     private String adjustStatus;
 

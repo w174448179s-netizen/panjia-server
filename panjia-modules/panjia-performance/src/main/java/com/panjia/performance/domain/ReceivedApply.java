@@ -90,6 +90,14 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private BigDecimal originalExpectedAmount;
 
+    /** 应收业绩折算后（非入库字段；列表查询时按 bizType 折算） */
+    @TableField(exist = false)
+    private BigDecimal expectedConvertedAmount;
+
+    /** 实收业绩折算后（非入库字段；列表查询时按 bizType 折算） */
+    @TableField(exist = false)
+    private BigDecimal receivedConvertedAmount;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 

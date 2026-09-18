@@ -29,6 +29,7 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
+import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
@@ -110,6 +111,8 @@ public class CommissionApplicationService {
     private final CommissionApplicationMapper applicationMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionConsumeLogMapper consumeLogMapper;
+    /** 折算比例唯一来源：契约层端口（规则表由薪酬域持有，本域不直连） */
+    private final ConversionFactorPort conversionFactorPort;
     private final CommissionPerformanceQueryPort performanceQueryPort;
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
@@ -909,6 +912,10 @@ public class CommissionApplicationService {
         boolean nodeScopeAll = LoginHelper.isSuperAdmin();
         Set<String> myNodes = nodeScopeAll ? Set.of() : currentApprovalNodes();
 
+        // 折算因子：本轮合同共用一次批量查询（同一 bizType 同一因子），逐行经公共方法取值
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
+            contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
+
         List<CommissionContractVO> all = new ArrayList<>(contracts.size());
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
@@ -930,7 +937,7 @@ public class CommissionApplicationService {
             if (keyword != null && !containsKeyword(c, keyword)) {
                 continue;
             }
-            all.add(toContractVO(period, c, app, status));
+            all.add(toContractVO(period, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
         }
 
         all.sort((a, b) -> {
@@ -953,9 +960,13 @@ public class CommissionApplicationService {
         return PageResult.build(all.subList(from, to), (long) total);
     }
 
-    /** 合同汇总 + 申请单 → 列表行 VO；有单时金额/条数以申请单聚合为准（0 值事实不入单） */
+    /**
+     * 合同汇总 + 申请单 → 列表行 VO；有单时金额/条数以申请单聚合为准（0 值事实不入单）。
+     *
+     * @param factor 该合同 bizType 的折算因子（调用方批量取好后传入，避免逐行回表）
+     */
     private CommissionContractVO toContractVO(String period, PerformanceContractSummaryDTO c,
-                                              CommissionApplication app, String status) {
+                                              CommissionApplication app, String status, BigDecimal factor) {
         CommissionContractVO vo = new CommissionContractVO();
         vo.setPeriod(period);
         vo.setContractNo(c.getContractNo());
@@ -986,6 +997,9 @@ public class CommissionApplicationService {
             vo.setAmount(c.getAmount());
             vo.setDetailCount(c.getDetailCount());
         }
+        // 折算后金额：合同维度聚合行无 factId，按本行 bizType 的因子折算（同一合同同一因子，应收/实收同因子）
+        vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
+        vo.setExpectedConvertedAmount(conversionFactorPort.convert(vo.getExpectedAmount(), factor));
         return vo;
     }
 
@@ -1042,7 +1056,32 @@ public class CommissionApplicationService {
      * 过滤掉已冲销（REVERSED）行。
      */
     public List<com.panjia.commission.dto.CommissionItemDetailDTO> listItemDetails(Long applicationId) {
-        return itemMapper.selectItemDetails(applicationId);
+        List<com.panjia.commission.dto.CommissionItemDetailDTO> details = itemMapper.selectItemDetails(applicationId);
+        fillItemDetailConversion(details);
+        return details;
+    }
+
+    /**
+     * 结佣明细折算填充：按明细自带的 bizType 批量取折算因子，计算
+     * convertedAmount / expectedConvertedAmount。空集合安全。
+     */
+    private void fillItemDetailConversion(List<com.panjia.commission.dto.CommissionItemDetailDTO> details) {
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
+            details.stream()
+                .map(com.panjia.commission.dto.CommissionItemDetailDTO::getBizType)
+                .collect(Collectors.toSet()));
+        for (com.panjia.commission.dto.CommissionItemDetailDTO d : details) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, d.getBizType());
+            if (d.getAmount() != null) {
+                d.setConvertedAmount(conversionFactorPort.convert(d.getAmount(), factor));
+            }
+            if (d.getExpectedAmount() != null) {
+                d.setExpectedConvertedAmount(conversionFactorPort.convert(d.getExpectedAmount(), factor));
+            }
+        }
     }
 
     public CommissionItem getItem(Long itemId) {

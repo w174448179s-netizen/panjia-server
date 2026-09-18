@@ -47,8 +47,14 @@ public class CommissionContractVO implements Serializable {
     /** 合同结佣金额合计（实收口径；§3.5 对齐后=应收合计） */
     private BigDecimal amount;
 
+    /** 结佣业绩折算后金额（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
+
     /** 应收业绩合计（差异判定展示） */
     private BigDecimal expectedAmount;
+
+    /** 新签业绩折算后金额（expectedAmount × conversionFactor） */
+    private BigDecimal expectedConvertedAmount;
 
     /** 应收已被调整（当前 ACTIVE 应收与提交快照不一致时置 true） */
     private Boolean expectedAdjusted;

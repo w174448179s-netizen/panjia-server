@@ -12,6 +12,9 @@ import java.time.LocalDateTime;
  * <p>
  * 按合同号聚合的业绩事实汇总，供结佣域按合同发起 / 列表合并使用；
  * 金额为业绩域原样值合计，消费方不得二次折算。
+ * <p>
+ * 本 DTO 只带 {@link #bizType}，不携带折算因子：折算比例属薪酬域规则，
+ * 由消费方经 {@code ConversionFactorPort} 按 bizType 自行取用（避免同一口径在两域各存一份）。
  */
 @Data
 public class PerformanceContractSummaryDTO implements Serializable {

@@ -4,6 +4,7 @@ import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
+import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
@@ -31,6 +32,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
@@ -65,6 +67,7 @@ public class PayrollBatchService {
     private final ApplicationEventPublisher eventPublisher;
     private final ApprovalPort approvalPort;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
+    private final ConversionFactorPort conversionFactorPort;
 
     // ==================== 创建 ====================
 
@@ -566,14 +569,14 @@ public class PayrollBatchService {
         if (me == null || me.getEmployeeId() == null) {
             return List.of();
         }
-        return commissionQueryPort.findLockedByEmployee(period, me.getEmployeeId());
+        return enrichConvertedAmounts(commissionQueryPort.findLockedByEmployee(period, me.getEmployeeId()));
     }
 
     /**
      * 组织工资明细页（总监/财务）：查指定员工在指定期间的已审批结佣明细（含合同/房源/比例 enrichment）。
      */
     public List<CommissionItemDTO> listCommissionTrace(String period, Long employeeId) {
-        return commissionQueryPort.findLockedByEmployee(period, employeeId);
+        return enrichConvertedAmounts(commissionQueryPort.findLockedByEmployee(period, employeeId));
     }
 
     /**
@@ -585,14 +588,31 @@ public class PayrollBatchService {
         if (me == null || me.getDeptId() == null) {
             return List.of();
         }
-        return commissionQueryPort.findNewSignByDept(period, me.getDeptId());
+        return enrichConvertedAmounts(commissionQueryPort.findNewSignByDept(period, me.getDeptId()));
     }
 
     /**
      * 组织工资明细页（总监/财务）：查指定门店团队成员的新签明细。
      */
     public List<CommissionItemDTO> listTeamNewSign(String period, Long deptId) {
-        return commissionQueryPort.findNewSignByDept(period, deptId);
+        return enrichConvertedAmounts(commissionQueryPort.findNewSignByDept(period, deptId));
+    }
+
+    /**
+     * 为 CommissionItemDTO 列表批量填充 convertedAmount（amount × 当前生效折算因子）。
+     * 比例统一经 {@link ConversionFactorPort} 取（工资明细页与业务明细页同口径）。
+     */
+    private List<CommissionItemDTO> enrichConvertedAmounts(List<CommissionItemDTO> items) {
+        if (items == null || items.isEmpty()) return items;
+        Set<String> bizTypes = new HashSet<>();
+        for (CommissionItemDTO it : items) {
+            bizTypes.add(it.getBizType());
+        }
+        Map<String, BigDecimal> factors = conversionFactorPort.factorsOf(bizTypes);
+        for (CommissionItemDTO it : items) {
+            it.setConvertedAmount(conversionFactorPort.convert(it.getAmount(), factors.get(it.getBizType())));
+        }
+        return items;
     }
 
     public RuleSnapshot getRuleSnapshot(Long batchId) {

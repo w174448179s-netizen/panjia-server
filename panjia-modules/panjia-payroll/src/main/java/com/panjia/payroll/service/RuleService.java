@@ -16,6 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -91,6 +92,9 @@ public class RuleService {
     public List<ConversionRule> listConversionRules() {
         return conversionRuleMapper.selectList(null);
     }
+
+    // 注：折算比例取数已统一收敛到 ConversionFactorPort（唯一公共出口，实现在 payroll.adapter），
+    // 工资明细页与业务明细页共用同一口径，此处不再重复实现。
 
     public void saveRankRule(RankRule rule) {
         if (rule.getEffectiveFrom() == null) {

@@ -54,6 +54,15 @@ public class PerformanceSearchDetailDTO {
     /** 实收金额（PERF_REAL，按 source_key 配对；无实收时为 0） */
     private BigDecimal realAmount;
 
+    /** 新签业绩折算后金额（originalExpectAmount × conversionFactor） */
+    private BigDecimal originalExpectConvertedAmount;
+
+    /** 调整后业绩折算后金额（expectAmount × conversionFactor） */
+    private BigDecimal expectConvertedAmount;
+
+    /** 实收业绩折算后金额（realAmount × conversionFactor） */
+    private BigDecimal realConvertedAmount;
+
     /** 是否已结算（存在有效结佣明细） */
     private Boolean settled;
 

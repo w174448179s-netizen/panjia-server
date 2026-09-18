@@ -1512,5 +1512,47 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         ORDER BY f.period DESC, e.employee_name, d.dept_id, nr.role_type, f.id
         """)
     List<PerformanceSearchDetailDTO> selectSearchDetailRows(@Param("bizNo") String bizNo);
+
+    /**
+     * 按业绩事实 ID 批量查业务类型（factId → bizType）。
+     * <p>
+     * 仅做业绩域内自有数据的标识解析；折算比例本身由 {@code ConversionFactorPort} 统一提供，
+     * 本 Mapper 不再直连 {@code pj_payroll_conversion_rule}。
+     *
+     * @param factIds 业绩事实 ID 集合（非空）
+     * @return 每行含 factId / bizType
+     */
+    @Select("""
+        <script>
+        SELECT f.id AS "factId", f.biz_type AS "bizType"
+        FROM pj_perf_fact f
+        WHERE f.id IN
+        <foreach collection="factIds" item="fid" open="(" separator="," close=")">#{fid}</foreach>
+        </script>
+    """)
+    List<java.util.Map<String, Object>> selectBizTypeByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
+
+    /**
+     * 按合同号 + 期间 + 事实口径查业务类型（合同级调整无 factId 时用）。
+     *
+     * @return bizType；查不到返回 null
+     */
+    @Select("""
+        SELECT f2.biz_type
+        FROM pj_perf_fact f2
+        JOIN pj_normalized_record nr2 ON nr2.id = f2.normalized_record_id
+        JOIN pj_import_raw_signed rs2 ON rs2.id = nr2.raw_data_id
+        WHERE f2.fact_status = 'ACTIVE'
+          AND f2.period = #{period}
+          AND f2.fact_type = #{factType}
+          AND (rs2.contract_no = #{contractNo}
+               OR (CASE WHEN f2.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs2.order_no, rs2.contract_no)
+                        ELSE COALESCE(rs2.contract_no, rs2.order_no) END) = #{contractNo})
+        LIMIT 1
+    """)
+    String selectBizTypeByContract(@Param("period") String period,
+                                   @Param("contractNo") String contractNo,
+                                   @Param("factType") String factType);
 }
 

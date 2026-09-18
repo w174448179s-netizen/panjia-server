@@ -59,4 +59,10 @@ public class AdjustFactDetailDTO implements Serializable {
 
     /** 事实状态（ACTIVE / SUPERSEDED / REVERSED 等），用于过滤已冲销行 */
     private String factStatus;
+
+    /** 折算后当前金额（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
+
+    /** 折算后调整后金额（afterAmount × conversionFactor） */
+    private BigDecimal convertedAfterAmount;
 }

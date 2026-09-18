@@ -131,4 +131,12 @@ public class PerformanceAdjust implements Serializable {
     @TableField(exist = false)
     @Translation(type = TransConstant.USER_ID_TO_NICKNAME, mapper = "approverId")
     private String approverName;
+
+    /** 折算后目标金额（targetAmount × conversionFactor，展示用） */
+    @TableField(exist = false)
+    private BigDecimal convertedTargetAmount;
+
+    /** 折算后原始金额（originalAmount × conversionFactor，展示用） */
+    @TableField(exist = false)
+    private BigDecimal convertedOriginalAmount;
 }

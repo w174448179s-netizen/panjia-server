@@ -72,6 +72,9 @@ public class CommissionItemDTO implements Serializable {
     /** 结佣业绩金额（原样透传，非佣金金额） */
     private BigDecimal amount;
 
+    /** 结佣业绩折算后金额（amount × conversionFactor，展示用） */
+    private BigDecimal convertedAmount;
+
     /** 明细状态（PENDING / APPROVED / REVERSED；业绩事实透传时为 null） */
     private String status;
 

@@ -34,7 +34,7 @@ public class SalaryCalculationEngine {
      */
     public static class CalcInput {
         public List<EmployeeSnapshot> employees;
-        /** employeeId -> 已审批结佣明细（PERF_REAL，不折算） */
+        /** employeeId -> 已审批结佣明细（PERF_REAL，原样取用不折算：P5/S-14/P15） */
         public Map<Long, List<CommissionItemDTO>> lockedByEmp;
         /** employeeId -> 新签业绩明细（PERF_EXPECT，折算） */
         public Map<Long, List<CommissionItemDTO>> newsignByEmp;
@@ -118,7 +118,8 @@ public class SalaryCalculationEngine {
             }
             d.setFinalRate(MoneyUtil.round6(finalRate));
 
-            // 结佣业绩（不折算）
+            // 结佣业绩（不折算）：设计文档 P5 / S-14 / P15 —— 结佣是贝壳实收到手值，
+            // 折算只作用于新签（一手房 ×0.9024、其他 ×0.96），结佣原样取用。
             BigDecimal commissionPerf = sumAmount(input.lockedByEmp.get(emp.getEmployeeId()));
             BigDecimal commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
             d.setCommissionIncome(commissionIncome);
@@ -379,6 +380,25 @@ public class SalaryCalculationEngine {
             if (it.getAmount() != null) {
                 sum = sum.add(it.getAmount());
             }
+        }
+        return sum;
+    }
+
+    /**
+     * 按每条明细的 bizType 应用快照中的折算因子，汇总折算后金额。
+     * <p>
+     * ⚠ 仅用于「新签业绩」口径。结佣业绩<b>不得</b>调用本方法：设计文档 P5 / S-14 / P15
+     * 明文规定「折算只作用于新签，结佣不折」（结佣是贝壳实收到手值），
+     * 契约测试 {@code SalaryCalculationEngineTest#testConversionOnlyNewSign} 断言
+     * 「结佣 100,000 → 计薪业绩仍 100,000」。保留此方法供后续新签口径调用。
+     */
+    private BigDecimal applyConversion(List<CommissionItemDTO> items, RuleService.ParsedSnapshot snapshot) {
+        if (items == null) return BigDecimal.ZERO;
+        BigDecimal sum = BigDecimal.ZERO;
+        for (CommissionItemDTO it : items) {
+            if (it.getAmount() == null) continue;
+            BigDecimal factor = snapshot.conversionFactor(it.getBizType());
+            sum = sum.add(it.getAmount().multiply(factor));
         }
         return sum;
     }

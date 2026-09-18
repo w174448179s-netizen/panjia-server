@@ -45,11 +45,20 @@ public class CommissionItemDetailDTO implements Serializable {
     /** 角色占比 */
     private BigDecimal shareRatio;
 
+    /** 业务类型（结佣明细自带，取折算因子的键） */
+    private String bizType;
+
     /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额） */
     private BigDecimal expectedAmount;
 
     /** 结佣金额（结佣明细确认的业绩金额） */
     private BigDecimal amount;
+
+    /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
+    private BigDecimal expectedConvertedAmount;
+
+    /** 结佣业绩折算后金额（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
 
     /** 费用项 */
     private String feeItem;

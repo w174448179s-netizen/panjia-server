@@ -51,4 +51,10 @@ public class ReceivedFactDetailDTO implements Serializable {
 
     /** 实收金额（PERF_REAL 事实金额） */
     private BigDecimal amount;
+
+    /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
+    private BigDecimal expectedConvertedAmount;
+
+    /** 实收业绩折算后金额（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
 }

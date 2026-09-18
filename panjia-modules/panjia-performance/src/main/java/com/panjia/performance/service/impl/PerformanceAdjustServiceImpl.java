@@ -16,6 +16,7 @@ import com.panjia.performance.dto.AdjustFactDetailDTO;
 import com.panjia.performance.dto.AdjustQuery;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.service.FactConversionResolver;
 import com.panjia.performance.service.PerformanceAdjustService;
 import com.panjia.performance.service.PeriodCloseService;
 import com.panjia.performance.service.ReverseService;
@@ -23,6 +24,7 @@ import com.panjia.performance.util.MoneyUtil;
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
+import com.panjia.contracts.port.ConversionFactorPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -98,6 +100,10 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final ReverseService reverseService;
     private final ApprovalPort approvalPort;
     private final PeriodCloseService periodCloseService;
+    /** 折算因子公共方法（取比例 / 金额乘算的唯一入口） */
+    private final ConversionFactorPort conversionFactorPort;
+    /** 业绩域自有标识 → bizType 的解析（factId / 合同号反查） */
+    private final FactConversionResolver factConversionResolver;
 
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(AdjustQuery query, PageQuery pageQuery) {
@@ -108,6 +114,8 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         List<PerformanceAdjust> records = page.getRecords();
         // 批量回填员工姓名 / 部门名称（含目标部门），避免列表显示裸 ID
         fillDisplayNames(records);
+        // 批量回填折算后金额
+        fillConvertedAmounts(records);
         return PageResult.build(records, page.getTotal());
     }
 
@@ -161,6 +169,37 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         }
     }
 
+    /**
+     * 批量回填折算后金额：按 factId 批量查折算因子，合同级（无 factId）按合同号查。
+     * 空集合安全。
+     */
+    private void fillConvertedAmounts(List<PerformanceAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        // 收集有 factId 的记录
+        Set<Long> factIds = records.stream()
+            .filter(r -> r.getFactId() != null)
+            .map(PerformanceAdjust::getFactId)
+            .collect(Collectors.toSet());
+
+        Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
+
+        for (PerformanceAdjust r : records) {
+            // 这里取的是「有没有解析到」而非取值兜底，故用 Map.get 判存在，再逐级回退
+            BigDecimal factor = r.getFactId() != null ? factorMap.get(r.getFactId()) : null;
+            if (factor == null && r.getContractNo() != null && r.getPeriod() != null) {
+                String factType = r.getFactType() != null ? r.getFactType() : FACT_TYPE_EXPECT;
+                factor = factConversionResolver.factorByContract(r.getPeriod(), r.getContractNo(), factType);
+            }
+            if (factor == null) {
+                factor = BigDecimal.ONE;
+            }
+            r.setConvertedTargetAmount(conversionFactorPort.convert(r.getTargetAmount(), factor));
+            r.setConvertedOriginalAmount(conversionFactorPort.convert(r.getOriginalAmount(), factor));
+        }
+    }
+
     @Override
     public PerformanceAdjust getAdjust(Long id) {
         PerformanceAdjust adjust = adjustMapper.selectById(id);
@@ -168,6 +207,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             // 状态自愈：工作流已终态但调整单还是 SUBMITTED 时自动对齐
             adjust = syncStatusWithWorkflow(adjust);
             fillDisplayNames(List.of(adjust));
+            fillConvertedAmounts(List.of(adjust));
         }
         return adjust;
     }
@@ -287,6 +327,17 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                         d.setTarget(false);
                     }
                 }
+            }
+            // 补充折算后金额：按 factId 批量取折算因子
+            Set<Long> detailFactIds = details.stream()
+                .map(AdjustFactDetailDTO::getFactId)
+                .filter(f -> f != null)
+                .collect(Collectors.toSet());
+            Map<Long, BigDecimal> detailFactorMap = factConversionResolver.factorByFactIds(detailFactIds);
+            for (AdjustFactDetailDTO d : details) {
+                BigDecimal factor = conversionFactorPort.factorOf(detailFactorMap, d.getFactId());
+                d.setConvertedAmount(conversionFactorPort.convert(d.getAmount(), factor));
+                d.setConvertedAfterAmount(conversionFactorPort.convert(d.getAfterAmount(), factor));
             }
             dto.setDetails(details);
             dto.setDetailCount(details.size());

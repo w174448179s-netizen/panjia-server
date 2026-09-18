@@ -17,6 +17,7 @@ import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
+import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,9 +33,11 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 结佣调整单服务（DISCOUNT / DIFF / VOID，结佣域详细设计 §4.5）。
@@ -68,6 +71,8 @@ public class CommissionAdjustService {
 
     private final CommissionAdjustMapper adjustMapper;
     private final CommissionItemMapper itemMapper;
+    /** 折算比例唯一来源：契约层端口（规则表由薪酬域持有，本域不直连） */
+    private final ConversionFactorPort conversionFactorPort;
     private final CommissionApplicationService applicationService;
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final ObjectMapper objectMapper;
@@ -310,7 +315,9 @@ public class CommissionAdjustService {
                 AdjustStatus.fromCode(query.getStatus()))
             .orderByDesc(CommissionAdjust::getCreateTime);
         var page = adjustMapper.selectPage(pageQuery.build(), wrapper);
-        return PageResult.build(page.getRecords(), page.getTotal());
+        List<CommissionAdjust> records = page.getRecords();
+        fillConvertedAmounts(records);
+        return PageResult.build(records, page.getTotal());
     }
 
     /**
@@ -324,7 +331,54 @@ public class CommissionAdjustService {
         if (adjust == null) {
             throw new ServiceException("结佣调整单不存在：" + adjustId);
         }
+        fillConvertedAmounts(List.of(adjust));
         return adjust;
+    }
+
+    /**
+     * 批量填充折算后金额（列表 / 详情展示用，不入库）。
+     * <p>
+     * 调整单本身不存 bizType，按 itemId 批量反查结佣明细的业务类型；折扣（DISCOUNT）取
+     * newAmount 折算值，差额补发（DIFF）取 diffAmount 折算值；原值为空则折算值保持 null，
+     * 让前端显示占位符而不是 0.00。
+     */
+    private void fillConvertedAmounts(List<CommissionAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Set<Long> itemIds = new HashSet<>();
+        for (CommissionAdjust r : records) {
+            if (r.getItemId() != null) {
+                itemIds.add(r.getItemId());
+            }
+        }
+        Map<Long, String> bizTypeByItem = itemBizTypes(itemIds);
+        for (CommissionAdjust r : records) {
+            String bizType = r.getItemId() == null ? null : bizTypeByItem.get(r.getItemId());
+            BigDecimal factor = conversionFactorPort.factorOf(bizType);
+            if (r.getNewAmount() != null) {
+                r.setConvertedNewAmount(conversionFactorPort.convert(r.getNewAmount(), factor));
+            }
+            if (r.getDiffAmount() != null) {
+                r.setConvertedDiffAmount(conversionFactorPort.convert(r.getDiffAmount(), factor));
+            }
+        }
+    }
+
+    /** 按明细 ID 批量查业务类型（itemId → bizType）。 */
+    private Map<Long, String> itemBizTypes(Set<Long> itemIds) {
+        Map<Long, String> map = new HashMap<>();
+        if (itemIds.isEmpty()) {
+            return map;
+        }
+        for (Map<String, Object> row : itemMapper.selectBizTypeByItemIds(itemIds)) {
+            Object id = row.get("itemId");
+            if (id == null) {
+                continue;
+            }
+            map.put(((Number) id).longValue(), row.get("bizType") == null ? null : String.valueOf(row.get("bizType")));
+        }
+        return map;
     }
 
     /**

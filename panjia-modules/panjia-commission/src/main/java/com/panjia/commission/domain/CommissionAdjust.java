@@ -64,6 +64,22 @@ public class CommissionAdjust implements Serializable {
     /** 调整原因（必填，审计；折扣种类如 85 折写此处） */
     private String reason;
 
+    /**
+     * 折算后折后金额（newAmount × 当前生效折算因子，展示用，不入库）。
+     * <p>
+     * 因子由调整单关联明细的 bizType 决定，经 ConversionFactorPort 取；newAmount 为空时保持 null。
+     */
+    @TableField(exist = false)
+    private BigDecimal convertedNewAmount;
+
+    /**
+     * 折算后差额金额（diffAmount × 当前生效折算因子，展示用，不入库）。
+     * <p>
+     * 因子由调整单关联明细的 bizType 决定，经 ConversionFactorPort 取；diffAmount 为空时保持 null。
+     */
+    @TableField(exist = false)
+    private BigDecimal convertedDiffAmount;
+
     /** 状态 SUBMITTED/APPROVED/REJECTED/CANCELLED/EXECUTED */
     private AdjustStatus status;
 

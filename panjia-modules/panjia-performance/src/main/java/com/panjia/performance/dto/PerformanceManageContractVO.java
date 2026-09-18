@@ -51,4 +51,10 @@ public class PerformanceManageContractVO {
 
     /** 聚合状态（存在任一 ACTIVE → ACTIVE，否则 VOIDED） */
     private String factStatus;
+
+    /** 折算后金额合计（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
+
+    /** 折算后原始金额合计（originalAmount × conversionFactor） */
+    private BigDecimal originalConvertedAmount;
 }

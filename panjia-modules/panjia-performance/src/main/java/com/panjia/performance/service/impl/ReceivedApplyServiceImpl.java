@@ -15,6 +15,7 @@ import com.panjia.performance.dto.ReceivedContractMetricsDTO;
 import com.panjia.performance.dto.ReceivedFactDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
+import com.panjia.performance.service.FactConversionResolver;
 import com.panjia.performance.service.ReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +27,7 @@ import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
+import com.panjia.contracts.port.ConversionFactorPort;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.springframework.core.task.TaskExecutor;
@@ -34,6 +36,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -71,6 +74,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
     private final TaskExecutor taskExecutor;
+    /** 折算因子公共方法（取比例 / 金额乘算的唯一入口） */
+    private final ConversionFactorPort conversionFactorPort;
+    /** 业绩域自有标识 → bizType 的解析（factId 反查） */
+    private final FactConversionResolver factConversionResolver;
 
     // ==================== 导入自动建单（§2.1） ====================
 
@@ -577,6 +584,14 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                         && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
+                // 折算后金额：应收合计与实收合计用同一因子，走公共方法取比例与乘算
+                BigDecimal factor = conversionFactorPort.factorOf(m.getBizType());
+                if (m.getExpectedAmount() != null) {
+                    apply.setExpectedConvertedAmount(conversionFactorPort.convert(m.getExpectedAmount(), factor));
+                }
+                if (apply.getReceivedAmount() != null) {
+                    apply.setReceivedConvertedAmount(conversionFactorPort.convert(apply.getReceivedAmount(), factor));
+                }
             }
         }
     }
@@ -602,6 +617,21 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         }
         List<ReceivedFactDetailDTO> facts = factMapper.selectReceivedFactDetails(
             apply.getPeriod(), apply.getContractNo());
+        // 折算后金额：按 factId 批量解析因子，应收业绩与实收业绩同取本行因子，
+        // 取比例与乘算都走公共方法（ConversionFactorPort）
+        Set<Long> factIds = facts.stream().map(ReceivedFactDetailDTO::getFactId).filter(f -> f != null).collect(java.util.stream.Collectors.toSet());
+        Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
+        BigDecimal recvConvertedSum = BigDecimal.ZERO;
+        BigDecimal expectConvertedSum = BigDecimal.ZERO;
+        for (ReceivedFactDetailDTO f : facts) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getFactId());
+            f.setConvertedAmount(conversionFactorPort.convert(f.getAmount(), factor));
+            f.setExpectedConvertedAmount(conversionFactorPort.convert(f.getExpectedAmount(), factor));
+            if (f.getConvertedAmount() != null) recvConvertedSum = recvConvertedSum.add(f.getConvertedAmount());
+            if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
+        }
+        apply.setReceivedConvertedAmount(recvConvertedSum);
+        apply.setExpectedConvertedAmount(expectConvertedSum);
         return new ReceivedApplyDetail(apply, facts);
     }
 

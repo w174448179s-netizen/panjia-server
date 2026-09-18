@@ -102,4 +102,10 @@ public class PerformanceManageDTO {
 
     /** 事实来源键（幂等标识，用于前端明细去重） */
     private String sourceKey;
+
+    /** 折算后金额（amount × conversionFactor） */
+    private BigDecimal convertedAmount;
+
+    /** 折算后原始金额（originalAmount × conversionFactor） */
+    private BigDecimal originalConvertedAmount;
 }

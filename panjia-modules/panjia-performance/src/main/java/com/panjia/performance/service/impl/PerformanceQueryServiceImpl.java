@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
@@ -21,6 +22,7 @@ import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
+import com.panjia.performance.service.FactConversionResolver;
 import com.panjia.performance.service.PerformanceQueryService;
 import com.panjia.performance.service.PerformanceViewLogService;
 import lombok.RequiredArgsConstructor;
@@ -58,6 +60,10 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     private final PerformancePeriodCloseMapper periodCloseMapper;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final PerformanceViewLogService viewLogService;
+    /** 折算因子公共方法（取比例 / 金额乘算的唯一入口，规则表读取在薪酬域实现） */
+    private final ConversionFactorPort conversionFactorPort;
+    /** 业绩域自有标识 → bizType 的解析（factId / 合同号反查） */
+    private final FactConversionResolver factConversionResolver;
 
     @Override
     public PageResult<PerformanceFactDTO> listFacts(FactQuery query, PageQuery pageQuery) {
@@ -255,6 +261,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
                 period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId, offset, size);
+            fillContractConversion(contracts);
         }
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
@@ -282,6 +289,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         }
         List<PerformanceManageDTO> rows = factMapper.selectManageListByContractNos(
             period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
+        fillManageDetailConversion(rows);
 
         // §3.6 查看留痕：经纪人打开含他人业绩的合同 → 异步写 view_log
         // 触发条件：当前登录用户是经纪人 + 单合同展开（contractNos.size()==1）
@@ -439,6 +447,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         List<PerformanceFactSearchDTO> rows = total == 0
             ? List.of()
             : factMapper.selectFactSearchByContract(period, deptId, keyword, offset, size);
+        fillSearchConversion(rows);
 
         return new PageResult<>(rows, total);
     }
@@ -455,6 +464,85 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         if (StringUtils.isBlank(bizNo)) {
             return List.of();
         }
-        return factMapper.selectSearchDetailRows(bizNo.trim());
+        List<PerformanceSearchDetailDTO> rows = factMapper.selectSearchDetailRows(bizNo.trim());
+        fillSearchDetailConversion(rows);
+        return rows;
+    }
+
+    // ==================== 折算填充（统一入口） ====================
+
+    /**
+     * 合同管理列表：按 bizType 批量取因子，填充 convertedAmount / originalConvertedAmount。
+     */
+    private void fillContractConversion(List<PerformanceManageContractVO> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
+            .map(PerformanceManageContractVO::getBizType)
+            .collect(Collectors.toSet()));
+        for (PerformanceManageContractVO row : rows) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
+            row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
+            row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
+        }
+    }
+
+    /**
+     * 合同管理明细：按 bizType 批量取因子，填充 convertedAmount / originalConvertedAmount。
+     */
+    private void fillManageDetailConversion(List<PerformanceManageDTO> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
+            .map(PerformanceManageDTO::getBizType)
+            .collect(Collectors.toSet()));
+        for (PerformanceManageDTO row : rows) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
+            row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
+            row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
+        }
+    }
+
+    /**
+     * 业绩查询列表：按 bizType 批量取因子，填充所有折算后金额。
+     */
+    private void fillSearchConversion(List<PerformanceFactSearchDTO> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
+            .map(PerformanceFactSearchDTO::getBizType)
+            .collect(Collectors.toSet()));
+        for (PerformanceFactSearchDTO row : rows) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
+            row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectOriginalAmount(), factor));
+            row.setAdjustedConvertedAmount(conversionFactorPort.convert(row.getAdjustedAmount(), factor));
+            row.setRealConvertedAmount(conversionFactorPort.convert(row.getRealAmount(), factor));
+            row.setCommissionConvertedAmount(conversionFactorPort.convert(row.getCommissionAmount(), factor));
+        }
+    }
+
+    /**
+     * 业绩查明细：按 factId 批量解析因子，填充所有折算后金额。
+     * <p>
+     * 同一行的新签业绩（应收）与实收业绩（实收）共用本行因子，取值与乘算都走公共方法。
+     */
+    private void fillSearchDetailConversion(List<PerformanceSearchDetailDTO> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<Long> factIds = rows.stream()
+            .map(PerformanceSearchDetailDTO::getFactId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
+        for (PerformanceSearchDetailDTO row : rows) {
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getFactId());
+            row.setOriginalExpectConvertedAmount(conversionFactorPort.convert(row.getOriginalExpectAmount(), factor));
+            row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectAmount(), factor));
+            row.setRealConvertedAmount(conversionFactorPort.convert(row.getRealAmount(), factor));
+        }
     }
 }

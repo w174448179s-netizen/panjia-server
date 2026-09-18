@@ -7,7 +7,9 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 结佣明细 Mapper。
@@ -49,6 +51,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(nr.role_type, f.role_type, ci.role_type) AS "roleType",
                rs.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
+               ci.biz_type AS "bizType",
                (SELECT pe.performance_amount
                   FROM pj_perf_fact pe
                  WHERE pe.fact_status = 'ACTIVE'
@@ -73,4 +76,24 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         </script>
         """)
     List<CommissionItemDetailDTO> selectItemDetails(@Param("applicationId") Long applicationId);
+
+    /**
+     * 按结佣明细 ID 批量查业务类型（itemId → bizType）。
+     * <p>
+     * 结佣调整单列表 / 详情展示折算后金额时使用：调整单本身不存 bizType，
+     * 由其关联的结佣明细反查（结佣域自有表，不跨域）。折算比例由
+     * {@code ConversionFactorPort} 统一提供，本 Mapper 不直连规则表。
+     *
+     * @param itemIds 结佣明细 ID 集合（非空）
+     * @return 每行含 itemId / bizType
+     */
+    @Select("""
+        <script>
+        SELECT ci.id AS "itemId", ci.biz_type AS "bizType"
+        FROM pj_commission_item ci
+        WHERE ci.id IN
+        <foreach collection="itemIds" item="iid" open="(" separator="," close=")">#{iid}</foreach>
+        </script>
+    """)
+    List<Map<String, Object>> selectBizTypeByItemIds(@Param("itemIds") Collection<Long> itemIds);
 }
