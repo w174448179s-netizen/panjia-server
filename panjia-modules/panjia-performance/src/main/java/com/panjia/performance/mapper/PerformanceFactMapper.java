@@ -1297,6 +1297,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @param period     归属期间（CTE 过滤：该期间有事实的合同才参与）
      * @param deptId     部门 ID（可选，含子部门）
      * @param keyword    关键字（可选：合同号/订单号/物业地址）
+     * @param employeeId 员工 ID（可选：经纪人本人数据权限，仅聚合该员工参与的合同及其本人事实行）
      * @param offset     偏移量
      * @param pageSize   每页条数
      * @return 合同维度业绩汇总列表
@@ -1322,6 +1323,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND (f.dept_id = #{deptId}
                    OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
                               AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+            </if>
+            <if test="employeeId != null">
+              AND f.employee_id = #{employeeId}
             </if>
             <if test="keyword != null and keyword != ''">
               AND (rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
@@ -1361,6 +1365,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                          THEN COALESCE(rs.order_no, rs.contract_no)
                          ELSE COALESCE(rs.contract_no, rs.order_no) END = cp.biz_key
             LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+            <if test="employeeId != null">
+              WHERE f.employee_id = #{employeeId}
+            </if>
             GROUP BY cp.biz_key, cp.max_period
         )
         SELECT fa."period",
@@ -1418,6 +1425,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("period") String period,
             @Param("deptId") Long deptId,
             @Param("keyword") String keyword,
+            @Param("employeeId") Long employeeId,
             @Param("offset") long offset,
             @Param("pageSize") int pageSize);
 
@@ -1444,6 +1452,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
                             AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
           </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
           <if test="keyword != null and keyword != ''">
             AND (
               rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
@@ -1456,7 +1467,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long countFactSearchByContract(
             @Param("period") String period,
             @Param("deptId") Long deptId,
-            @Param("keyword") String keyword);
+            @Param("keyword") String keyword,
+            @Param("employeeId") Long employeeId);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
@@ -1472,6 +1484,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         SELECT f.id AS "factId",
                f.period AS "period",
+               f.dept_id AS "deptId",
                f.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
                e.employee_name AS "employeeName",

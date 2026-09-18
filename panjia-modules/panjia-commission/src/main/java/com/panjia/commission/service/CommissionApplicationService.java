@@ -97,6 +97,12 @@ public class CommissionApplicationService {
     private static final String NODE_FINANCE = "capp_finance";
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
     private static final String ROLE_DIRECTOR = "director";
+    /** 店长角色标识（结佣列表仅本部门数据） */
+    private static final String ROLE_MANAGER = "manager";
+    /** 经纪人角色标识（结佣列表仅本部门数据；默认无菜单权限，服务端兜底） */
+    private static final String ROLE_AGENT = "agent";
+    /** 财务角色标识（全量数据，不做部门限制） */
+    private static final String ROLE_FINANCE = "finance";
 
     /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
     private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
@@ -177,6 +183,57 @@ public class CommissionApplicationService {
             }
         }
         return parentMap;
+    }
+
+    /**
+     * 结佣列表部门数据权限：业务角色（总监/店长/经纪人）只能查看本部门（含下级）数据。
+     * <ul>
+     *   <li>超管/财务 → 不限制，返回原 deptId；</li>
+     *   <li>业务角色未传 deptId → 强制取登录用户 dept_id（前端默认选中同部门）；</li>
+     *   <li>传入本人部门或其下级部门 → 放行（允许本部门范围内下钻）；</li>
+     *   <li>传入非本部门子树 deptId → 拒绝（防止越权指定他部门绕过过滤）。</li>
+     * </ul>
+     *
+     * @param requestedDeptId 调用方传入的 deptId（可空）
+     * @return 实际生效的 deptId；返回 null 表示不限制
+     */
+    Long enforceListDeptScope(Long requestedDeptId) {
+        try {
+            if (LoginHelper.isSuperAdmin()) {
+                return requestedDeptId;
+            }
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null) {
+                return requestedDeptId;
+            }
+            Set<String> roles = loginUser.getRolePermission();
+            if (roles != null && roles.contains(ROLE_FINANCE)) {
+                return requestedDeptId;
+            }
+            boolean businessRole = roles != null && (roles.contains(ROLE_DIRECTOR)
+                || roles.contains(ROLE_MANAGER) || roles.contains(ROLE_AGENT));
+            if (!businessRole) {
+                return requestedDeptId;
+            }
+            Long myDeptId = LoginHelper.getDeptId();
+            if (myDeptId == null) {
+                log.warn("[结佣] 当前用户 deptId 为空，列表部门数据权限降级不限制（请检查账号配置）");
+                return requestedDeptId;
+            }
+            if (requestedDeptId == null || requestedDeptId.equals(myDeptId)) {
+                return myDeptId;
+            }
+            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(myDeptId);
+            if (!scopeDeptIds.contains(requestedDeptId)) {
+                throw new ServiceException("仅能查看本部门（含下级）结佣数据");
+            }
+            return requestedDeptId;
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[结佣] 解析列表部门数据权限失败，默认不限制", e);
+            return requestedDeptId;
+        }
     }
 
     /**
@@ -871,14 +928,18 @@ public class CommissionApplicationService {
     public PageResult<CommissionApplication> listApplications(ApplyQuery query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionApplication> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionApplication::getPeriod, query.getPeriod())
-            .eq(query.getDeptId() != null, CommissionApplication::getDeptId, query.getDeptId())
             .eq(StringUtils.isNotBlank(query.getStatus()), CommissionApplication::getStatus,
                 ApplicationStatus.fromCode(query.getStatus()))
             .and(StringUtils.isNotBlank(query.getKeyword()), w -> w
                 .like(CommissionApplication::getContractNo, query.getKeyword())
                 .or().like(CommissionApplication::getOrderNo, query.getKeyword())
-                .or().like(CommissionApplication::getPropertyAddress, query.getKeyword()))
-            .orderByDesc(CommissionApplication::getCreateTime);
+                .or().like(CommissionApplication::getPropertyAddress, query.getKeyword()));
+        // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
+        Long effectiveDeptId = enforceListDeptScope(query.getDeptId());
+        if (effectiveDeptId != null) {
+            wrapper.in(CommissionApplication::getDeptId, deptService.selectDeptAndChildById(effectiveDeptId));
+        }
+        wrapper.orderByDesc(CommissionApplication::getCreateTime);
         var page = applicationMapper.selectPage(pageQuery.build(), wrapper);
         return PageResult.build(page.getRecords(), page.getTotal());
     }
@@ -890,8 +951,11 @@ public class CommissionApplicationService {
         String period = StringUtils.isNotBlank(query.getPeriod())
             ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
 
+        // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
+        Long effectiveDeptId = enforceListDeptScope(query.getDeptId());
+
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(period, query.getDeptId(), FACT_TYPE_REAL);
+            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL);
 
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)

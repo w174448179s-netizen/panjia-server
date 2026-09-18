@@ -21,6 +21,9 @@ public class PerformanceSearchDetailDTO {
     /** 归属期间（明细含该业务键全部期间，与列表的合同全周期聚合口径一致） */
     private String period;
 
+    /** 归属部门 ID（部门数据权限钻取校验用） */
+    private Long deptId;
+
     /** 员工 ID */
     private Long employeeId;
 
