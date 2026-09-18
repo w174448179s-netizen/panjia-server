@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 /**
  * 业绩事实作废/恢复服务（总监可逆操作）。
@@ -35,49 +36,52 @@ public class PerformanceFactVoidService {
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
 
     /**
-     * 作废业绩事实（ACTIVE → VOIDED）。
+     * 合同级作废：该合同该期间的全部有效（ACTIVE）业绩一次性作废（不区分人员/角色）。
+     * <p>
+     * 作废后整张合同业绩不参与算薪/结佣，可由总监按合同整体恢复。
+     * 封账/算薪批次校验与单条作废一致。
      *
-     * @param factId  事实 ID
-     * @param reason  作废原因
+     * @param period     归属期间
+     * @param factType   事实口径（新签明细页为 PERF_EXPECT）
+     * @param contractNo 合同号（或订单号）
+     * @param reason     作废原因
+     * @return 作废明细条数
      */
     @Transactional(rollbackFor = Exception.class)
-    public void voidFact(Long factId, String reason) {
-        PerformanceFact fact = factMapper.selectById(factId);
-        if (fact == null) {
-            throw new ServiceException("业绩事实不存在：id=" + factId);
+    public int voidByContract(String period, String factType, String contractNo, String reason) {
+        if (periodCloseService.isClosed(period)) {
+            throw new ServiceException("期间已封账，禁止作废：period=" + period);
         }
-        if (fact.getFactStatus() != FactStatus.ACTIVE) {
-            throw new ServiceException("仅有效状态的业绩可作废，当前状态：" + fact.getFactStatus().getDesc());
+        if (payrollBatchQueryPort.hasActiveBatch(period)) {
+            throw new ServiceException("该期间存在正在审核的算薪批次，禁止作废：period=" + period);
         }
-        if (periodCloseService.isClosed(fact.getPeriod())) {
-            throw new ServiceException("期间已封账，禁止作废：period=" + fact.getPeriod());
+        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+        if (facts.isEmpty()) {
+            throw new ServiceException("合同 " + contractNo + " 在 " + period + " 无有效业绩，无需作废");
         }
-        if (payrollBatchQueryPort.hasActiveBatch(fact.getPeriod())) {
-            throw new ServiceException("该期间存在正在审核的算薪批次，禁止作废：period=" + fact.getPeriod());
+        for (PerformanceFact fact : facts) {
+            fact.setFactStatus(FactStatus.VOIDED);
+            fact.setReversedReason(ReversedReason.DIRECTOR_VOID);
+            fact.setOperatorId(LoginHelper.getUserId());
+            factMapper.updateById(fact);
         }
-        fact.setFactStatus(FactStatus.VOIDED);
-        fact.setReversedReason(ReversedReason.DIRECTOR_VOID);
-        fact.setOperatorId(LoginHelper.getUserId());
-        factMapper.updateById(fact);
-        log.info("[业绩作废] factId={}, period={}, contractNo(sourceKey)={}, operator={}, reason={}",
-            factId, fact.getPeriod(), fact.getSourceKey(), LoginHelper.getUserId(), reason);
+        log.info("[业绩作废-合同级] contractNo={}, period={}, factType={}, voided={}, operator={}, reason={}",
+            contractNo, period, factType, facts.size(), LoginHelper.getUserId(), reason);
+        return facts.size();
     }
 
     /**
-     * 恢复业绩事实（VOIDED → ACTIVE），period 改为当前月。
+     * 合同级恢复：该合同该期间全部已作废（VOIDED）业绩一次性恢复为 ACTIVE，
+     * period 统一改为当前月（落入当月算薪），口径与单条恢复一致。
      *
-     * @param factId  事实 ID
-     * @param reason  恢复原因
+     * @param period     原归属期间（作废时保持不变）
+     * @param factType   事实口径
+     * @param contractNo 合同号（或订单号）
+     * @param reason     恢复原因
+     * @return 恢复明细条数
      */
     @Transactional(rollbackFor = Exception.class)
-    public void restoreFact(Long factId, String reason) {
-        PerformanceFact fact = factMapper.selectById(factId);
-        if (fact == null) {
-            throw new ServiceException("业绩事实不存在：id=" + factId);
-        }
-        if (fact.getFactStatus() != FactStatus.VOIDED) {
-            throw new ServiceException("仅已作废状态的业绩可恢复，当前状态：" + fact.getFactStatus().getDesc());
-        }
+    public int restoreByContract(String period, String factType, String contractNo, String reason) {
         String currentPeriod = LocalDate.now().format(PERIOD_FORMATTER);
         if (periodCloseService.isClosed(currentPeriod)) {
             throw new ServiceException("当前期间已封账，禁止恢复：period=" + currentPeriod);
@@ -85,12 +89,19 @@ public class PerformanceFactVoidService {
         if (payrollBatchQueryPort.hasActiveBatch(currentPeriod)) {
             throw new ServiceException("当前期间存在正在审核的算薪批次，禁止恢复：period=" + currentPeriod);
         }
-        fact.setFactStatus(FactStatus.ACTIVE);
-        fact.setPeriod(currentPeriod);
-        fact.setReversedReason(null);
-        fact.setOperatorId(LoginHelper.getUserId());
-        factMapper.updateById(fact);
-        log.info("[业绩恢复] factId={}, 原period={}, 新period={}, operator={}, reason={}",
-            factId, fact.getPeriod(), currentPeriod, LoginHelper.getUserId(), reason);
+        List<PerformanceFact> facts = factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
+        if (facts.isEmpty()) {
+            throw new ServiceException("合同 " + contractNo + " 在 " + period + " 无已作废业绩，无需恢复");
+        }
+        for (PerformanceFact fact : facts) {
+            fact.setFactStatus(FactStatus.ACTIVE);
+            fact.setPeriod(currentPeriod);
+            fact.setReversedReason(null);
+            fact.setOperatorId(LoginHelper.getUserId());
+            factMapper.updateById(fact);
+        }
+        log.info("[业绩恢复-合同级] contractNo={}, 原period={}, 新period={}, factType={}, restored={}, operator={}, reason={}",
+            contractNo, period, currentPeriod, factType, facts.size(), LoginHelper.getUserId(), reason);
+        return facts.size();
     }
 }

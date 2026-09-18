@@ -738,6 +738,34 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                          @Param("contractNo") String contractNo);
 
     /**
+     * 查询指定合同号下全部已作废（VOIDED）业绩事实（合同级恢复用）。
+     * <p>
+     * 作废不改变 period，故仍按原期间定位；合同号匹配口径同 {@link #selectActiveFactsByContractNo}。
+     *
+     * @param period     归属期间
+     * @param factType   事实口径
+     * @param contractNo 合同号
+     * @return 该合同下全部 VOIDED 事实列表
+     */
+    @Select("""
+        SELECT f.*
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        WHERE f.fact_status = 'VOIDED'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND (rs.contract_no = #{contractNo}
+               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(rs.order_no, rs.contract_no)
+                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
+        ORDER BY f.id
+        """)
+    List<PerformanceFact> selectVoidedFactsByContractNo(@Param("period") String period,
+                                                         @Param("factType") String factType,
+                                                         @Param("contractNo") String contractNo);
+
+    /**
      * 按业务键前缀定位退单红冲对应的原正数 ACTIVE 事实（成交月原事实）。
      * <p>
      * 事实 source_key = {@code sourceType-recordSourceKey-period}，同一笔业务

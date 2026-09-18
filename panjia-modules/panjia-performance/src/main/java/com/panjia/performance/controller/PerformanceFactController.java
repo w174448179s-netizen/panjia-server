@@ -228,39 +228,38 @@ public class PerformanceFactController extends BaseController {
     }
 
     /**
-     * 作废业绩事实（ACTIVE → VOIDED）。
-     * <p>
-     * 作废后该笔业绩不参与算薪/结佣，可由总监恢复。
-     * 仅 ACTIVE 状态可作废，封账后禁止操作。
+     * 合同级作废：该合同该期间全部有效业绩一次性作废（不区分人员/角色），
+     * 作废后整张合同不参与算薪/结佣，可按合同整体恢复。
      *
-     * @param id     事实 ID
-     * @param reason 作废原因
-     * @return 操作结果
+     * @param period     归属期间
+     * @param factType   事实口径（新签明细 PERF_EXPECT）
+     * @param contractNo 合同号（或订单号）
+     * @param reason     作废原因
+     * @return 作废明细条数
      */
     @SaCheckPermission("perf:fact:void")
-    @Log(title = "业绩作废", businessType = BusinessType.UPDATE)
-    @PostMapping("/void/{id}")
-    public R<Void> voidFact(@PathVariable Long id, @RequestParam String reason) {
-        voidService.voidFact(id, reason);
-        return R.ok();
+    @Log(title = "业绩合同级作废", businessType = BusinessType.UPDATE)
+    @PostMapping("/void-contract")
+    public R<Integer> voidByContract(@RequestParam String period, @RequestParam String factType,
+                                     @RequestParam String contractNo, @RequestParam String reason) {
+        return R.ok(voidService.voidByContract(period, factType, contractNo, reason));
     }
 
     /**
-     * 恢复业绩事实（VOIDED → ACTIVE），period 改为当前月。
-     * <p>
-     * 恢复后业绩落入当月算薪，算作当月新签。
-     * 仅 VOIDED 状态可恢复，当前期间封账后禁止恢复。
+     * 合同级恢复：该合同该期间全部已作废业绩一次性恢复，period 改为当前月。
      *
-     * @param id     事实 ID
-     * @param reason 恢复原因
-     * @return 操作结果
+     * @param period     原归属期间
+     * @param factType   事实口径
+     * @param contractNo 合同号（或订单号）
+     * @param reason     恢复原因
+     * @return 恢复明细条数
      */
     @SaCheckPermission("perf:fact:void")
-    @Log(title = "业绩恢复", businessType = BusinessType.UPDATE)
-    @PostMapping("/restore/{id}")
-    public R<Void> restoreFact(@PathVariable Long id, @RequestParam String reason) {
-        voidService.restoreFact(id, reason);
-        return R.ok();
+    @Log(title = "业绩合同级恢复", businessType = BusinessType.UPDATE)
+    @PostMapping("/restore-contract")
+    public R<Integer> restoreByContract(@RequestParam String period, @RequestParam String factType,
+                                        @RequestParam String contractNo, @RequestParam String reason) {
+        return R.ok(voidService.restoreByContract(period, factType, contractNo, reason));
     }
 
     /**
