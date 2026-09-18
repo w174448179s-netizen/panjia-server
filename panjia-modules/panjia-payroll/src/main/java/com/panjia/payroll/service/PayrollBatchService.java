@@ -1,8 +1,10 @@
 package com.panjia.payroll.service;
 
 import com.panjia.contracts.dto.CommissionItemDTO;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
@@ -12,6 +14,7 @@ import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.PayrollEmployeeSnapshot;
 import com.panjia.payroll.domain.RuleSnapshot;
+import com.panjia.payroll.dto.MyPayrollDetailVO;
 import com.panjia.payroll.mapper.PayrollBatchMapper;
 import com.panjia.payroll.mapper.PayrollDetailMapper;
 import com.panjia.payroll.mapper.PayrollEmployeeSnapshotMapper;
@@ -32,6 +35,7 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -60,6 +64,7 @@ public class PayrollBatchService {
     private final ManualItemService manualItemService;
     private final ApplicationEventPublisher eventPublisher;
     private final ApprovalPort approvalPort;
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     // ==================== 创建 ====================
 
@@ -500,6 +505,54 @@ public class PayrollBatchService {
 
     public List<PayrollDetail> listDetails(Long batchId) {
         return detailMapper.selectByBatchId(batchId);
+    }
+
+    // ==================== 本人工资查询（数据范围强制为登录人本人） ====================
+
+    /**
+     * 列出当前登录人有工资明细的批次（期间倒序）。
+     * <p>
+     * employeeId 只能由登录用户经 {@link EmployeeMainDataQueryPort#getByUserId} 解析，
+     * 接口不接受任何员工参数；账号未关联员工档案时返回空列表（前端展示空态）。
+     */
+    public List<PayrollBatch> listMyBatches(Long userId) {
+        EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
+        if (me == null || me.getEmployeeId() == null) {
+            return List.of();
+        }
+        List<Long> batchIds = detailMapper.selectByEmployeeId(me.getEmployeeId()).stream()
+            .map(PayrollDetail::getBatchId)
+            .distinct()
+            .collect(Collectors.toList());
+        if (batchIds.isEmpty()) {
+            return List.of();
+        }
+        return batchMapper.selectBatchIds(batchIds).stream()
+            .sorted(Comparator.comparing(PayrollBatch::getPeriod).reversed())
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * 查当前登录人在指定批次的工资明细 + 员工主数据（姓名/工号/门店名）。
+     */
+    public MyPayrollDetailVO getMyDetail(Long userId, Long batchId) {
+        EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
+        if (me == null || me.getEmployeeId() == null) {
+            throw new ServiceException("当前账号未关联员工档案，无法查询工资，请联系人事绑定");
+        }
+        PayrollDetail detail = detailMapper.selectByBatchAndEmployee(batchId, me.getEmployeeId());
+        if (detail == null) {
+            throw new ServiceException("未找到您在该批次的工资明细");
+        }
+        PayrollBatch batch = batchMapper.selectById(batchId);
+        if (batch == null) {
+            throw new ServiceException("工资批次不存在");
+        }
+        MyPayrollDetailVO vo = new MyPayrollDetailVO();
+        vo.setBatch(batch);
+        vo.setDetail(detail);
+        vo.setEmployee(me);
+        return vo;
     }
 
     public RuleSnapshot getRuleSnapshot(Long batchId) {

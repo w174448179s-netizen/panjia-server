@@ -15,6 +15,18 @@ public interface PayrollDetailMapper extends BaseMapperPlus<PayrollDetail, Payro
     @Select("SELECT * FROM pj_payroll_detail WHERE batch_id = #{batchId} ORDER BY dept_id, employee_id")
     List<PayrollDetail> selectByBatchId(@Param("batchId") Long batchId);
 
+    /**
+     * 按员工查全部工资明细（本人工资查询用），按期间、批次倒序。
+     */
+    @Select("SELECT * FROM pj_payroll_detail WHERE employee_id = #{employeeId} ORDER BY period DESC, batch_id DESC")
+    List<PayrollDetail> selectByEmployeeId(@Param("employeeId") Long employeeId);
+
+    /**
+     * 查指定批次中某员工的工资明细（本人工资查询，服务层保证 employeeId 来自登录态解析）。
+     */
+    @Select("SELECT * FROM pj_payroll_detail WHERE batch_id = #{batchId} AND employee_id = #{employeeId} LIMIT 1")
+    PayrollDetail selectByBatchAndEmployee(@Param("batchId") Long batchId, @Param("employeeId") Long employeeId);
+
     @Delete("DELETE FROM pj_payroll_detail WHERE batch_id = #{batchId}")
     int deleteByBatchId(@Param("batchId") Long batchId);
 

@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.RuleSnapshot;
+import com.panjia.payroll.dto.MyPayrollDetailVO;
 import com.panjia.payroll.service.PayrollBatchService;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
@@ -89,5 +90,21 @@ public class PayrollController {
     @GetMapping("/{id}/snapshot")
     public R<RuleSnapshot> snapshot(@PathVariable Long id) {
         return R.ok(batchService.getRuleSnapshot(id));
+    }
+
+    // ==================== 本人工资查询（综合查询 → 工资查询） ====================
+
+    /** 我的工资批次列表（仅含本人有明细的批次，期间倒序） */
+    @SaCheckPermission("payroll:my:query")
+    @GetMapping("/my/batches")
+    public R<List<PayrollBatch>> myBatches() {
+        return R.ok(batchService.listMyBatches(LoginHelper.getUserId()));
+    }
+
+    /** 我的工资明细（员工身份由后端按登录态解析，不接受员工参数） */
+    @SaCheckPermission("payroll:my:query")
+    @GetMapping("/my/detail")
+    public R<MyPayrollDetailVO> myDetail(@RequestParam Long batchId) {
+        return R.ok(batchService.getMyDetail(LoginHelper.getUserId(), batchId));
     }
 }
