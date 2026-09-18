@@ -3,6 +3,7 @@ package com.panjia.performance.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
@@ -286,40 +287,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         log.info("[实收审批] 已解绑审批单事实：applyId={}", applyId);
     }
 
-    /**
-     * 数据权限：所有登录用户仅本部门（含下级）审批单（全系统统一口径）。
-     * <p>未传 deptId → 强制设为登录用户 dept_id（列表按部门子树过滤）；
-     * 传了非本部门子树的 dept_id → 拒绝。
-     * <p>超管不受限制；登录用户无归属部门时降级不限制。
-     */
-    private Long enforceStoreManagerDeptFilter(Long requestedDeptId) {
-        try {
-            var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || LoginHelper.isSuperAdmin()) {
-                return requestedDeptId;
-            }
-            Long userDeptId = loginUser.getDeptId();
-            if (userDeptId == null) {
-                log.warn("[实收审批] 登录用户 deptId 为空，降级为不限制（请检查账号配置）");
-                return requestedDeptId;
-            }
-            // 未传 → 默认本部门；传了 → 必须在本部门（含下级）子树内（与结佣明细/业绩查询同口径）
-            if (requestedDeptId == null || requestedDeptId.equals(userDeptId)) {
-                return userDeptId;
-            }
-            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(userDeptId);
-            if (!scopeDeptIds.contains(requestedDeptId)) {
-                throw new ServiceException("仅能查看本部门（含下级）实收审批数据");
-            }
-            return requestedDeptId;
-        } catch (ServiceException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("[实收审批] 解析部门数据权限失败，默认不限制", e);
-            return requestedDeptId;
-        }
-    }
-
     // ==================== 批量审批（线程池异步 + CompletableFuture 挂起等待） ====================
 
     @Override
@@ -514,10 +481,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     @Override
     public PageResult<ReceivedApply> list(ReceivedApplyQuery query, PageQuery pageQuery) {
-        // §3.6 数据级行级权限：店长仅本店审批单。
-        // 若调用方未传 deptId 且当前登录用户是店长，强制设为本人 dept_id；
-        // 若调用方传了非本人 dept_id，直接拒绝（防越权）。
-        Long effectiveDeptId = enforceStoreManagerDeptFilter(query == null ? null : query.getDeptId());
+        // §3.6 数据权限：所有登录用户仅本部门（含下级）审批单（统一走 DeptScopeUtils，超管不限）
+        Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query == null ? null : query.getDeptId(), deptService::selectDeptAndChildById, "实收审批");
         // 默认排除已作废（CANCELLED），与业绩明细只查 ACTIVE 一致；
         // 前端显式传 status 时按指定状态查询（含 CANCELLED）
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();

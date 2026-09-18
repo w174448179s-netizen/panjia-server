@@ -6,6 +6,7 @@ import cn.dev33.satoken.context.mock.SaResponseForMock;
 import cn.dev33.satoken.context.mock.SaStorageForMock;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.commission.domain.ApplicationStatus;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionConsumeLog;
@@ -178,49 +179,6 @@ public class CommissionApplicationService {
             }
         }
         return parentMap;
-    }
-
-    /**
-     * 结佣列表部门数据权限：所有登录用户只能查看本部门（含下级）数据（全系统统一口径）。
-     * <ul>
-     *   <li>超管 → 不限制，返回原 deptId；</li>
-     *   <li>登录用户未传 deptId → 强制取登录用户 dept_id（前端默认选中同部门）；</li>
-     *   <li>传入本人部门或其下级部门 → 放行（允许本部门范围内下钻）；</li>
-     *   <li>传入非本部门子树 deptId → 拒绝（防止越权指定他部门绕过过滤）。</li>
-     * </ul>
-     * 登录用户无归属部门时降级不限制（避免系统账号被锁死）。
-     *
-     * @param requestedDeptId 调用方传入的 deptId（可空）
-     * @return 实际生效的 deptId；返回 null 表示不限制
-     */
-    Long enforceListDeptScope(Long requestedDeptId) {
-        try {
-            if (LoginHelper.isSuperAdmin()) {
-                return requestedDeptId;
-            }
-            var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null) {
-                return requestedDeptId;
-            }
-            Long myDeptId = LoginHelper.getDeptId();
-            if (myDeptId == null) {
-                log.warn("[结佣] 当前用户 deptId 为空，列表部门数据权限降级不限制（请检查账号配置）");
-                return requestedDeptId;
-            }
-            if (requestedDeptId == null || requestedDeptId.equals(myDeptId)) {
-                return myDeptId;
-            }
-            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(myDeptId);
-            if (!scopeDeptIds.contains(requestedDeptId)) {
-                throw new ServiceException("仅能查看本部门（含下级）结佣数据");
-            }
-            return requestedDeptId;
-        } catch (ServiceException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("[结佣] 解析列表部门数据权限失败，默认不限制", e);
-            return requestedDeptId;
-        }
     }
 
     /**
@@ -998,7 +956,7 @@ public class CommissionApplicationService {
                 .or().like(CommissionApplication::getOrderNo, query.getKeyword())
                 .or().like(CommissionApplication::getPropertyAddress, query.getKeyword()));
         // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
-        Long effectiveDeptId = enforceListDeptScope(query.getDeptId());
+        Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
         if (effectiveDeptId != null) {
             wrapper.in(CommissionApplication::getDeptId, deptService.selectDeptAndChildById(effectiveDeptId));
         }
@@ -1015,7 +973,7 @@ public class CommissionApplicationService {
             ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
 
         // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
-        Long effectiveDeptId = enforceListDeptScope(query.getDeptId());
+        Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
 
         List<PerformanceContractSummaryDTO> contracts =
             performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL);

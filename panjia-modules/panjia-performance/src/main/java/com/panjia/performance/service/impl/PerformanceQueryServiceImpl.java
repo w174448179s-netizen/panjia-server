@@ -3,6 +3,7 @@ package com.panjia.performance.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
@@ -189,7 +190,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         Long selfEmployeeId = resolveSelfEmployeeId();
         // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
         if (selfEmployeeId == null) {
-            deptId = enforceScopedRoleDeptFilter(deptId);
+            deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
         long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
@@ -249,7 +250,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         Long selfEmployeeId = resolveSelfEmployeeId();
         // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
         if (selfEmployeeId == null) {
-            deptId = enforceScopedRoleDeptFilter(deptId);
+            deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
         long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
@@ -286,8 +287,8 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
-        // §3.6 数据级行级权限：店长/总监仅能钻取本部门（含下级）明细，越权传他部门 deptId 直接拒绝
-        Long scopedDeptId = enforceScopedRoleDeptFilter(deptId);
+        // §3.6 数据级行级权限：所有登录用户仅能钻取本部门（含下级）明细，越权传他部门 deptId 直接拒绝
+        Long scopedDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         List<PerformanceManageDTO> rows = factMapper.selectManageListByContractNos(
             period, factType, scopedDeptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
         fillManageDetailConversion(rows);
@@ -339,48 +340,6 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         } catch (Exception e) {
             log.warn("[performance] 解析经纪人数据权限失败，默认不限制", e);
             return null;
-        }
-    }
-
-    /**
-     * 数据权限：所有登录用户只能查看本部门（含下级组别/门店）数据（全系统统一口径）。
-     * <p>
-     * 适用于完整业绩查询/业绩明细等全部查询接口：
-     * <ul>
-     *   <li>未传 deptId → 强制设为登录用户的 dept_id（前端默认选中同部门）；</li>
-     *   <li>传入本人部门或其下级部门 → 放行（允许在本部门范围内下钻）；</li>
-     *   <li>传入非本部门子树的 deptId → 拒绝（防止越权指定他部门绕过过滤）。</li>
-     * </ul>
-     * 经纪人在合同列表另走 {@link #resolveSelfEmployeeId()} 本人口径；
-     * 超管不受限制；登录用户无归属部门时降级不限制（避免系统账号被锁死）。
-     *
-     * @param requestedDeptId 调用方传入的 deptId（可空）
-     * @return 实际生效的 deptId
-     */
-    private Long enforceScopedRoleDeptFilter(Long requestedDeptId) {
-        try {
-            var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || LoginHelper.isSuperAdmin()) {
-                return requestedDeptId;
-            }
-            Long userDeptId = loginUser.getDeptId();
-            if (userDeptId == null) {
-                log.warn("[performance] 登录用户 deptId 为空，降级为不限制（请检查账号配置）");
-                return requestedDeptId;
-            }
-            if (requestedDeptId == null || requestedDeptId.equals(userDeptId)) {
-                return userDeptId;
-            }
-            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(userDeptId);
-            if (!scopeDeptIds.contains(requestedDeptId)) {
-                throw new ServiceException("仅能查看本部门（含下级）业绩数据");
-            }
-            return requestedDeptId;
-        } catch (ServiceException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("[performance] 解析部门数据权限失败，默认不限制", e);
-            return requestedDeptId;
         }
     }
 
@@ -453,7 +412,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         Long selfEmployeeId = resolveSelfEmployeeId();
         Long effectiveDeptId = deptId;
         if (selfEmployeeId == null) {
-            effectiveDeptId = enforceScopedRoleDeptFilter(deptId);
+            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
         long total = factMapper.countFactSearchByContract(period, effectiveDeptId, keyword, selfEmployeeId);
@@ -504,15 +463,14 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
                 return;
             }
             var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || LoginHelper.isSuperAdmin()) {
+            if (loginUser == null) {
                 return;
             }
-            Long myDeptId = loginUser.getDeptId();
-            if (myDeptId == null) {
-                log.warn("[performance] 登录用户 deptId 为空，部门数据权限降级不限制（请检查账号配置）");
+            // 所有登录用户（超管除外）：明细行 deptId 须落在本部门（含下级）子树内
+            List<Long> scopeDeptIds = DeptScopeUtils.selfDeptSubtree(deptService::selectDeptAndChildById);
+            if (scopeDeptIds == null) {
                 return;
             }
-            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(myDeptId);
             boolean hit = rows.stream()
                 .map(PerformanceSearchDetailDTO::getDeptId)
                 .filter(Objects::nonNull)
