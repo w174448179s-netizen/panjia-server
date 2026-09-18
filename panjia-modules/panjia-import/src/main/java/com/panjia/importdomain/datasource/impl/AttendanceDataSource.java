@@ -9,10 +9,18 @@ import com.panjia.importutil.dto.ParsedRow;
 import com.panjia.importutil.dto.ParsedSheet;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeParseException;
+import java.util.Map;
+
 /**
  * 考勤数据源（ATTENDANCE）。
  * <p>
- * 必填/类型校验由 common-import-util 基础校验器完成，本类只做结构转换。
+ * V200 起对接钉钉《月度汇总》标准表：一行一人一月，行内没有考勤日期列，
+ * 归属月取导入时选择的批次期间并归一为当月 1 日（同时写入 raw_json 供 sourceKey 使用）；
+ * 模板映射的姓名/部门/出勤天数等指标随 raw_json 全量归档，必填/类型校验由
+ * common-import-util 基础校验器完成，本类只做结构转换。
  */
 @Component
 public class AttendanceDataSource extends AbstractDataSource {
@@ -25,20 +33,39 @@ public class AttendanceDataSource extends AbstractDataSource {
     @Override
     public ParseResult parse(ParsedSheet sheet, ImportContext ctx) {
         ParseResult result = new ParseResult();
+        LocalDate monthStart = parseMonthStart(ctx.getPeriod());
         for (ParsedRow row : sheet.getRows()) {
             RawAttendance raw = new RawAttendance();
             raw.setBatchId(ctx.getBatchId());
             raw.setRowNo(row.getRowNo());
-            raw.setRawJson(toRawJson(row));
+
+            // raw_json 保留模板映射的全部指标列，并补入按归属月推导的考勤日期，
+            // 使归一化阶段 sourceKey（工号|考勤日期）与员工号提取逻辑保持不变
+            Map<String, Object> rawJson = toRawJsonMap(row);
+            if (monthStart != null) {
+                rawJson.put("attendDate", monthStart.toString());
+            }
+            raw.setRawJson(writeJson(rawJson));
 
             raw.setEmployeeCode(str(row, "employeeCode"));
-            raw.setAttendDate(date(row, "attendDate"));
+            raw.setAttendDate(monthStart);
             raw.setLateCount(integer(row, "lateCount"));
             raw.setAbsentDays(decimal(row, "absentDays"));
-            raw.setLeaveAmount(decimal(row, "leaveAmount"));
 
             result.addRow(raw);
         }
         return result;
+    }
+
+    /** 归属月（YYYY-MM）→ 当月 1 日；期间缺失/非法时返回 null（不阻断解析） */
+    private LocalDate parseMonthStart(String period) {
+        if (period == null || period.isBlank()) {
+            return null;
+        }
+        try {
+            return YearMonth.parse(period.trim()).atDay(1);
+        } catch (DateTimeParseException e) {
+            return null;
+        }
     }
 }

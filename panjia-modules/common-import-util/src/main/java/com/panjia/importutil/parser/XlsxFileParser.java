@@ -58,6 +58,11 @@ public class XlsxFileParser implements FileParser {
         sheet.setTemplateVersion(template.getTemplateVersion());
 
         int headerRow = template.getHeaderRow();
+        // 数据起始行（0-based）：默认紧邻表头下一行；多行表头（如钉钉月度汇总：
+        // 标题行/生成时间行/字段名行/日期子行）由模板显式指定 dataStartRow 跳过辅助表头行。
+        int dataStartRow = template.getDataStartRow() != null
+            ? Math.max(template.getDataStartRow(), headerRow + 1)
+            : headerRow + 1;
 
         AnalysisEventListener<Map<Integer, String>> listener = new AnalysisEventListener<>() {
             private final List<String> headers = new ArrayList<>();
@@ -116,13 +121,14 @@ public class XlsxFileParser implements FileParser {
 
         // 指定 sheet 名称时读取对应 sheet，否则读取第一个 sheet。
         // headRowNumber 必须覆盖 0..headerRow，否则 headerRow>0 的行会被当作数据行跳过
-        // （fesod 默认 headRowNumber=1，仅第 0 行进 invokeHead）。
+        // （fesod 默认 headRowNumber=1，仅第 0 行进 invokeHead）；
+        // 多行表头时取 dataStartRow，把字段名行与日期子行等全部留在表头区，invoke 从数据首行开始。
         if (template.getSheetName() != null && !template.getSheetName().isBlank()) {
             FesodSheet.read(in, listener).sheet(template.getSheetName().trim())
-                .headRowNumber(headerRow + 1).doRead();
+                .headRowNumber(dataStartRow).doRead();
         } else {
             FesodSheet.read(in, listener).sheet()
-                .headRowNumber(headerRow + 1).doRead();
+                .headRowNumber(dataStartRow).doRead();
         }
 
         return sheet;

@@ -36,14 +36,27 @@ public abstract class AbstractDataSource implements DataSource {
 
     /** 以原始字符串行（field→raw）序列化 raw_json */
     protected String toRawJson(ParsedRow row) {
+        return writeJson(toRawJsonMap(row));
+    }
+
+    /**
+     * 构造 raw_json 的有序 Map（field→原始字符串，空值不写入）。
+     * 子类可在序列化前补充行内不存在、但由导入上下文推导的字段（如月度汇总按归属月补考勤日期）。
+     */
+    protected Map<String, Object> toRawJsonMap(ParsedRow row) {
+        // rawValues 是 field→String，按 audit 锚点落库；空值不写入
+        Map<String, Object> json = new LinkedHashMap<>();
+        row.getRawValues().forEach((k, v) -> {
+            if (v != null && !v.isBlank()) {
+                json.put(k, v);
+            }
+        });
+        return json;
+    }
+
+    /** 序列化 raw_json Map（失败兜底返回 {}） */
+    protected String writeJson(Map<String, Object> json) {
         try {
-            // rawValues 是 field→String，按 audit 锚点落库；空值不写入
-            Map<String, Object> json = new LinkedHashMap<>();
-            row.getRawValues().forEach((k, v) -> {
-                if (v != null && !v.isBlank()) {
-                    json.put(k, v);
-                }
-            });
             return OBJECT_MAPPER.writeValueAsString(json);
         } catch (Exception e) {
             log.warn("rawJson 序列化失败", e);

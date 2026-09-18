@@ -26,6 +26,15 @@ public class ImportTemplate implements Serializable {
     /** 表头行号（0-based，默认 0） */
     private int headerRow = 0;
 
+    /**
+     * 数据起始行号（0-based，可选）。
+     * <p>
+     * 为空时数据从 {@code headerRow + 1} 开始（单行表头常规场景）；
+     * 表头占多行（如分组行 + 列名行 + 日期子行）时显式指定，使中间的辅助表头行
+     * 既被跳过不进数据区、又不会因为列名不在该行而解析失败。
+     */
+    private Integer dataStartRow;
+
     /** 列定义 */
     private List<ColumnDef> columns;
 

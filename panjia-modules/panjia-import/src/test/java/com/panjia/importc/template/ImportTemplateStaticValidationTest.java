@@ -60,6 +60,12 @@ class ImportTemplateStaticValidationTest {
         "currentReceivable", "currentReceived",
         // ATTENDANCE
         "employeeCode", "attendDate", "lateCount", "absentDays",
+        // ATTENDANCE V100 扣款列（V120012 增补，历史模板兼容）
+        "leaveAmount",
+        // ATTENDANCE V200 钉钉《月度汇总》固定指标列（V120013；每日考勤结果为动态列不映射）
+        "employeeName", "attendanceGroup", "deptName", "position", "userId",
+        "attendDays", "restDays", "lateMinutes", "missingCardCount",
+        "weekendOvertime", "holidayOvertime",
         // POINTS
         "pointDate", "score", "violationCount",
         // OTHERS
