@@ -159,7 +159,7 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废申请单：仅 DRAFT/SUBMITTED 可作废，未审批明细随单冲销。
+     * 作废申请单：DRAFT/SUBMITTED/REJECTED 可作废（未锁定均可），未审批明细随单冲销。
      *
      * @param id 申请单 ID
      * @return 操作结果
@@ -169,6 +169,22 @@ public class CommissionApplyController extends BaseController {
     @PostMapping("/{id}/cancel")
     public R<Void> cancel(@PathVariable Long id) {
         applicationService.cancel(id, LoginHelper.getUserId());
+        return R.ok();
+    }
+
+    /**
+     * 作废未发起的合同结佣（本期不再发起）：无申请单时创建 CANCELLED 占位单，
+     * 后续仍可重新发起；已有单时与 {@link #cancel} 同口径处理。
+     *
+     * @param period     结算月 YYYY-MM
+     * @param contractNo 合同号（或订单号）
+     * @return 操作结果
+     */
+    @SaCheckPermission("commission:apply:cancel")
+    @Log(title = "结佣未发起合同作废", businessType = BusinessType.UPDATE)
+    @PostMapping("/cancel-unapplied")
+    public R<Void> cancelUnapplied(@RequestParam String period, @RequestParam String contractNo) {
+        applicationService.cancelUnapplied(period, contractNo, LoginHelper.getUserId());
         return R.ok();
     }
 
