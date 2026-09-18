@@ -517,8 +517,11 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             .collect(Collectors.toSet()));
         for (PerformanceFactSearchDTO row : rows) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
-            row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectOriginalAmount(), factor));
-            row.setAdjustedConvertedAmount(conversionFactorPort.convert(row.getAdjustedAmount(), factor));
+            // 新签业绩两列：expectConvertedAmount = 当前值折算，originalExpectConvertedAmount = 调整前折算；
+            // 前端按 expectAmount 与 expectOriginalAmount 是否相等决定单值展示还是「原值 → 调整后值」
+            row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectAmount(), factor));
+            row.setOriginalExpectConvertedAmount(
+                conversionFactorPort.convert(row.getExpectOriginalAmount(), factor));
             row.setRealConvertedAmount(conversionFactorPort.convert(row.getRealAmount(), factor));
             row.setCommissionConvertedAmount(conversionFactorPort.convert(row.getCommissionAmount(), factor));
         }

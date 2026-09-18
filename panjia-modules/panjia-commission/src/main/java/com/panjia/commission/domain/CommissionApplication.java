@@ -108,6 +108,14 @@ public class CommissionApplication implements Serializable {
     @TableField(exist = false)
     private Boolean expectedAdjusted;
 
+    /**
+     * 调整前应收（非入库字段）。
+     * <p>即提交时快照 {@code expectedAmount}：展示时用当前 ACTIVE 值覆盖 {@code expectedAmount}，
+     * 原快照留在此字段，供前端展示「原值 → 调整后值」。仅 {@link #expectedAdjusted} 为 true 时有值。
+     */
+    @TableField(exist = false)
+    private BigDecimal originalExpectedAmount;
+
     /** 锁定时间 */
     private LocalDateTime lockTime;
 

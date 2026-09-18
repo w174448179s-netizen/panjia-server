@@ -1351,8 +1351,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                      THEN COALESCE(re.performance_amount, f.performance_amount) ELSE 0 END), 0) AS "expectOriginalAmount",
                    COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
                    BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
-                   COALESCE(SUM(CASE WHEN f.adjust_id IS NOT NULL AND f.fact_type = 'PERF_EXPECT'
-                                     THEN f.performance_amount ELSE 0 END), 0) AS "adjustedAmount",
                    COUNT(DISTINCT f.employee_id) AS "employeeCount",
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
@@ -1375,7 +1373,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                fa."expectOriginalAmount",
                fa."realAmount",
                fa."hasAdjust",
-               fa."adjustedAmount",
                fa."employeeCount",
                fa."detailCount",
                la.status AS "adjustStatus",

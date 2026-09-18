@@ -51,11 +51,20 @@ public class CommissionItemDetailDTO implements Serializable {
     /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额） */
     private BigDecimal expectedAmount;
 
+    /** 应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
+    private Boolean expectedAdjusted;
+
+    /** 调整前应收金额（同 sourceKey 最早一条 REVERSED 的 PERF_EXPECT；无调整时回退当前值） */
+    private BigDecimal originalExpectedAmount;
+
     /** 结佣金额（结佣明细确认的业绩金额） */
     private BigDecimal amount;
 
     /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
     private BigDecimal expectedConvertedAmount;
+
+    /** 调整前应收的折算后金额（originalExpectedAmount × conversionFactor） */
+    private BigDecimal originalConvertedAmount;
 
     /** 结佣业绩折算后金额（amount × conversionFactor） */
     private BigDecimal convertedAmount;

@@ -56,6 +56,12 @@ public class CommissionContractVO implements Serializable {
     /** 新签业绩折算后金额（expectedAmount × conversionFactor） */
     private BigDecimal expectedConvertedAmount;
 
+    /** 调整前应收业绩合计（申请单提交时快照；仅 expectedAdjusted=true 时有值，供展示「原值 → 调整后值」） */
+    private BigDecimal originalExpectedAmount;
+
+    /** 调整前应收的折算后金额（originalExpectedAmount × conversionFactor） */
+    private BigDecimal originalExpectedConvertedAmount;
+
     /** 应收已被调整（当前 ACTIVE 应收与提交快照不一致时置 true） */
     private Boolean expectedAdjusted;
 

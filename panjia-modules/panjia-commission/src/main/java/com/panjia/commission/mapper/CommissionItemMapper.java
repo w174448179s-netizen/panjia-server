@@ -25,6 +25,10 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
      * 通过 performance_fact_id 关联业绩事实、员工、部门、归一化记录等表，
      * 补充：工号、姓名、门店/组别路径、角色占比、应收金额。
      * DIFF 差额行（performance_fact_id 为空）仅展示结佣明细基础字段。
+     * <p>
+     * 应收同时给出 originalExpectedAmount（调整前：同 sourceKey 最早一条 REVERSED 的
+     * PERF_EXPECT，无则回退当前 ACTIVE 值）与 expectedAdjusted 标记，
+     * 与「实收明细详情」同口径，供前端展示「原值 → 调整后值」。
      *
      * @param applicationId 申请单 ID
      * @return 明细详情列表
@@ -59,6 +63,26 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                    AND pe.source_key = f.source_key
                  ORDER BY pe.id
                  LIMIT 1) AS "expectedAmount",
+               COALESCE(
+                 (SELECT pr.performance_amount
+                    FROM pj_perf_fact pr
+                   WHERE pr.fact_status = 'REVERSED'
+                     AND pr.fact_type = 'PERF_EXPECT'
+                     AND pr.source_key = f.source_key
+                   ORDER BY pr.id ASC
+                   LIMIT 1),
+                 (SELECT pe.performance_amount
+                    FROM pj_perf_fact pe
+                   WHERE pe.fact_status = 'ACTIVE'
+                     AND pe.fact_type = 'PERF_EXPECT'
+                     AND pe.source_key = f.source_key
+                   ORDER BY pe.id
+                   LIMIT 1)
+               ) AS "originalExpectedAmount",
+               EXISTS(SELECT 1 FROM pj_perf_fact pe2
+                 WHERE pe2.fact_status = 'REVERSED'
+                   AND pe2.fact_type = 'PERF_EXPECT'
+                   AND pe2.source_key = f.source_key) AS "expectedAdjusted",
                ci.amount AS "amount",
                ci.fee_item AS "feeItem",
                ci.status AS "status"

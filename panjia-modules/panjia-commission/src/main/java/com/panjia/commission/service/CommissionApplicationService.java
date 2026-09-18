@@ -988,10 +988,12 @@ public class CommissionApplicationService {
             vo.setDetailCount(app.getItemCount() == null ? 0 : app.getItemCount());
             vo.setAligned(app.getAligned());
             vo.setCurrentNode(app.getCurrentNode());
-            // 应收展示当前 ACTIVE 值（含已生效调整），与快照不一致时标「已调整」
+            // 应收展示当前 ACTIVE 值（含已生效调整），与快照不一致时标「已调整」，
+            // 并把提交快照留存为「调整前」值，供前端展示「原值 → 调整后值」
             if (app.getExpectedAmount() != null && c.getExpectedAmount() != null
                 && app.getExpectedAmount().compareTo(c.getExpectedAmount()) != 0) {
                 vo.setExpectedAdjusted(true);
+                vo.setOriginalExpectedAmount(app.getExpectedAmount());
             }
         } else {
             vo.setAmount(c.getAmount());
@@ -1000,6 +1002,11 @@ public class CommissionApplicationService {
         // 折算后金额：合同维度聚合行无 factId，按本行 bizType 的因子折算（同一合同同一因子，应收/实收同因子）
         vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
         vo.setExpectedConvertedAmount(conversionFactorPort.convert(vo.getExpectedAmount(), factor));
+        // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出（无调整时保持 null，前端不展示）
+        if (vo.getOriginalExpectedAmount() != null) {
+            vo.setOriginalExpectedConvertedAmount(
+                conversionFactorPort.convert(vo.getOriginalExpectedAmount(), factor));
+        }
         return vo;
     }
 
@@ -1042,6 +1049,8 @@ public class CommissionApplicationService {
         if (app.getExpectedAmount() != null && app.getExpectedAmount().compareTo(currentExpected) != 0) {
             app.setExpectedAdjusted(true);
         }
+        // 保留提交快照作为「调整前」值，再覆盖为当前值（供详情「应收合计」展示「原值 → 调整后值」）
+        app.setOriginalExpectedAmount(app.getExpectedAmount());
         app.setExpectedAmount(currentExpected);
     }
 
@@ -1080,6 +1089,10 @@ public class CommissionApplicationService {
             }
             if (d.getExpectedAmount() != null) {
                 d.setExpectedConvertedAmount(conversionFactorPort.convert(d.getExpectedAmount(), factor));
+            }
+            // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出
+            if (d.getOriginalExpectedAmount() != null) {
+                d.setOriginalConvertedAmount(conversionFactorPort.convert(d.getOriginalExpectedAmount(), factor));
             }
         }
     }
