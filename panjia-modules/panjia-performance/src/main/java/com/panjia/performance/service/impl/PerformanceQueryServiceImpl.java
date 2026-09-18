@@ -402,7 +402,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId,
+    public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId, String bizType,
                                                                   String keyword, Integer pageNum, Integer pageSize) {
         int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
         int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
@@ -415,13 +415,26 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
-        long total = factMapper.countFactSearchByContract(period, effectiveDeptId, keyword, selfEmployeeId);
+        long total = factMapper.countFactSearchByContract(period, effectiveDeptId,
+            StringUtils.trimToNull(bizType), keyword, selfEmployeeId);
         List<PerformanceFactSearchDTO> rows = total == 0
             ? List.of()
-            : factMapper.selectFactSearchByContract(period, effectiveDeptId, keyword, selfEmployeeId, offset, size);
+            : factMapper.selectFactSearchByContract(period, effectiveDeptId,
+                StringUtils.trimToNull(bizType), keyword, selfEmployeeId, offset, size);
         fillSearchConversion(rows);
 
         return new PageResult<>(rows, total);
+    }
+
+    @Override
+    public List<String> searchBizTypes(String period, Long deptId) {
+        // 与 searchByContract 完全相同的数据权限口径，保证下拉选项即当前用户可见的类型
+        Long selfEmployeeId = resolveSelfEmployeeId();
+        Long effectiveDeptId = deptId;
+        if (selfEmployeeId == null) {
+            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
+        }
+        return factMapper.selectSearchBizTypes(StringUtils.trimToNull(period), effectiveDeptId, selfEmployeeId);
     }
 
     /**

@@ -266,17 +266,29 @@ public class PerformanceFactController extends BaseController {
      * 完整业绩查询（合同维度）。
      * <p>
      * 以合同为维度，展示新签业绩、实收业绩、调整状态与金额、实收审批状态、结佣状态。
-     * 支持按期间、部门、关键字筛选。
+     * 支持按期间、部门、业务类型、关键字筛选。
      */
     @SaCheckPermission("perf:fact:list")
     @GetMapping("/search")
     public R<PageResult<PerformanceFactSearchDTO>> search(
             @RequestParam(required = false) String period,
             @RequestParam(required = false) Long deptId,
+            @RequestParam(required = false) String bizType,
             @RequestParam(required = false) String keyword,
             @RequestParam(defaultValue = "1") Integer pageNum,
             @RequestParam(defaultValue = "20") Integer pageSize) {
-        return R.ok(queryService.searchByContract(period, deptId, keyword, pageNum, pageSize));
+        return R.ok(queryService.searchByContract(period, deptId, bizType, keyword, pageNum, pageSize));
+    }
+
+    /**
+     * 完整业绩查询的业务类型下拉选项（数据范围与 /search 一致：期间/部门子树/经纪人本人）。
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/search/biz-types")
+    public R<List<String>> searchBizTypes(
+            @RequestParam(required = false) String period,
+            @RequestParam(required = false) Long deptId) {
+        return R.ok(queryService.searchBizTypes(period, deptId));
     }
 
     /**
