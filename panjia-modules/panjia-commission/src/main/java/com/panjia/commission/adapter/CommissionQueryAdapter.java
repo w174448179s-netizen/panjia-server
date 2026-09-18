@@ -12,7 +12,12 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 结佣查询跨域适配器（panjia-commission 实现 contracts {@link CommissionQueryPort}，对 payroll 唯一出口）。
@@ -41,22 +46,22 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
 
     @Override
     public List<CommissionItemDTO> findLocked(String period, Long deptId) {
-        return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+        List<CommissionItem> items = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
                 .eq(CommissionItem::getPeriod, period)
                 .eq(deptId != null, CommissionItem::getDeptId, deptId)
                 .eq(CommissionItem::getStatus, ItemStatus.APPROVED)
-                .orderByAsc(CommissionItem::getId))
-            .stream().map(this::toDTO).toList();
+                .orderByAsc(CommissionItem::getId));
+        return enrichWithFacts(items);
     }
 
     @Override
     public List<CommissionItemDTO> findLockedByEmployee(String period, Long employeeId) {
-        return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+        List<CommissionItem> items = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
                 .eq(CommissionItem::getPeriod, period)
                 .eq(CommissionItem::getEmployeeId, employeeId)
                 .eq(CommissionItem::getStatus, ItemStatus.APPROVED)
-                .orderByAsc(CommissionItem::getId))
-            .stream().map(this::toDTO).toList();
+                .orderByAsc(CommissionItem::getId));
+        return enrichWithFacts(items);
     }
 
     @Override
@@ -90,6 +95,7 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setApprovedMonth(item.getApprovedMonth());
         dto.setEmployeeId(item.getEmployeeId());
         dto.setDeptId(item.getDeptId());
+        dto.setContractNo(item.getContractNo());
         dto.setBizType(item.getBizType());
         dto.setRoleType(item.getRoleType());
         dto.setFeeItem(item.getFeeItem());
@@ -97,6 +103,36 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setStatus(item.getStatus() != null ? item.getStatus().getCode() : null);
         dto.setSource(SOURCE_ITEM);
         return dto;
+    }
+
+    /** 批量 enrich 结佣明细 with 业绩事实的合同/房源/比例信息 */
+    private List<CommissionItemDTO> enrichWithFacts(List<CommissionItem> items) {
+        if (items.isEmpty()) return Collections.emptyList();
+        List<Long> factIds = items.stream()
+            .map(CommissionItem::getPerformanceFactId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        Map<Long, PerformanceFactSummaryDTO> factMap = Collections.emptyMap();
+        if (!factIds.isEmpty()) {
+            factMap = performanceQueryPort.findActiveByFacts(factIds).stream()
+                .collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, Function.identity(), (a, b) -> a));
+        }
+        List<CommissionItemDTO> result = new ArrayList<>(items.size());
+        for (CommissionItem item : items) {
+            CommissionItemDTO dto = toDTO(item);
+            PerformanceFactSummaryDTO fact = factMap.get(item.getPerformanceFactId());
+            if (fact != null) {
+                dto.setBusinessDate(fact.getBusinessDate());
+                dto.setSignDate(fact.getSignDate());
+                dto.setOrderNo(fact.getOrderNo());
+                dto.setPropertyAddress(fact.getPropertyAddress());
+                dto.setShareRatio(fact.getShareRatio());
+                if (dto.getContractNo() == null) dto.setContractNo(fact.getContractNo());
+            }
+            result.add(dto);
+        }
+        return result;
     }
 
     /** 业绩事实 → DTO（★ 原样透传，不折算） */
@@ -108,6 +144,12 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setEmployeeId(fact.getEmployeeId());
         dto.setEmployeeCode(fact.getEmployeeCode());
         dto.setDeptId(fact.getDeptId());
+        dto.setContractNo(fact.getContractNo());
+        dto.setOrderNo(fact.getOrderNo());
+        dto.setBusinessDate(fact.getBusinessDate());
+        dto.setSignDate(fact.getSignDate());
+        dto.setPropertyAddress(fact.getPropertyAddress());
+        dto.setShareRatio(fact.getShareRatio());
         dto.setBizType(fact.getBizType());
         dto.setRoleType(fact.getRoleType());
         dto.setAmount(fact.getAmount());

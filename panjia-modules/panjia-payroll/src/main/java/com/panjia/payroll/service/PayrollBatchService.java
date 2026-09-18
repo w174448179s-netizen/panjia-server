@@ -558,7 +558,7 @@ public class PayrollBatchService {
     // ==================== 结佣追溯（工资构成 → 每笔结佣明细） ====================
 
     /**
-     * 本人工资查询页：查当前登录人在指定期间的已审批结佣明细。
+     * 本人工资查询页：查当前登录人在指定期间的已审批结佣明细（含合同/房源/比例 enrichment）。
      * employeeId 由后端按登录态解析，不接受前端参数。
      */
     public List<CommissionItemDTO> listMyCommissionTrace(Long userId, String period) {
@@ -570,10 +570,29 @@ public class PayrollBatchService {
     }
 
     /**
-     * 组织工资明细页（总监/财务）：查指定员工在指定期间的已审批结佣明细。
+     * 组织工资明细页（总监/财务）：查指定员工在指定期间的已审批结佣明细（含合同/房源/比例 enrichment）。
      */
     public List<CommissionItemDTO> listCommissionTrace(String period, Long employeeId) {
         return commissionQueryPort.findLockedByEmployee(period, employeeId);
+    }
+
+    /**
+     * 本人工资查询页（店长）：查所在门店团队成员的新签明细。
+     * deptId 由后端按登录态解析员工档案得到，不接受前端参数。
+     */
+    public List<CommissionItemDTO> listMyTeamNewSign(Long userId, String period) {
+        EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
+        if (me == null || me.getDeptId() == null) {
+            return List.of();
+        }
+        return commissionQueryPort.findNewSignByDept(period, me.getDeptId());
+    }
+
+    /**
+     * 组织工资明细页（总监/财务）：查指定门店团队成员的新签明细。
+     */
+    public List<CommissionItemDTO> listTeamNewSign(String period, Long deptId) {
+        return commissionQueryPort.findNewSignByDept(period, deptId);
     }
 
     public RuleSnapshot getRuleSnapshot(Long batchId) {

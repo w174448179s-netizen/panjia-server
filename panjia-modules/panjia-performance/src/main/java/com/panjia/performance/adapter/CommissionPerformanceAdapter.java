@@ -120,6 +120,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         dto.setNormalizedRecordId(fact.getNormalizedRecordId());
         dto.setSourceKey(fact.getSourceKey());
         dto.setReceivedApplyId(fact.getReceivedApplyId());
+        dto.setShareRatio(fact.getShareRatio());
         return dto;
     }
 }

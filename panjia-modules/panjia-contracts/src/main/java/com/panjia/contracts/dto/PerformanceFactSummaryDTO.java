@@ -34,6 +34,9 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 业务发生日 */
     private LocalDate businessDate;
 
+    /** 签约/认购时间（raw_json.signDate 原始时间戳字符串，含时分秒；缺失时为 null） */
+    private String signDate;
+
     /** 员工 ID */
     private Long employeeId;
 
@@ -75,4 +78,7 @@ public class PerformanceFactSummaryDTO implements Serializable {
 
     /** 房源地址（raw_json.propertyAddress） */
     private String propertyAddress;
+
+    /** 分摊比例（仅展示用，不参与计算） */
+    private BigDecimal shareRatio;
 }

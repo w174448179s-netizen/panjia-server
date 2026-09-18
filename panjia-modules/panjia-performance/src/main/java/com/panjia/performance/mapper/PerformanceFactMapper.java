@@ -843,7 +843,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ra.status AS "receivedStatus",
                rs.contract_no AS "contractNo",
                rs.order_no AS "orderNo",
-               rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
+               rs.raw_json ->> 'propertyAddress' AS "propertyAddress",
+               f.share_ratio AS "shareRatio",
+               rs.raw_json ->> 'signDate' AS "signDate"
         FROM pj_perf_fact f
         LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
@@ -882,7 +884,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ra.status AS "receivedStatus",
                rs.contract_no AS "contractNo",
                rs.order_no AS "orderNo",
-               rs.raw_json ->> 'propertyAddress' AS "propertyAddress"
+               rs.raw_json ->> 'propertyAddress' AS "propertyAddress",
+               f.share_ratio AS "shareRatio"
         FROM pj_perf_fact f
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
