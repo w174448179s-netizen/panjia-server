@@ -1,6 +1,7 @@
 package com.panjia.payroll.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.RuleSnapshot;
@@ -106,5 +107,19 @@ public class PayrollController {
     @GetMapping("/my/detail")
     public R<MyPayrollDetailVO> myDetail(@RequestParam Long batchId) {
         return R.ok(batchService.getMyDetail(LoginHelper.getUserId(), batchId));
+    }
+
+    /** 我的结佣追溯（本人工资构成中每笔结佣明细，员工身份后端解析） */
+    @SaCheckPermission("payroll:my:query")
+    @GetMapping("/my/commission-trace")
+    public R<List<CommissionItemDTO>> myCommissionTrace(@RequestParam String period) {
+        return R.ok(batchService.listMyCommissionTrace(LoginHelper.getUserId(), period));
+    }
+
+    /** 组织视角结佣追溯（总监/财务查指定员工的结佣明细） */
+    @SaCheckPermission("payroll:detail:list")
+    @GetMapping("/commission-trace")
+    public R<List<CommissionItemDTO>> commissionTrace(@RequestParam String period, @RequestParam Long employeeId) {
+        return R.ok(batchService.listCommissionTrace(period, employeeId));
     }
 }

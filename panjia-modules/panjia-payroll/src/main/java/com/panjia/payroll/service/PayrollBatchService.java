@@ -555,6 +555,27 @@ public class PayrollBatchService {
         return vo;
     }
 
+    // ==================== 结佣追溯（工资构成 → 每笔结佣明细） ====================
+
+    /**
+     * 本人工资查询页：查当前登录人在指定期间的已审批结佣明细。
+     * employeeId 由后端按登录态解析，不接受前端参数。
+     */
+    public List<CommissionItemDTO> listMyCommissionTrace(Long userId, String period) {
+        EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
+        if (me == null || me.getEmployeeId() == null) {
+            return List.of();
+        }
+        return commissionQueryPort.findLockedByEmployee(period, me.getEmployeeId());
+    }
+
+    /**
+     * 组织工资明细页（总监/财务）：查指定员工在指定期间的已审批结佣明细。
+     */
+    public List<CommissionItemDTO> listCommissionTrace(String period, Long employeeId) {
+        return commissionQueryPort.findLockedByEmployee(period, employeeId);
+    }
+
     public RuleSnapshot getRuleSnapshot(Long batchId) {
         return ruleService.getSnapshot(batchId);
     }
