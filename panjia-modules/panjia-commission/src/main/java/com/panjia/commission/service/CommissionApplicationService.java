@@ -60,6 +60,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -815,14 +816,22 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED 可作废；运行中的流程先终止（cancel 事件回调冲销明细）。
+     * 作废申请单：DRAFT/SUBMITTED/REJECTED 可作废（未锁定均可）；
+     * 超管可作废任意单据，其他用户仅可作废本人发起的单据（服务端兜底防越权）。
+     * 运行中的流程先终止（cancel 事件回调冲销明细）；REJECTED 单据的流程已结束，
+     * deleteInstanceSys 走标准删除链清理实例记录。
      */
     @Transactional(rollbackFor = Exception.class)
     public void cancel(Long applicationId, Long operatorId) {
         CommissionApplication application = getApplication(applicationId);
+        if (!LoginHelper.isSuperAdmin()
+            && !Objects.equals(application.getApplicantId(), operatorId)) {
+            throw new ServiceException("仅可作废本人发起的申请单");
+        }
         if (application.getStatus() != ApplicationStatus.DRAFT
-            && application.getStatus() != ApplicationStatus.SUBMITTED) {
-            throw new ServiceException("仅草稿/已提交状态可作废（当前：" + application.getStatus().getDesc() + "）");
+            && application.getStatus() != ApplicationStatus.SUBMITTED
+            && application.getStatus() != ApplicationStatus.REJECTED) {
+            throw new ServiceException("仅未锁定（草稿/审批中/已驳回）状态可作废（当前：" + application.getStatus().getDesc() + "）");
         }
         if (StringUtils.isNotBlank(application.getProcessInstanceId())) {
             // 终止运行中的流程实例（触发 cancel 事件，监听器置 CANCELLED + 冲销明细，幂等）
@@ -993,9 +1002,11 @@ public class CommissionApplicationService {
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
             }
-            // 审批节点数据隔离：审批中（SUBMITTED）单据仅本人角色对应节点可见；非审批中/未发起单据不受限
+            // 审批节点数据隔离：审批中（SUBMITTED）单据仅「本人角色对应节点」或「申请人本人」可见；
+            // 财务→FINANCE、总监→DIRECTOR，店长/经纪人看不到他人审批中的单据但能看到自己发起的，超管看全部
             if (!nodeScopeAll && ApplicationStatus.SUBMITTED.getCode().equals(status)
-                && (app == null || !myNodes.contains(app.getCurrentNode()))) {
+                && (app == null || (!myNodes.contains(app.getCurrentNode())
+                    && !Objects.equals(app.getApplicantId(), LoginHelper.getUserId())))) {
                 continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
