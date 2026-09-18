@@ -43,8 +43,15 @@ public class ReceivedFactDetailDTO implements Serializable {
     /** 角色占比 */
     private BigDecimal shareRatio;
 
-    /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额） */
+    /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额，已含调整） */
     private BigDecimal expectedAmount;
+
+    /**
+     * 应收原始金额（调整前：同 sourceKey + 同 fact_type 下最早一条 REVERSED 事实的金额；
+     * 未调整时 = expectedAmount）。口径与「合同业绩明细」页 originalAmount 一致，
+     * 仅用于前端展示「原值 → 调整后值」。
+     */
+    private BigDecimal originalExpectedAmount;
 
     /** 该行的应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
     private Boolean expectedAdjusted;
@@ -54,6 +61,9 @@ public class ReceivedFactDetailDTO implements Serializable {
 
     /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
     private BigDecimal expectedConvertedAmount;
+
+    /** 应收业绩折算后原始金额（originalExpectedAmount × conversionFactor） */
+    private BigDecimal originalConvertedAmount;
 
     /** 实收业绩折算后金额（amount × conversionFactor） */
     private BigDecimal convertedAmount;

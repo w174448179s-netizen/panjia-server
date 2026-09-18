@@ -86,13 +86,21 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private Boolean expectedAdjusted;
 
-    /** 提交时快照应收（非入库字段；getDetail 时保留原始值供前端展示「调整前」） */
+    /**
+     * 调整前应收（非入库字段）＝提交时快照应收。
+     * <p>列表/详情在把 {@link #expectedAmount} 覆盖为实时值前留存，供前端展示「原值 → 调整后值」；
+     * 未调整（或老数据无快照）时为 null 或与 {@link #expectedAmount} 相等。</p>
+     */
     @TableField(exist = false)
     private BigDecimal originalExpectedAmount;
 
     /** 应收业绩折算后（非入库字段；列表查询时按 bizType 折算） */
     @TableField(exist = false)
     private BigDecimal expectedConvertedAmount;
+
+    /** 调整前应收的折算后金额（非入库字段；originalExpectedAmount × 与 expectedConvertedAmount 同一折算因子） */
+    @TableField(exist = false)
+    private BigDecimal originalExpectedConvertedAmount;
 
     /** 实收业绩折算后（非入库字段；列表查询时按 bizType 折算） */
     @TableField(exist = false)

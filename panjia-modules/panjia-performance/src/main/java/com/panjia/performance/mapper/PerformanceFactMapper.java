@@ -909,6 +909,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 列口径对齐「合同业绩明细」页（selectManageListByContractNos）：
      * deptPath / 工号 / 姓名 / 角色 / 角色占比；应收金额按同 sourceKey 的
      * PERF_EXPECT 事实配对（导入引擎一行双发，与 ReceivedAlignmentService 口径一致）。
+     * <p>
+     * 应收同时给出 originalExpectedAmount（调整前：同 sourceKey 最早一条 REVERSED 的
+     * PERF_EXPECT 金额，无调整时回退为当前 ACTIVE 金额），与「合同业绩明细」页
+     * originalAmount 同口径，供前端展示「原值 → 调整后值」。
      *
      * @param period     归属期间
      * @param contractNo 合同号
@@ -942,6 +946,22 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    AND pe.source_key = f.source_key
                  ORDER BY pe.id
                  LIMIT 1) AS "expectedAmount",
+               COALESCE(
+                 (SELECT pr.performance_amount
+                    FROM pj_perf_fact pr
+                   WHERE pr.fact_status = 'REVERSED'
+                     AND pr.fact_type = 'PERF_EXPECT'
+                     AND pr.source_key = f.source_key
+                   ORDER BY pr.id ASC
+                   LIMIT 1),
+                 (SELECT pe.performance_amount
+                    FROM pj_perf_fact pe
+                   WHERE pe.fact_status = 'ACTIVE'
+                     AND pe.fact_type = 'PERF_EXPECT'
+                     AND pe.source_key = f.source_key
+                   ORDER BY pe.id
+                   LIMIT 1)
+               ) AS "originalExpectedAmount",
                EXISTS(SELECT 1 FROM pj_perf_fact pe2
                  WHERE pe2.fact_status = 'REVERSED'
                    AND pe2.fact_type = 'PERF_EXPECT'

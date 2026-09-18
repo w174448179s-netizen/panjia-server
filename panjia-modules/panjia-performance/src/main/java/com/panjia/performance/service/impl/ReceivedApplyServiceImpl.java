@@ -580,6 +580,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 apply.setEmployeeCount(m.getEmployeeCount());
                 // 新签业绩展示实时值（含已生效调整），与详情/每人明细口径一致；与快照不一致时标「已调整」
                 if (m.getExpectedAmount() != null) {
+                    // 快照即「调整前」值，先留存再覆盖为实时值（口径同 getDetail），供前端展示「原值 → 调整后值」
+                    apply.setOriginalExpectedAmount(apply.getExpectedAmount());
                     apply.setExpectedAdjusted(apply.getExpectedAmount() != null
                         && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
                     apply.setExpectedAmount(m.getExpectedAmount());
@@ -588,6 +590,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 BigDecimal factor = conversionFactorPort.factorOf(m.getBizType());
                 if (m.getExpectedAmount() != null) {
                     apply.setExpectedConvertedAmount(conversionFactorPort.convert(m.getExpectedAmount(), factor));
+                    if (apply.getOriginalExpectedAmount() != null) {
+                        apply.setOriginalExpectedConvertedAmount(
+                            conversionFactorPort.convert(apply.getOriginalExpectedAmount(), factor));
+                    }
                 }
                 if (apply.getReceivedAmount() != null) {
                     apply.setReceivedConvertedAmount(conversionFactorPort.convert(apply.getReceivedAmount(), factor));
@@ -623,15 +629,23 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
         BigDecimal recvConvertedSum = BigDecimal.ZERO;
         BigDecimal expectConvertedSum = BigDecimal.ZERO;
+        BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
         for (ReceivedFactDetailDTO f : facts) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getFactId());
             f.setConvertedAmount(conversionFactorPort.convert(f.getAmount(), factor));
             f.setExpectedConvertedAmount(conversionFactorPort.convert(f.getExpectedAmount(), factor));
+            // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出（无调整则与原值一致，前端不展示）
+            if (f.getOriginalExpectedAmount() != null) {
+                f.setOriginalConvertedAmount(conversionFactorPort.convert(f.getOriginalExpectedAmount(), factor));
+            }
             if (f.getConvertedAmount() != null) recvConvertedSum = recvConvertedSum.add(f.getConvertedAmount());
             if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
+            if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
         }
         apply.setReceivedConvertedAmount(recvConvertedSum);
         apply.setExpectedConvertedAmount(expectConvertedSum);
+        // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）
+        apply.setOriginalExpectedConvertedAmount(expectOriginalConvertedSum);
         return new ReceivedApplyDetail(apply, facts);
     }
 
