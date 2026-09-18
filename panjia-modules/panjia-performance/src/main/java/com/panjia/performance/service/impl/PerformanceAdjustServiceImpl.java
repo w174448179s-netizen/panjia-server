@@ -32,6 +32,8 @@ import org.dromara.common.core.enums.BusinessStatusEnum;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.system.api.DeptService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -104,9 +106,15 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final ConversionFactorPort conversionFactorPort;
     /** 业绩域自有标识 → bizType 的解析（factId / 合同号反查） */
     private final FactConversionResolver factConversionResolver;
+    /** 部门子树解析（登录用户数据权限范围） */
+    private final DeptService deptService;
 
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(AdjustQuery query, PageQuery pageQuery) {
+        // §3.6 数据权限：所有登录用户仅本部门（含下级）。未传 deptId 强制本部门，越权传他部门直接拒绝
+        if (query != null) {
+            query.setDeptId(enforceScopedRoleDeptFilter(query.getDeptId()));
+        }
         LambdaQueryWrapper<PerformanceAdjust> wrapper = buildQueryWrapper(query);
         wrapper.orderByDesc(PerformanceAdjust::getCreateTime);
 
@@ -782,6 +790,41 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                     deptId));
         }
         return wrapper;
+    }
+
+    /**
+     * 数据权限：所有登录用户只能查看本部门（含下级组别/门店）的调整单（全系统统一口径）。
+     * <ul>
+     *   <li>未传 deptId → 强制设为登录用户的 dept_id（buildQueryWrapper 按部门子树过滤）；</li>
+     *   <li>传入本部门子树内的 deptId → 放行；非本部门子树 → 拒绝。</li>
+     * </ul>
+     * 超管不受限制；登录用户无归属部门时降级不限制（避免系统账号被锁死）。
+     */
+    private Long enforceScopedRoleDeptFilter(Long requestedDeptId) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || LoginHelper.isSuperAdmin()) {
+                return requestedDeptId;
+            }
+            Long userDeptId = loginUser.getDeptId();
+            if (userDeptId == null) {
+                log.warn("[adjust] 登录用户 deptId 为空，降级为不限制（请检查账号配置）");
+                return requestedDeptId;
+            }
+            if (requestedDeptId == null || requestedDeptId.equals(userDeptId)) {
+                return userDeptId;
+            }
+            java.util.List<Long> scopeDeptIds = deptService.selectDeptAndChildById(userDeptId);
+            if (!scopeDeptIds.contains(requestedDeptId)) {
+                throw new ServiceException("仅能查看本部门（含下级）业绩调整数据");
+            }
+            return requestedDeptId;
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[adjust] 解析部门数据权限失败，默认不限制", e);
+            return requestedDeptId;
+        }
     }
 
     /**

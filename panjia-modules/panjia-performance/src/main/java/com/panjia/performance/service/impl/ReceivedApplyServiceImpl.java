@@ -30,6 +30,7 @@ import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.ConversionFactorPort;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
+import org.dromara.system.api.DeptService;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
@@ -61,8 +62,6 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
-    /** 店长角色 ID（仅本店数据权限） */
-    private static final Long ROLE_STORE_MANAGER = 1761300000000000011L;
     private static final String FACT_TYPE_REAL = FactType.PERF_REAL.getCode();
     private static final String FACT_TYPE_EXPECT = FactType.PERF_EXPECT.getCode();
 
@@ -78,6 +77,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     private final ConversionFactorPort conversionFactorPort;
     /** 业绩域自有标识 → bizType 的解析（factId 反查） */
     private final FactConversionResolver factConversionResolver;
+    /** 部门子树解析（店长/总监数据权限范围） */
+    private final DeptService deptService;
 
     // ==================== 导入自动建单（§2.1） ====================
 
@@ -286,30 +287,35 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 数据权限：店长角色仅本店审批单。
-     * <p>店长：未传 deptId → 强制设为登录用户 dept_id；传了非本人 dept_id → 拒绝。
-     * <p>非店长角色（财务/总监）直接返回原 deptId（不限制）。
+     * 数据权限：所有登录用户仅本部门（含下级）审批单（全系统统一口径）。
+     * <p>未传 deptId → 强制设为登录用户 dept_id（列表按部门子树过滤）；
+     * 传了非本部门子树的 dept_id → 拒绝。
+     * <p>超管不受限制；登录用户无归属部门时降级不限制。
      */
     private Long enforceStoreManagerDeptFilter(Long requestedDeptId) {
         try {
             var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || loginUser.getRoleId() == null
-                || !ROLE_STORE_MANAGER.equals(loginUser.getRoleId())) {
+            if (loginUser == null || LoginHelper.isSuperAdmin()) {
                 return requestedDeptId;
             }
             Long userDeptId = loginUser.getDeptId();
             if (userDeptId == null) {
-                log.warn("[实收审批] 店长 deptId 为空，降级为不限制（请检查账号配置）");
+                log.warn("[实收审批] 登录用户 deptId 为空，降级为不限制（请检查账号配置）");
                 return requestedDeptId;
             }
-            if (requestedDeptId != null && !requestedDeptId.equals(userDeptId)) {
-                throw new ServiceException("店长仅能查看本店审批单");
+            // 未传 → 默认本部门；传了 → 必须在本部门（含下级）子树内（与结佣明细/业绩查询同口径）
+            if (requestedDeptId == null || requestedDeptId.equals(userDeptId)) {
+                return userDeptId;
             }
-            return userDeptId;
+            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(userDeptId);
+            if (!scopeDeptIds.contains(requestedDeptId)) {
+                throw new ServiceException("仅能查看本部门（含下级）实收审批数据");
+            }
+            return requestedDeptId;
         } catch (ServiceException e) {
             throw e;
         } catch (Exception e) {
-            log.warn("[实收审批] 解析店长数据权限失败，默认不限制", e);
+            log.warn("[实收审批] 解析部门数据权限失败，默认不限制", e);
             return requestedDeptId;
         }
     }

@@ -52,10 +52,6 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     /** 经纪人角色 ID（仅本人业绩数据权限） */
     private static final Long ROLE_AGENT = 1761300000000000014L;
-    /** 店长角色 ID（仅本店业绩数据权限） */
-    private static final Long ROLE_STORE_MANAGER = 1761300000000000011L;
-    /** 总监角色 ID（分管范围数据权限；当前实现等同于全量，无分管切片时不限制） */
-    private static final Long ROLE_DIRECTOR = 1761300000000000010L;
 
     private final PerformanceFactMapper factMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
@@ -191,9 +187,9 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
         int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
-        // §3.6 数据级行级权限：店长仅本店。未传 deptId 时强制设为登录用户的 dept_id
+        // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
         if (selfEmployeeId == null) {
-            deptId = enforceStoreManagerDeptFilter(deptId);
+            deptId = enforceScopedRoleDeptFilter(deptId);
         }
 
         long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
@@ -251,9 +247,9 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
         int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
-        // §3.6 数据级行级权限：店长仅本店。未传 deptId 时强制设为登录用户的 dept_id
+        // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
         if (selfEmployeeId == null) {
-            deptId = enforceStoreManagerDeptFilter(deptId);
+            deptId = enforceScopedRoleDeptFilter(deptId);
         }
 
         long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
@@ -290,8 +286,10 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
+        // §3.6 数据级行级权限：店长/总监仅能钻取本部门（含下级）明细，越权传他部门 deptId 直接拒绝
+        Long scopedDeptId = enforceScopedRoleDeptFilter(deptId);
         List<PerformanceManageDTO> rows = factMapper.selectManageListByContractNos(
-            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
+            period, factType, scopedDeptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
         fillManageDetailConversion(rows);
 
         // §3.6 查看留痕：经纪人打开含他人业绩的合同 → 异步写 view_log
@@ -345,53 +343,16 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     /**
-     * 数据权限：店长角色仅本店业绩。
+     * 数据权限：所有登录用户只能查看本部门（含下级组别/门店）数据（全系统统一口径）。
      * <p>
-     * 当前登录用户是店长时：
-     * <ul>
-     *   <li>未传 deptId → 强制设为登录用户的 dept_id（本店）</li>
-     *   <li>已传 deptId 但非本人 dept_id → 拒绝（防止越权指定他店 deptId 绕过过滤）</li>
-     * </ul>
-     * 非店长角色直接返回原 deptId（财务/总监不限制）。
-     *
-     * @param requestedDeptId 调用方传入的 deptId（可空）
-     * @return 实际生效的 deptId
-     */
-    private Long enforceStoreManagerDeptFilter(Long requestedDeptId) {
-        try {
-            var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || loginUser.getRoleId() == null
-                || !ROLE_STORE_MANAGER.equals(loginUser.getRoleId())) {
-                return requestedDeptId;
-            }
-            Long userDeptId = loginUser.getDeptId();
-            if (userDeptId == null) {
-                log.warn("[performance] 店长 deptId 为空，降级为不限制（请检查账号配置）");
-                return requestedDeptId;
-            }
-            if (requestedDeptId != null && !requestedDeptId.equals(userDeptId)) {
-                throw new ServiceException("店长仅能查看本店业绩数据");
-            }
-            return userDeptId;
-        } catch (ServiceException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("[performance] 解析店长数据权限失败，默认不限制", e);
-            return requestedDeptId;
-        }
-    }
-
-    /**
-     * 数据权限：店长/总监只能查看本部门（含下级组别/门店）数据。
-     * <p>
-     * 适用于完整业绩查询（searchByContract）：
+     * 适用于完整业绩查询/业绩明细等全部查询接口：
      * <ul>
      *   <li>未传 deptId → 强制设为登录用户的 dept_id（前端默认选中同部门）；</li>
      *   <li>传入本人部门或其下级部门 → 放行（允许在本部门范围内下钻）；</li>
      *   <li>传入非本部门子树的 deptId → 拒绝（防止越权指定他部门绕过过滤）。</li>
      * </ul>
-     * 经纪人不在此处理（走 {@link #resolveSelfEmployeeId()} 本人口径）；
-     * 财务/超管/其它角色直接返回原 deptId（不限制）。
+     * 经纪人在合同列表另走 {@link #resolveSelfEmployeeId()} 本人口径；
+     * 超管不受限制；登录用户无归属部门时降级不限制（避免系统账号被锁死）。
      *
      * @param requestedDeptId 调用方传入的 deptId（可空）
      * @return 实际生效的 deptId
@@ -399,16 +360,12 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     private Long enforceScopedRoleDeptFilter(Long requestedDeptId) {
         try {
             var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || LoginHelper.isSuperAdmin() || loginUser.getRoleId() == null) {
-                return requestedDeptId;
-            }
-            Long roleId = loginUser.getRoleId();
-            if (!ROLE_STORE_MANAGER.equals(roleId) && !ROLE_DIRECTOR.equals(roleId)) {
+            if (loginUser == null || LoginHelper.isSuperAdmin()) {
                 return requestedDeptId;
             }
             Long userDeptId = loginUser.getDeptId();
             if (userDeptId == null) {
-                log.warn("[performance] 店长/总监 deptId 为空，降级为不限制（请检查账号配置）");
+                log.warn("[performance] 登录用户 deptId 为空，降级为不限制（请检查账号配置）");
                 return requestedDeptId;
             }
             if (requestedDeptId == null || requestedDeptId.equals(userDeptId)) {
@@ -547,11 +504,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
                 return;
             }
             var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || loginUser.getRoleId() == null) {
-                return;
-            }
-            Long roleId = loginUser.getRoleId();
-            if (!ROLE_STORE_MANAGER.equals(roleId) && !ROLE_DIRECTOR.equals(roleId)) {
+            if (loginUser == null || LoginHelper.isSuperAdmin()) {
                 return;
             }
             Long myDeptId = loginUser.getDeptId();

@@ -98,12 +98,6 @@ public class CommissionApplicationService {
     private static final String NODE_FINANCE = "capp_finance";
     /** 业务角色标识，与 flow_node.permission_flag 的 role:…010 对应（总监发起自动判定用）。 */
     private static final String ROLE_DIRECTOR = "director";
-    /** 店长角色标识（结佣列表仅本部门数据） */
-    private static final String ROLE_MANAGER = "manager";
-    /** 经纪人角色标识（结佣列表仅本部门数据；默认无菜单权限，服务端兜底） */
-    private static final String ROLE_AGENT = "agent";
-    /** 财务角色标识（全量数据，不做部门限制） */
-    private static final String ROLE_FINANCE = "finance";
 
     /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
     private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
@@ -187,13 +181,14 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 结佣列表部门数据权限：业务角色（总监/店长/经纪人）只能查看本部门（含下级）数据。
+     * 结佣列表部门数据权限：所有登录用户只能查看本部门（含下级）数据（全系统统一口径）。
      * <ul>
-     *   <li>超管/财务 → 不限制，返回原 deptId；</li>
-     *   <li>业务角色未传 deptId → 强制取登录用户 dept_id（前端默认选中同部门）；</li>
+     *   <li>超管 → 不限制，返回原 deptId；</li>
+     *   <li>登录用户未传 deptId → 强制取登录用户 dept_id（前端默认选中同部门）；</li>
      *   <li>传入本人部门或其下级部门 → 放行（允许本部门范围内下钻）；</li>
      *   <li>传入非本部门子树 deptId → 拒绝（防止越权指定他部门绕过过滤）。</li>
      * </ul>
+     * 登录用户无归属部门时降级不限制（避免系统账号被锁死）。
      *
      * @param requestedDeptId 调用方传入的 deptId（可空）
      * @return 实际生效的 deptId；返回 null 表示不限制
@@ -205,15 +200,6 @@ public class CommissionApplicationService {
             }
             var loginUser = LoginHelper.getLoginUser();
             if (loginUser == null) {
-                return requestedDeptId;
-            }
-            Set<String> roles = loginUser.getRolePermission();
-            if (roles != null && roles.contains(ROLE_FINANCE)) {
-                return requestedDeptId;
-            }
-            boolean businessRole = roles != null && (roles.contains(ROLE_DIRECTOR)
-                || roles.contains(ROLE_MANAGER) || roles.contains(ROLE_AGENT));
-            if (!businessRole) {
                 return requestedDeptId;
             }
             Long myDeptId = LoginHelper.getDeptId();
