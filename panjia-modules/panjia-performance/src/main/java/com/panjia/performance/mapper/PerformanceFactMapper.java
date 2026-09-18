@@ -766,6 +766,35 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                          @Param("contractNo") String contractNo);
 
     /**
+     * 统计指定事实同合同（同期间/口径/业务键）下已作废（VOIDED）事实数量。
+     * <p>
+     * 用于明细级调整前的合同状态校验：合同存在已作废明细时禁止调整。
+     * 合同匹配口径同 {@link #selectActiveFactsByContractNo}（按业务类型取合同号/订单号）。
+     *
+     * @param factId 主事实 ID
+     * @return 同合同 VOIDED 事实数量
+     */
+    @Select("""
+        SELECT COUNT(*)
+        FROM pj_perf_fact vf
+        JOIN pj_normalized_record vnr ON vnr.id = vf.normalized_record_id
+        JOIN pj_import_raw_signed vrs ON vrs.id = vnr.raw_data_id
+        JOIN pj_perf_fact mf ON mf.id = #{factId}
+        JOIN pj_normalized_record mnr ON mnr.id = mf.normalized_record_id
+        JOIN pj_import_raw_signed mrs ON mrs.id = mnr.raw_data_id
+        WHERE vf.fact_status = 'VOIDED'
+          AND vf.period = mf.period
+          AND vf.fact_type = mf.fact_type
+          AND (CASE WHEN vf.biz_type IN ('一手房','房产金融','家装荐客')
+                    THEN COALESCE(vrs.order_no, vrs.contract_no)
+                    ELSE COALESCE(vrs.contract_no, vrs.order_no) END)
+            = (CASE WHEN mf.biz_type IN ('一手房','房产金融','家装荐客')
+                    THEN COALESCE(mrs.order_no, mrs.contract_no)
+                    ELSE COALESCE(mrs.contract_no, mrs.order_no) END)
+        """)
+    long countVoidedSiblingsByFactId(@Param("factId") Long factId);
+
+    /**
      * 按业务键前缀定位退单红冲对应的原正数 ACTIVE 事实（成交月原事实）。
      * <p>
      * 事实 source_key = {@code sourceType-recordSourceKey-period}，同一笔业务

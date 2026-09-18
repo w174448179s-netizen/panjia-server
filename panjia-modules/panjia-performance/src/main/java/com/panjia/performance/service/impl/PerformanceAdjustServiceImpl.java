@@ -397,6 +397,15 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             throw new ServiceException("明细级调整缺少关联业绩事实");
         }
 
+        // 1.5 合同存在已作废明细时禁止调整（作废为合同级操作，口径一致：先恢复合同业绩再调整）
+        if (SCOPE_CONTRACT.equals(scope)) {
+            if (!factMapper.selectVoidedFactsByContractNo(dto.getPeriod(), dto.getFactType(), dto.getContractNo()).isEmpty()) {
+                throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
+            }
+        } else if (factMapper.countVoidedSiblingsByFactId(dto.getFactId()) > 0) {
+            throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
+        }
+
         // 2. 计算原始金额 + 验证目标金额
         BigDecimal originalAmt = calculateCurrentAmount(dto, scope);
         // 金额调整：优先取目标金额（用户录入的就是调整后金额）
