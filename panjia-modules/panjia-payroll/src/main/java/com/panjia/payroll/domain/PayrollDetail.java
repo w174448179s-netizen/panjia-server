@@ -62,6 +62,10 @@ public class PayrollDetail implements Serializable {
     // 溯源
     private BigDecimal finalRate;
     private String perfGrade;
+    /** 提成点调整合计（未参保自动扣点+审批通过人工项，负=扣点） */
+    private BigDecimal manualAdjust;
+    /** 提成点调整命中项溯源 JSON（adjustId/type/rate/reason/source） */
+    private String rateAdjustJson;
     private Long ruleSnapshotId;
     private Long empSnapshotId;
 

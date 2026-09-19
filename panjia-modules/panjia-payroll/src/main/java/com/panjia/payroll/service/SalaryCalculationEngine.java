@@ -6,6 +6,7 @@ import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.EmployeeRole;
 import com.panjia.payroll.domain.PayrollDetail;
+import com.panjia.payroll.dto.RateAdjustItem;
 import com.panjia.payroll.util.MoneyUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -61,6 +62,8 @@ public class SalaryCalculationEngine {
         public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
         /** employeeId -> 绩效等级 A/B/C（积分表按出勤日平均积分判定；无数据默认 A 不扣点） */
         public Map<Long, String> perfGrade;
+        /** employeeId -> 提成点人工调整命中项（rate_adjust APPROVED 且区间命中，溯源写入 rate_adjust_json） */
+        public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格徒弟数（招聘奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
         /** employeeId -> 徒弟结佣合计（店长/总监招聘奖励用） */
@@ -114,10 +117,37 @@ public class SalaryCalculationEngine {
             if (rateOverride != null && rateOverride.has("rate")) {
                 finalRate = bd(rateOverride.path("rate").asText());
             }
+            // 提成点调整（员工业绩扣点）：未参保自动扣点（档案 SOCIAL 事实判断，
+            // 规则 policy.noSocialDeduct 配置）+ 审批通过的人工调整单，覆盖后仍叠加
+            List<RateAdjustItem> adjustItems = new ArrayList<>(
+                input.manualAdjustItems == null
+                    ? List.of() : input.manualAdjustItems.getOrDefault(emp.getEmployeeId(), List.of()));
+            if (!Boolean.TRUE.equals(emp.getIsPartTime()) && !Boolean.TRUE.equals(emp.getSocialInsured())) {
+                BigDecimal noSocialDeduct = bd(snap.policy().path("noSocialDeduct").asText("0"));
+                if (noSocialDeduct.signum() != 0) {
+                    RateAdjustItem auto = new RateAdjustItem();
+                    auto.setType("NO_SOCIAL");
+                    auto.setRate(noSocialDeduct);
+                    auto.setReason("未买社保，按规则自动扣点");
+                    auto.setSource("AUTO");
+                    adjustItems.add(auto);
+                }
+            }
+            BigDecimal manualAdjust = BigDecimal.ZERO;
+            for (RateAdjustItem it : adjustItems) {
+                if (it.getRate() != null) {
+                    manualAdjust = manualAdjust.add(it.getRate());
+                }
+            }
+            if (manualAdjust.signum() != 0) {
+                finalRate = finalRate.add(manualAdjust);
+            }
             if (finalRate.compareTo(BigDecimal.ZERO) < 0) {
                 finalRate = BigDecimal.ZERO;
             }
             d.setFinalRate(MoneyUtil.round6(finalRate));
+            d.setManualAdjust(MoneyUtil.round6(manualAdjust));
+            d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
             // 结佣业绩（不折算）：设计文档 P5 / S-14 / P15 —— 结佣是贝壳实收到手值，
             // 折算只作用于新签（一手房 ×0.9024、其他 ×0.96），结佣原样取用。
@@ -318,6 +348,18 @@ public class SalaryCalculationEngine {
     }
 
     // ==================== 辅助方法 ====================
+
+    private static final tools.jackson.databind.json.JsonMapper ADJUST_JSON = tools.jackson.databind.json.JsonMapper.builder().build();
+
+    /** 提成点调整命中项 → 溯源 JSON（rate_adjust_json 列） */
+    private String writeAdjustJson(List<RateAdjustItem> items) {
+        try {
+            return ADJUST_JSON.writeValueAsString(items);
+        } catch (Exception e) {
+            log.warn("提成点调整溯源JSON序列化失败", e);
+            return null;
+        }
+    }
 
     private EmployeeRole resolveRole(EmployeeSnapshot emp) {
         String pos = emp.getPosition();

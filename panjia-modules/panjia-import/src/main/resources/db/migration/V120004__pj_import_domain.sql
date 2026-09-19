@@ -11,11 +11,10 @@
 -- ============================================================
 
 BEGIN;
-
 -- ---------- 一、导入批次（聚合根） ----------
 CREATE TABLE pj_import_batch (
     id                      BIGINT       PRIMARY KEY,                  -- 雪花 ID
-    batch_no                VARCHAR(32)  NOT NULL,                     -- 批次号 IMP+yyyyMMdd+序列
+    batch_no                VARCHAR(64)  NOT NULL,                     -- 批次号 IMP+yyyyMMdd+序列
     source_type             VARCHAR(20)  NOT NULL,                     -- KE_SIGNED/KE_NEW_SIGN/ATTENDANCE/POINTS/OTHERS（五类交易单据）
     template_version        VARCHAR(20)  NOT NULL,                     -- 创建/解析时快照冻结
     file_name               VARCHAR(255),                              -- 存储文件名

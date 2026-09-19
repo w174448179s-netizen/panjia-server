@@ -21,6 +21,7 @@ import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.PayrollEmployeeSnapshot;
 import com.panjia.payroll.domain.RuleSnapshot;
 import com.panjia.payroll.dto.MyPayrollDetailVO;
+import com.panjia.payroll.dto.RateAdjustItem;
 import com.panjia.payroll.mapper.PayrollBatchMapper;
 import com.panjia.payroll.mapper.PayrollDetailMapper;
 import com.panjia.payroll.mapper.PayrollEmployeeSnapshotMapper;
@@ -76,6 +77,7 @@ public class PayrollBatchService {
     private final PeopleAttendanceApprovalQueryPort attendanceApprovalQueryPort;
     private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
     private final PeopleScoreQueryPort scoreQueryPort;
+    private final RateAdjustService rateAdjustService;
 
     // ==================== 创建 ====================
 
@@ -143,6 +145,10 @@ public class PayrollBatchService {
             // 否则无业绩但有扣款/奖励的人会整月漏算——2026-08 实测漏 14/59 人）
             empIds.addAll(manualItemService.loadApprovedForPeriod(period).keySet());
 
+            // 名单扩展①+：当期提成点调整生效的员工（无业绩仅有扣点的人也需入名单留痕）
+            Map<Long, List<RateAdjustItem>> rateAdjustItems = rateAdjustService.loadEffectiveForPeriod(period);
+            empIds.addAll(rateAdjustItems.keySet());
+
             // 名单扩展②：职级含底薪/保底的在职员工（店长保底、带底薪职级，
             // 无业绩也应入名单走保底/底薪计算）
             Set<String> baseLevels = ruleService.levelsWithBaseOrMin();
@@ -191,7 +197,7 @@ public class PayrollBatchService {
             }
 
             // 4. 组装算薪输入
-            SalaryCalculationEngine.CalcInput input = buildCalcInput(period, employees, lockedItems, newsignItems, ruleSnap, empMap);
+            SalaryCalculationEngine.CalcInput input = buildCalcInput(period, employees, lockedItems, newsignItems, ruleSnap, empMap, rateAdjustItems);
 
             // 5. 执行算薪
             List<PayrollDetail> details = engine.calculate(input);
@@ -236,7 +242,8 @@ public class PayrollBatchService {
                                                               List<CommissionItemDTO> lockedItems,
                                                               List<CommissionItemDTO> newsignItems,
                                                               RuleSnapshot ruleSnap,
-                                                              Map<Long, EmployeeSnapshot> empMap) {
+                                                              Map<Long, EmployeeSnapshot> empMap,
+                                                              Map<Long, List<RateAdjustItem>> rateAdjustItems) {
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = employees;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
@@ -281,6 +288,10 @@ public class PayrollBatchService {
         // 绩效等级：积分表按「出勤日平均积分」判定（A/B/C），引擎按
         // policy.points.deduct{grade} 计算绩效扣点；无积分数据的员工默认 A 不扣点
         input.perfGrade = scoreQueryPort.scoreGrades(period);
+
+        // 提成点调整：APPROVED 且 start_month ≤ period ≤ end_month 的人工调整单，
+        // 引擎叠加到 finalRate（另含未参保自动扣点，见引擎），溯源写入 rate_adjust_json
+        input.manualAdjustItems = rateAdjustItems;
 
         // 负工资结转：从上月工资明细中查询净发为负的记录
         String prevPeriod = YearMonth.parse(period).minusMonths(1).toString();
