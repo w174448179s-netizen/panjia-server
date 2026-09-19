@@ -56,9 +56,7 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> cumulativeTaxable;
         /** employeeId -> 本年任职月数 */
         public Map<Long, Integer> monthsEmployed;
-        /** employeeId -> 考勤扣款（导入金额，旧扁平模板；钉钉月度模板为 0） */
-        public Map<Long, BigDecimal> attendanceFee;
-        /** employeeId -> 考勤月度指标（迟到/旷工/请假，按 policy.attendance 规则计算扣款） */
+        /** employeeId -> 考勤月度指标（旧扁平模板导入金额 importedFee + 迟到/旷工/请假，按 policy.attendance 规则计算扣款） */
         public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
         /** employeeId -> 绩效等级 A/B/C（积分表按出勤日平均积分判定；无数据默认 A 不扣点） */
         public Map<Long, String> perfGrade;
@@ -265,7 +263,7 @@ public class SalaryCalculationEngine {
             //            + 请假天数 × leaveFee（事假+病假合计天数 × 规则配置的每日扣款额）
             //            + 导入扣款金额（旧扁平模板 receivableAmount，兼容）
             //   日工资 = 底薪 / workDaysPerMonth（21.75）
-            BigDecimal attendanceFee = input.attendanceFee.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            BigDecimal attendanceFee = BigDecimal.ZERO;
             AttendanceMetricsDTO att = input.attendanceMetrics == null
                 ? null : input.attendanceMetrics.get(emp.getEmployeeId());
             if (att != null) {

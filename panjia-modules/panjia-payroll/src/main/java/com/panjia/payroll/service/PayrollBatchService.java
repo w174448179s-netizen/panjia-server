@@ -281,8 +281,8 @@ public class PayrollBatchService {
             }
         });
 
-        // 考勤：月度指标（钉钉月度汇总的迟到/旷工/请假 + 旧扁平模板导入金额），
-        // 引擎按 policy.attendance 规则计算扣款；input.attendanceFee 仅保留给存量测试/兼容调用方
+        // 考勤：月度指标（钉钉月度汇总的迟到/旷工/请假 + 旧扁平模板导入金额 importedFee），
+        // 引擎按 policy.attendance 规则计算扣款
         input.attendanceMetrics = importQueryPort.sumAttendanceByPeriod(period);
 
         // 绩效等级：积分表按「出勤日平均积分」判定（A/B/C），引擎按
