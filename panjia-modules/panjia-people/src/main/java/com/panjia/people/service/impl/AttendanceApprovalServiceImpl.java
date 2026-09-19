@@ -1,11 +1,18 @@
 package com.panjia.people.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.dto.AttendanceApprovalStatusDTO;
+import com.panjia.contracts.port.ApprovalAction;
+import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.people.domain.AttendanceApproval;
+import com.panjia.people.domain.AttendanceRecord;
+import com.panjia.people.domain.Employee;
 import com.panjia.people.dto.AttendanceApprovalVO;
 import com.panjia.people.mapper.AttendanceApprovalMapper;
 import com.panjia.people.mapper.AttendanceRecordMapper;
+import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.service.AttendanceApprovalService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -13,29 +20,245 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
- * 考勤审批服务实现。
+ * 考勤审批服务实现（warm-flow：attendance_approval 考勤月度审批）。
  * <p>
- * 状态机：DRAFT → SUBMITTED → APPROVED / REJECTED（驳回后可重新提交）。
- * 考勤重新导入时数据被覆盖，SUBMITTED/APPROVED 单据自动失效回 DRAFT，
- * 防止"审批通过后偷偷改数仍按旧审批算薪"。
+ * 流程：att_start → att_submit（提交考勤，人事）→ att_review（总监审核，
+ * 节点 ext AutoApproval 24h 超时自动通过）→ att_end；总监驳回回 att_submit。
+ * <p>
+ * 提交时按"异常考勤"聚合快照（迟到次数/迟到分/缺卡/旷工/请假 任一 >0 的行），
+ * 只有异常行需要总监审阅，正常行免审；快照定格在审批单上，办理弹窗展示。
+ * 状态回写唯一入口是工作流事件（handleWorkflowEvent），无业务直批路径。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AttendanceApprovalServiceImpl implements AttendanceApprovalService {
 
+    private static final JsonMapper JSON = JsonMapper.builder().build();
+
     private final AttendanceApprovalMapper approvalMapper;
     private final AttendanceRecordMapper attendanceMapper;
+    private final EmployeeMapper employeeMapper;
+    private final ApprovalPort approvalPort;
 
     @Override
     public AttendanceApprovalVO getByPeriod(String period) {
+        return toVo(selectByPeriod(period), period);
+    }
+
+    @Override
+    public AttendanceApprovalVO getByBizId(Long bizId) {
+        AttendanceApproval entity = requireById(bizId);
+        return toVo(entity, entity.getPeriod());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void submit(String period, Long operatorId) {
+        validatePeriod(period);
         AttendanceApproval entity = selectByPeriod(period);
+        if (entity != null && AttendanceApproval.STATUS_SUBMITTED.equals(entity.getStatus())) {
+            throw new ServiceException("该期间考勤审批正在流程中，请等待总监审核或超时自动通过");
+        }
+        if (entity == null) {
+            entity = new AttendanceApproval();
+            entity.setPeriod(period);
+            entity.setStatus(AttendanceApproval.STATUS_DRAFT);
+            approvalMapper.insert(entity);
+        }
+
+        // 异常考勤快照（含"该期间有数据"校验）；驳回后重提也重新定格最新数据
+        String snapshotJson = buildSnapshotJson(YearMonth.parse(period.trim()), entity.getId());
+
+        boolean resubmit = AttendanceApproval.STATUS_REJECTED.equals(entity.getStatus())
+            && StringUtils.isNotBlank(entity.getProcessInstanceId());
+        if (resubmit) {
+            // 驳回后流程停在「提交考勤」节点：办理该任务重新进入总监审核
+            boolean ok = approvalPort.completeAsSys(BizType.ATTENDANCE_APPROVAL, entity.getId(),
+                ApprovalAction.PASS, "重新提交");
+            if (!ok) {
+                throw new ServiceException("重新提交失败，流程任务不存在，请联系管理员");
+            }
+        } else {
+            // 首次提交：发起流程并自动办理「提交考勤」首节点
+            ApprovalStartCmd cmd = buildStartCmd(entity, operatorId);
+            boolean ok;
+            try {
+                ok = approvalPort.startAndCompleteFirst(BizType.ATTENDANCE_APPROVAL, entity.getId(), cmd);
+            } catch (Exception e) {
+                log.error("[考勤审批] 流程发起异常：approvalId={}", entity.getId(), e);
+                throw new ServiceException("考勤审批流程发起失败：{}", e.getMessage());
+            }
+            if (!ok) {
+                throw new ServiceException("考勤审批流程发起失败");
+            }
+            Long instanceId = approvalPort.instanceId(BizType.ATTENDANCE_APPROVAL, entity.getId());
+            entity.setProcessInstanceId(instanceId == null ? null : String.valueOf(instanceId));
+        }
+
+        entity.setSnapshot(snapshotJson);
+        entity.setStatus(AttendanceApproval.STATUS_SUBMITTED);
+        entity.setSubmitBy(operatorId);
+        entity.setSubmitTime(LocalDateTime.now());
+        entity.setApproveBy(null);
+        entity.setApproveTime(null);
+        entity.setRejectReason(null);
+        if (approvalMapper.updateById(entity) == 0) {
+            throw new ServiceException("提交失败，审批单已被他人操作，请刷新后重试");
+        }
+        log.info("[考勤审批] 提交审批：period={}, approvalId={}, operatorId={}, 重提={}",
+            period, entity.getId(), operatorId, resubmit);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void handleWorkflowEvent(Long bizId, String status, String handler, String message) {
+        AttendanceApproval entity = approvalMapper.selectById(bizId);
+        if (entity == null) {
+            log.warn("[考勤审批] 工作流回调审批单不存在，忽略：id={}, status={}", bizId, status);
+            return;
+        }
+        Long handlerId = parseHandlerId(handler);
+        switch (status == null ? "" : status) {
+            case "finish" -> {
+                entity.setStatus(AttendanceApproval.STATUS_APPROVED);
+                entity.setApproveBy(handlerId);
+                entity.setApproveTime(LocalDateTime.now());
+            }
+            case "back" -> {
+                entity.setStatus(AttendanceApproval.STATUS_REJECTED);
+                entity.setApproveBy(handlerId);
+                entity.setApproveTime(LocalDateTime.now());
+                entity.setRejectReason(StringUtils.isBlank(message) ? "总监驳回" : message);
+            }
+            case "cancel", "invalid", "termination" -> entity.setStatus(AttendanceApproval.STATUS_DRAFT);
+            default -> {
+                log.info("[考勤审批] 忽略流程状态：id={}, status={}", bizId, status);
+                return;
+            }
+        }
+        if (approvalMapper.updateById(entity) == 0) {
+            log.warn("[考勤审批] 工作流回写失败（并发修改）：id={}, status={}", bizId, status);
+        }
+        log.info("[考勤审批] 工作流回写：period={}, status={}, handler={}", entity.getPeriod(), status, handler);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void invalidateOnDataChange(String period) {
+        AttendanceApproval entity = selectByPeriod(period);
+        if (entity == null) {
+            return;
+        }
+        String status = entity.getStatus();
+        if (AttendanceApproval.STATUS_SUBMITTED.equals(status)) {
+            // 在途流程撤销（数据已变，不能继续按旧数据审批），下次提交重发新流程
+            try {
+                approvalPort.cancel(BizType.ATTENDANCE_APPROVAL, entity.getId());
+            } catch (Exception e) {
+                log.error("[考勤审批] 在途流程撤销失败：id={}", entity.getId(), e);
+            }
+            entity.setProcessInstanceId(null);
+        }
+        if (AttendanceApproval.STATUS_SUBMITTED.equals(status)
+            || AttendanceApproval.STATUS_APPROVED.equals(status)) {
+            entity.setStatus(AttendanceApproval.STATUS_DRAFT);
+            if (approvalMapper.updateById(entity) == 0) {
+                log.warn("[考勤审批] 失效审批单失败（并发修改）：period={}", period);
+                return;
+            }
+            log.info("[考勤审批] 考勤数据变更，审批单失效回待提交：period={}，原状态={}", period, status);
+        }
+    }
+
+    // ==================== 算薪卡点查询（PeopleAttendanceApprovalQueryPort） ====================
+
+    @Override
+    public AttendanceApprovalStatusDTO getApprovalStatus(String period) {
+        AttendanceApprovalStatusDTO dto = new AttendanceApprovalStatusDTO();
+        dto.setPeriod(period);
+        dto.setDataExists(countByPeriod(period) > 0);
+        AttendanceApproval entity = selectByPeriod(period);
+        dto.setStatus(entity == null ? null : entity.getStatus());
+        return dto;
+    }
+
+    // ==================== 内部方法 ====================
+
+    /**
+     * 聚合异常考勤快照 JSON。
+     * 异常口径：迟到次数/迟到分钟/缺卡次数/旷工天数/请假天数 任一 >0；
+     * 正常行免审。快照定格提交时点，总监审阅内容不随后续数据变动漂移。
+     */
+    private String buildSnapshotJson(YearMonth month, Long approvalId) {
+        LocalDate monthStart = month.atDay(1);
+        List<AttendanceRecord> rows = attendanceMapper.selectList(new LambdaQueryWrapper<AttendanceRecord>()
+            .eq(AttendanceRecord::getAttendMonth, monthStart));
+        if (rows.isEmpty()) {
+            throw new ServiceException("该期间无考勤数据，无法提交审批");
+        }
+        List<AttendanceRecord> abnormal = rows.stream().filter(r ->
+            pos(r.getLateCount()) || pos(r.getLateMinutes()) || pos(r.getMissingCardCount())
+                || pos(r.getAbsentDays()) || pos(r.getLeaveDays())).toList();
+
+        Map<Long, Employee> empMap = abnormal.isEmpty() ? Map.of()
+            : employeeMapper.selectByIds(abnormal.stream().map(AttendanceRecord::getEmployeeId).distinct().toList())
+            .stream().collect(Collectors.toMap(Employee::getEmployeeId, Function.identity(), (a, b) -> a));
+
+        List<AttendanceApprovalVO.AbnormalRow> voRows = abnormal.stream().map(r -> {
+            AttendanceApprovalVO.AbnormalRow row = new AttendanceApprovalVO.AbnormalRow();
+            row.setEmployeeId(r.getEmployeeId());
+            Employee emp = empMap.get(r.getEmployeeId());
+            row.setEmployeeCode(emp == null ? null : emp.getEmployeeCode());
+            row.setEmployeeName(emp == null ? null : emp.getEmployeeName());
+            row.setAttendMonth(r.getAttendMonth() == null ? null : r.getAttendMonth().toString());
+            row.setLateCount(r.getLateCount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(r.getLateCount()));
+            row.setLateMinutes(r.getLateMinutes() == null ? BigDecimal.ZERO : BigDecimal.valueOf(r.getLateMinutes()));
+            row.setMissingCardCount(r.getMissingCardCount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(r.getMissingCardCount()));
+            row.setAbsentDays(r.getAbsentDays() == null ? BigDecimal.ZERO : r.getAbsentDays());
+            row.setLeaveDays(r.getLeaveDays() == null ? BigDecimal.ZERO : r.getLeaveDays());
+            row.setRemark(r.getRemark());
+            return row;
+        }).toList();
+
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("totalCount", rows.size());
+        snapshot.put("abnormalCount", voRows.size());
+        snapshot.put("abnormalLeaveDays", voRows.stream()
+            .map(AttendanceApprovalVO.AbnormalRow::getLeaveDays)
+            .filter(java.util.Objects::nonNull)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        snapshot.put("rows", voRows);
+        return JSON.writeValueAsString(snapshot);
+    }
+
+    /** 发起流程命令（对齐 payroll_batch 口径） */
+    private ApprovalStartCmd buildStartCmd(AttendanceApproval entity, Long operatorId) {
+        ApprovalStartCmd cmd = ApprovalStartCmd.of(entity.getPeriod(),
+            "考勤月度审批｜" + entity.getPeriod());
+        cmd.setHandler(String.valueOf(operatorId));
+        cmd.setVariables(Map.of("ignore", true));
+        return cmd;
+    }
+
+    /** VO 装配（快照 JSON → 异常明细） */
+    private AttendanceApprovalVO toVo(AttendanceApproval entity, String period) {
         AttendanceApprovalVO vo = new AttendanceApprovalVO();
         vo.setPeriod(period);
         if (entity == null) {
@@ -48,120 +271,45 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
         vo.setApproveBy(entity.getApproveBy());
         vo.setApproveTime(entity.getApproveTime());
         vo.setRejectReason(entity.getRejectReason());
+        vo.setProcessInstanceId(entity.getProcessInstanceId());
+        if (StringUtils.isNotBlank(entity.getSnapshot())) {
+            try {
+                JsonNode node = JSON.readTree(entity.getSnapshot());
+                vo.setTotalCount(node.path("totalCount").asInt());
+                vo.setAbnormalCount(node.path("abnormalCount").asInt());
+                vo.setAbnormalLeaveDays(dec(node.path("abnormalLeaveDays")));
+                List<AttendanceApprovalVO.AbnormalRow> rows = new ArrayList<>();
+                for (JsonNode r : node.path("rows")) {
+                    AttendanceApprovalVO.AbnormalRow row = new AttendanceApprovalVO.AbnormalRow();
+                    row.setEmployeeId(r.path("employeeId").isNumber() ? r.path("employeeId").asLong() : null);
+                    row.setEmployeeCode(textOrNull(r.path("employeeCode")));
+                    row.setEmployeeName(textOrNull(r.path("employeeName")));
+                    row.setAttendMonth(textOrNull(r.path("attendMonth")));
+                    row.setLateCount(dec(r.path("lateCount")));
+                    row.setLateMinutes(dec(r.path("lateMinutes")));
+                    row.setMissingCardCount(dec(r.path("missingCardCount")));
+                    row.setAbsentDays(dec(r.path("absentDays")));
+                    row.setLeaveDays(dec(r.path("leaveDays")));
+                    row.setRemark(textOrNull(r.path("remark")));
+                    rows.add(row);
+                }
+                vo.setAbnormalRows(rows);
+            } catch (Exception e) {
+                log.warn("[考勤审批] 快照解析失败：id={}", entity.getId(), e);
+            }
+        }
         return vo;
     }
 
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void submit(String period, Long operatorId) {
-        validatePeriod(period);
-        YearMonth month = YearMonth.parse(period.trim());
-        long dataCount = attendanceMapper.selectCount(new LambdaQueryWrapper<com.panjia.people.domain.AttendanceRecord>()
-            .eq(com.panjia.people.domain.AttendanceRecord::getAttendMonth, month.atDay(1)));
-        if (dataCount == 0) {
-            throw new ServiceException("该期间无考勤数据，无法提交审批");
-        }
-        AttendanceApproval entity = selectByPeriod(period);
-        if (entity == null) {
-            entity = new AttendanceApproval();
-            entity.setPeriod(period);
-            entity.setStatus(AttendanceApproval.STATUS_DRAFT);
-            approvalMapper.insert(entity);
-        }
-        if (AttendanceApproval.STATUS_SUBMITTED.equals(entity.getStatus())) {
-            throw new ServiceException("该期间考勤已提交，等待总监审批");
-        }
-        if (AttendanceApproval.STATUS_APPROVED.equals(entity.getStatus())) {
-            throw new ServiceException("该期间考勤已审批通过，无需重复提交");
-        }
-        entity.setStatus(AttendanceApproval.STATUS_SUBMITTED);
-        entity.setSubmitBy(operatorId);
-        entity.setSubmitTime(LocalDateTime.now());
-        entity.setApproveBy(null);
-        entity.setApproveTime(null);
-        entity.setRejectReason(null);
-        if (approvalMapper.updateById(entity) == 0) {
-            throw new ServiceException("提交失败，审批单已被他人操作，请刷新后重试");
-        }
-        log.info("[考勤审批] 提交审批：period={}, operatorId={}", period, operatorId);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void approve(Long id, Long operatorId) {
-        AttendanceApproval entity = requireById(id);
-        if (!AttendanceApproval.STATUS_SUBMITTED.equals(entity.getStatus())) {
-            throw new ServiceException("仅待审批状态可审批通过");
-        }
-        entity.setStatus(AttendanceApproval.STATUS_APPROVED);
-        entity.setApproveBy(operatorId);
-        entity.setApproveTime(LocalDateTime.now());
-        if (approvalMapper.updateById(entity) == 0) {
-            throw new ServiceException("审批失败，单据已被他人操作，请刷新后重试");
-        }
-        log.info("[考勤审批] 审批通过：period={}, operatorId={}", entity.getPeriod(), operatorId);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void reject(Long id, String reason, Long operatorId) {
-        if (StringUtils.isBlank(reason)) {
-            throw new ServiceException("驳回原因不能为空");
-        }
-        AttendanceApproval entity = requireById(id);
-        if (!AttendanceApproval.STATUS_SUBMITTED.equals(entity.getStatus())) {
-            throw new ServiceException("仅待审批状态可驳回");
-        }
-        entity.setStatus(AttendanceApproval.STATUS_REJECTED);
-        entity.setApproveBy(operatorId);
-        entity.setApproveTime(LocalDateTime.now());
-        entity.setRejectReason(reason.trim());
-        if (approvalMapper.updateById(entity) == 0) {
-            throw new ServiceException("驳回失败，单据已被他人操作，请刷新后重试");
-        }
-        log.info("[考勤审批] 驳回：period={}, operatorId={}, reason={}", entity.getPeriod(), operatorId, reason);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void invalidateOnDataChange(String period) {
-        AttendanceApproval entity = selectByPeriod(period);
-        if (entity == null) {
-            return;
-        }
-        String status = entity.getStatus();
-        if (AttendanceApproval.STATUS_SUBMITTED.equals(status)
-            || AttendanceApproval.STATUS_APPROVED.equals(status)) {
-            entity.setStatus(AttendanceApproval.STATUS_DRAFT);
-            if (approvalMapper.updateById(entity) == 0) {
-                log.warn("[考勤审批] 失效审批单失败（并发修改）：period={}", period);
-                return;
-            }
-            log.info("[考勤审批] 考勤数据变更，审批单失效回待提交：period={}，原状态={}", period, status);
-        }
-    }
-
-    // ==================== 导入同步卡点查询（PeopleAttendanceApprovalQueryPort） ====================
-
-    @Override
-    public AttendanceApprovalStatusDTO getApprovalStatus(String period) {
-        AttendanceApprovalStatusDTO dto = new AttendanceApprovalStatusDTO();
-        dto.setPeriod(period);
-        boolean dataExists;
+    private long countByPeriod(String period) {
         try {
             YearMonth month = YearMonth.parse(period.trim());
-            dataExists = attendanceMapper.selectCount(new LambdaQueryWrapper<com.panjia.people.domain.AttendanceRecord>()
-                .eq(com.panjia.people.domain.AttendanceRecord::getAttendMonth, month.atDay(1))) > 0;
+            return attendanceMapper.selectCount(new LambdaQueryWrapper<AttendanceRecord>()
+                .eq(AttendanceRecord::getAttendMonth, month.atDay(1)));
         } catch (DateTimeParseException e) {
-            dataExists = false;
+            return 0;
         }
-        dto.setDataExists(dataExists);
-        AttendanceApproval entity = selectByPeriod(period);
-        dto.setStatus(entity == null ? null : entity.getStatus());
-        return dto;
     }
-
-    // ==================== 内部方法 ====================
 
     private AttendanceApproval selectByPeriod(String period) {
         return approvalMapper.selectOne(new LambdaQueryWrapper<AttendanceApproval>()
@@ -177,7 +325,6 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
         return entity;
     }
 
-    /** 期间格式校验（YYYY-MM） */
     private void validatePeriod(String period) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("归属期间不能为空");
@@ -186,6 +333,37 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
             YearMonth.parse(period.trim());
         } catch (DateTimeParseException e) {
             throw new ServiceException("归属期间格式不正确，应为 YYYY-MM：{}", period);
+        }
+    }
+
+    /** 数值列 >0 判定（null 视为 0） */
+    private boolean pos(Number v) {
+        return v != null && v.doubleValue() > 0;
+    }
+
+    private String textOrNull(JsonNode node) {
+        return node.isMissingNode() || node.isNull() ? null : node.asText();
+    }
+
+    private BigDecimal dec(JsonNode node) {
+        if (node.isMissingNode() || node.isNull() || !node.isNumber()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(node.asText());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Long parseHandlerId(String handler) {
+        if (StringUtils.isBlank(handler)) {
+            return null;
+        }
+        try {
+            return Long.valueOf(handler.trim());
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 }

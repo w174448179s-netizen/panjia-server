@@ -59,6 +59,12 @@ public class AttendanceApproval implements Serializable {
     /** 驳回原因 */
     private String rejectReason;
 
+    /** Warm-Flow 流程实例 ID（attendance_approval 流程） */
+    private String processInstanceId;
+
+    /** 提交时异常考勤快照 JSON（迟到/迟到分/缺卡/旷工/请假 >0 的行） */
+    private String snapshot;
+
     @Version
     private Integer version;
 

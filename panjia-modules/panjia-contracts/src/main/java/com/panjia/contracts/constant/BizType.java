@@ -18,6 +18,8 @@ public final class BizType {
     public static final String COMMISSION_ADJUST = "COMMISSION_ADJUST";
     /** 薪酬批次 */
     public static final String PAYROLL_BATCH = "PAYROLL_BATCH";
+    /** 考勤月度审批 */
+    public static final String ATTENDANCE_APPROVAL = "ATTENDANCE_APPROVAL";
 
     private BizType() {
     }
