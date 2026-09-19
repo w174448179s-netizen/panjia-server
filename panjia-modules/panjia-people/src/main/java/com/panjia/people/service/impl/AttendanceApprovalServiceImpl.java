@@ -29,6 +29,7 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -248,12 +249,14 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
         return JSON.writeValueAsString(snapshot);
     }
 
-    /** 发起流程命令（对齐 payroll_batch 口径） */
+    /** 发起流程命令（对齐 payroll_batch 口径；variables 必须可变，适配器会写入流程变量） */
     private ApprovalStartCmd buildStartCmd(AttendanceApproval entity, Long operatorId) {
         ApprovalStartCmd cmd = ApprovalStartCmd.of(entity.getPeriod(),
             "考勤月度审批｜" + entity.getPeriod());
         cmd.setHandler(String.valueOf(operatorId));
-        cmd.setVariables(Map.of("ignore", true));
+        Map<String, Object> variables = new HashMap<>(2);
+        variables.put("ignore", true);
+        cmd.setVariables(variables);
         return cmd;
     }
 
