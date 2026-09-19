@@ -53,7 +53,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final ObjectProvider<BatchConsumptionQueryPort> consumptionQueryPortProvider;
     private final FileArchiver fileArchiver;
     private final EventPort eventPort;
-    private final com.panjia.importdomain.service.AttendanceSummarySyncer attendanceSummarySyncer;
+    private final com.panjia.importdomain.service.AttendanceSummaryAggregator attendanceSummaryAggregator;
     private final com.panjia.importdomain.service.BatchSupersedeService batchSupersedeService;
 
     @Override
@@ -119,11 +119,8 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         batchSupersedeService.supersedeOldArchivedBatch(batch);
         batch.archive();
         batchMapper.updateById(batch);
-        // 归档完成后发事件，supersededBatchIds 由 EventPort 内部解析（CR-1）
+        // 归档完成后发事件（考勤汇总随 payload 投递，supersededBatchIds 由 EventPort 内部解析）
         emitArchivedEvent(batch);
-        // 考勤批次手动归档后同步员工域月度汇总（内部捕获异常，不阻断归档）
-        attendanceSummarySyncer.syncIfAttendance(batch.getId(),
-            batch.getSourceType() == null ? null : batch.getSourceType().getCode(), batch.getPeriod());
     }
 
     /**
@@ -152,6 +149,9 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         event.setPeriod(batch.getPeriod());
         event.setOperatorId(operatorId);
         event.setSupersededBatchIds(supersededStrIds);
+        // 考勤批次：聚合月度汇总随事件 payload 投递，员工域 AttendanceArchiveHandler 消费
+        event.setAttendanceSummaries(attendanceSummaryAggregator.aggregateIfAttendance(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
         eventPort.emit(event);
 
         log.info("[导入归档事件] 发布 ImportBatchArchivedEvent: batchId={}, sourceType={}, period={}, operatorId={}, supersededBatchIds={}",

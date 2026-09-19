@@ -12,6 +12,7 @@ import com.panjia.people.dto.AttendanceVO;
 import com.panjia.people.mapper.AttendanceRecordMapper;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.port.DeptPort;
+import com.panjia.people.service.AttendanceApprovalService;
 import com.panjia.people.service.AttendanceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +55,8 @@ public class AttendanceServiceImpl implements AttendanceService {
     private final AttendanceRecordMapper attendanceMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
+    private final AttendanceApprovalService approvalService;
+
 
     // ==================== 管理端查询 ====================
 
@@ -245,6 +248,10 @@ public class AttendanceServiceImpl implements AttendanceService {
             synced++;
         }
         log.info("[考勤同步] 期间 {} 同步完成：成功 {} 条，跳过 {} 条", period, synced, skipped);
+        if (synced > 0) {
+            // 数据被导入覆盖，已提交/已通过的审批单失效回待提交，防止按旧审批算薪
+            approvalService.invalidateOnDataChange(period);
+        }
     }
 
     /** 导入行 upsert：同员工同月存在则覆盖更新（保留人工备注），否则新增，data_source=DINGTALK */

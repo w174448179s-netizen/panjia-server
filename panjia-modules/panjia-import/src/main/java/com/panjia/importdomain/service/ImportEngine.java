@@ -87,7 +87,7 @@ public class ImportEngine {
     private final RawManualMapper rawManualMapper;
     private final PeopleQueryPort peopleQueryPort;
     private final EventPort eventPort;
-    private final AttendanceSummarySyncer attendanceSummarySyncer;
+    private final AttendanceSummaryAggregator attendanceSummaryAggregator;
     private final BatchSupersedeService batchSupersedeService;
 
     /**
@@ -275,9 +275,6 @@ public class ImportEngine {
             //   supersedeIfDuplicate 已在本事务内完成 markSuperseded 回填，
             //   selectSupersededBatchIds 在同一事务可读到被本批 supersede 的旧批次。
             emitArchivedEvent(batch);
-            // 考勤批次归档后同步员工域月度汇总（内部捕获异常，不阻断导入）
-            attendanceSummarySyncer.syncIfAttendance(batch.getId(),
-                batch.getSourceType() == null ? null : batch.getSourceType().getCode(), batch.getPeriod());
         }
 
         batchMapper.updateById(batch);
@@ -309,6 +306,9 @@ public class ImportEngine {
         event.setPeriod(batch.getPeriod());
         event.setOperatorId(operatorId);
         event.setSupersededBatchIds(supersededStrIds);
+        // 考勤批次：聚合月度汇总随事件 payload 投递，员工域 AttendanceArchiveHandler 消费
+        event.setAttendanceSummaries(attendanceSummaryAggregator.aggregateIfAttendance(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
         eventPort.emit(event);
 
         log.info("[导入归档事件] 发布 ImportBatchArchivedEvent(自动归档): batchId={}, sourceType={}, period={}, operatorId={}, supersededBatchIds={}",
@@ -521,6 +521,8 @@ public class ImportEngine {
                 extra.put("leaveDays", decimal(json, "leaveDays"));
                 extra.put("personalLeaveDays", decimal(json, "personalLeaveDays"));
                 extra.put("sickLeaveDays", decimal(json, "sickLeaveDays"));
+                extra.put("attendDays", decimal(json, "attendDays"));
+                extra.put("restDays", decimal(json, "restDays"));
                 nr.setExtraJson(toJson(extra));
             }
             case POINTS -> {

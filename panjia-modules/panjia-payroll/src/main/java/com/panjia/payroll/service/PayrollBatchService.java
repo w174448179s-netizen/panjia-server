@@ -1,5 +1,6 @@
 package com.panjia.payroll.service;
 
+import com.panjia.contracts.dto.AttendanceApprovalStatusDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
@@ -7,6 +8,7 @@ import com.panjia.contracts.port.CommissionQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
+import com.panjia.contracts.port.PeopleAttendanceApprovalQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
@@ -68,11 +70,17 @@ public class PayrollBatchService {
     private final ApprovalPort approvalPort;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final ConversionFactorPort conversionFactorPort;
+    private final PeopleAttendanceApprovalQueryPort attendanceApprovalQueryPort;
 
     // ==================== 创建 ====================
 
     @Transactional(rollbackFor = Exception.class)
     public PayrollBatch createBatch(String period, String deptScope, Long operatorId) {
+        // 卡点：当月考勤须总监审批通过（无考勤数据期间不卡）
+        AttendanceApprovalStatusDTO approvalStatus = attendanceApprovalQueryPort.getApprovalStatus(period);
+        if (!approvalStatus.isApproved()) {
+            throw new ServiceException("当月考勤（" + period + "）未经总监审批通过，暂不能进入算薪");
+        }
         // 唯一性
         Long exist = batchMapper.selectCount(
             new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PayrollBatch>()

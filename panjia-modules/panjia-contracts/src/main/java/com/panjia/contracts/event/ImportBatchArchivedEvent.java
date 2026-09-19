@@ -1,5 +1,6 @@
 package com.panjia.contracts.event;
 
+import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import lombok.Data;
 
 import java.util.List;
@@ -48,6 +49,15 @@ public class ImportBatchArchivedEvent implements DomainEvent {
      * 空集合表示本次未触发 supersede（如首次导入）。
      */
     private List<String> supersededBatchIds;
+
+    /**
+     * 考勤月度汇总（仅 sourceType=ATTENDANCE 时填充，其他来源为 null）。
+     * <p>
+     * 推模式：import 域归档时按批次聚合好（一行一人一月），员工域
+     * AttendanceArchiveHandler 消费本事件后 upsert 考勤汇总表；
+     * upsert（同人同月覆盖）天然幂等，事件重投安全。
+     */
+    private List<AttendanceSummarySyncDTO> attendanceSummaries;
 
     @Override
     public String eventType() {
