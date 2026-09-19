@@ -64,20 +64,23 @@ public class OutboxDispatcher {
     @Autowired
     private OutboxIdempotentMapper outboxIdempotentMapper;
 
-    /** 事件处理器映射表：eventType → handler（Spring 自动收集所有 DomainEventHandler Bean） */
+    /** 事件处理器映射表：eventType → handlers（Spring 自动收集所有 DomainEventHandler Bean） */
     @Autowired(required = false)
     private List<DomainEventHandler> handlers;
 
-    private Map<String, DomainEventHandler> handlerMap;
+    private Map<String, List<DomainEventHandler>> handlerMap;
 
     /**
      * 初始化 handler 路由表。
+     * <p>
+     * 同一 eventType 允许多个 handler（如 import.batch.archived 同时驱动
+     * 业绩域重算与员工域考勤同步），dispatch 时全部调用。
      */
     @jakarta.annotation.PostConstruct
     void initHandlerMap() {
         handlerMap = handlers == null ? Map.of()
-            : handlers.stream().collect(Collectors.toMap(DomainEventHandler::eventType, h -> h, (a, b) -> a));
-        log.info("Outbox event handlers registered: {}", handlerMap.keySet());
+            : handlers.stream().collect(Collectors.groupingBy(DomainEventHandler::eventType));
+        log.info("Outbox event handlers registered: {}", handlerMap);
     }
 
     /**
@@ -151,21 +154,27 @@ public class OutboxDispatcher {
     }
 
     /**
-     * 按 event_type 路由到注册的 DomainEventHandler。
+     * 按 event_type 路由到注册的所有 DomainEventHandler（多播）。
+     * <p>
+     * 同一事件类型可有多个订阅域（如归档事件同时驱动业绩重算与考勤同步），
+     * 依次全部调用；任一 handler 抛异常则整体按失败重试（handler 需幂等，
+     * 重投时已成功的 handler 会再次执行，靠其内部幂等/去重保证无副作用）。
      * <p>
      * 无对应 handler 的事件仅记录日志（如未来域事件尚未实现处理器）。
      *
      * @param event 待投递事件
      */
     private void dispatchToTarget(OutboxEvent event) {
-        DomainEventHandler handler = handlerMap.get(event.getEventType());
-        if (handler != null) {
+        List<DomainEventHandler> targets = handlerMap.get(event.getEventType());
+        if (targets == null || targets.isEmpty()) {
+            log.debug("No handler for outbox event: eventId={}, type={}",
+                event.getEventId(), event.getEventType());
+            return;
+        }
+        for (DomainEventHandler handler : targets) {
             log.debug("Dispatch outbox event: eventId={}, type={}, handler={}",
                 event.getEventId(), event.getEventType(), handler.getClass().getName());
             handler.handle(event.getEventId(), event.getPayload());
-        } else {
-            log.debug("No handler for outbox event: eventId={}, type={}",
-                event.getEventId(), event.getEventType());
         }
     }
 
