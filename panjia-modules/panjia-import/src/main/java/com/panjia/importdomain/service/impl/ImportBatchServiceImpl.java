@@ -53,6 +53,8 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final ObjectProvider<BatchConsumptionQueryPort> consumptionQueryPortProvider;
     private final FileArchiver fileArchiver;
     private final EventPort eventPort;
+    private final com.panjia.importdomain.service.AttendanceSummarySyncer attendanceSummarySyncer;
+    private final com.panjia.importdomain.service.BatchSupersedeService batchSupersedeService;
 
     @Override
     public Long importFromFile(ImportSourceType sourceType, byte[] content,
@@ -113,10 +115,15 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     @Transactional(rollbackFor = Exception.class)
     public void archive(Long batchId) {
         ImportBatch batch = requireBatch(batchId);
+        // 先冲销同（类型,期间,部门）的旧生效批次，否则本批次转入 ARCHIVED 撞部分唯一索引
+        batchSupersedeService.supersedeOldArchivedBatch(batch);
         batch.archive();
         batchMapper.updateById(batch);
         // 归档完成后发事件，supersededBatchIds 由 EventPort 内部解析（CR-1）
         emitArchivedEvent(batch);
+        // 考勤批次手动归档后同步员工域月度汇总（内部捕获异常，不阻断归档）
+        attendanceSummarySyncer.syncIfAttendance(batch.getId(),
+            batch.getSourceType() == null ? null : batch.getSourceType().getCode(), batch.getPeriod());
     }
 
     /**

@@ -87,6 +87,8 @@ public class ImportEngine {
     private final RawManualMapper rawManualMapper;
     private final PeopleQueryPort peopleQueryPort;
     private final EventPort eventPort;
+    private final AttendanceSummarySyncer attendanceSummarySyncer;
+    private final BatchSupersedeService batchSupersedeService;
 
     /**
      * 自身代理引用（绕过同类内部方法调用的代理拦截问题）。
@@ -273,6 +275,9 @@ public class ImportEngine {
             //   supersedeIfDuplicate 已在本事务内完成 markSuperseded 回填，
             //   selectSupersededBatchIds 在同一事务可读到被本批 supersede 的旧批次。
             emitArchivedEvent(batch);
+            // 考勤批次归档后同步员工域月度汇总（内部捕获异常，不阻断导入）
+            attendanceSummarySyncer.syncIfAttendance(batch.getId(),
+                batch.getSourceType() == null ? null : batch.getSourceType().getCode(), batch.getPeriod());
         }
 
         batchMapper.updateById(batch);
@@ -317,19 +322,7 @@ public class ImportEngine {
      * 设计依据：V2.0 §5.5 / §6.1 / ADR-IMP-004（单据逻辑失效）。
      */
     private void supersedeIfDuplicate(ImportBatch newBatch) {
-        ImportBatch old = batchMapper.selectOne(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ImportBatch>()
-            .eq(ImportBatch::getSourceType, newBatch.getSourceType())
-            .eq(ImportBatch::getPeriod, newBatch.getPeriod())
-            .eq(ImportBatch::getDeptId, newBatch.getDeptId())
-            .eq(ImportBatch::getStatus, ImportBatchStatus.ARCHIVED)
-            .isNull(ImportBatch::getSupersededByBatchId)
-            .ne(ImportBatch::getId, newBatch.getId())
-            .last("LIMIT 1"));
-        if (old != null) {
-            log.info("重复导入归档标记 SUPERSEDED: oldBatchId={} -> newBatchId={} (sourceType={}, period={}, deptId={})",
-                old.getId(), newBatch.getId(), newBatch.getSourceType(), newBatch.getPeriod(), newBatch.getDeptId());
-            batchMapper.markSuperseded(old.getId(), newBatch.getId());
-        }
+        batchSupersedeService.supersedeOldArchivedBatch(newBatch);
     }
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,
@@ -524,6 +517,10 @@ public class ImportEngine {
                 Map<String, Object> extra = new LinkedHashMap<>();
                 extra.put("lateCount", intVal(json, "lateCount"));
                 extra.put("absentDays", decimal(json, "absentDays"));
+                // 请假天数（事假+病假合计）参与算薪扣款；事/病假分项留痕
+                extra.put("leaveDays", decimal(json, "leaveDays"));
+                extra.put("personalLeaveDays", decimal(json, "personalLeaveDays"));
+                extra.put("sickLeaveDays", decimal(json, "sickLeaveDays"));
                 nr.setExtraJson(toJson(extra));
             }
             case POINTS -> {

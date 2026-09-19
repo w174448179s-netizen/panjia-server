@@ -9,6 +9,7 @@ import com.panjia.importutil.dto.ParsedRow;
 import com.panjia.importutil.dto.ParsedSheet;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
@@ -51,6 +52,16 @@ public class AttendanceDataSource extends AbstractDataSource {
             raw.setAttendDate(monthStart);
             raw.setLateCount(integer(row, "lateCount"));
             raw.setAbsentDays(decimal(row, "absentDays"));
+            // 请假天数 = 事假 + 病假（合计参与算薪扣款）
+            BigDecimal personalLeave = decimal(row, "personalLeaveDays");
+            BigDecimal sickLeave = decimal(row, "sickLeaveDays");
+            BigDecimal leaveDays = sumNullable(personalLeave, sickLeave);
+            raw.setLeaveDays(leaveDays);
+            // 补入 raw_json，供归一化阶段消费（extraJson）与未来按日拆分留痕
+            rawJson.put("personalLeaveDays", personalLeave);
+            rawJson.put("sickLeaveDays", sickLeave);
+            rawJson.put("leaveDays", leaveDays);
+            raw.setRawJson(writeJson(rawJson));
 
             result.addRow(raw);
         }
@@ -67,5 +78,13 @@ public class AttendanceDataSource extends AbstractDataSource {
         } catch (DateTimeParseException e) {
             return null;
         }
+    }
+
+    /** 两个 BigDecimal 求和，全空返回 null（不写 0，避免与"未填写"混淆） */
+    private BigDecimal sumNullable(BigDecimal a, BigDecimal b) {
+        if (a == null && b == null) {
+            return null;
+        }
+        return (a == null ? BigDecimal.ZERO : a).add(b == null ? BigDecimal.ZERO : b);
     }
 }

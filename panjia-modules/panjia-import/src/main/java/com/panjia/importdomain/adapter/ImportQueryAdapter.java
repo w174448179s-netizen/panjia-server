@@ -1,5 +1,6 @@
 package com.panjia.importdomain.adapter;
 
+import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
@@ -15,6 +16,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
 import java.util.Collections;
@@ -127,6 +130,62 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
             }
         }
         return result;
+    }
+
+    /** extraJson 指标解析器（线程安全，tools.jackson JsonMapper 不可变） */
+    private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    @Override
+    public Map<Long, AttendanceMetricsDTO> sumAttendanceByPeriod(String period) {
+        if (period == null || period.isBlank()) {
+            return Collections.emptyMap();
+        }
+        List<NormalizedRecord> rows = normalizedRecordMapper.selectAttendanceByPeriod(period);
+        Map<Long, AttendanceMetricsDTO> result = new HashMap<>();
+        for (NormalizedRecord r : rows) {
+            Long empId = r.getEmployeeId();
+            if (empId == null) {
+                continue;
+            }
+            AttendanceMetricsDTO m = result.computeIfAbsent(empId, k -> {
+                AttendanceMetricsDTO dto = new AttendanceMetricsDTO();
+                dto.setImportedFee(BigDecimal.ZERO);
+                dto.setLateCount(0);
+                dto.setAbsentDays(BigDecimal.ZERO);
+                dto.setLeaveDays(BigDecimal.ZERO);
+                return dto;
+            });
+            if (r.getReceivableAmount() != null) {
+                m.setImportedFee(m.getImportedFee().add(r.getReceivableAmount()));
+            }
+            // extraJson 指标（ImportEngine 归一化时写入；旧扁平模板无这些键，缺失按 0）
+            String extra = r.getExtraJson();
+            if (extra == null || extra.isBlank()) {
+                continue;
+            }
+            try {
+                JsonNode node = JSON.readTree(extra);
+                m.setLateCount(m.getLateCount() + node.path("lateCount").asInt(0));
+                m.setAbsentDays(m.getAbsentDays().add(dec(node, "absentDays")));
+                m.setLeaveDays(m.getLeaveDays().add(dec(node, "leaveDays")));
+            } catch (Exception e) {
+                log.warn("考勤 extraJson 解析失败，recordId={}，忽略指标", r.getId(), e);
+            }
+        }
+        return result;
+    }
+
+    /** 读取 JSON 数值字段，缺失/非法返回 0 */
+    private BigDecimal dec(JsonNode node, String field) {
+        JsonNode v = node.path(field);
+        if (v.isMissingNode() || v.isNull()) {
+            return BigDecimal.ZERO;
+        }
+        try {
+            return new BigDecimal(v.asText());
+        } catch (NumberFormatException e) {
+            return BigDecimal.ZERO;
+        }
     }
 
     /**

@@ -256,8 +256,9 @@ public class PayrollBatchService {
             }
         });
 
-        // 考勤扣款：从导入的考勤数据（ATTENDANCE record_type）中按员工汇总 receivable_amount
-        input.attendanceFee = importQueryPort.sumAmountByPeriodAndType(period, "ATTENDANCE");
+        // 考勤：月度指标（钉钉月度汇总的迟到/旷工/请假 + 旧扁平模板导入金额），
+        // 引擎按 policy.attendance 规则计算扣款；input.attendanceFee 仅保留给存量测试/兼容调用方
+        input.attendanceMetrics = importQueryPort.sumAttendanceByPeriod(period);
 
         // 积分扣款：从导入的积分数据（POINTS record_type）中按员工汇总 receivable_amount
         input.pointsFee = importQueryPort.sumAmountByPeriodAndType(period, "POINTS");

@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import org.dromara.common.core.domain.PageResult;
 
@@ -72,4 +73,16 @@ public interface ImportNormalizedRecordQueryPort {
      * @return employeeId → 金额合计；employeeId 为 null 的记录不参与汇总
      */
     Map<Long, BigDecimal> sumAmountByPeriodAndType(String period, String recordType);
+
+    /**
+     * 按期间汇总考勤指标（ATTENDANCE 记录），按员工聚合。
+     * <p>
+     * 钉钉月度汇总模板无「扣款金额」列，薪酬域需按
+     * 迟到次数/旷工天数/请假天数 + 规则配置计算扣款；
+     * 旧扁平模板的扣款金额经 {@code importedFee} 带出以兼容。
+     *
+     * @param period 归属期间（YYYY-MM）
+     * @return employeeId → 考勤指标；无数据的员工不在 Map 中
+     */
+    Map<Long, AttendanceMetricsDTO> sumAttendanceByPeriod(String period);
 }

@@ -1,6 +1,7 @@
 package com.panjia.payroll.service;
 
 import tools.jackson.databind.JsonNode;
+import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.EmployeeRole;
@@ -54,8 +55,10 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> cumulativeTaxable;
         /** employeeId -> 本年任职月数 */
         public Map<Long, Integer> monthsEmployed;
-        /** employeeId -> 考勤扣款 */
+        /** employeeId -> 考勤扣款（导入金额，旧扁平模板；钉钉月度模板为 0） */
         public Map<Long, BigDecimal> attendanceFee;
+        /** employeeId -> 考勤月度指标（迟到/旷工/请假，按 policy.attendance 规则计算扣款） */
+        public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
         /** employeeId -> 积分扣款 */
         public Map<Long, BigDecimal> pointsFee;
         /** employeeId -> 绩效等级 A/B/C */
@@ -228,8 +231,40 @@ public class SalaryCalculationEngine {
             }
             d.setHousingFund(MoneyUtil.round2(housingFund));
 
-            // 考勤扣款
+            // 考勤扣款（设计文档 §2.6 第 16 项 / S-12）：
+            //   考勤扣款 = 迟到次数 × lateFee
+            //            + 旷工天数 ×（有底薪 ? absentWithBaseTimes × 日工资 : absentNoBaseFee）
+            //            + 请假天数 × leaveFee（事假+病假合计天数 × 规则配置的每日扣款额）
+            //            + 导入扣款金额（旧扁平模板 receivableAmount，兼容）
+            //   日工资 = 底薪 / workDaysPerMonth（21.75）
             BigDecimal attendanceFee = input.attendanceFee.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            AttendanceMetricsDTO att = input.attendanceMetrics == null
+                ? null : input.attendanceMetrics.get(emp.getEmployeeId());
+            if (att != null) {
+                JsonNode cfg = policy.path("attendance");
+                BigDecimal lateFee = bd(cfg.path("lateFee").asText("20"));
+                BigDecimal workDays = bd(cfg.path("workDaysPerMonth").asText("21.75"));
+                BigDecimal absentBaseTimes = bd(cfg.path("absentWithBaseTimes").asText("3"));
+                BigDecimal absentNoBaseFee = bd(cfg.path("absentNoBaseFee").asText("50"));
+                BigDecimal leaveFee = bd(cfg.path("leaveFee").asText("50"));
+                BigDecimal dailyWage = workDays.signum() > 0
+                    ? baseSalary.divide(workDays, 6, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+
+                if (att.getImportedFee() != null && att.getImportedFee().signum() > 0) {
+                    attendanceFee = attendanceFee.add(att.getImportedFee());
+                }
+                if (att.getLateCount() != null && lateFee.signum() > 0) {
+                    attendanceFee = attendanceFee.add(lateFee.multiply(BigDecimal.valueOf(att.getLateCount())));
+                }
+                if (att.getAbsentDays() != null && att.getAbsentDays().signum() > 0) {
+                    BigDecimal perDay = baseSalary.signum() > 0
+                        ? absentBaseTimes.multiply(dailyWage) : absentNoBaseFee;
+                    attendanceFee = attendanceFee.add(att.getAbsentDays().multiply(perDay));
+                }
+                if (att.getLeaveDays() != null && att.getLeaveDays().signum() > 0 && leaveFee.signum() > 0) {
+                    attendanceFee = attendanceFee.add(att.getLeaveDays().multiply(leaveFee));
+                }
+            }
             d.setAttendanceFee(MoneyUtil.round2(attendanceFee));
 
             // 积分扣款（总监不扣）

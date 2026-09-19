@@ -33,4 +33,6 @@ public class RawAttendance implements RawData {
     private Integer lateCount;
     private BigDecimal absentDays;
     private BigDecimal leaveAmount;
+    /** 请假天数（事假+病假合计，参与算薪扣款） */
+    private BigDecimal leaveDays;
 }

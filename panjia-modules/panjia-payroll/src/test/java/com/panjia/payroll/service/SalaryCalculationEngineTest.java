@@ -1,5 +1,6 @@
 package com.panjia.payroll.service;
 
+import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.EmployeeRole;
@@ -40,7 +41,8 @@ class SalaryCalculationEngineTest {
             "dormitoryFee":0,
             "housingFund":0,
             "tax":{"threshold":5000,"deductSocial":true,"brackets":[{"min":0,"rate":0.03,"quick":0},{"min":3000,"rate":0.10,"quick":210}]},
-            "points":{"penaltyFee":5,"gradeA":8.0,"gradeB":6.0,"deductA":0.0,"deductB":-0.02,"deductC":-0.04}
+            "points":{"penaltyFee":5,"gradeA":8.0,"gradeB":6.0,"deductA":0.0,"deductB":-0.02,"deductC":-0.04},
+            "attendance":{"lateFee":20,"absentNoBaseFee":50,"absentWithBaseTimes":3,"workDaysPerMonth":21.75,"leaveFee":30}
           },
           "conversion": {"FIRST_HAND":0.9024,"DEFAULT":0.96}
         }
@@ -234,5 +236,50 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("8400.00").compareTo(d.getStoreIncome()));
         // 总监无积分扣款
         assertEquals(0, BigDecimal.ZERO.compareTo(d.getPointsFee()));
+    }
+
+    /** S-12: 考勤扣款 — 迟到×20；无底薪旷工×50；有底薪旷工按 3 倍日工资；请假=天数×leaveFee(30)；导入金额兼容叠加 */
+    @Test
+    void testAttendanceFeeFromMetrics() {
+        EmployeeSnapshot a2 = emp("A2010", "A2", "经纪人"); // 无底薪（baseSalary=0）
+        EmployeeSnapshot a0 = emp("A0010", "A0", "经纪人"); // 底薪 4500
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(a2, a0);
+        input.lockedByEmp = Map.of(a2.getEmployeeId(), new ArrayList<>(), a0.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = new HashMap<>();
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(a2.getEmployeeId(), 1, a0.getEmployeeId(), 1);
+        input.attendanceFee = new HashMap<>();
+        input.pointsFee = new HashMap<>();
+        input.perfGrade = Map.of(a2.getEmployeeId(), "A", a0.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        // A2（无底薪）：迟到 3 次 + 旷工 2 天 + 导入金额 10 → 3×20 + 2×50 + 10 = 170
+        AttendanceMetricsDTO m2 = new AttendanceMetricsDTO();
+        m2.setImportedFee(new BigDecimal("10"));
+        m2.setLateCount(3);
+        m2.setAbsentDays(new BigDecimal("2"));
+        m2.setLeaveDays(BigDecimal.ZERO);
+        // A0（底薪 4500，日工资 = 4500/21.75 = 206.896552）：
+        //   迟到 1 次 20 + 旷工 1 天 3×206.896552 + 请假 1 天×leaveFee 30 = 670.689656 → 670.69
+        AttendanceMetricsDTO m0 = new AttendanceMetricsDTO();
+        m0.setImportedFee(BigDecimal.ZERO);
+        m0.setLateCount(1);
+        m0.setAbsentDays(BigDecimal.ONE);
+        m0.setLeaveDays(BigDecimal.ONE);
+        input.attendanceMetrics = Map.of(a2.getEmployeeId(), m2, a0.getEmployeeId(), m0);
+
+        List<PayrollDetail> details = engine.calculate(input);
+        PayrollDetail d2 = details.stream().filter(x -> x.getEmployeeId().equals(a2.getEmployeeId())).findFirst().orElseThrow();
+        PayrollDetail d0 = details.stream().filter(x -> x.getEmployeeId().equals(a0.getEmployeeId())).findFirst().orElseThrow();
+        assertEquals(0, new BigDecimal("170.00").compareTo(d2.getAttendanceFee()));
+        assertEquals(0, new BigDecimal("670.69").compareTo(d0.getAttendanceFee()));
     }
 }

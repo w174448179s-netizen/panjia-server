@@ -68,11 +68,31 @@ public class XlsxFileParser implements FileParser {
             private final List<String> headers = new ArrayList<>();
             private int dataSeq = 0;
 
+            /**
+             * 多行表头合并（钉钉月度汇总等场景）：
+             * <p>
+             * 收集 [headerRow, dataStartRow) 范围内的所有表头行，对同一列
+             * 取<b>最后一个非空值</b>（子表头覆盖主表头）。例如钉钉月度汇总第 3 行
+             * H-I 合并为「请假」、第 4 行分别为「事假(天)」/「病假(天)」，合并后
+             * H 列表头=事假(天)、I 列=病假(天)，即可分别映射。
+             * <p>
+             * 单表头行模板（headerRow+1 == dataStartRow）只收集一行，行为不变。
+             */
             @Override
             public void invokeHeadMap(Map<Integer, String> headMap, AnalysisContext context) {
-                if (context.readRowHolder().getRowIndex() == headerRow) {
-                    headers.clear();
-                    headMap.values().forEach(h -> headers.add(h == null ? null : h.trim()));
+                int rowIdx = context.readRowHolder().getRowIndex();
+                if (rowIdx >= headerRow && rowIdx < dataStartRow) {
+                    int maxCol = headMap.keySet().stream().max(Integer::compareTo).orElse(-1);
+                    while (headers.size() <= maxCol) {
+                        headers.add(null);
+                    }
+                    for (int i = 0; i <= maxCol; i++) {
+                        String v = headMap.get(i);
+                        if (v != null && !v.trim().isEmpty()) {
+                            headers.set(i, v.trim());
+                        }
+                    }
+                    sheet.getHeaders().clear();
                     sheet.getHeaders().addAll(headers);
                 }
             }
