@@ -19,4 +19,7 @@ public interface PanjiaTransConstant {
 
     /** 员工档案 ID → 员工姓名（实现见 panjia-people 的 EmployeeNameTranslationImpl） */
     String EMPLOYEE_ID_TO_NAME = "panjia_employee_id_to_name";
+
+    /** 员工档案 ID → 工号（employeeCode） */
+    String EMPLOYEE_ID_TO_CODE = "panjia_employee_id_to_code";
 }

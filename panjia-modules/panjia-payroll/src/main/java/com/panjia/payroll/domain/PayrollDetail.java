@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import com.panjia.common.constant.PanjiaTransConstant;
 import lombok.Data;
 import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 
 import java.io.Serial;
 import java.io.Serializable;
@@ -80,4 +81,14 @@ public class PayrollDetail implements Serializable {
     @TableField(exist = false)
     @Translation(type = PanjiaTransConstant.EMPLOYEE_ID_TO_NAME, mapper = "employeeId")
     private String employeeName;
+
+    /** 工号（非入库字段；按 employeeId 翻译） */
+    @TableField(exist = false)
+    @Translation(type = PanjiaTransConstant.EMPLOYEE_ID_TO_CODE, mapper = "employeeId")
+    private String employeeCode;
+
+    /** 门店名称（非入库字段；按 deptId 从 sys_dept 翻译） */
+    @TableField(exist = false)
+    @Translation(type = TransConstant.DEPT_ID_TO_NAME, mapper = "deptId")
+    private String deptName;
 }
