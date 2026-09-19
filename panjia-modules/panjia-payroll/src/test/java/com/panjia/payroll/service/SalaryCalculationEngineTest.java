@@ -93,7 +93,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(e.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
@@ -131,7 +130,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
@@ -164,7 +162,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
@@ -197,7 +194,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(e.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
@@ -225,7 +221,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(dir.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
@@ -234,8 +229,39 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("6000.00").compareTo(d.getBaseSalary()));
         // 120000 ≥ 100000 → 7% → 8400
         assertEquals(0, new BigDecimal("8400.00").compareTo(d.getStoreIncome()));
-        // 总监无积分扣款
-        assertEquals(0, BigDecimal.ZERO.compareTo(d.getPointsFee()));
+        // 绩效 A 级不扣点：finalRate = baseRate 0.30
+        assertEquals(0, new BigDecimal("0.30").compareTo(d.getFinalRate()));
+        // 总监门店提成（跳点档位）不经过 finalRate，绩效等级不影响门店提成
+        assertEquals("A", d.getPerfGrade());
+    }
+
+    /** S-13: 绩效扣点 — A2 经纪人 B 级（-2%）→ finalRate = 60% - 2% = 58% */
+    @Test
+    void testPerfGradeDeduct() {
+        EmployeeSnapshot e = emp("A2003", "A2", "经纪人");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(e);
+        input.lockedByEmp = Map.of(e.getEmployeeId(), List.of(item(e.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND")));
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
+        input.attendanceFee = new HashMap<>();
+        input.perfGrade = Map.of(e.getEmployeeId(), "B");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        List<PayrollDetail> details = engine.calculate(input);
+        PayrollDetail d = details.get(0);
+        // finalRate = 0.60 - 0.02 = 0.58；结佣 = 100000 × 58% = 58000
+        assertEquals("B", d.getPerfGrade());
+        assertEquals(0, new BigDecimal("0.58").compareTo(d.getFinalRate()));
+        assertEquals(0, new BigDecimal("58000.00").compareTo(d.getCommissionIncome()));
     }
 
     /** S-12: 考勤扣款 — 迟到×20；无底薪旷工×50；有底薪旷工按 3 倍日工资；请假=天数×leaveFee(30)；导入金额兼容叠加 */
@@ -256,7 +282,6 @@ class SalaryCalculationEngineTest {
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(a2.getEmployeeId(), 1, a0.getEmployeeId(), 1);
         input.attendanceFee = new HashMap<>();
-        input.pointsFee = new HashMap<>();
         input.perfGrade = Map.of(a2.getEmployeeId(), "A", a0.getEmployeeId(), "A");
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();

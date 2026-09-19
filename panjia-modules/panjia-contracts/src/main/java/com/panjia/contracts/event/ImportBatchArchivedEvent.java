@@ -1,6 +1,7 @@
 package com.panjia.contracts.event;
 
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
+import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import lombok.Data;
 
 import java.util.List;
@@ -58,6 +59,15 @@ public class ImportBatchArchivedEvent implements DomainEvent {
      * upsert（同人同月覆盖）天然幂等，事件重投安全。
      */
     private List<AttendanceSummarySyncDTO> attendanceSummaries;
+
+    /**
+     * 积分月度汇总（仅 sourceType=POINTS 时填充，其他来源为 null）。
+     * <p>
+     * 推模式：import 域归档时按批次聚合好（日报一人一天聚合为一人一月），
+     * 员工域 ScoreArchiveHandler 消费本事件后 upsert 积分表；
+     * upsert（同人同月覆盖）天然幂等，事件重投安全。
+     */
+    private List<ScoreSummarySyncDTO> scoreSummaries;
 
     @Override
     public String eventType() {

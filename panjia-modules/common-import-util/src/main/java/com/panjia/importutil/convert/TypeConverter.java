@@ -127,6 +127,8 @@ public final class TypeConverter {
         DateTimeFormatter.ofPattern("yyyy-M-d"),
         DateTimeFormatter.ofPattern("yyyy/M/d"),
         DateTimeFormatter.ofPattern("yyyy年M月d日"),
+        // 钉钉智能填报导出的中文日期时间（积分日报「填报时间」列）
+        DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm"),
         DateTimeFormatter.ofPattern("yyyy.MM.d"),
     };
 

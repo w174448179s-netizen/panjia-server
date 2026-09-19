@@ -59,9 +59,7 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> attendanceFee;
         /** employeeId -> 考勤月度指标（迟到/旷工/请假，按 policy.attendance 规则计算扣款） */
         public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
-        /** employeeId -> 积分扣款 */
-        public Map<Long, BigDecimal> pointsFee;
-        /** employeeId -> 绩效等级 A/B/C */
+        /** employeeId -> 绩效等级 A/B/C（积分表按出勤日平均积分判定；无数据默认 A 不扣点） */
         public Map<Long, String> perfGrade;
         /** employeeId -> 合格徒弟数（招聘奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
@@ -267,13 +265,6 @@ public class SalaryCalculationEngine {
             }
             d.setAttendanceFee(MoneyUtil.round2(attendanceFee));
 
-            // 积分扣款（总监不扣）
-            BigDecimal pointsFee = BigDecimal.ZERO;
-            if (role != EmployeeRole.DIRECTOR) {
-                pointsFee = input.pointsFee.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
-            }
-            d.setPointsFee(MoneyUtil.round2(pointsFee));
-
             // 商业保险
             // 优先取员工级自定义金额（SalaryFact COMMERCIAL_FEE），null 则取全局默认 21 元
             BigDecimal commercialInsurance = BigDecimal.ZERO;
@@ -308,7 +299,7 @@ public class SalaryCalculationEngine {
             d.setOtherDeduct(MoneyUtil.round2(otherDeduct));
 
             // 支出合计
-            BigDecimal deduct = socialFee.add(housingFund).add(attendanceFee).add(pointsFee)
+            BigDecimal deduct = socialFee.add(housingFund).add(attendanceFee)
                 .add(commercialInsurance).add(dormitoryFee).add(negativeCarryover).add(otherDeduct);
             d.setDeduct(MoneyUtil.round2(deduct));
 

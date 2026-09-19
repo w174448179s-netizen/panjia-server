@@ -47,7 +47,6 @@ public class PayrollDetail implements Serializable {
     private BigDecimal socialFee;
     private BigDecimal housingFund;
     private BigDecimal attendanceFee;
-    private BigDecimal pointsFee;
     private BigDecimal commercialInsurance;
     private BigDecimal dormitoryFee;
     private BigDecimal negativeCarryover;

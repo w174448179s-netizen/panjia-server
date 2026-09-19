@@ -76,27 +76,6 @@ public interface NormalizedRecordMapper extends BaseMapper<NormalizedRecord> {
     long countByBatchIdActive(@Param("batchId") Long batchId);
 
     /**
-     * 按期间和记录类型汇总 receivable_amount，按 employee_id 聚合。
-     * <p>
-     * 仅活跃批次（ARCHIVED 且未被 supersede）的记录参与汇总；
-     * employee_id 为 null 的记录不参与（薪资域需要按员工匹配）。
-     *
-     * @param period     归属月（YYYY-MM）
-     * @param recordType 记录类型 code（ATTENDANCE / POINTS / SIGNED / MANUAL）
-     * @return employee_id → receivable_amount 合计 的行列表
-     */
-    @Select("SELECT n.employee_id AS employeeId, COALESCE(SUM(n.receivable_amount), 0) AS receivableAmount " +
-        "FROM pj_normalized_record n " +
-        "JOIN pj_import_batch b ON n.batch_id = b.id " +
-        "WHERE n.period = #{period} " +
-        "AND n.record_type = #{recordType} " +
-        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL " +
-        "AND n.employee_id IS NOT NULL " +
-        "GROUP BY n.employee_id")
-    List<NormalizedRecord> sumReceivableByEmployeeAndType(@Param("period") String period,
-                                                          @Param("recordType") String recordType);
-
-    /**
      * 查询活跃批次的考勤（ATTENDANCE）归一化记录（含金额与 extraJson 指标）。
      *
      * @param period 归属期间（YYYY-MM）

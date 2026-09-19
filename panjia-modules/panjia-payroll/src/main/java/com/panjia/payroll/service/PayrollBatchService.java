@@ -10,7 +10,10 @@ import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleAttendanceApprovalQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
+import com.panjia.contracts.port.PeopleScoreApprovalQueryPort;
+import com.panjia.contracts.port.PeopleScoreQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
+import com.panjia.contracts.dto.ScoreApprovalStatusDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.BatchStatus;
 import com.panjia.payroll.domain.PayrollBatch;
@@ -71,6 +74,8 @@ public class PayrollBatchService {
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final ConversionFactorPort conversionFactorPort;
     private final PeopleAttendanceApprovalQueryPort attendanceApprovalQueryPort;
+    private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
+    private final PeopleScoreQueryPort scoreQueryPort;
 
     // ==================== 创建 ====================
 
@@ -80,6 +85,11 @@ public class PayrollBatchService {
         AttendanceApprovalStatusDTO approvalStatus = attendanceApprovalQueryPort.getApprovalStatus(period);
         if (!approvalStatus.isApproved()) {
             throw new ServiceException("当月考勤（" + period + "）未经总监审批通过，暂不能进入算薪");
+        }
+        // 卡点：当月积分须总监审批通过（无积分数据期间不卡，绩效等级默认 A 不扣点）
+        ScoreApprovalStatusDTO scoreApprovalStatus = scoreApprovalQueryPort.getApprovalStatus(period);
+        if (!scoreApprovalStatus.isApproved()) {
+            throw new ServiceException("当月积分（" + period + "）未经总监审批通过，暂不能进入算薪");
         }
         // 唯一性
         Long exist = batchMapper.selectCount(
@@ -268,8 +278,9 @@ public class PayrollBatchService {
         // 引擎按 policy.attendance 规则计算扣款；input.attendanceFee 仅保留给存量测试/兼容调用方
         input.attendanceMetrics = importQueryPort.sumAttendanceByPeriod(period);
 
-        // 积分扣款：从导入的积分数据（POINTS record_type）中按员工汇总 receivable_amount
-        input.pointsFee = importQueryPort.sumAmountByPeriodAndType(period, "POINTS");
+        // 绩效等级：积分表按「出勤日平均积分」判定（A/B/C），引擎按
+        // policy.points.deduct{grade} 计算绩效扣点；无积分数据的员工默认 A 不扣点
+        input.perfGrade = scoreQueryPort.scoreGrades(period);
 
         // 负工资结转：从上月工资明细中查询净发为负的记录
         String prevPeriod = YearMonth.parse(period).minusMonths(1).toString();
@@ -303,12 +314,6 @@ public class PayrollBatchService {
         input.monthsEmployed = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
-        }
-
-        // 绩效等级：暂无导入数据源，默认 A（后续由导入或审批域补齐）
-        input.perfGrade = new HashMap<>();
-        for (EmployeeSnapshot e : employees) {
-            input.perfGrade.put(e.getEmployeeId(), "A");
         }
 
         // 招聘奖励：需要师徒关系（EmployeeSnapshot.mentorId）+ 结佣数据联合查询

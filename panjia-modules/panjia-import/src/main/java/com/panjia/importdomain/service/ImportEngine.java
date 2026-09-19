@@ -88,6 +88,7 @@ public class ImportEngine {
     private final PeopleQueryPort peopleQueryPort;
     private final EventPort eventPort;
     private final AttendanceSummaryAggregator attendanceSummaryAggregator;
+    private final ScoreSummaryAggregator scoreSummaryAggregator;
     private final BatchSupersedeService batchSupersedeService;
 
     /**
@@ -309,6 +310,9 @@ public class ImportEngine {
         // 考勤批次：聚合月度汇总随事件 payload 投递，员工域 AttendanceArchiveHandler 消费
         event.setAttendanceSummaries(attendanceSummaryAggregator.aggregateIfAttendance(
             batch.getId(), event.getSourceType(), batch.getPeriod()));
+        // 积分批次：日报按工号聚合月度汇总随事件 payload 投递，员工域 ScoreArchiveHandler 消费
+        event.setScoreSummaries(scoreSummaryAggregator.aggregateIfPoints(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
         eventPort.emit(event);
 
         log.info("[导入归档事件] 发布 ImportBatchArchivedEvent(自动归档): batchId={}, sourceType={}, period={}, operatorId={}, supersededBatchIds={}",
@@ -336,6 +340,14 @@ public class ImportEngine {
         // sourceKey 生成器
         SourceKeyGenerator keyGen = findSourceKeyGenerator(sourceType);
         NormalizedRecordType recordType = toRecordType(sourceType);
+
+        // POINTS 口径：同人同日多次填报取文件最后一条（钉钉「修改重提」= 最新生效），
+        // 被覆盖行记 DUPLICATE_KEY issue。不做去重会导致两点问题：
+        //   1) 同日不同填报时间的行 source_key 不同，全部入库 → 聚合 SUM 总积分重复计；
+        //   2) 同日同填报时间的行撞 uk_norm_source_key → 整批导入失败。
+        boolean dedupDaily = sourceType == ImportSourceType.POINTS;
+        Map<String, NormalizedRecord> pendingRecords = dedupDaily ? new java.util.LinkedHashMap<>() : null;
+        Map<String, Integer> pendingRowNo = dedupDaily ? new java.util.HashMap<>() : null;
 
         for (RawData raw : rawRows) {
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
@@ -380,7 +392,32 @@ public class ImportEngine {
             fillPerformanceFields(nr, sourceType, jsonMap);
             nr.setValidationStatus(1);  // 走到此处必已匹配成功
 
-            normalizedRecordMapper.insert(nr);
+            if (!dedupDaily) {
+                normalizedRecordMapper.insert(nr);
+                continue;
+            }
+            // POINTS：同人同日去重（同工号 + 同自然日；日期缺失行按行号天然唯一不参与覆盖）
+            java.time.LocalDate pointDay = raw instanceof com.panjia.importdomain.domain.raw.RawPoints rp
+                ? rp.getPointDate() : null;
+            String dayKey = pointDay != null
+                ? externalCode + "|" + pointDay
+                : "ROW|" + raw.getRowNo();
+            NormalizedRecord prev = pendingRecords.put(dayKey, nr);
+            if (prev == null) {
+                pendingRowNo.put(dayKey, raw.getRowNo());
+            } else {
+                // 文件中靠后的行覆盖靠前的行，被覆盖行记问题提示（不阻断导入）
+                issues.add(buildIssue(pendingRowNo.get(dayKey), ImportIssueType.DUPLICATE_KEY,
+                    "employeeCode", externalCode, "同人同日重复填报，仅保留最后一条，本行积分忽略"));
+                pendingRowNo.put(dayKey, raw.getRowNo());
+            }
+        }
+
+        // POINTS：去重完成后统一入库
+        if (dedupDaily) {
+            for (NormalizedRecord nr : pendingRecords.values()) {
+                normalizedRecordMapper.insert(nr);
+            }
         }
     }
 
@@ -414,8 +451,10 @@ public class ImportEngine {
     }
 
     private String generateBatchNo(ImportSourceType type, String period) {
-        String ts = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
-        return type.name() + "_" + (period == null ? "NOPERIOD" : period.replace("-", "")) + "_" + ts;
+        // 毫秒 + 4 位随机：秒级时间戳在同一秒内连续导入会撞 uk_import_batch_no
+        String ts = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
+        int salt = java.util.concurrent.ThreadLocalRandom.current().nextInt(10000);
+        return type.name() + "_" + (period == null ? "NOPERIOD" : period.replace("-", "")) + "_" + ts + String.format("%04d", salt);
     }
 
     private DataSource findDataSource(ImportSourceType type) {

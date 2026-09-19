@@ -54,6 +54,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final FileArchiver fileArchiver;
     private final EventPort eventPort;
     private final com.panjia.importdomain.service.AttendanceSummaryAggregator attendanceSummaryAggregator;
+    private final com.panjia.importdomain.service.ScoreSummaryAggregator scoreSummaryAggregator;
     private final com.panjia.importdomain.service.BatchSupersedeService batchSupersedeService;
 
     @Override
@@ -151,6 +152,9 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         event.setSupersededBatchIds(supersededStrIds);
         // 考勤批次：聚合月度汇总随事件 payload 投递，员工域 AttendanceArchiveHandler 消费
         event.setAttendanceSummaries(attendanceSummaryAggregator.aggregateIfAttendance(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
+        // 积分批次：日报按工号聚合月度汇总随事件 payload 投递，员工域 ScoreArchiveHandler 消费
+        event.setScoreSummaries(scoreSummaryAggregator.aggregateIfPoints(
             batch.getId(), event.getSourceType(), batch.getPeriod()));
         eventPort.emit(event);
 

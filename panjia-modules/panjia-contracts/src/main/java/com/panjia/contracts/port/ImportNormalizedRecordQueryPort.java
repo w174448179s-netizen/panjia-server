@@ -4,7 +4,6 @@ import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import org.dromara.common.core.domain.PageResult;
 
-import java.math.BigDecimal;
 import java.util.Map;
 
 /**
@@ -61,18 +60,6 @@ public interface ImportNormalizedRecordQueryPort {
      * @return 原始行 JSON 串；无关联原始行返回 null
      */
     String getRawJsonByRecordId(Long recordId);
-
-    /**
-     * 按期间和记录类型汇总归一化记录的金额（receivableAmount），按员工聚合。
-     * <p>
-     * 用于薪资域查询考勤扣款（ATTENDANCE）和积分扣款（POINTS）。
-     * 仅活跃批次（ARCHIVED 且未被 supersede）的记录参与汇总。
-     *
-     * @param period     归属期间（YYYY-MM）
-     * @param recordType 记录类型（NormalizedRecordType code：ATTENDANCE / POINTS / SIGNED / MANUAL）
-     * @return employeeId → 金额合计；employeeId 为 null 的记录不参与汇总
-     */
-    Map<Long, BigDecimal> sumAmountByPeriodAndType(String period, String recordType);
 
     /**
      * 按期间汇总考勤指标（ATTENDANCE 记录），按员工聚合。

@@ -18,7 +18,8 @@ final class FlowCodeMapping {
         BizType.PERF_ADJUST, "perf_adjust",
         BizType.COMMISSION_ADJUST, "commission_adjust",
         BizType.PAYROLL_BATCH, "payroll_batch",
-        BizType.ATTENDANCE_APPROVAL, "attendance_approval"
+        BizType.ATTENDANCE_APPROVAL, "attendance_approval",
+        BizType.SCORE_APPROVAL, "score_approval"
     );
 
     /** flowCode → bizType（事件转译用逆映射） */
@@ -28,7 +29,8 @@ final class FlowCodeMapping {
         "perf_adjust", BizType.PERF_ADJUST,
         "commission_adjust", BizType.COMMISSION_ADJUST,
         "payroll_batch", BizType.PAYROLL_BATCH,
-        "attendance_approval", BizType.ATTENDANCE_APPROVAL
+        "attendance_approval", BizType.ATTENDANCE_APPROVAL,
+        "score_approval", BizType.SCORE_APPROVAL
     );
 
     private FlowCodeMapping() {

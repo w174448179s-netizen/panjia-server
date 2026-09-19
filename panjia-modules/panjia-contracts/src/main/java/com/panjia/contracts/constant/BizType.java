@@ -20,6 +20,8 @@ public final class BizType {
     public static final String PAYROLL_BATCH = "PAYROLL_BATCH";
     /** 考勤月度审批 */
     public static final String ATTENDANCE_APPROVAL = "ATTENDANCE_APPROVAL";
+    /** 积分月度审批 */
+    public static final String SCORE_APPROVAL = "SCORE_APPROVAL";
 
     private BizType() {
     }

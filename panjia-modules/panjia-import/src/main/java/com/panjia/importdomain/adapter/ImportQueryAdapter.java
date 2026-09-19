@@ -116,22 +116,6 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         return null;
     }
 
-    @Override
-    public Map<Long, BigDecimal> sumAmountByPeriodAndType(String period, String recordType) {
-        if (period == null || period.isBlank() || recordType == null || recordType.isBlank()) {
-            return Collections.emptyMap();
-        }
-        List<NormalizedRecord> rows = normalizedRecordMapper.sumReceivableByEmployeeAndType(period, recordType);
-        Map<Long, BigDecimal> result = new HashMap<>();
-        for (NormalizedRecord r : rows) {
-            if (r.getEmployeeId() != null) {
-                result.put(r.getEmployeeId(),
-                    r.getReceivableAmount() == null ? BigDecimal.ZERO : r.getReceivableAmount());
-            }
-        }
-        return result;
-    }
-
     /** extraJson 指标解析器（线程安全，tools.jackson JsonMapper 不可变） */
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
