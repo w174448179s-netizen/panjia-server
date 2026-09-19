@@ -108,26 +108,30 @@ public class AttendanceSummaryAggregator {
         }
     }
 
-    /** 读取 JSON 数值字段为 BigDecimal，缺失/非法返回 null */
+    /**
+     * 读取 JSON 数值字段为 BigDecimal，缺失/非法返回 null。
+     * Excel 解析器将单元格统一序列化为字符串（如 "25"），数值/文本节点均需兼容。
+     */
     private BigDecimal dec(JsonNode node, String field) {
         JsonNode v = node.path(field);
-        if (v.isMissingNode() || v.isNull() || !v.isNumber()) {
+        if (v.isMissingNode() || v.isNull()) {
+            return null;
+        }
+        String text = v.isNumber() ? v.asText() : (v.isTextual() ? v.asText().trim() : null);
+        if (text == null || text.isEmpty()) {
             return null;
         }
         try {
-            return new BigDecimal(v.asText());
+            return new BigDecimal(text);
         } catch (NumberFormatException e) {
             return null;
         }
     }
 
-    /** 读取 JSON 数值字段为 Integer，缺失/非法返回 null */
+    /** 读取 JSON 数值字段为 Integer，缺失/非法返回 null（复用 dec 兼容字符串） */
     private Integer intOf(JsonNode node, String field) {
-        JsonNode v = node.path(field);
-        if (v.isMissingNode() || v.isNull() || !v.isNumber()) {
-            return null;
-        }
-        return v.intValue();
+        BigDecimal value = dec(node, field);
+        return value == null ? null : value.intValue();
     }
 
     private <T> T firstNonNull(T a, T b) {

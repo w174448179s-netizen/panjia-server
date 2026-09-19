@@ -3,6 +3,9 @@ package com.panjia.people.service;
 import com.panjia.contracts.port.PeopleAttendanceApprovalQueryPort;
 import com.panjia.people.dto.AttendanceApprovalVO;
 
+import java.util.Collection;
+import java.util.Set;
+
 /**
  * 考勤审批服务：人事提交当月考勤 → warm-flow 考勤月度审批（attendance_approval）
  * → 总监「我的待办」办理（24h 超时自动通过）→ 办结回写状态。
@@ -37,4 +40,21 @@ public interface AttendanceApprovalService extends PeopleAttendanceApprovalQuery
      * 由考勤导入同步（syncAttendanceSummaries）与批次撤销消费调用。
      */
     void invalidateOnDataChange(String period);
+
+    /**
+     * 期间是否锁定（审批 SUBMITTED/APPROVED）：锁定期间禁止手工增删改考勤明细，
+     * 防止提交后修改数据导致审批快照与明细不一致。导入同步走 invalidateOnDataChange
+     * 失效重提路径，不受此限制。
+     *
+     * @param period 归属期间（yyyy-MM）
+     */
+    boolean isPeriodLocked(String period);
+
+    /**
+     * 批量查询锁定期间集合（列表行级锁定标记用）。
+     *
+     * @param periods 归属期间集合（yyyy-MM）
+     * @return 其中处于 SUBMITTED/APPROVED 状态的期间
+     */
+    Set<String> lockedPeriods(Collection<String> periods);
 }

@@ -30,9 +30,11 @@ import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -198,6 +200,33 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
         AttendanceApproval entity = selectByPeriod(period);
         dto.setStatus(entity == null ? null : entity.getStatus());
         return dto;
+    }
+
+    // ==================== 期间锁定（提交后禁止手工改数） ====================
+
+    @Override
+    public boolean isPeriodLocked(String period) {
+        if (StringUtils.isBlank(period)) {
+            return false;
+        }
+        AttendanceApproval entity = selectByPeriod(period.trim());
+        return entity != null
+            && (AttendanceApproval.STATUS_SUBMITTED.equals(entity.getStatus())
+                || AttendanceApproval.STATUS_APPROVED.equals(entity.getStatus()));
+    }
+
+    @Override
+    public Set<String> lockedPeriods(Collection<String> periods) {
+        if (periods == null || periods.isEmpty()) {
+            return Set.of();
+        }
+        return approvalMapper.selectList(new LambdaQueryWrapper<AttendanceApproval>()
+                .in(AttendanceApproval::getPeriod, periods)
+                .in(AttendanceApproval::getStatus, List.of(
+                    AttendanceApproval.STATUS_SUBMITTED, AttendanceApproval.STATUS_APPROVED)))
+            .stream()
+            .map(AttendanceApproval::getPeriod)
+            .collect(Collectors.toSet());
     }
 
     // ==================== 内部方法 ====================

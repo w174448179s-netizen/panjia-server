@@ -75,4 +75,7 @@ public class AttendanceVO implements Serializable {
 
     /** 部门全路径名 */
     private String deptName;
+
+    /** 该月考勤是否锁定（审批 SUBMITTED/APPROVED 期间，禁止手工增删改） */
+    private Boolean locked;
 }

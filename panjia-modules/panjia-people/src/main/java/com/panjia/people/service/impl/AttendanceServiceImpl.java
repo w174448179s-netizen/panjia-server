@@ -114,6 +114,7 @@ public class AttendanceServiceImpl implements AttendanceService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long create(AttendanceSaveDTO dto) {
+        assertNotLocked(monthPeriod(dto.getAttendMonth()));
         Employee employee = employeeMapper.selectById(dto.getEmployeeId());
         if (employee == null) {
             throw new ServiceException("员工不存在，employeeId={}", dto.getEmployeeId());
@@ -142,6 +143,9 @@ public class AttendanceServiceImpl implements AttendanceService {
         if (record == null) {
             throw new ServiceException("考勤记录不存在，id={}", id);
         }
+        // 月份允许变更，但原月与目标月任一锁定都拒绝（提交后数据不可动）
+        assertNotLocked(monthPeriod(record.getAttendMonth()));
+        assertNotLocked(monthPeriod(dto.getAttendMonth()));
         // 员工归属不允许通过编辑修改；月份变更仍需避开同人同月冲突
         if (!Objects.equals(record.getEmployeeId(), dto.getEmployeeId())) {
             throw new ServiceException("不允许修改考勤记录的员工归属");
@@ -169,6 +173,16 @@ public class AttendanceServiceImpl implements AttendanceService {
     public void deleteByIds(Collection<Long> ids) {
         if (ids == null || ids.isEmpty()) {
             return;
+        }
+        Set<String> months = attendanceMapper.selectByIds(ids).stream()
+            .map(AttendanceRecord::getAttendMonth)
+            .filter(Objects::nonNull)
+            .map(this::monthPeriod)
+            .collect(Collectors.toSet());
+        Set<String> locked = approvalService.lockedPeriods(months);
+        if (!locked.isEmpty()) {
+            throw new ServiceException("期间 {} 考勤已提交审批（或已通过），不能删除明细；如需调整请先撤销/驳回审批",
+                String.join("、", locked.stream().sorted().toList()));
         }
         attendanceMapper.deleteByIds(ids);
     }
@@ -374,6 +388,18 @@ public class AttendanceServiceImpl implements AttendanceService {
         }
     }
 
+    /** LocalDate → 期间（yyyy-MM，审批/锁定口径） */
+    private String monthPeriod(LocalDate month) {
+        return month == null ? null : month.toString().substring(0, 7);
+    }
+
+    /** 期间锁定校验：审批 SUBMITTED/APPROVED 期间禁止手工增删改考勤明细 */
+    private void assertNotLocked(String period) {
+        if (StringUtils.isNotBlank(period) && approvalService.isPeriodLocked(period)) {
+            throw new ServiceException("期间 {} 考勤已提交审批（或已通过），不能修改明细；如需调整请先撤销/驳回审批", period);
+        }
+    }
+
     private AttendanceVO toVO(AttendanceRecord record) {
         AttendanceVO vo = new AttendanceVO();
         BeanUtil.copyProperties(record, vo);
@@ -399,6 +425,11 @@ public class AttendanceServiceImpl implements AttendanceService {
             .filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, String> deptNames = deptIds.isEmpty() ? Map.of() : deptPort.findDeptFullNames(deptIds);
 
+        // 行级锁定标记：命中锁定期间（SUBMITTED/APPROVED）的行前端隐藏修改/删除按钮
+        Set<String> months = vos.stream().map(AttendanceVO::getAttendMonth)
+            .filter(Objects::nonNull).map(this::monthPeriod).collect(Collectors.toSet());
+        Set<String> lockedPeriods = approvalService.lockedPeriods(months);
+
         for (AttendanceVO vo : vos) {
             Employee employee = employeeMap.get(vo.getEmployeeId());
             if (employee != null) {
@@ -409,6 +440,7 @@ public class AttendanceServiceImpl implements AttendanceService {
                     vo.setDeptName(deptNames.get(employee.getDeptId()));
                 }
             }
+            vo.setLocked(lockedPeriods.contains(monthPeriod(vo.getAttendMonth())));
         }
     }
 }
