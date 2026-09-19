@@ -36,8 +36,7 @@ public class AttendanceApprovalController extends BaseController {
 
     private final AttendanceApprovalService approvalService;
 
-    /** 查询期间审批状态 */
-    @SaCheckPermission("people:attendance:list")
+    /** 查询期间审批状态（仅登录校验：算薪操作员可能无考勤明细权限，用于创建批次前的无考勤确认） */
     @GetMapping("/{period}")
     public R<AttendanceApprovalVO> getByPeriod(@PathVariable String period) {
         return R.ok(approvalService.getByPeriod(period));

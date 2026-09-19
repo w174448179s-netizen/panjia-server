@@ -62,7 +62,10 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
 
     @Override
     public AttendanceApprovalVO getByPeriod(String period) {
-        return toVo(selectByPeriod(period), period);
+        AttendanceApprovalVO vo = toVo(selectByPeriod(period), period);
+        // 该月是否有考勤数据（算薪页创建批次前用于「无考勤确认」提示）
+        vo.setDataExists(countByPeriod(period) > 0);
+        return vo;
     }
 
     @Override

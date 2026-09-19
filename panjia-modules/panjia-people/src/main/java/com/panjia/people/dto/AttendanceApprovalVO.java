@@ -25,6 +25,9 @@ public class AttendanceApprovalVO implements Serializable {
     /** 审批状态：DRAFT/SUBMITTED/APPROVED/REJECTED；无审批单为 null（未提交） */
     private String status;
 
+    /** 该月是否有考勤记录（false = 无考勤，算薪扣款将为 0，创建批次前需人工确认） */
+    private Boolean dataExists;
+
     /** 提交人用户ID */
     private Long submitBy;
 
