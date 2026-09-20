@@ -42,6 +42,8 @@ public class SalaryCalculationEngine {
         public Map<Long, List<CommissionItemDTO>> newsignByEmp;
         /** deptId -> 门店新签计薪业绩合计（已折算） */
         public Map<Long, BigDecimal> deptNewSignTotal;
+        /** deptId -> 门店社保业绩扣款（门店全员公司承担社保合计，店长/总监提成计薪基数扣减项） */
+        public Map<Long, BigDecimal> deptEmployerSocialTotal;
         /** 规则快照 */
         public RuleService.ParsedSnapshot snapshot;
         /** employeeId -> 手工收入（奖金+其他收入） */
@@ -68,6 +70,10 @@ public class SalaryCalculationEngine {
         public Map<Long, Integer> qualifiedApprenticeCount;
         /** employeeId -> 徒弟结佣合计（店长/总监招聘奖励用） */
         public Map<Long, BigDecimal> apprenticeCommission;
+        /** employeeId -> 总监管辖门店 deptId 列表（含自身及子孙，总监多门店按门店分别跳点算提成） */
+        public Map<Long, List<Long>> directorStoreDepts;
+        /** deptId -> 部门展示名（总监门店提成明细 deptName 用） */
+        public Map<Long, String> deptNames;
     }
 
     /**
@@ -150,13 +156,18 @@ public class SalaryCalculationEngine {
             d.setManualAdjust(MoneyUtil.round6(manualAdjust));
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
-            // 结佣业绩（不折算）：设计文档 P5 / S-14 / P15 —— 结佣是贝壳实收到手值，
-            // 折算只作用于新签（一手房 ×0.9024、其他 ×0.96），结佣原样取用。
-            BigDecimal commissionPerf = sumAmount(input.lockedByEmp.get(emp.getEmployeeId()));
+            // 结佣业绩（折算后）：按 bizType 应用折算因子（一手房 ×0.9024、其他 ×0.96），
+            // 与新签同口径，提成基于折算后金额计算。
+            BigDecimal commissionPerf = applyConversion(input.lockedByEmp.get(emp.getEmployeeId()), snap);
             BigDecimal commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
             d.setCommissionIncome(commissionIncome);
-            // 落地结佣业绩（导出展示，避免前端反推误差）
+            // 落地结佣业绩（折算后，导出展示，避免前端反推误差）
             d.setCommissionPerformance(MoneyUtil.round2(commissionPerf));
+
+            // 落地：当月新签业绩（折算后）+ 新签提成比例（baseRate，所有角色通用）
+            BigDecimal personalNewsignPerfCommon = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
+            d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerfCommon));
+            d.setNewSignRate(baseRate);
 
             // 招聘奖励（店长/总监 = 徒弟结佣 × 2%）
             BigDecimal mentorBonus = BigDecimal.ZERO;
@@ -175,20 +186,34 @@ public class SalaryCalculationEngine {
             BigDecimal guaranteeFill = BigDecimal.ZERO;
 
             if (role == EmployeeRole.MANAGER) {
-                // 团队提成 = 门店新签合计 × 10%
+                // 店长结佣提成使用 personalRate（70%），而非 baseRate（30%）
+                BigDecimal personalRate = bd(rank.path("personalRate").asText("0.70"));
+                finalRate = personalRate.add(perfDeduct).add(mentorAdd).add(manualAdjust);
+                if (finalRate.compareTo(BigDecimal.ZERO) < 0) {
+                    finalRate = BigDecimal.ZERO;
+                }
+                d.setFinalRate(MoneyUtil.round6(finalRate));
+                d.setNewSignRate(personalRate);
+                // 重算结佣提成（用 personalRate 口径的 finalRate）
+                commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
+                d.setCommissionIncome(commissionIncome);
+
+                // 团队提成 = (门店新签合计 - 门店社保业绩扣款) × teamRate
+                // 社保业绩扣款 = 门店全员公司承担社保合计（对齐天街工资表 2026.08 列结构）
                 BigDecimal teamRate = bd(rank.path("teamRate").asText("0.10"));
                 BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
-                teamIncome = MoneyUtil.round2(deptTotal.multiply(teamRate));
+                BigDecimal deptSocial = input.deptEmployerSocialTotal == null
+                    ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
+                BigDecimal billableBase = deptTotal.subtract(deptSocial);
+                teamIncome = MoneyUtil.round2(billableBase.multiply(teamRate));
                 d.setTeamIncome(teamIncome);
 
-                // 个人新签提成 = 个人新签业绩 × 职级 personalRate → 递延
-                BigDecimal personalRate = bd(rank.path("personalRate").asText("0.70"));
-                BigDecimal personalNewsignPerf = sumAmount(input.newsignByEmp.get(emp.getEmployeeId()));
+                // 个人新签提成 = 个人新签业绩（折算后）× 职级 personalRate → 递延
+                BigDecimal personalNewsignPerf = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
                 personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(personalRate));
                 d.setPersonalNewsignIncome(personalNewsign);
-                // 落地：当月新签业绩 + 提成比例（导出展示用）
+                // 落地：当月新签业绩（折算后）
                 d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerf));
-                d.setNewSignRate(personalRate);
 
                 // 保底补足 = MAX(min, team+ps) - ps - team
                 BigDecimal minSalary = bd(rank.path("minSalary").asText("0"));
@@ -200,17 +225,64 @@ public class SalaryCalculationEngine {
                 }
                 d.setGuaranteeFill(guaranteeFill);
 
+                // 落地：店长 sheet 展示字段（门店新签/社保业绩扣款/团队提成比例/保底）
+                d.setDeptNewSignTotal(MoneyUtil.round2(deptTotal));
+                d.setDeptEmployerSocialTotal(MoneyUtil.round2(deptSocial));
+                d.setTeamRate(teamRate);
+                d.setMinSalary(minSalary);
+
             } else if (role == EmployeeRole.DIRECTOR) {
                 // 底薪 6000
                 baseSalary = bd(rank.path("baseSalary").asText("6000"));
                 d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
-                // 门店提成：逐店新签 × 跳点比例（总监管多店时按店汇总）
-                storeIncome = calcDirectorStoreIncome(emp, input, rank);
+                // 总监多门店：遍历管辖门店，各门店独立按合计跳点算提成，汇总 storeIncome。
+                // 对齐天街工资表总监 sheet（每门店一行：新签/社保/合计/跳点/提成金额，
+                // 提成金额汇总到第一行发工资）。
+                List<Long> managedDepts;
+                if (input.directorStoreDepts != null && input.directorStoreDepts.containsKey(emp.getEmployeeId())) {
+                    managedDepts = input.directorStoreDepts.get(emp.getEmployeeId());
+                } else {
+                    // 兼容：未传管辖列表时按单门店 emp.getDeptId() 处理（保留旧测试口径）
+                    managedDepts = emp.getDeptId() == null ? List.of() : List.of(emp.getDeptId());
+                }
+                JsonNode brackets = rank.path("ruleContent").path("brackets");
+                BigDecimal sumNewSign = BigDecimal.ZERO;
+                BigDecimal sumSocial = BigDecimal.ZERO;
+                BigDecimal sumIncome = BigDecimal.ZERO;
+                List<DirectorStoreItem> storeItems = new ArrayList<>();
+                for (Long deptId : managedDepts) {
+                    BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(deptId, BigDecimal.ZERO);
+                    BigDecimal deptSocial = input.deptEmployerSocialTotal == null
+                        ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(deptId, BigDecimal.ZERO);
+                    if (deptTotal.signum() == 0 && deptSocial.signum() == 0) continue;
+                    BigDecimal billable = deptTotal.subtract(deptSocial);
+                    BigDecimal dirRate = BigDecimal.ZERO;
+                    if (brackets.isArray()) {
+                        for (JsonNode b : brackets) {
+                            BigDecimal min = bd(b.path("min").asText("0"));
+                            if (billable.compareTo(min) >= 0) {
+                                dirRate = bd(b.path("rate").asText("0"));
+                            }
+                        }
+                    }
+                    BigDecimal income = MoneyUtil.round2(billable.multiply(dirRate));
+                    sumNewSign = sumNewSign.add(deptTotal);
+                    sumSocial = sumSocial.add(deptSocial);
+                    sumIncome = sumIncome.add(income);
+                    String deptName = input.deptNames == null ? null : input.deptNames.get(deptId);
+                    storeItems.add(new DirectorStoreItem(deptId, deptName, deptTotal, deptSocial, billable, dirRate, income));
+                }
+                storeIncome = MoneyUtil.round2(sumIncome);
                 d.setStoreIncome(storeIncome);
-                // 总监无个人新签业绩，落地 0
                 d.setNewSignPerformance(BigDecimal.ZERO);
                 d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
+                // 落地：汇总值（一行展示）+ JSON 明细（导出按门店分行）
+                d.setDeptNewSignTotal(MoneyUtil.round2(sumNewSign));
+                d.setDeptEmployerSocialTotal(MoneyUtil.round2(sumSocial));
+                d.setStoreRate(BigDecimal.ZERO);
+                d.setFullAttendance(bd(snap.policy().path("fullAttendance").asText("500")));
+                d.setDirectorStoreItems(storeItems.isEmpty() ? null : writeStoreItemsJson(storeItems));
             } else {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
                 baseSalary = bd(rank.path("baseSalary").asText("0"));
@@ -225,9 +297,20 @@ public class SalaryCalculationEngine {
             d.setBonus(MoneyUtil.round2(bonus));
             d.setOtherIncome(BigDecimal.ZERO);
 
-            // 应发 = 提成 + 团队 + 保底 + 门店 + 底薪 + 招聘奖励 + 奖金（不含个人新签递延）
+            // 应发 = 提成 + 团队 + 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 全勤奖（不含个人新签递延）
+            BigDecimal fullAttendance = d.getFullAttendance() == null
+                ? BigDecimal.ZERO : d.getFullAttendance();
             BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
-                .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus);
+                .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus).add(fullAttendance);
+            // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
+            if (role == EmployeeRole.MANAGER && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
+                // 保底场景 gross = commissionIncome + teamIncome + guaranteeFill，应等于 minSalary + commissionIncome
+                BigDecimal expectedFloor = minSal.add(commissionIncome);
+                if (gross.compareTo(expectedFloor) < 0) {
+                    gross = expectedFloor;
+                }
+            }
             d.setGross(MoneyUtil.round2(gross));
 
             // ==================== 支出项 ====================
@@ -380,6 +463,37 @@ public class SalaryCalculationEngine {
         }
     }
 
+    private String writeStoreItemsJson(List<DirectorStoreItem> items) {
+        try {
+            return ADJUST_JSON.writeValueAsString(items);
+        } catch (Exception e) {
+            log.warn("总监门店提成明细JSON序列化失败", e);
+            return null;
+        }
+    }
+
+    /** 总监各门店提成明细（引擎内部类型，序列化为 PayrollDetail.directorStoreItems JSON） */
+    public static class DirectorStoreItem {
+        public Long deptId;
+        public String deptName;
+        public BigDecimal newSign;
+        public BigDecimal social;
+        public BigDecimal billable;
+        public BigDecimal rate;
+        public BigDecimal income;
+        public DirectorStoreItem() {}
+        public DirectorStoreItem(Long deptId, String deptName, BigDecimal newSign, BigDecimal social,
+                                 BigDecimal billable, BigDecimal rate, BigDecimal income) {
+            this.deptId = deptId;
+            this.deptName = deptName;
+            this.newSign = newSign;
+            this.social = social;
+            this.billable = billable;
+            this.rate = rate;
+            this.income = income;
+        }
+    }
+
     private EmployeeRole resolveRole(EmployeeSnapshot emp) {
         String pos = emp.getPosition();
         if (pos != null) {
@@ -398,24 +512,6 @@ public class SalaryCalculationEngine {
         JsonNode points = snap.policy().path("points");
         String key = "deduct" + grade;
         return bd(points.path(key).asText("0"));
-    }
-
-    private BigDecimal calcDirectorStoreIncome(EmployeeSnapshot director, CalcInput input, JsonNode rank) {
-        // 简化：总监按所管门店新签合计套用跳点档位
-        // 实际应逐店算后汇总；此处用 director dept 的新签合计
-        BigDecimal total = input.deptNewSignTotal.getOrDefault(director.getDeptId(), BigDecimal.ZERO);
-        JsonNode brackets = rank.path("ruleContent").path("brackets");
-        if (!brackets.isArray() || brackets.isEmpty()) {
-            return BigDecimal.ZERO;
-        }
-        BigDecimal rate = BigDecimal.ZERO;
-        for (JsonNode b : brackets) {
-            BigDecimal min = bd(b.path("min").asText("0"));
-            if (total.compareTo(min) >= 0) {
-                rate = bd(b.path("rate").asText("0"));
-            }
-        }
-        return MoneyUtil.round2(total.multiply(rate));
     }
 
     private BigDecimal calcTax(EmployeeSnapshot emp, BigDecimal netBeforeTax, CalcInput input, RuleService.ParsedSnapshot snap) {
@@ -460,24 +556,12 @@ public class SalaryCalculationEngine {
         return monthlyTax;
     }
 
-    private BigDecimal sumAmount(List<CommissionItemDTO> items) {
-        if (items == null) return BigDecimal.ZERO;
-        BigDecimal sum = BigDecimal.ZERO;
-        for (CommissionItemDTO it : items) {
-            if (it.getAmount() != null) {
-                sum = sum.add(it.getAmount());
-            }
-        }
-        return sum;
-    }
-
     /**
      * 按每条明细的 bizType 应用快照中的折算因子，汇总折算后金额。
      * <p>
-     * ⚠ 仅用于「新签业绩」口径。结佣业绩<b>不得</b>调用本方法：设计文档 P5 / S-14 / P15
-     * 明文规定「折算只作用于新签，结佣不折」（结佣是贝壳实收到手值），
-     * 契约测试 {@code SalaryCalculationEngineTest#testConversionOnlyNewSign} 断言
-     * 「结佣 100,000 → 计薪业绩仍 100,000」。保留此方法供后续新签口径调用。
+     * 新签业绩与结佣业绩均调用本方法折算（一手房 ×0.9024、其他 ×0.96），
+     * 口径统一：提成与落地业绩都基于折算后金额。
+     * 契约测试 {@link SalaryCalculationEngineTest#testConversionAppliesToAll} 断言此口径。
      */
     private BigDecimal applyConversion(List<CommissionItemDTO> items, RuleService.ParsedSnapshot snapshot) {
         if (items == null) return BigDecimal.ZERO;
@@ -490,8 +574,33 @@ public class SalaryCalculationEngine {
         return sum;
     }
 
-    private BigDecimal bd(String s) {
+    private static BigDecimal bd(String s) {
         if (s == null || s.isBlank()) return BigDecimal.ZERO;
         return new BigDecimal(s);
+    }
+
+    /**
+     * 计算员工公司承担社保金额（employerSocial），用于门店级聚合 deptEmployerSocialTotal。
+     * 与引擎内 socialFee/employerSocial 计算同口径（L243-260 现有逻辑的复用版本），
+     * 供 {@link PayrollBatchService#buildCalcInput} 在引擎外预聚合门店社保业绩扣款使用。
+     * <p>
+     * 口径：兼职或不参保返回 0；员工级自定义 socialFee 优先，否则走 socialFixedFee / socialRatio。
+     */
+    static BigDecimal calcEmployerSocial(EmployeeSnapshot emp, RuleService.ParsedSnapshot snap) {
+        if (Boolean.TRUE.equals(emp.getIsPartTime()) || !Boolean.TRUE.equals(emp.getSocialInsured())) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal baseSocial = bd(snap.policy().path("baseSocial").asText("1637.15"));
+        if (emp.getSocialFee() != null) {
+            return baseSocial.subtract(emp.getSocialFee()).max(BigDecimal.ZERO);
+        }
+        JsonNode policy = snap.policy();
+        String level = emp.getLevelCode() == null ? "A0" : emp.getLevelCode();
+        if (policy.path("socialFixedFee").has(level)) {
+            BigDecimal sf = bd(policy.path("socialFixedFee").path(level).asText("0"));
+            return baseSocial.subtract(sf).max(BigDecimal.ZERO);
+        }
+        BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
+        return baseSocial.multiply(BigDecimal.ONE.subtract(ratio));
     }
 }

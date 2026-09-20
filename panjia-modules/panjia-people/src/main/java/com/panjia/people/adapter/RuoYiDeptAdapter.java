@@ -174,6 +174,17 @@ public class RuoYiDeptAdapter implements DeptPort {
     }
 
     @Override
+    public List<Long> findDirectChildIds(Long deptId) {
+        if (deptId == null) {
+            return List.of();
+        }
+        List<SysDept> children = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .select(SysDept::getDeptId)
+            .eq(SysDept::getParentId, deptId));
+        return children.stream().map(SysDept::getDeptId).toList();
+    }
+
+    @Override
     public List<DeptNode> listDeptTree() {
         Long rootId = peopleProperties.getRootDeptId();
         SysDept root = sysDeptMapper.selectById(rootId);

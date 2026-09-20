@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -99,14 +100,15 @@ class SalaryCalculationEngineTest {
         List<PayrollDetail> details = engine.calculate(input);
         assertEquals(1, details.size());
         PayrollDetail d = details.get(0);
-        assertEquals(0, new BigDecimal("60000.00").compareTo(d.getCommissionIncome()));
+        // 结佣折算后：100000 × 0.96 × 60% = 57600
+        assertEquals(0, new BigDecimal("57600.00").compareTo(d.getCommissionIncome()));
         assertEquals(0, BigDecimal.ZERO.compareTo(d.getBaseSalary()));
         // 社保 A2: 1637.15 × 60% = 982.29
         assertEquals(0, new BigDecimal("982.29").compareTo(d.getSocialFee()));
         // 公司社保: 1637.15 × 40% = 654.86
         assertEquals(0, new BigDecimal("654.86").compareTo(d.getEmployerSocial()));
-        // 应发 = 60000
-        assertEquals(0, new BigDecimal("60000.00").compareTo(d.getGross()));
+        // 应发 = 57600
+        assertEquals(0, new BigDecimal("57600.00").compareTo(d.getGross()));
         assertTrue(d.getNet().compareTo(BigDecimal.ZERO) > 0);
     }
 
@@ -133,11 +135,13 @@ class SalaryCalculationEngineTest {
         input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
+        // 店长 finalRate = personalRate 0.70（非 baseRate 0.30）
+        assertEquals(0, new BigDecimal("0.70").compareTo(d.getFinalRate()));
         // 团队提成 = 90000 × 10% = 9000
         assertEquals(0, new BigDecimal("9000.00").compareTo(d.getTeamIncome()));
-        // 个人新签 = 3000 × 70% = 2100（递延，不进 gross）
-        assertEquals(0, new BigDecimal("2100.00").compareTo(d.getPersonalNewsignIncome()));
-        // 保底补足 = MAX(8000, 9000+2100) - 2100 - 9000 = 11100 - 11100 = 0
+        // 个人新签折算后：3000 × 0.96 × 70% = 2016（递延，不进 gross）
+        assertEquals(0, new BigDecimal("2016.00").compareTo(d.getPersonalNewsignIncome()));
+        // 保底补足 = MAX(8000, 9000+2016) - 2016 - 9000 = 11016 - 11016 = 0
         assertEquals(0, BigDecimal.ZERO.compareTo(d.getGuaranteeFill()));
         // 应发 = 团队 + 保底 = 9000 + 0 = 9000
         assertEquals(0, new BigDecimal("9000.00").compareTo(d.getGross()));
@@ -164,22 +168,53 @@ class SalaryCalculationEngineTest {
         input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
-        // 团队 = 2000, 个人新签递延 = 700
+        // 团队 = 2000, 个人新签折算后递延 = 1000×0.96×70% = 672
         assertEquals(0, new BigDecimal("2000.00").compareTo(d.getTeamIncome()));
-        assertEquals(0, new BigDecimal("700.00").compareTo(d.getPersonalNewsignIncome()));
-        // 保底补足 = MAX(8000, 2000+700) - 700 - 2000 = 8000 - 2700 = 5300
-        assertEquals(0, new BigDecimal("5300.00").compareTo(d.getGuaranteeFill()));
-        // 应发 = 2000 + 5300 = 7300
-        assertEquals(0, new BigDecimal("7300.00").compareTo(d.getGross()));
+        assertEquals(0, new BigDecimal("672.00").compareTo(d.getPersonalNewsignIncome()));
+        // 保底补足 = MAX(8000, 2000+672) - 672 - 2000 = 8000 - 2672 = 5328
+        assertEquals(0, new BigDecimal("5328.00").compareTo(d.getGuaranteeFill()));
+        // 应发 = 2000 + 5328 = 7328
+        assertEquals(0, new BigDecimal("7328.00").compareTo(d.getGross()));
     }
 
-    /** S-14: 折算只作用于新签 — 一手房新签 100000 → 计薪 90240；结佣 100000 不折算 */
+    /** S-19: 店长结佣提成用 personalRate 70% — 结佣 100000 × 0.96 × 70% = 67200 */
     @Test
-    void testConversionOnlyNewSign() {
+    void testManagerCommissionUsesPersonalRate() {
+        EmployeeSnapshot mgr = emp("M020", "S1", "店长");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(mgr);
+        // 店长本人有结佣 100000（SECOND_HAND 折算 0.96）
+        input.lockedByEmp = Map.of(mgr.getEmployeeId(),
+            List.of(item(mgr.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND")));
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
+        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // finalRate = personalRate 0.70（非 baseRate 0.30）
+        assertEquals(0, new BigDecimal("0.70").compareTo(d.getFinalRate()));
+        // 结佣业绩折算后 = 100000 × 0.96 = 96000
+        assertEquals(0, new BigDecimal("96000.00").compareTo(d.getCommissionPerformance()));
+        // 提成金额 = 96000 × 70% = 67200
+        assertEquals(0, new BigDecimal("67200.00").compareTo(d.getCommissionIncome()));
+    }
+
+    /** S-14: 折算作用于新签和结佣 — 一手房结佣 100000 → 折算 90240 × 60% = 54144 */
+    @Test
+    void testConversionAppliesToAll() {
         EmployeeSnapshot e = emp("A2002", "A2", "经纪人");
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = List.of(e);
-        // 结佣 100000 不折算
+        // 结佣 100000（FIRST_HAND）折算后 90240
         input.lockedByEmp = Map.of(e.getEmployeeId(), List.of(item(e.getEmployeeId(), new BigDecimal("100000"), "FIRST_HAND")));
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = new HashMap<>();
@@ -195,8 +230,10 @@ class SalaryCalculationEngineTest {
         input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
-        // 结佣不折算：100000 × 60% = 60000
-        assertEquals(0, new BigDecimal("60000.00").compareTo(d.getCommissionIncome()));
+        // 结佣折算后：100000 × 0.9024 = 90240（落地业绩）
+        assertEquals(0, new BigDecimal("90240.00").compareTo(d.getCommissionPerformance()));
+        // 提成 = 90240 × 60% = 54144
+        assertEquals(0, new BigDecimal("54144.00").compareTo(d.getCommissionIncome()));
     }
 
     /** 总监：底薪 6000 + 门店提成（跳点） */
@@ -252,10 +289,155 @@ class SalaryCalculationEngineTest {
 
         List<PayrollDetail> details = engine.calculate(input);
         PayrollDetail d = details.get(0);
-        // finalRate = 0.60 - 0.02 = 0.58；结佣 = 100000 × 58% = 58000
+        // finalRate = 0.60 - 0.02 = 0.58；结佣折算后 100000×0.96=96000 × 58% = 55680
         assertEquals("B", d.getPerfGrade());
         assertEquals(0, new BigDecimal("0.58").compareTo(d.getFinalRate()));
-        assertEquals(0, new BigDecimal("58000.00").compareTo(d.getCommissionIncome()));
+        assertEquals(0, new BigDecimal("55680.00").compareTo(d.getCommissionIncome()));
+    }
+
+    /** S-15: 店长团队提成扣减门店社保业绩 — (deptNewSign - deptEmployerSocial) × teamRate */
+    @Test
+    void testManagerTeamIncomeDeductsEmployerSocial() {
+        EmployeeSnapshot mgr = emp("M010", "S1", "店长");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(mgr);
+        input.lockedByEmp = Map.of(mgr.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        // 门店新签 90000，门店社保业绩扣款 1000（模拟 2 员工各 employerSocial 500 聚合）
+        input.deptNewSignTotal = Map.of(1L, new BigDecimal("90000"));
+        input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000"));
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
+        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // 团队提成 = (90000 - 1000) × 10% = 8900
+        assertEquals(0, new BigDecimal("8900.00").compareTo(d.getTeamIncome()));
+        // 落地字段对齐天街工资表店长 sheet
+        assertEquals(0, new BigDecimal("90000.00").compareTo(d.getDeptNewSignTotal()));
+        assertEquals(0, new BigDecimal("1000.00").compareTo(d.getDeptEmployerSocialTotal()));
+        assertEquals(0, new BigDecimal("0.10").compareTo(d.getTeamRate()));
+        assertEquals(0, new BigDecimal("8000.00").compareTo(d.getMinSalary()));
+    }
+
+    /** S-16: 总监门店提成扣减门店社保业绩 — (deptNewSign - deptEmployerSocial) × 跳点档 rate */
+    @Test
+    void testDirectorStoreIncomeDeductsEmployerSocial() {
+        EmployeeSnapshot dir = emp("D010", "D", "总监");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(dir);
+        input.lockedByEmp = Map.of(dir.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        // 门店新签 120000，门店社保业绩扣款 1000 → 计薪基数 119000 ≥ 100000 → 7%
+        input.deptNewSignTotal = Map.of(1L, new BigDecimal("120000"));
+        input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000"));
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
+        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // 门店提成 = (120000 - 1000) × 7% = 8330
+        assertEquals(0, new BigDecimal("8330.00").compareTo(d.getStoreIncome()));
+        // 落地字段对齐天街工资表总监 sheet
+        assertEquals(0, new BigDecimal("120000.00").compareTo(d.getDeptNewSignTotal()));
+        assertEquals(0, new BigDecimal("1000.00").compareTo(d.getDeptEmployerSocialTotal()));
+        // storeRate 固定 0（跳点档位在 directorStoreItems JSON 明细中，不落地到 storeRate）
+        assertEquals(0, BigDecimal.ZERO.compareTo(d.getStoreRate()));
+        // 全勤奖兜底 500（policy 未配 fullAttendance 时默认 500）
+        assertEquals(0, new BigDecimal("500.00").compareTo(d.getFullAttendance()));
+    }
+
+    /** S-18: 总监多门店跳点 — 3 门店各自跳点算提成，汇总 storeIncome，directorStoreItems JSON 含 3 条明细 */
+    @Test
+    void testDirectorMultiStore() {
+        EmployeeSnapshot dir = emp("D020", "D", "总监");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(dir);
+        input.lockedByEmp = Map.of(dir.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        // 3 门店新签与社保
+        input.deptNewSignTotal = new HashMap<>();
+        input.deptNewSignTotal.put(1L, new BigDecimal("120000")); // ≥10万 → 7%
+        input.deptNewSignTotal.put(2L, new BigDecimal("80000"));  // <10万 → 6%
+        input.deptNewSignTotal.put(3L, new BigDecimal("50000"));  // <10万 → 6%
+        input.deptEmployerSocialTotal = new HashMap<>();
+        input.deptEmployerSocialTotal.put(1L, new BigDecimal("1000"));
+        input.deptEmployerSocialTotal.put(2L, BigDecimal.ZERO);
+        input.deptEmployerSocialTotal.put(3L, new BigDecimal("500"));
+        // 总监管辖 3 门店
+        input.directorStoreDepts = Map.of(dir.getEmployeeId(), List.of(1L, 2L, 3L));
+        input.deptNames = Map.of(1L, "龙湖店", 2L, "云庭店", 3L, "长庆店");
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
+        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // 门店1: (120000-1000) × 7% = 8330
+        // 门店2: (80000-0) × 6% = 4800
+        // 门店3: (50000-500) × 6% = 2970
+        // 合计 = 8330 + 4800 + 2970 = 16100
+        assertEquals(0, new BigDecimal("16100.00").compareTo(d.getStoreIncome()));
+        // 汇总新签 = 250000
+        assertEquals(0, new BigDecimal("250000.00").compareTo(d.getDeptNewSignTotal()));
+        // 汇总社保 = 1500
+        assertEquals(0, new BigDecimal("1500.00").compareTo(d.getDeptEmployerSocialTotal()));
+        // 底薪 6000
+        assertEquals(0, new BigDecimal("6000.00").compareTo(d.getBaseSalary()));
+        // storeRate 固定 0（跳点档位在 JSON 明细中）
+        assertEquals(0, BigDecimal.ZERO.compareTo(d.getStoreRate()));
+        // directorStoreItems JSON 非空，含 3 条门店明细
+        assertNotNull(d.getDirectorStoreItems());
+        assertTrue(d.getDirectorStoreItems().contains("龙湖店"));
+        assertTrue(d.getDirectorStoreItems().contains("云庭店"));
+        assertTrue(d.getDirectorStoreItems().contains("长庆店"));
+        // 应发 = 底薪 + 门店提成 + 全勤 = 6000 + 16100 + 500 = 22600
+        assertEquals(0, new BigDecimal("22600.00").compareTo(d.getGross()));
+    }
+
+    /** S-17: 全勤奖默认 500 — policy 未配 fullAttendance 时兜底 500 */
+    @Test
+    void testFullAttendanceDefault500() {
+        EmployeeSnapshot dir = emp("D011", "D", "总监");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(dir);
+        input.lockedByEmp = Map.of(dir.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
+        input.snapshot = buildSnapshot();
+        input.manualIncome = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
+        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // buildSnapshot policy 无 fullAttendance → 兜底 500
+        assertEquals(0, new BigDecimal("500.00").compareTo(d.getFullAttendance()));
     }
 
     /** S-12: 考勤扣款 — 迟到×20；无底薪旷工×50；有底薪旷工按 3 倍日工资；请假=天数×leaveFee(30)；导入金额兼容叠加 */

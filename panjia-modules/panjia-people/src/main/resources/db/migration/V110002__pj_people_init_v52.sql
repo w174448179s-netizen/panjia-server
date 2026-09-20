@@ -130,7 +130,8 @@ VALUES
 (1761600000000010009, 9, 'C0', 'C0', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010010, 9, 'C1', 'C1', 'panjia_employee_level', 'default', 'N', 1761000000000000100, 1761100000000000001, now()),
 (1761600000000010011, 10, 'C2', 'C2', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now()),
-(1761600000000010012, 11, 'C3', 'C3', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now());
+(1761600000000010012, 11, 'C3', 'C3', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now()),
+(1761600000000010013, 12, 'D', 'D', 'panjia_employee_level', 'success', 'N', 1761000000000000100, 1761100000000000001, now());
 
 -- 6.3 员工状态字典（V5.2：ACTIVE/PARTTIME/LEFT/PENDING）
 INSERT INTO sys_dict_type (dict_id, dict_name, dict_type, create_dept, create_by, create_time, remark)

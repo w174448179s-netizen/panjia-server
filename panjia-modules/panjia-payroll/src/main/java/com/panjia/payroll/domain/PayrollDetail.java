@@ -65,10 +65,26 @@ public class PayrollDetail implements Serializable {
     // 业绩溯源（导出展示用，落地避免前端反推误差）
     /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */
     private BigDecimal newSignPerformance;
-    /** 当月结佣业绩（不折算，贝壳实收到手值） */
+    /** 当月结佣业绩（折算后金额，与提成同口径） */
     private BigDecimal commissionPerformance;
     /** 当月新签业绩提成比例（职级 personalRate，如 0.70） */
     private BigDecimal newSignRate;
+
+    // 店长/总监 sheet 展示字段（V160012 落地，对齐天街工资表 2026.08 列结构）
+    /** 门店当月新签计薪业绩合计（折算后，店长/总监展示用） */
+    private BigDecimal deptNewSignTotal;
+    /** 门店社保业绩扣款（门店全员公司承担社保合计，店长/总监「社保业绩扣款」列） */
+    private BigDecimal deptEmployerSocialTotal;
+    /** 店长团队提成比例（职级 teamRate，如 0.10） */
+    private BigDecimal teamRate;
+    /** 总监门店提成比例（跳点命中档 rate） */
+    private BigDecimal storeRate;
+    /** 店长保底工资（职级 minSalary，如 8000） */
+    private BigDecimal minSalary;
+    /** 总监全勤奖（policy.fullAttendance 默认 500） */
+    private BigDecimal fullAttendance;
+    /** 总监各门店提成明细 JSON（deptId/newSign/social/billable/rate/income，导出按门店分行对齐天街工资表） */
+    private String directorStoreItems;
 
     // 溯源
     private BigDecimal finalRate;

@@ -350,7 +350,17 @@ public class EmployeeServiceImpl implements EmployeeService {
         if (emp == null) {
             return null;
         }
-        return assembleSnapshot(emp, getSnapshotAt(employeeId, pointInMonth), monthEnd(pointInMonth));
+        com.panjia.contracts.snapshot.EmployeeSnapshot snap =
+            assembleSnapshot(emp, getSnapshotAt(employeeId, pointInMonth), monthEnd(pointInMonth));
+        // 填充 position（sys_user_post → sys_post.post_name）供角色判定
+        if (emp.getUserId() != null) {
+            Map<Long, List<String>> postNameMap = accountPort.findPostNamesByUserIds(List.of(emp.getUserId()));
+            List<String> names = postNameMap.get(emp.getUserId());
+            if (names != null && !names.isEmpty()) {
+                snap.setPosition(names.get(0));
+            }
+        }
+        return snap;
     }
 
     @Override
@@ -363,9 +373,22 @@ public class EmployeeServiceImpl implements EmployeeService {
         Map<Long, Map<String, String>> facts = getSnapshotsAt(employeeIds, pointInMonth);
         List<Employee> employees = employeeMapper.selectList(
             new LambdaQueryWrapper<Employee>().in(Employee::getEmployeeId, employeeIds));
+        // 批量查岗位名（sys_user_post → sys_post.post_name），填充 position 供角色判定
+        List<Long> userIds = employees.stream()
+            .map(Employee::getUserId)
+            .filter(Objects::nonNull)
+            .toList();
+        Map<Long, List<String>> postNameMap = userIds.isEmpty()
+            ? Map.of() : accountPort.findPostNamesByUserIds(userIds);
         Map<Long, com.panjia.contracts.snapshot.EmployeeSnapshot> result = new LinkedHashMap<>();
         for (Employee emp : employees) {
-            result.put(emp.getEmployeeId(), assembleSnapshot(emp, facts.get(emp.getEmployeeId()), point));
+            com.panjia.contracts.snapshot.EmployeeSnapshot snap =
+                assembleSnapshot(emp, facts.get(emp.getEmployeeId()), point);
+            List<String> names = emp.getUserId() == null ? null : postNameMap.get(emp.getUserId());
+            if (names != null && !names.isEmpty()) {
+                snap.setPosition(names.get(0));
+            }
+            result.put(emp.getEmployeeId(), snap);
         }
         return result;
     }
@@ -379,10 +402,46 @@ public class EmployeeServiceImpl implements EmployeeService {
             List.copyOf(levelCodes), FactType.LEVEL, monthEnd(pointInMonth));
     }
 
+    @Override
+    public Map<Long, List<Long>> findDeptAndChildren(Collection<Long> deptIds) {
+        if (deptIds == null || deptIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<Long>> result = new LinkedHashMap<>();
+        for (Long deptId : deptIds) {
+            if (deptId == null) continue;
+            List<Long> ids = deptPort.findDeptAndChildIds(deptId);
+            result.put(deptId, ids != null ? ids : new ArrayList<>());
+        }
+        return result;
+    }
+
+    @Override
+    public Map<Long, List<Long>> findDirectChildren(Collection<Long> deptIds) {
+        if (deptIds == null || deptIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<Long>> result = new LinkedHashMap<>();
+        for (Long deptId : deptIds) {
+            if (deptId == null) continue;
+            result.put(deptId, deptPort.findDirectChildIds(deptId));
+        }
+        return result;
+    }
+
+    @Override
+    public Map<Long, String> findDeptNames(Collection<Long> deptIds) {
+        if (deptIds == null || deptIds.isEmpty()) {
+            return Map.of();
+        }
+        return deptPort.findDeptFullNames(deptIds);
+    }
+
     /**
      * 组装 §10.6 强类型快照：身份取员工主数据当前行，事实取月末闭开区间切片。
      * <p>
-     * position / socialTag 当前无承载，恒 null（契约类注释已说明，待 P0 决策）。
+     * position 由调用方通过 AccountPort.findPostNamesByUserIds 查询后填充，
+     * 本方法仅组装事实层字段。
      */
     private com.panjia.contracts.snapshot.EmployeeSnapshot assembleSnapshot(
             Employee emp, Map<String, String> factValues, LocalDate point) {

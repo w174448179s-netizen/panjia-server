@@ -4,6 +4,7 @@ import com.panjia.contracts.snapshot.EmployeeSnapshot;
 
 import java.time.LocalDate;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -78,4 +79,33 @@ public interface PeopleQueryPort {
      * @return 持有这些职级事实且未离职的员工 ID
      */
     Collection<Long> findEmployeeIdsByLevels(Collection<String> levelCodes, LocalDate pointInMonth);
+
+    /**
+     * 批量取多个部门及其所有下级部门 ID（含自身，递归到叶子）。
+     * <p>算薪时总监提成按管辖门店分别跳点：总监 deptId 下所有子孙门店的新签/社保
+     * 各自独立计薪，汇总提成金额。
+     *
+     * @param deptIds 根部门 ID 集合
+     * @return deptId → 含自身及所有子孙的部门 ID 列表；入参为空返回空 Map
+     */
+    Map<Long, List<Long>> findDeptAndChildren(Collection<Long> deptIds);
+
+    /**
+     * 批量取多个部门的直接子部门 ID（仅下一层，不含自身）。
+     * <p>总监挂在大区，提成按门店级分行：取大区下直接子部门（门店），
+     * 门店下组别级数据由调用方向上汇总，避免一个门店出现多条提成行。
+     *
+     * @param deptIds 根部门 ID 集合
+     * @return deptId → 直接子部门 ID 列表；入参为空返回空 Map
+     */
+    Map<Long, List<Long>> findDirectChildren(Collection<Long> deptIds);
+
+    /**
+     * 批量取部门展示名（单层 dept_name，如"云庭店"）。
+     * <p>总监多门店提成明细导出时按门店分行展示门店名。
+     *
+     * @param deptIds 部门 ID 集合
+     * @return deptId → 部门名；入参为空返回空 Map
+     */
+    Map<Long, String> findDeptNames(Collection<Long> deptIds);
 }

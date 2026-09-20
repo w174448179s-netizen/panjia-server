@@ -46,6 +46,17 @@ public interface DeptPort {
     List<Long> findDeptAndChildIds(Long deptId);
 
     /**
+     * 取指定部门的直接子部门 ID（仅下一层，不含自身）。
+     * <p>
+     * 用于总监多门店提成：总监挂在大区，只需取大区下的门店级 deptId，
+     * 门店下组别级数据由上层 roll-up 汇总，避免一个门店出现多条提成行。
+     *
+     * @param deptId 部门 ID
+     * @return 直接子部门 ID 列表（不含自身）；deptId 为 null 返回空列表
+     */
+    List<Long> findDirectChildIds(Long deptId);
+
+    /**
      * 取客户根部门下的部门树（门店 → 组别，不含根节点本身）。
      *
      * @return 部门树节点

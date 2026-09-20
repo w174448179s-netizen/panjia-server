@@ -268,6 +268,72 @@ public class PayrollBatchService {
         }
         input.deptNewSignTotal = deptNewSign;
 
+        // 门店社保业绩扣款（门店全员公司承担社保合计，对齐天街工资表 2026.08 店长/总监 sheet 口径）
+        // 引擎店长 teamIncome、总监 storeIncome 计薪基数 = deptNewSignTotal - deptEmployerSocialTotal
+        Map<Long, BigDecimal> deptEmployerSocial = new HashMap<>();
+        for (EmployeeSnapshot es : employees) {
+            if (es.getDeptId() == null) continue;
+            BigDecimal amount = SalaryCalculationEngine.calcEmployerSocial(es, input.snapshot);
+            deptEmployerSocial.merge(es.getDeptId(), amount, BigDecimal::add);
+        }
+        input.deptEmployerSocialTotal = deptEmployerSocial;
+
+        // 总监管辖门店 deptId 列表（总监挂大区，取大区下直接子部门 = 门店级，
+        // 门店下组别级数据向上 roll-up 汇总到门店级，避免一个门店出现多条提成行）
+        Map<Long, List<Long>> directorStoreDepts = new HashMap<>();
+        Set<Long> directorDeptIds = new HashSet<>();
+        List<EmployeeSnapshot> directors = new ArrayList<>();
+        for (EmployeeSnapshot es : employees) {
+            String pos = es.getPosition();
+            String lvl = es.getLevelCode();
+            boolean isDirector = (pos != null && pos.contains("总监")) || "D".equals(lvl);
+            if (isDirector && es.getDeptId() != null) {
+                directorDeptIds.add(es.getDeptId());
+                directors.add(es);
+            }
+        }
+        if (!directorDeptIds.isEmpty()) {
+            // 取大区下直接子部门（门店级）
+            Map<Long, List<Long>> deptDirectChildren = peopleQueryPort.findDirectChildren(directorDeptIds);
+            for (EmployeeSnapshot dir : directors) {
+                Long dirDeptId = dir.getDeptId();
+                List<Long> storeDeptIds = deptDirectChildren.getOrDefault(dirDeptId, List.of());
+                // 将门店自身+其所有子组别的数据汇总写入门店级（覆盖，不跳过）
+                for (Long storeDeptId : storeDeptIds) {
+                    // 查该门店及其所有子孙组别
+                    List<Long> groupDeptIds = peopleQueryPort.findDeptAndChildren(List.of(storeDeptId))
+                        .getOrDefault(storeDeptId, List.of());
+                    BigDecimal storeNewSign = BigDecimal.ZERO;
+                    BigDecimal storeSocial = BigDecimal.ZERO;
+                    for (Long descId : groupDeptIds) {
+                        BigDecimal ns = input.deptNewSignTotal.get(descId);
+                        if (ns != null) storeNewSign = storeNewSign.add(ns);
+                        BigDecimal sc = input.deptEmployerSocialTotal.get(descId);
+                        if (sc != null) storeSocial = storeSocial.add(sc);
+                    }
+                    // 覆盖写入门店级（含门店自身+所有子组别汇总值）
+                    input.deptNewSignTotal.put(storeDeptId, storeNewSign);
+                    input.deptEmployerSocialTotal.put(storeDeptId, storeSocial);
+                }
+                directorStoreDepts.put(dir.getEmployeeId(), storeDeptIds);
+            }
+        }
+        input.directorStoreDepts = directorStoreDepts;
+
+        // 部门展示名（总监门店提成明细导出按门店分行展示门店名）
+        Set<Long> allDeptIds = new HashSet<>();
+        allDeptIds.addAll(input.deptNewSignTotal.keySet());
+        if (input.deptEmployerSocialTotal != null) {
+            allDeptIds.addAll(input.deptEmployerSocialTotal.keySet());
+        }
+        for (List<Long> children : directorStoreDepts.values()) {
+            allDeptIds.addAll(children);
+        }
+        for (EmployeeSnapshot es : employees) {
+            if (es.getDeptId() != null) allDeptIds.add(es.getDeptId());
+        }
+        input.deptNames = allDeptIds.isEmpty() ? Map.of() : peopleQueryPort.findDeptNames(allDeptIds);
+
         // 手工项
         input.manualIncome = new HashMap<>();
         input.manualDeduct = new HashMap<>();
