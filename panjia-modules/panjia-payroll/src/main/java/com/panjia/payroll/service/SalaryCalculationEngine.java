@@ -3,6 +3,7 @@ package com.panjia.payroll.service;
 import tools.jackson.databind.JsonNode;
 import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
+import com.panjia.contracts.dto.ScoreFactsDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.EmployeeRole;
 import com.panjia.payroll.domain.PayrollDetail;
@@ -58,12 +59,12 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> cumulativeTaxable;
         /** employeeId -> 本年任职月数 */
         public Map<Long, Integer> monthsEmployed;
-        /** employeeId -> 考勤月度指标（旧扁平模板导入金额 importedFee + 迟到/旷工/请假，按 policy.attendance 规则计算扣款） */
+        /** employeeId -> 考勤月度指标 - 旧扁平模板导入金额 importedFee + 迟到/旷工/请假，按 policy.attendance 规则计算扣款。
+         * 端口只装事实（AttendanceMetricsDTO），不预先按规则算扣款——与同模块 ScoreFactsDTO 同模式。 */
         public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
-        /** employeeId -> 绩效等级 A/B/C（积分表按出勤日平均积分判定；无数据默认 A 不扣点） */
-        public Map<Long, String> perfGrade;
-        /** employeeId -> 积分扣款（晚提交处罚：次数 × 5 元） */
-        public Map<Long, BigDecimal> pointsFee;
+        /** employeeId -> 绩效事实（总积分/出勤天数/晚提交次数），引擎按 policy.points 规则
+         * 派生 grade 与 pointsFee；不在端口提前算好。 */
+        public Map<Long, ScoreFactsDTO> scoreFacts;
         /** employeeId -> 提成点人工调整命中项（rate_adjust APPROVED 且区间命中，溯源写入 rate_adjust_json） */
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格徒弟数（招聘奖励加点用） */
@@ -99,8 +100,11 @@ public class SalaryCalculationEngine {
             // 基础提点
             BigDecimal baseRate = bd(rank.path("baseRate").asText("0"));
 
-            // 绩效扣点
-            String grade = input.perfGrade.getOrDefault(emp.getEmployeeId(), "A");
+            // 绩效扣点（port 只装 scoreFacts 原始事实：总积分/出勤天数/晚提交次数；
+            // grade 由本引擎按 policy.points（gradeA/gradeB）派生——
+            // 无积分数据默认 A 不扣点）
+            ScoreFactsDTO scoreFacts = input.scoreFacts == null ? null : input.scoreFacts.get(emp.getEmployeeId());
+            String grade = resolveGrade(snap, scoreFacts);
             d.setPerfGrade(grade);
             BigDecimal perfDeduct = resolvePerfDeduct(snap, grade);
             d.setPerfDeduct(MoneyUtil.round6(perfDeduct));
@@ -360,6 +364,7 @@ public class SalaryCalculationEngine {
             //            + 请假天数 × leaveFee（事假+病假合计天数 × 规则配置的每日扣款额）
             //            + 导入扣款金额（旧扁平模板 receivableAmount，兼容）
             //   日工资 = 底薪 / workDaysPerMonth（21.75）
+            // DTO 只装事实（AttendanceMetricsDTO），扣款金额由本引擎按 policy.attendance 规则计算。
             BigDecimal attendanceFee = BigDecimal.ZERO;
             AttendanceMetricsDTO att = input.attendanceMetrics == null
                 ? null : input.attendanceMetrics.get(emp.getEmployeeId());
@@ -419,10 +424,9 @@ public class SalaryCalculationEngine {
             BigDecimal negativeCarryover = input.negativeBalance.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setNegativeCarryover(MoneyUtil.round2(negativeCarryover));
 
-            // 积分扣款（积分日报晚提交处罚：晚提交次数 × 5 元/次）
-            BigDecimal pointsFee = input.pointsFee == null
-                ? BigDecimal.ZERO
-                : input.pointsFee.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            // 积分扣款（积分日报晚提交处罚：晚提交次数 × policy.points.penaltyFee 元/次）——
+            // port 只装 scoreFacts 事实，不预扣款，由本引擎按 policy 算。
+            BigDecimal pointsFee = resolvePointsFee(snap, scoreFacts);
             d.setPointsFee(MoneyUtil.round2(pointsFee));
 
             // 其他支出
@@ -512,6 +516,49 @@ public class SalaryCalculationEngine {
         JsonNode points = snap.policy().path("points");
         String key = "deduct" + grade;
         return bd(points.path(key).asText("0"));
+    }
+
+    /**
+     * 派生绩效等级（事实 → 等级）。
+     * <p>
+     * 平均积分 = totalPoints / attendDays（HALF_UP 保留 4 位）；
+     * 平均分 ≥ gradeA 阈值 → A；≥ gradeB 阈值 → B；否则 C；
+     * 无事实或出勤 0 天 → A（不扣点）。规则缺失/字段缺失时各阈值兜底默认 8/6（与
+     * 员工域 ScoreGradePolicy 一致）。
+     */
+    private String resolveGrade(RuleService.ParsedSnapshot snap, ScoreFactsDTO facts) {
+        if (facts == null) {
+            return "A";
+        }
+        BigDecimal totalPoints = facts.getTotalPoints();
+        Integer attendDays = facts.getAttendDays();
+        if (totalPoints == null || attendDays == null || attendDays <= 0) {
+            return "A";
+        }
+        BigDecimal avg = totalPoints.divide(BigDecimal.valueOf(attendDays), 4, RoundingMode.HALF_UP);
+        JsonNode points = snap.policy().path("points");
+        BigDecimal gradeAMin = bd(points.path("gradeA").asText("8"));
+        BigDecimal gradeBMin = bd(points.path("gradeB").asText("6"));
+        if (avg.compareTo(gradeAMin) >= 0) {
+            return "A";
+        }
+        return avg.compareTo(gradeBMin) >= 0 ? "B" : "C";
+    }
+
+    /**
+     * 派生积分扣款（事实 → 金额）。
+     * <p>
+     * 扣款 = 晚提交次数 × policy.points.penaltyFee（保留 2 位）；
+     * 无事实/字段缺失时为 0；规则缺失时 penaltyFee 兜底默认 5（与员工域
+     * ScoreGradePolicy.lateFeeOf 一致）。
+     */
+    private BigDecimal resolvePointsFee(RuleService.ParsedSnapshot snap, ScoreFactsDTO facts) {
+        if (facts == null || facts.getLateSubmitCount() == null || facts.getLateSubmitCount() <= 0) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal penaltyFee = bd(snap.policy().path("points").path("penaltyFee").asText("5"));
+        return penaltyFee.multiply(BigDecimal.valueOf(facts.getLateSubmitCount()))
+            .setScale(2, RoundingMode.HALF_UP);
     }
 
     private BigDecimal calcTax(EmployeeSnapshot emp, BigDecimal netBeforeTax, CalcInput input, RuleService.ParsedSnapshot snap) {

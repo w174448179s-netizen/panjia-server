@@ -52,6 +52,24 @@ class SalaryCalculationEngineTest {
         return svc.parseSnapshot(json);
     }
 
+    /** 等级 A 的 scoreFacts：totalPoints/attendDays = 200/22 ≈ 9.09 ≥ policy.points.gradeA=8 */
+    private static com.panjia.contracts.dto.ScoreFactsDTO factsA() {
+        com.panjia.contracts.dto.ScoreFactsDTO f = new com.panjia.contracts.dto.ScoreFactsDTO();
+        f.setTotalPoints(new BigDecimal("200"));
+        f.setAttendDays(22);
+        f.setLateSubmitCount(0);
+        return f;
+    }
+
+    /** 等级 B 的 scoreFacts：totalPoints/attendDays = 150/22 ≈ 6.82 ∈ [gradeB=6, gradeA=8) */
+    private static com.panjia.contracts.dto.ScoreFactsDTO factsB() {
+        com.panjia.contracts.dto.ScoreFactsDTO f = new com.panjia.contracts.dto.ScoreFactsDTO();
+        f.setTotalPoints(new BigDecimal("150"));
+        f.setAttendDays(22);
+        f.setLateSubmitCount(0);
+        return f;
+    }
+
     private EmployeeSnapshot emp(String code, String level, String position) {
         EmployeeSnapshot e = new EmployeeSnapshot();
         e.setEmployeeId(100L + code.hashCode() % 1000);
@@ -93,7 +111,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
-        input.perfGrade = Map.of(e.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(e.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -130,7 +148,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
-        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -163,7 +181,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
-        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -195,7 +213,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
-        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -225,7 +243,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
-        input.perfGrade = Map.of(e.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(e.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -253,7 +271,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
-        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -283,7 +301,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
-        input.perfGrade = Map.of(e.getEmployeeId(), "B");
+        input.scoreFacts = Map.of(e.getEmployeeId(), factsB());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -313,7 +331,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
-        input.perfGrade = Map.of(mgr.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -345,7 +363,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
-        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -388,7 +406,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
-        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -431,7 +449,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
-        input.perfGrade = Map.of(dir.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
@@ -457,7 +475,7 @@ class SalaryCalculationEngineTest {
         input.cumulativeTax = new HashMap<>();
         input.cumulativeTaxable = new HashMap<>();
         input.monthsEmployed = Map.of(a2.getEmployeeId(), 1, a0.getEmployeeId(), 1);
-        input.perfGrade = Map.of(a2.getEmployeeId(), "A", a0.getEmployeeId(), "A");
+        input.scoreFacts = Map.of(a2.getEmployeeId(), factsA(), a0.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 

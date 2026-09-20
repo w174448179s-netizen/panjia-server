@@ -4,6 +4,7 @@ import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.contracts.dto.PointsRuleDTO;
+import com.panjia.contracts.dto.ScoreFactsDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.domain.PerformanceScore;
@@ -296,45 +297,31 @@ public class ScoreServiceImpl implements ScoreService {
             scoreGradePolicy.lateFeeOf(scoreGradePolicy.currentRule(), lateSubmitCount));
     }
 
-    // ==================== 算薪绩效等级（PeopleScoreQueryPort） ====================
+    // ==================== 算薪绩效事实（PeopleScoreQueryPort） ====================
 
+    /**
+     * 仅返回原始事实（总积分/出勤天数/晚提交次数），不做等级判定、不算扣款——
+     * 由薪酬引擎按 policy.points 规则推导（参见 SalaryCalculationEngine.resolveGrade/LateFee）。
+     * 与 {@code AttendanceMetricsDTO} 同模式：port 只装事实。
+     */
     @Override
-    public Map<Long, String> scoreGrades(String period) {
+    public Map<Long, ScoreFactsDTO> scoreFacts(String period) {
         LocalDate monthStart = parseMonthStart(period);
         if (monthStart == null) {
             return Map.of();
         }
         List<PerformanceScore> rows = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
             .eq(PerformanceScore::getScoreMonth, monthStart));
-        Map<Long, String> result = new HashMap<>();
-        PointsRuleDTO rule = scoreGradePolicy.currentRule();
-        for (PerformanceScore row : rows) {
-            String grade = scoreGradePolicy.grade(rule, row.getTotalPoints(), row.getAttendDays());
-            if (row.getEmployeeId() != null && grade != null) {
-                result.put(row.getEmployeeId(), grade);
-            }
-        }
-        return result;
-    }
-
-    @Override
-    public Map<Long, BigDecimal> pointsFees(String period) {
-        LocalDate monthStart = parseMonthStart(period);
-        if (monthStart == null) {
-            return Map.of();
-        }
-        List<PerformanceScore> rows = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
-            .eq(PerformanceScore::getScoreMonth, monthStart));
-        Map<Long, BigDecimal> result = new HashMap<>();
-        PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        Map<Long, ScoreFactsDTO> result = new HashMap<>();
         for (PerformanceScore row : rows) {
             if (row.getEmployeeId() == null) {
                 continue;
             }
-            BigDecimal fee = scoreGradePolicy.lateFeeOf(rule, row.getLateSubmitCount());
-            if (fee.signum() > 0) {
-                result.merge(row.getEmployeeId(), fee, BigDecimal::add);
-            }
+            ScoreFactsDTO dto = new ScoreFactsDTO();
+            dto.setTotalPoints(row.getTotalPoints());
+            dto.setAttendDays(row.getAttendDays());
+            dto.setLateSubmitCount(row.getLateSubmitCount());
+            result.put(row.getEmployeeId(), dto);
         }
         return result;
     }

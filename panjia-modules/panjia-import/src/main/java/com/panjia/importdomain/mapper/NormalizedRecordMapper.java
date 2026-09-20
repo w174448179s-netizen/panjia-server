@@ -74,19 +74,5 @@ public interface NormalizedRecordMapper extends BaseMapper<NormalizedRecord> {
         "WHERE n.batch_id = #{batchId} " +
         "AND b.status = 3 AND b.superseded_by_batch_id IS NULL")
     long countByBatchIdActive(@Param("batchId") Long batchId);
-
-    /**
-     * 查询活跃批次的考勤（ATTENDANCE）归一化记录（含金额与 extraJson 指标）。
-     *
-     * @param period 归属期间（YYYY-MM）
-     * @return 考勤归一化记录列表（employee_id 非空）
-     */
-    @Select("SELECT n.employee_id AS employeeId, n.receivable_amount AS receivableAmount, n.extra_json AS extraJson " +
-        "FROM pj_normalized_record n " +
-        "JOIN pj_import_batch b ON n.batch_id = b.id " +
-        "WHERE n.period = #{period} " +
-        "AND n.record_type = 'ATTENDANCE' " +
-        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL " +
-        "AND n.employee_id IS NOT NULL")
-    List<NormalizedRecord> selectAttendanceByPeriod(@Param("period") String period);
 }
+

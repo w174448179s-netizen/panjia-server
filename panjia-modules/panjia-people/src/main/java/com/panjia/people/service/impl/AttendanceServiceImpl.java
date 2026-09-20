@@ -3,7 +3,9 @@ package com.panjia.people.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
+import com.panjia.contracts.port.PeopleAttendanceMetricsQueryPort;
 import com.panjia.people.domain.AttendanceRecord;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.dto.AttendanceQuery;
@@ -28,6 +30,8 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -44,7 +48,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class AttendanceServiceImpl implements AttendanceService {
+public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanceMetricsQueryPort {
 
     /** 数据来源：人工登记 */
     private static final String DATA_SOURCE_MANUAL = "MANUAL";
@@ -398,6 +402,42 @@ public class AttendanceServiceImpl implements AttendanceService {
         if (StringUtils.isNotBlank(period) && approvalService.isPeriodLocked(period)) {
             throw new ServiceException("期间 {} 考勤已提交审批（或已通过），不能修改明细；如需调整请先撤销/驳回审批", period);
         }
+    }
+
+    // ==================== 跨域查询（PeopleAttendanceMetricsQueryPort） ====================
+
+    @Override
+    public Map<Long, AttendanceMetricsDTO> sumByPeriod(String period) {
+        if (StringUtils.isBlank(period)) {
+            return Collections.emptyMap();
+        }
+        LocalDate monthStart;
+        try {
+            monthStart = LocalDate.parse(period.trim() + "-01");
+        } catch (DateTimeParseException e) {
+            log.warn("[考勤指标查询] period 格式不合法：{}", period);
+            return Collections.emptyMap();
+        }
+        List<AttendanceRecord> rows = attendanceMapper.selectList(new LambdaQueryWrapper<AttendanceRecord>()
+            .eq(AttendanceRecord::getAttendMonth, monthStart));
+        if (rows.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<Long, AttendanceMetricsDTO> result = new HashMap<>(rows.size());
+        for (AttendanceRecord r : rows) {
+            if (r.getEmployeeId() == null) {
+                continue;
+            }
+            AttendanceMetricsDTO dto = new AttendanceMetricsDTO();
+            // 考勤事实不含「导入扣款金额」：该字段语义属于月度业绩指标导入的其它扣减
+            // （如「7.1-121.31日何方方提成扣2%」），由 MonthlyMetricPort 提供。
+            dto.setImportedFee(BigDecimal.ZERO);
+            dto.setLateCount(r.getLateCount() == null ? 0 : r.getLateCount());
+            dto.setAbsentDays(r.getAbsentDays() == null ? BigDecimal.ZERO : r.getAbsentDays());
+            dto.setLeaveDays(r.getLeaveDays() == null ? BigDecimal.ZERO : r.getLeaveDays());
+            result.put(r.getEmployeeId(), dto);
+        }
+        return result;
     }
 
     private AttendanceVO toVO(AttendanceRecord record) {

@@ -1,29 +1,29 @@
 package com.panjia.contracts.port;
 
-import java.math.BigDecimal;
+import com.panjia.contracts.dto.ScoreFactsDTO;
+
 import java.util.Map;
 
 /**
- * 积分数据跨域查询端口（payroll → people）。
+ * 积分事实跨域查询端口（payroll → people）。
  * <p>
- * 算薪时按期间取员工绩效等级（A/B/C，来自积分表按「出勤日平均积分」判定），
- * 引擎按 policy.points.deduct{grade} 计算绩效扣点。
+ * 端口只装原始事实（{@link ScoreFactsDTO}），不预先按规则算绩效等级/扣款金额——
+ * 等级（A/B/C）与积分扣款（晚提交次数 × penaltyFee）由
+ * {@code SalaryCalculationEngine} 按 {@code policy.points} 规则计算，
+ * 与 {@code PeopleAttendanceMetricsQueryPort} → {@code AttendanceMetricsDTO}
+ * 「事实聚合」层模式一致。
+ *
+ * @author panjia
+ * @since 2026-09
  */
 public interface PeopleScoreQueryPort {
 
     /**
-     * 查询期间各员工绩效等级。
+     * 查询期间各员工积分事实（聚合：总分、出勤天数、晚提交次数）。
      *
      * @param period 期间 YYYY-MM
-     * @return employeeId → 等级（A/B/C）；无积分数据的员工不在 Map 中（引擎默认 A）
+     * @return employeeId → 积分事实；无积分数据的员工不在 Map 中
+     *         （引擎侧按 strategy.A 不扣点处理，见 {@code SalaryCalculationEngine}）
      */
-    Map<Long, String> scoreGrades(String period);
-
-    /**
-     * 查询期间各员工积分扣款（晚提交处罚）。
-     *
-     * @param period 期间 YYYY-MM
-     * @return employeeId → 积分扣款金额（晚提交次数 × 5 元）；无扣款的员工不在 Map 中
-     */
-    Map<Long, BigDecimal> pointsFees(String period);
+    Map<Long, ScoreFactsDTO> scoreFacts(String period);
 }

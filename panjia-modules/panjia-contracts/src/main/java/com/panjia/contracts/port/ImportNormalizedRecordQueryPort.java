@@ -1,16 +1,12 @@
 package com.panjia.contracts.port;
 
-import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import org.dromara.common.core.domain.PageResult;
-
-import java.util.Map;
 
 /**
  * 只读 import 域归一化记录的端口接口（跨域契约，panjia-contracts 叶子模块）。
  * <p>
  * 业绩域通过此端口读取 import 域归一化后的业务记录，用于生成业绩事实。
- * 薪资域通过此端口读取考勤/积分扣款数据，用于算薪。
  * 实现由 import 域（panjia-import）提供，依赖方向：payroll/performance → contracts ← import。
  * <p>
  * 业务约束：仅 {@code status='ARCHIVED' AND superseded_by_batch_id IS NULL} 的批次归一化记录可被消费；
@@ -19,6 +15,10 @@ import java.util.Map;
  * 分页参数说明：本端口位于 panjia-contracts 叶子模块，刻意不依赖 {@code ruoyi-common-mybatis}（PageQuery 来源），
  * 仅用基础 {@code int} 表达分页约束，保持 contracts 层的"零基础设施"特性。
  * 端口调用方（panjia-import / panjia-performance）应自行转换 PageQuery ↔ (pageNum, pageSize)。
+ * <p>
+ * <strong>注意：</strong>考勤数据由薪资域通过 {@link PeopleAttendanceMetricsQueryPort} 直读
+ * {@code pj_people_attendance}（员工域权威源），不再走本端口——导入归一表的考勤事实会在
+ * 人事/总监手工调整后失真。
  */
 public interface ImportNormalizedRecordQueryPort {
 
@@ -60,16 +60,4 @@ public interface ImportNormalizedRecordQueryPort {
      * @return 原始行 JSON 串；无关联原始行返回 null
      */
     String getRawJsonByRecordId(Long recordId);
-
-    /**
-     * 按期间汇总考勤指标（ATTENDANCE 记录），按员工聚合。
-     * <p>
-     * 钉钉月度汇总模板无「扣款金额」列，薪酬域需按
-     * 迟到次数/旷工天数/请假天数 + 规则配置计算扣款；
-     * 旧扁平模板的扣款金额经 {@code importedFee} 带出以兼容。
-     *
-     * @param period 归属期间（YYYY-MM）
-     * @return employeeId → 考勤指标；无数据的员工不在 Map 中
-     */
-    Map<Long, AttendanceMetricsDTO> sumAttendanceByPeriod(String period);
 }

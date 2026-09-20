@@ -7,8 +7,8 @@ import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
-import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.PeopleAttendanceApprovalQueryPort;
+import com.panjia.contracts.port.PeopleAttendanceMetricsQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeopleScoreApprovalQueryPort;
 import com.panjia.contracts.port.PeopleScoreQueryPort;
@@ -66,7 +66,10 @@ public class PayrollBatchService {
     private final PeopleQueryPort peopleQueryPort;
     private final CommissionQueryPort commissionQueryPort;
     private final PeriodCloseQueryPort periodCloseQueryPort;
-    private final ImportNormalizedRecordQueryPort importQueryPort;
+    /** 考勤月度指标取数源：取自 {@code pj_people_attendance}（员工域权威源）。
+     * 历史曾通过 {@code ImportNormalizedRecordQueryPort} 从归一表取，人事/总监手工
+     * 调整后归一表不同步导致算薪失真，现已删除该路径。 */
+    private final PeopleAttendanceMetricsQueryPort attendanceMetricsPort;
     private final RuleService ruleService;
     private final SalaryCalculationEngine engine;
     private final ManualItemService manualItemService;
@@ -347,16 +350,20 @@ public class PayrollBatchService {
             }
         });
 
-        // 考勤：月度指标（钉钉月度汇总的迟到/旷工/请假 + 旧扁平模板导入金额 importedFee），
-        // 引擎按 policy.attendance 规则计算扣款
-        input.attendanceMetrics = importQueryPort.sumAttendanceByPeriod(period);
+        // 考勤：月度指标（迟到次数/旷工天数/请假天数），引擎按 policy.attendance 规则计算扣款。
+        // 取数源：pj_people_attendance（员工域考勤明细维护的权威源，人事/总监手工调整生效）。
+        // 不能从 pj_normalized_record 取——导入归档后人事的手工修改不写回归一表，会算错。
+        // AttendanceMetricsDTO.importedFee 始终为 0：考勤事实不含「导入扣款金额」，
+        // 该字段语义属于月度业绩指标导入的其它扣减（如「7.1-121.31日何方方提成扣2%」），
+        // 待 MonthlyMetricPort 接驳后由其提供。
+        input.attendanceMetrics = attendanceMetricsPort.sumByPeriod(period);
 
-        // 绩效等级：积分表按「出勤日平均积分」判定（A/B/C），引擎按
-        // policy.points.deduct{grade} 计算绩效扣点；无积分数据的员工默认 A 不扣点
-        input.perfGrade = scoreQueryPort.scoreGrades(period);
-
-        // 积分扣款：积分日报晚提交处罚（晚提交次数 × policy.points.penaltyFee 元/次），算薪时从工资扣除
-        input.pointsFee = scoreQueryPort.pointsFees(period);
+        // 绩效事实：积分表按「出勤日平均积分」算 grade（A/B/C），按晚提交次数算扣款，
+        // 但 port 只装 ScoreFactsDTO（总积分/出勤天数/晚提交次数，等级/扣款不在
+        // port 预先算好）—— 引擎按 policy.points（gradeA/gradeB/deductA/B/C/penaltyFee）
+        // 派生等级与扣款（参见 AttendanceMetricsDTO 同模式）。
+        // 无积分数据的员工不在 Map 中，引擎默认 A 不扣点。
+        input.scoreFacts = scoreQueryPort.scoreFacts(period);
 
         // 提成点调整：APPROVED 且 start_month ≤ period ≤ end_month 的人工调整单，
         // 引擎叠加到 finalRate（另含未参保自动扣点，见引擎），溯源写入 rate_adjust_json
