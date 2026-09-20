@@ -102,6 +102,11 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
                 throw new ServiceException("重新提交失败，流程任务不存在，请联系管理员");
             }
         } else {
+            // 同一单据已有历史流程实例（已通过/已驳回且回调未回写实例ID）：
+            // 先撤销旧实例再重新发起，否则引擎按 businessId 校验报「该单据已完成申请」
+            if (approvalPort.instanceId(BizType.ATTENDANCE_APPROVAL, entity.getId()) != null) {
+                approvalPort.cancel(BizType.ATTENDANCE_APPROVAL, entity.getId());
+            }
             // 首次提交：发起流程并自动办理「提交考勤」首节点
             ApprovalStartCmd cmd = buildStartCmd(entity, operatorId);
             boolean ok;
@@ -173,17 +178,16 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
             return;
         }
         String status = entity.getStatus();
-        if (AttendanceApproval.STATUS_SUBMITTED.equals(status)) {
-            // 在途流程撤销（数据已变，不能继续按旧数据审批），下次提交重发新流程
-            try {
-                approvalPort.cancel(BizType.ATTENDANCE_APPROVAL, entity.getId());
-            } catch (Exception e) {
-                log.error("[考勤审批] 在途流程撤销失败：id={}", entity.getId(), e);
-            }
-            entity.setProcessInstanceId(null);
-        }
         if (AttendanceApproval.STATUS_SUBMITTED.equals(status)
             || AttendanceApproval.STATUS_APPROVED.equals(status)) {
+            // 在途/已完成流程均需撤销（数据已变，旧流程结果不再有效）：
+            // 只回退审批单不撤实例，会让"我的已办/详情"残留旧流程状态，与实际不符
+            approvalPort.cancel(BizType.ATTENDANCE_APPROVAL, entity.getId());
+            // 校验实例确已清理，防止撤销失败产生僵尸实例
+            if (approvalPort.instanceId(BizType.ATTENDANCE_APPROVAL, entity.getId()) != null) {
+                throw new ServiceException("考勤审批流程撤销失败，请稍后重试");
+            }
+            entity.setProcessInstanceId(null);
             entity.setStatus(AttendanceApproval.STATUS_DRAFT);
             if (approvalMapper.updateById(entity) == 0) {
                 log.warn("[考勤审批] 失效审批单失败（并发修改）：period={}", period);

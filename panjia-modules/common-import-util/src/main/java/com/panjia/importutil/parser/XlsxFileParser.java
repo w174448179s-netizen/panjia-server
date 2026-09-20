@@ -45,11 +45,11 @@ public class XlsxFileParser implements FileParser {
 
     @Override
     public ParsedSheet parse(InputStream in, ImportTemplate template, String originalFilename) {
-        // 表头文本 → 列定义（trim 后匹配）
+        // 表头文本 → 列定义（归一化后匹配：trim + 兼容下载模板必填列 " *" 后缀）
         Map<String, ColumnDef> headerIndex = new LinkedHashMap<>();
         for (ColumnDef col : template.getColumns()) {
             if (col.getColName() != null && !col.getColName().isBlank()) {
-                headerIndex.put(col.getColName().trim(), col);
+                headerIndex.put(com.panjia.importutil.template.HeaderNames.normalize(col.getColName()), col);
             }
         }
 
@@ -113,7 +113,8 @@ public class XlsxFileParser implements FileParser {
                     if (header == null || header.isBlank()) {
                         continue;
                     }
-                    ColumnDef col = headerIndex.get(header);
+                    ColumnDef col = headerIndex.get(
+                        com.panjia.importutil.template.HeaderNames.normalize(header));
                     if (col == null) {
                         continue;
                     }

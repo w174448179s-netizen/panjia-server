@@ -105,6 +105,11 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
                 throw new ServiceException("重新提交失败，流程任务不存在，请联系管理员");
             }
         } else {
+            // 同一单据已有历史流程实例（已通过/已驳回且回调未回写实例ID）：
+            // 先撤销旧实例再重新发起，否则引擎按 businessId 校验报「该单据已完成申请」
+            if (approvalPort.instanceId(BizType.SCORE_APPROVAL, entity.getId()) != null) {
+                approvalPort.cancel(BizType.SCORE_APPROVAL, entity.getId());
+            }
             // 首次提交：发起流程并自动办理「提交积分」首节点
             ApprovalStartCmd cmd = buildStartCmd(entity, operatorId);
             boolean ok;
@@ -176,17 +181,16 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             return;
         }
         String status = entity.getStatus();
-        if (ScoreApproval.STATUS_SUBMITTED.equals(status)) {
-            // 在途流程撤销（数据已变，不能继续按旧数据审批），下次提交重发新流程
-            try {
-                approvalPort.cancel(BizType.SCORE_APPROVAL, entity.getId());
-            } catch (Exception e) {
-                log.error("[积分审批] 在途流程撤销失败：id={}", entity.getId(), e);
-            }
-            entity.setProcessInstanceId(null);
-        }
         if (ScoreApproval.STATUS_SUBMITTED.equals(status)
             || ScoreApproval.STATUS_APPROVED.equals(status)) {
+            // 在途/已完成流程均需撤销（数据已变，旧流程结果不再有效）：
+            // 只回退审批单不撤实例，会让"我的已办/详情"残留旧流程状态，与实际不符
+            approvalPort.cancel(BizType.SCORE_APPROVAL, entity.getId());
+            // 校验实例确已清理，防止撤销失败产生僵尸实例
+            if (approvalPort.instanceId(BizType.SCORE_APPROVAL, entity.getId()) != null) {
+                throw new ServiceException("积分审批流程撤销失败，请稍后重试");
+            }
+            entity.setProcessInstanceId(null);
             entity.setStatus(ScoreApproval.STATUS_DRAFT);
             if (approvalMapper.updateById(entity) == 0) {
                 log.warn("[积分审批] 失效审批单失败（并发修改）：period={}", period);

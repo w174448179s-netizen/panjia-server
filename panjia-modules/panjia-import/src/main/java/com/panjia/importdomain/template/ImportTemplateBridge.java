@@ -67,6 +67,129 @@ public class ImportTemplateBridge implements TemplateResolver {
         return template;
     }
 
+    /**
+     * 按模板 code 取激活模板（模板下载等需要精确指定模板的场景）。
+     */
+    public ImportTemplate getActiveByCode(String templateCode) {
+        ImportTemplate template = templateMapper.selectOne(
+            new LambdaQueryWrapper<ImportTemplate>()
+                .eq(ImportTemplate::getTemplateCode, templateCode)
+                .eq(ImportTemplate::getIsActive, true)
+                .last("LIMIT 1"));
+        if (template == null) {
+            throw new IllegalStateException("未找到激活模板: templateCode=" + templateCode);
+        }
+        return template;
+    }
+
+    /**
+     * 取首选激活模板：同 source_type 多套激活时，返回映射列数最多者
+     * （原始文件模板信息量最大，作为"下载模板"的缺省对象）。
+     */
+    public ImportTemplate getPreferredActive(String sourceType) {
+        List<ImportTemplate> actives = templateMapper.selectList(
+            new LambdaQueryWrapper<ImportTemplate>()
+                .eq(ImportTemplate::getSourceType, sourceType)
+                .eq(ImportTemplate::getIsActive, true));
+        if (actives.isEmpty()) {
+            throw new IllegalStateException("未找到激活模板: sourceType=" + sourceType);
+        }
+        ImportTemplate best = actives.get(0);
+        int bestCols = parseMappings(best.getColumnMapping()).size();
+        for (ImportTemplate t : actives) {
+            int cols = parseMappings(t.getColumnMapping()).size();
+            if (cols > bestCols) {
+                best = t;
+                bestCols = cols;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 按文件表头自动匹配激活模板（多模板共存时）。
+     * <p>
+     * 匹配规则：候选模板的所有映射列（source_header，trim 后）都出现在文件表头行
+     * （按模板 header_row 取行）中才算合格；合格者取映射列数最多者（原始文件列多，
+     * 优先于其列子集的简版模板）。仅一套激活模板时直接返回，不做匹配。
+     *
+     * @param sourceType 数据源类型（=pj_import_template.source_type）
+     * @param headerRows 嗅探到的文件行文本（1-based：get(0) 即文件第 1 行）
+     * @return 匹配到的工具层模板
+     */
+    public com.panjia.importutil.template.model.ImportTemplate resolveByHeaders(
+            String sourceType, List<List<String>> headerRows) {
+        List<ImportTemplate> actives = templateMapper.selectList(
+            new LambdaQueryWrapper<ImportTemplate>()
+                .eq(ImportTemplate::getSourceType, sourceType)
+                .eq(ImportTemplate::getIsActive, true)
+                .orderByDesc(ImportTemplate::getUpdatedAt));
+        if (actives.isEmpty()) {
+            throw new IllegalStateException("未找到激活模板: sourceType=" + sourceType);
+        }
+        if (actives.size() == 1) {
+            return toToolTemplate(actives.get(0));
+        }
+
+        ImportTemplate best = null;
+        int bestScore = -1;
+        List<String> missReasons = new ArrayList<>();
+        for (ImportTemplate t : actives) {
+            List<ColumnMapping> mappings = parseMappings(t.getColumnMapping());
+            if (mappings.isEmpty()) {
+                continue;
+            }
+            int rowIdx = t.getHeaderRow() == null ? 1 : t.getHeaderRow();
+            List<String> fileRow = rowIdx - 1 < headerRows.size() ? headerRows.get(rowIdx - 1) : null;
+            if (fileRow == null || fileRow.isEmpty()) {
+                missReasons.add(t.getTemplateCode() + ": 文件无第 " + rowIdx + " 行表头");
+                continue;
+            }
+            java.util.Set<String> fileHeaders = new java.util.HashSet<>();
+            for (String h : fileRow) {
+                if (h != null && !h.isBlank()) {
+                    fileHeaders.add(h.trim());
+                }
+            }
+            int matched = 0;
+            for (ColumnMapping m : mappings) {
+                if (m.getSourceHeader() != null
+                    && fileHeaders.contains(com.panjia.importutil.template.HeaderNames
+                        .normalize(m.getSourceHeader()))) {
+                    matched++;
+                }
+            }
+            if (matched == mappings.size() && mappings.size() > bestScore) {
+                best = t;
+                bestScore = mappings.size();
+            } else if (matched < mappings.size()) {
+                missReasons.add(t.getTemplateCode() + ": 缺少列（"
+                    + (mappings.size() - matched) + "/" + mappings.size() + "）");
+            }
+        }
+        if (best == null) {
+            throw new IllegalStateException(
+                "文件表头与任何激活模板都不匹配，请使用「下载导入模板」获取正确格式。"
+                    + String.join("；", missReasons));
+        }
+        log.info("多模板表头匹配: sourceType={}, 选中={}/{}", sourceType,
+            best.getTemplateCode(), best.getTemplateVersion());
+        return toToolTemplate(best);
+    }
+
+    private List<ColumnMapping> parseMappings(String columnMappingJson) {
+        if (columnMappingJson == null || columnMappingJson.isBlank()) {
+            return Collections.emptyList();
+        }
+        try {
+            return OBJECT_MAPPER.readValue(columnMappingJson,
+                new TypeReference<List<ColumnMapping>>() {});
+        } catch (Exception e) {
+            log.error("模板 column_mapping 解析失败", e);
+            return Collections.emptyList();
+        }
+    }
+
     private com.panjia.importutil.template.model.ImportTemplate toToolTemplate(ImportTemplate entity) {
         com.panjia.importutil.template.model.ImportTemplate tool =
             new com.panjia.importutil.template.model.ImportTemplate();

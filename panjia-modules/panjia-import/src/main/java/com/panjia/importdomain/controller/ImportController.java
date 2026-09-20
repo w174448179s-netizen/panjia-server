@@ -116,13 +116,19 @@ public class ImportController {
 
     /**
      * 下载导入模板（根据 sourceType 从模板表生成 Excel，含表头 + 示例行）。
+     * <p>
+     * 同 source_type 存在多套激活模板（原始文件模板 + 简版模板）时：
+     * 未指定 templateCode 返回映射列数最多的首选模板；指定则精确返回。
      *
-     * @param sourceType 数据源类型 code
-     * @param response   HTTP 响应
+     * @param sourceType   数据源类型 code
+     * @param templateCode 模板 code（可选，如 POINTS_SIMPLE / ATTENDANCE_SIMPLE）
+     * @param response     HTTP 响应
      */
     @SaCheckPermission("import:batch:upload")
     @GetMapping("/template/{sourceType}")
-    public void downloadTemplate(@PathVariable String sourceType, HttpServletResponse response) {
+    public void downloadTemplate(@PathVariable String sourceType,
+                                 @RequestParam(required = false) String templateCode,
+                                 HttpServletResponse response) {
         ImportSourceType type = ImportSourceType.fromCode(sourceType);
         if (type == null) {
             try {
@@ -131,12 +137,17 @@ public class ImportController {
             }
             return;
         }
-        com.panjia.importutil.template.model.ImportTemplate template = templateBridge.resolve(sourceType);
+        com.panjia.importdomain.domain.ImportTemplate entity = (templateCode == null || templateCode.isBlank())
+            ? templateBridge.getPreferredActive(sourceType)
+            : templateBridge.getActiveByCode(templateCode);
+        com.panjia.importutil.template.model.ImportTemplate template =
+            templateBridge.resolve(entity.getSourceType(), entity.getTemplateVersion());
         int colCount = template.getColumns() == null ? 0 : template.getColumns().size();
-        log.info("导入模板: code={}, columns={}", sourceType, colCount);
+        log.info("导入模板: sourceType={}, template={}/{}, columns={}",
+            sourceType, entity.getTemplateCode(), entity.getTemplateVersion(), colCount);
         byte[] excel = TemplateExporter.toExcel(template);
         log.info("Excel 模板生成: {} bytes", excel.length);
-        String fileName = URLEncoder.encode(type.getCode() + "_导入模板.xlsx", StandardCharsets.UTF_8);
+        String fileName = URLEncoder.encode(entity.getTemplateName() + ".xlsx", StandardCharsets.UTF_8);
         response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         response.setHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
         response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");

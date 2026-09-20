@@ -160,7 +160,9 @@ public class TemplateController {
     /**
      * 激活模板。
      * <p>
-     * 同 source_type 仅允许 1 套激活：先停用同 source_type 的所有模板，再激活指定模板。
+     * 同 source_type 允许多套激活模板（如钉钉原始文件模板 + 手工简版模板），
+     * 上传时引擎按文件表头自动匹配（{@code ImportTemplateBridge#resolveByHeaders}），
+     * 本操作仅激活指定模板，不互斥停用同类型其他模板。
      */
     @SaCheckPermission("import:template:activate")
     @PostMapping("/{id}/activate")
@@ -171,18 +173,7 @@ public class TemplateController {
             return R.fail("模板不存在: id=" + id);
         }
         String operator = LoginHelper.getUsername();
-        String sourceType = template.getSourceType();
 
-        // 先停用同 source_type 的所有激活模板
-        templateMapper.update(null,
-                new LambdaUpdateWrapper<ImportTemplate>()
-                        .eq(ImportTemplate::getSourceType, sourceType)
-                        .eq(ImportTemplate::getIsActive, true)
-                        .set(ImportTemplate::getIsActive, false)
-                        .set(ImportTemplate::getUpdatedBy, operator)
-                        .set(ImportTemplate::getUpdatedAt, LocalDateTime.now()));
-
-        // 再激活指定模板
         templateMapper.update(null,
                 new LambdaUpdateWrapper<ImportTemplate>()
                         .eq(ImportTemplate::getId, id)
@@ -190,8 +181,8 @@ public class TemplateController {
                         .set(ImportTemplate::getUpdatedBy, operator)
                         .set(ImportTemplate::getUpdatedAt, LocalDateTime.now()));
 
-        log.info("激活模板: id={}, sourceType={}, version={}, operator={}",
-                id, sourceType, template.getTemplateVersion(), operator);
+        log.info("激活模板: id={}, sourceType={}, version={}, operator={}（不互斥，同类型多模板共存）",
+                id, template.getSourceType(), template.getTemplateVersion(), operator);
         return R.ok();
     }
 

@@ -41,7 +41,7 @@ public class CsvFileParser implements FileParser {
         Map<String, ColumnDef> headerIndex = new LinkedHashMap<>();
         for (ColumnDef col : template.getColumns()) {
             if (col.getColName() != null && !col.getColName().isBlank()) {
-                headerIndex.put(col.getColName().trim(), col);
+                headerIndex.put(com.panjia.importutil.template.HeaderNames.normalize(col.getColName()), col);
             }
         }
 
@@ -77,7 +77,8 @@ public class CsvFileParser implements FileParser {
                     if (header == null || header.isBlank()) {
                         continue;
                     }
-                    ColumnDef col = headerIndex.get(header);
+                    ColumnDef col = headerIndex.get(
+                        com.panjia.importutil.template.HeaderNames.normalize(header));
                     if (col == null) {
                         continue;
                     }

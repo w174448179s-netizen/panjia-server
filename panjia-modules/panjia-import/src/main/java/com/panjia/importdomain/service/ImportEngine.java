@@ -31,6 +31,7 @@ import com.panjia.importdomain.mapper.RawManualMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.template.ImportTemplateBridge;
+import com.panjia.importdomain.template.TemplateHeaderSniffer;
 import com.panjia.importutil.archive.ArchiveResult;
 import com.panjia.importutil.archive.FileArchiver;
 import com.panjia.importutil.convert.TypeConverter;
@@ -73,6 +74,7 @@ import java.util.stream.Collectors;
 public class ImportEngine {
 
     private final ImportTemplateBridge templateBridge;
+    private final TemplateHeaderSniffer headerSniffer;
     private final FileArchiver fileArchiver;
     private final ParserFactory parserFactory;
     private final BasicValidator basicValidator;
@@ -129,8 +131,15 @@ public class ImportEngine {
      */
     public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
-        // 1. 解析激活模板（工具层内存模型）
-        ImportTemplate template = templateBridge.resolve(sourceType.getCode());
+        // 1. 嗅探文件表头 → 多激活模板时按表头自动匹配（原始文件/简版模板共存）
+        List<List<String>> headerRows;
+        try (ByteArrayInputStream probe = new ByteArrayInputStream(content)) {
+            headerRows = headerSniffer.sniff(probe, fileName);
+        } catch (Exception e) {
+            log.error("表头嗅探失败: {}", fileName, e);
+            throw new IllegalStateException("无法读取上传文件，请确认文件未损坏: " + e.getMessage(), e);
+        }
+        ImportTemplate template = templateBridge.resolveByHeaders(sourceType.getCode(), headerRows);
 
         // 2. 原始文件归档（审计锚点）
         ArchiveResult archived = fileArchiver.archive(content, fileName, "import");
