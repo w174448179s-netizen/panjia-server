@@ -289,6 +289,9 @@ public class PayrollBatchService {
         // policy.points.deduct{grade} 计算绩效扣点；无积分数据的员工默认 A 不扣点
         input.perfGrade = scoreQueryPort.scoreGrades(period);
 
+        // 积分扣款：积分日报晚提交处罚（晚提交次数 × policy.points.penaltyFee 元/次），算薪时从工资扣除
+        input.pointsFee = scoreQueryPort.pointsFees(period);
+
         // 提成点调整：APPROVED 且 start_month ≤ period ≤ end_month 的人工调整单，
         // 引擎叠加到 finalRate（另含未参保自动扣点，见引擎），溯源写入 rate_adjust_json
         input.manualAdjustItems = rateAdjustItems;

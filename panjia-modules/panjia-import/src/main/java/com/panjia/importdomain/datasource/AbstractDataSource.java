@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -86,5 +87,11 @@ public abstract class AbstractDataSource implements DataSource {
     protected LocalDate date(ParsedRow row, String field) {
         Object v = row.getValues().get(field);
         return v instanceof LocalDate d ? d : null;
+    }
+
+    /** 取转换后的日期时间（data_type=DATETIME） */
+    protected LocalDateTime dateTime(ParsedRow row, String field) {
+        Object v = row.getValues().get(field);
+        return v instanceof LocalDateTime dt ? dt : null;
     }
 }

@@ -2,6 +2,7 @@ package com.panjia.people.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.dto.PointsRuleDTO;
 import com.panjia.contracts.dto.ScoreApprovalStatusDTO;
 import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
@@ -14,6 +15,7 @@ import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.mapper.PerformanceScoreMapper;
 import com.panjia.people.mapper.ScoreApprovalMapper;
 import com.panjia.people.service.ScoreApprovalService;
+import com.panjia.people.service.ScoreGradePolicy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -59,6 +61,7 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
     private final PerformanceScoreMapper scoreMapper;
     private final EmployeeMapper employeeMapper;
     private final ApprovalPort approvalPort;
+    private final ScoreGradePolicy scoreGradePolicy;
 
     @Override
     public ScoreApprovalVO getByPeriod(String period) {
@@ -247,11 +250,24 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         if (rows.isEmpty()) {
             throw new ServiceException("该期间无积分数据，无法提交审批");
         }
-        List<PerformanceScore> deductRows = rows.stream().filter(r ->
-            "B".equals(r.getGrade()) || "C".equals(r.getGrade())).toList();
+        // 派生字段（平均积分/等级/扣点/积分扣款）实时计算，不落库；规则整单只查一次
+        PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        List<PerformanceScore> deductRows = rows.stream().filter(r -> {
+            String grade = scoreGradePolicy.grade(rule, r.getTotalPoints(), r.getAttendDays());
+            return "B".equals(grade) || "C".equals(grade);
+        }).toList();
 
-        Map<Long, Employee> empMap = deductRows.isEmpty() ? Map.of()
-            : employeeMapper.selectByIds(deductRows.stream().map(PerformanceScore::getEmployeeId).distinct().toList())
+        // 晚提交行（lateSubmitCount > 0）
+        List<PerformanceScore> lateRows = rows.stream()
+            .filter(r -> r.getLateSubmitCount() != null && r.getLateSubmitCount() > 0)
+            .toList();
+
+        // 员工信息：合并扣点行 + 晚提交行的员工 ID 一次性查询
+        Set<Long> empIds = new java.util.HashSet<>();
+        deductRows.forEach(r -> empIds.add(r.getEmployeeId()));
+        lateRows.forEach(r -> empIds.add(r.getEmployeeId()));
+        Map<Long, Employee> empMap = empIds.isEmpty() ? Map.of()
+            : employeeMapper.selectByIds(new ArrayList<>(empIds))
             .stream().collect(Collectors.toMap(Employee::getEmployeeId, Function.identity(), (a, b) -> a));
 
         List<ScoreApprovalVO.DeductRow> voRows = deductRows.stream().map(r -> {
@@ -263,15 +279,18 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             row.setScoreMonth(r.getScoreMonth() == null ? null : r.getScoreMonth().toString());
             row.setTotalPoints(r.getTotalPoints());
             row.setAttendDays(r.getAttendDays());
-            row.setAvgPoints(r.getAvgPoints());
-            row.setGrade(r.getGrade());
-            row.setDeductRate(r.getDeductRate());
+            BigDecimal avg = scoreGradePolicy.avgPoints(r.getTotalPoints(), r.getAttendDays());
+            String grade = avg == null ? null : scoreGradePolicy.resolveGrade(rule, avg);
+            row.setAvgPoints(avg);
+            row.setGrade(grade);
+            row.setDeductRate(scoreGradePolicy.deductOf(rule, grade));
             return row;
         }).toList();
 
         Map<String, Long> gradeCounts = rows.stream()
-            .filter(r -> r.getGrade() != null)
-            .collect(Collectors.groupingBy(PerformanceScore::getGrade, Collectors.counting()));
+            .collect(Collectors.groupingBy(
+                r -> StringUtils.defaultString(scoreGradePolicy.grade(rule, r.getTotalPoints(), r.getAttendDays())),
+                Collectors.counting()));
 
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("totalCount", rows.size());
@@ -279,6 +298,29 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         snapshot.put("gradeBCount", gradeCounts.getOrDefault("B", 0L));
         snapshot.put("gradeCCount", gradeCounts.getOrDefault("C", 0L));
         snapshot.put("rows", voRows);
+
+        // 晚提交扣款行快照（所有 lateSubmitCount > 0 的行，供总监核对豁免情况）
+        List<ScoreApprovalVO.LateSubmitRow> lateVoRows = lateRows.stream().map(r -> {
+            ScoreApprovalVO.LateSubmitRow row = new ScoreApprovalVO.LateSubmitRow();
+            row.setEmployeeId(r.getEmployeeId());
+            Employee emp = empMap.get(r.getEmployeeId());
+            row.setEmployeeCode(emp == null ? null : emp.getEmployeeCode());
+            row.setEmployeeName(emp == null ? null : emp.getEmployeeName());
+            row.setScoreMonth(r.getScoreMonth() == null ? null : r.getScoreMonth().toString());
+            row.setLateSubmitCount(r.getLateSubmitCount());
+            row.setPointsFee(scoreGradePolicy.lateFeeOf(rule, r.getLateSubmitCount()));
+            return row;
+        }).toList();
+        int lateTotalCount = lateRows.stream()
+            .mapToInt(r -> r.getLateSubmitCount() == null ? 0 : r.getLateSubmitCount())
+            .sum();
+        BigDecimal lateTotalFee = lateVoRows.stream()
+            .map(r -> r.getPointsFee() == null ? BigDecimal.ZERO : r.getPointsFee())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        snapshot.put("lateSubmitTotalCount", lateTotalCount);
+        snapshot.put("lateSubmitTotalFee", lateTotalFee);
+        snapshot.put("lateSubmitRows", lateVoRows);
+
         return JSON.writeValueAsString(snapshot);
     }
 
@@ -330,6 +372,22 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
                     rows.add(row);
                 }
                 vo.setDeductRows(rows);
+
+                // 晚提交扣款行快照
+                vo.setLateSubmitTotalCount(node.path("lateSubmitTotalCount").asInt(0));
+                vo.setLateSubmitTotalFee(dec(node.path("lateSubmitTotalFee")));
+                List<ScoreApprovalVO.LateSubmitRow> lateRows = new ArrayList<>();
+                for (JsonNode r : node.path("lateSubmitRows")) {
+                    ScoreApprovalVO.LateSubmitRow row = new ScoreApprovalVO.LateSubmitRow();
+                    row.setEmployeeId(r.path("employeeId").isNumber() ? r.path("employeeId").asLong() : null);
+                    row.setEmployeeCode(textOrNull(r.path("employeeCode")));
+                    row.setEmployeeName(textOrNull(r.path("employeeName")));
+                    row.setScoreMonth(textOrNull(r.path("scoreMonth")));
+                    row.setLateSubmitCount(r.path("lateSubmitCount").isNumber() ? r.path("lateSubmitCount").asInt() : null);
+                    row.setPointsFee(dec(r.path("pointsFee")));
+                    lateRows.add(row);
+                }
+                vo.setLateSubmitRows(lateRows);
             } catch (Exception e) {
                 log.warn("[积分审批] 快照解析失败：id={}", entity.getId(), e);
             }

@@ -32,7 +32,10 @@ public class PointsDataSource extends AbstractDataSource {
             raw.setRawJson(toRawJson(row));
 
             raw.setEmployeeCode(str(row, "employeeCode"));
-            raw.setPointDate(date(row, "pointDate"));
+            java.time.LocalDateTime submitTime = dateTime(row, "submitTime");
+            raw.setSubmitTime(submitTime);
+            // pointDate 取填报时间的日期部分（日报按自然日聚合）
+            raw.setPointDate(submitTime != null ? submitTime.toLocalDate() : date(row, "pointDate"));
             raw.setScore(decimal(row, "score"));
             raw.setViolationCount(integer(row, "violationCount"));
 

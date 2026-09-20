@@ -9,6 +9,8 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -22,6 +24,15 @@ import java.util.Map;
  * 归档路径构造 {@code ImportBatchArchivedEvent} 时调用：《二手积分日报5.0版》
  * 为一人一天一行的日报，按工号聚合为一人一月——总积分 = SUM(今日总积分)，
  * 出勤天数 = COUNT(DISTINCT 填报日期)（报了积分即视为出勤）。
+ * <p>
+ * 提交时间规则（业务需求 V4.6+）：
+ * <ul>
+ *   <li>有效提交窗口：每日 19:30 ~ 23:00</li>
+ *   <li>早于 19:30 提交：视为无效，当日积分不计入总积分（但仍计出勤）</li>
+ *   <li>晚于 23:00 提交：积分有效，但记 1 次晚提交（算薪时扣款 5 元/次）</li>
+ *   <li>特殊情况（谈单到深夜）经总监同意可免处罚——免罚由人工在积分审批单中调整，
+ *       聚合器不做判断，只统计原始晚提交次数</li>
+ * </ul>
  * 聚合结果作为事件 payload（scoreSummaries）随 Outbox 投递，员工域
  * ScoreArchiveHandler 消费后经 Port 写积分表（推模式，与考勤域同构）。
  * 同步失败可由 OutboxDispatcher 重试，upsert（同人同月覆盖）保证重投幂等。
@@ -56,10 +67,17 @@ public class ScoreSummaryAggregator {
             return List.of();
         }
 
+        // 有效提交窗口：19:30 ~ 23:00
+        // 早于 19:30 → 无效（积分不计）；晚于 23:00 → 有效但计晚提交 1 次
+        final LocalTime WINDOW_START = LocalTime.of(19, 30);
+        final LocalTime WINDOW_END = LocalTime.of(23, 0);
+
         // 同工号聚合（日报一人一天一行；防御性处理同文件重复行：
         // 总积分累加，出勤天数按 DISTINCT 填报日期计数防同日重复行多算）
         Map<String, ScoreSummarySyncDTO> byCode = new LinkedHashMap<>();
         Map<String, java.util.Set<LocalDate>> datesByCode = new LinkedHashMap<>();
+        // 晚提交按「工号+日期」去重：同一天多次晚提交只计 1 次
+        Map<String, java.util.Set<LocalDate>> lateDatesByCode = new LinkedHashMap<>();
         for (RawPoints raw : rows) {
             String code = raw.getEmployeeCode() == null ? null : raw.getEmployeeCode().trim();
             if (code == null || code.isEmpty()) {
@@ -71,13 +89,40 @@ public class ScoreSummaryAggregator {
                 d.setScoreMonth(scoreMonth);
                 d.setTotalPoints(BigDecimal.ZERO);
                 d.setAttendDays(0);
+                d.setLateSubmitCount(0);
                 return d;
             });
-            if (raw.getScore() != null) {
-                dto.setTotalPoints(dto.getTotalPoints().add(raw.getScore()));
+            LocalDateTime submitTime = raw.getSubmitTime();
+            LocalDate pointDay = raw.getPointDate() != null ? raw.getPointDate()
+                : (submitTime != null ? submitTime.toLocalDate() : null);
+
+            // 出勤天数：有填报记录即计出勤（无论时间是否在窗口内）
+            if (pointDay != null) {
+                datesByCode.computeIfAbsent(code, k -> new java.util.HashSet<>()).add(pointDay);
             }
-            if (raw.getPointDate() != null) {
-                datesByCode.computeIfAbsent(code, k -> new java.util.HashSet<>()).add(raw.getPointDate());
+
+            // 提交时间判定：早于 19:30 无效不计积分；晚于 23:00 计晚提交。
+            // 提交时间缺失/解析失败（submitTime == null）时防御性按有效计分：
+            // 薪点数据宁多算不漏算，避免模板映射或格式问题静默清零整月积分
+            boolean inWindow = submitTime == null
+                || (!submitTime.toLocalTime().isBefore(WINDOW_START)
+                    && !submitTime.toLocalTime().isAfter(WINDOW_END));
+            boolean late = submitTime != null && submitTime.toLocalTime().isAfter(WINDOW_END);
+
+            if (inWindow || late) {
+                // 窗口内或晚提交：积分有效
+                if (raw.getScore() != null) {
+                    dto.setTotalPoints(dto.getTotalPoints().add(raw.getScore()));
+                }
+            }
+            // 早于 19:30：积分无效，不计入总积分
+
+            if (late && pointDay != null) {
+                boolean isNewLate = lateDatesByCode
+                    .computeIfAbsent(code, k -> new java.util.HashSet<>()).add(pointDay);
+                if (isNewLate) {
+                    dto.setLateSubmitCount(dto.getLateSubmitCount() + 1);
+                }
             }
         }
         for (Map.Entry<String, java.util.Set<LocalDate>> e : datesByCode.entrySet()) {

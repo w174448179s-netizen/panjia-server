@@ -3,6 +3,7 @@ package com.panjia.people.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.contracts.dto.PointsRuleDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.domain.PerformanceScore;
@@ -12,6 +13,7 @@ import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.mapper.PerformanceScoreMapper;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.ScoreApprovalService;
+import com.panjia.people.service.ScoreGradePolicy;
 import com.panjia.people.service.ScoreService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -24,8 +26,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.HashMap;
 import java.util.List;
@@ -38,9 +40,9 @@ import java.util.stream.Collectors;
  * 绩效积分月度汇总服务实现（一员工一月一行）。
  * <p>
  * 数据来源为《二手积分日报5.0版》导入同步：总积分 = SUM(今日总积分)，
- * 出勤天数 = 有日报的 DISTINCT 填报日期数，平均积分 = 总积分 / 出勤天数。
- * 绩效等级与扣点口径（需求书 V4.6，与 V160001 policy.points 一致）：
- * 平均分 ≥ 8 → A（不扣）；6 ≤ 平均分 < 8 → B（-2%）；平均分 < 6 → C（-4%）。
+ * 出勤天数 = 有日报的 DISTINCT 填报日期数。
+ * 落库只存原始事实（总积分/出勤天数/晚提交次数）；平均积分、绩效等级、
+ * 提成扣点、积分扣款为派生字段，查询时按 {@link ScoreGradePolicy} 实时计算。
  */
 @Slf4j
 @Service
@@ -50,20 +52,11 @@ public class ScoreServiceImpl implements ScoreService {
     /** 数据来源：积分日报导入同步 */
     private static final String DATA_SOURCE_IMPORT = "IMPORT";
 
-    /** 等级 A：平均分 ≥ 8 */
-    private static final BigDecimal GRADE_A_MIN = new BigDecimal("8");
-
-    /** 等级 B 下限：平均分 ≥ 6 */
-    private static final BigDecimal GRADE_B_MIN = new BigDecimal("6");
-
-    private static final BigDecimal GRADE_A_DEDUCT = BigDecimal.ZERO;
-    private static final BigDecimal GRADE_B_DEDUCT = new BigDecimal("-0.02");
-    private static final BigDecimal GRADE_C_DEDUCT = new BigDecimal("-0.04");
-
     private final PerformanceScoreMapper scoreMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
     private final ScoreApprovalService approvalService;
+    private final ScoreGradePolicy scoreGradePolicy;
 
     // ==================== 导入同步（ScoreArchiveHandler） ====================
 
@@ -144,39 +137,12 @@ public class ScoreServiceImpl implements ScoreService {
         }
     }
 
-    /** 导入指标回填 + 平均积分/等级/扣点派生（出勤 0 天时等级为 null，算薪默认 A 不扣点） */
+    /** 导入指标回填：只存原始事实，平均积分/等级/扣点/积分扣款查询时实时计算 */
     private void applyImportMetrics(PerformanceScore record, ScoreSummarySyncDTO summary) {
-        BigDecimal totalPoints = summary.getTotalPoints() == null ? BigDecimal.ZERO : summary.getTotalPoints();
-        int attendDays = summary.getAttendDays() == null ? 0 : summary.getAttendDays();
-        record.setTotalPoints(totalPoints);
-        record.setAttendDays(attendDays);
-        if (attendDays > 0) {
-            BigDecimal avg = totalPoints.divide(BigDecimal.valueOf(attendDays), 4, RoundingMode.HALF_UP);
-            record.setAvgPoints(avg);
-            record.setGrade(resolveGrade(avg));
-            record.setDeductRate(resolveDeduct(record.getGrade()));
-        } else {
-            record.setAvgPoints(null);
-            record.setGrade(null);
-            record.setDeductRate(null);
-        }
-    }
-
-    /** 平均分 → 等级：≥8 → A；≥6 → B；否则 C */
-    private String resolveGrade(BigDecimal avgPoints) {
-        if (avgPoints.compareTo(GRADE_A_MIN) >= 0) {
-            return "A";
-        }
-        return avgPoints.compareTo(GRADE_B_MIN) >= 0 ? "B" : "C";
-    }
-
-    private BigDecimal resolveDeduct(String grade) {
-        return switch (grade == null ? "" : grade) {
-            case "A" -> GRADE_A_DEDUCT;
-            case "B" -> GRADE_B_DEDUCT;
-            case "C" -> GRADE_C_DEDUCT;
-            default -> null;
-        };
+        record.setTotalPoints(summary.getTotalPoints() == null ? BigDecimal.ZERO : summary.getTotalPoints());
+        record.setAttendDays(summary.getAttendDays() == null ? 0 : summary.getAttendDays());
+        // 晚提交次数为原始事实（免罚由人事在锁定前调整该值，扣款随之实时变化）
+        record.setLateSubmitCount(summary.getLateSubmitCount() == null ? 0 : summary.getLateSubmitCount());
     }
 
     // ==================== 查询 ====================
@@ -211,7 +177,8 @@ public class ScoreServiceImpl implements ScoreService {
             .orderByDesc(PerformanceScore::getId);
 
         Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
-        List<ScoreVO> vos = page.getRecords().stream().map(this::toVO).toList();
+        PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule)).toList();
         enrich(vos);
         return PageResult.build(vos, page.getTotal());
     }
@@ -222,9 +189,111 @@ public class ScoreServiceImpl implements ScoreService {
         if (record == null) {
             throw new ServiceException("积分记录不存在，id={}", id);
         }
-        ScoreVO vo = toVO(record);
+        ScoreVO vo = toVO(record, scoreGradePolicy.currentRule());
         enrich(List.of(vo));
         return vo;
+    }
+
+    // ==================== 手工新增 / 删除 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void create(Long employeeId, YearMonth scoreMonth, BigDecimal totalPoints,
+                       Integer attendDays, Integer lateSubmitCount) {
+        if (employeeId == null || scoreMonth == null) {
+            throw new ServiceException("员工和积分月份不能为空");
+        }
+        if (totalPoints == null || totalPoints.signum() < 0) {
+            throw new ServiceException("总积分不能为空且不能为负数");
+        }
+        if (attendDays == null || attendDays < 0) {
+            throw new ServiceException("出勤天数不能为空且不能为负数");
+        }
+        if (lateSubmitCount == null || lateSubmitCount < 0) {
+            throw new ServiceException("晚提交次数不能为空且不能为负数");
+        }
+        Employee employee = employeeMapper.selectById(employeeId);
+        if (employee == null) {
+            throw new ServiceException("员工不存在，请重新选择");
+        }
+        String period = scoreMonth.toString();
+        if (approvalService.isPeriodLocked(period)) {
+            throw new ServiceException("该期间积分已提交审批或已通过，无法新增");
+        }
+        Long existed = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
+                .eq(PerformanceScore::getEmployeeId, employeeId)
+                .eq(PerformanceScore::getScoreMonth, scoreMonth.atDay(1)))
+            .stream().findFirst().map(PerformanceScore::getId).orElse(null);
+        if (existed != null) {
+            throw new ServiceException("该员工当月已有积分记录，请直接修改");
+        }
+        PerformanceScore record = new PerformanceScore();
+        record.setEmployeeId(employeeId);
+        record.setScoreMonth(scoreMonth.atDay(1));
+        record.setTotalPoints(totalPoints);
+        record.setAttendDays(attendDays);
+        record.setLateSubmitCount(lateSubmitCount);
+        record.setDataSource("MANUAL");
+        try {
+            scoreMapper.insert(record);
+        } catch (DuplicateKeyException e) {
+            throw new ServiceException("该员工当月已有积分记录，请直接修改");
+        }
+        log.info("[积分] 手工新增：员工={}, 月份={}, 总积分={}, 出勤={}天, 晚提交={}次",
+            employeeId, period, totalPoints, attendDays, lateSubmitCount);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void delete(Long id) {
+        PerformanceScore record = scoreMapper.selectById(id);
+        if (record == null) {
+            throw new ServiceException("积分记录不存在，id={}", id);
+        }
+        if (record.getScoreMonth() != null) {
+            String period = record.getScoreMonth().toString().substring(0, 7);
+            if (approvalService.isPeriodLocked(period)) {
+                throw new ServiceException("该期间积分已提交审批或已通过，无法删除");
+            }
+        }
+        scoreMapper.deleteById(id);
+        log.info("[积分] 删除：id={}, 员工={}, 月份={}", id, record.getEmployeeId(), record.getScoreMonth());
+    }
+
+    // ==================== 修改原始事实（数据修正/晚提交豁免） ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateRawFacts(Long id, BigDecimal totalPoints, Integer attendDays, Integer lateSubmitCount) {
+        if (totalPoints == null || totalPoints.signum() < 0) {
+            throw new ServiceException("总积分不能为空且不能为负数");
+        }
+        if (attendDays == null || attendDays < 0) {
+            throw new ServiceException("出勤天数不能为空且不能为负数");
+        }
+        if (lateSubmitCount == null || lateSubmitCount < 0) {
+            throw new ServiceException("晚提交次数不能为空且不能为负数");
+        }
+        PerformanceScore record = scoreMapper.selectById(id);
+        if (record == null) {
+            throw new ServiceException("积分记录不存在，id={}", id);
+        }
+        // 期间锁定校验：已提交审批或已通过的期间不允许修改
+        if (record.getScoreMonth() != null) {
+            String period = record.getScoreMonth().toString().substring(0, 7);
+            if (approvalService.isPeriodLocked(period)) {
+                throw new ServiceException("该期间积分已提交审批或已通过，无法修改");
+            }
+        }
+        record.setTotalPoints(totalPoints);
+        record.setAttendDays(attendDays);
+        record.setLateSubmitCount(lateSubmitCount);
+        if (scoreMapper.updateById(record) == 0) {
+            throw new ServiceException("修改失败，记录已被他人修改，请刷新后重试");
+        }
+        log.info("[积分] 原始事实修改：id={}, 员工={}, 总积分→{}, 出勤→{}天, 晚提交→{}次, 扣款={}",
+            id, record.getEmployeeId(), totalPoints, attendDays, lateSubmitCount,
+            scoreGradePolicy.lateFeeOf(scoreGradePolicy.currentRule(), lateSubmitCount));
     }
 
     // ==================== 算薪绩效等级（PeopleScoreQueryPort） ====================
@@ -236,12 +305,35 @@ public class ScoreServiceImpl implements ScoreService {
             return Map.of();
         }
         List<PerformanceScore> rows = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
-            .eq(PerformanceScore::getScoreMonth, monthStart)
-            .isNotNull(PerformanceScore::getGrade));
+            .eq(PerformanceScore::getScoreMonth, monthStart));
         Map<Long, String> result = new HashMap<>();
+        PointsRuleDTO rule = scoreGradePolicy.currentRule();
         for (PerformanceScore row : rows) {
-            if (row.getEmployeeId() != null && row.getGrade() != null) {
-                result.put(row.getEmployeeId(), row.getGrade());
+            String grade = scoreGradePolicy.grade(rule, row.getTotalPoints(), row.getAttendDays());
+            if (row.getEmployeeId() != null && grade != null) {
+                result.put(row.getEmployeeId(), grade);
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public Map<Long, BigDecimal> pointsFees(String period) {
+        LocalDate monthStart = parseMonthStart(period);
+        if (monthStart == null) {
+            return Map.of();
+        }
+        List<PerformanceScore> rows = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
+            .eq(PerformanceScore::getScoreMonth, monthStart));
+        Map<Long, BigDecimal> result = new HashMap<>();
+        PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        for (PerformanceScore row : rows) {
+            if (row.getEmployeeId() == null) {
+                continue;
+            }
+            BigDecimal fee = scoreGradePolicy.lateFeeOf(rule, row.getLateSubmitCount());
+            if (fee.signum() > 0) {
+                result.merge(row.getEmployeeId(), fee, BigDecimal::add);
             }
         }
         return result;
@@ -287,9 +379,15 @@ public class ScoreServiceImpl implements ScoreService {
         }
     }
 
-    private ScoreVO toVO(PerformanceScore record) {
+    private ScoreVO toVO(PerformanceScore record, PointsRuleDTO rule) {
         ScoreVO vo = new ScoreVO();
         BeanUtil.copyProperties(record, vo);
+        // 派生字段实时计算（不落库）：平均积分/绩效等级/提成扣点/积分扣款
+        vo.setPointsFee(scoreGradePolicy.lateFeeOf(rule, record.getLateSubmitCount()));
+        BigDecimal avg = scoreGradePolicy.avgPoints(record.getTotalPoints(), record.getAttendDays());
+        vo.setAvgPoints(avg);
+        vo.setGrade(avg == null ? null : scoreGradePolicy.resolveGrade(rule, avg));
+        vo.setDeductRate(scoreGradePolicy.deductOf(rule, vo.getGrade()));
         return vo;
     }
 

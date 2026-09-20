@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import java.math.BigDecimal;
 import java.util.Map;
 
 /**
@@ -17,4 +18,12 @@ public interface PeopleScoreQueryPort {
      * @return employeeId → 等级（A/B/C）；无积分数据的员工不在 Map 中（引擎默认 A）
      */
     Map<Long, String> scoreGrades(String period);
+
+    /**
+     * 查询期间各员工积分扣款（晚提交处罚）。
+     *
+     * @param period 期间 YYYY-MM
+     * @return employeeId → 积分扣款金额（晚提交次数 × 5 元）；无扣款的员工不在 Map 中
+     */
+    Map<Long, BigDecimal> pointsFees(String period);
 }

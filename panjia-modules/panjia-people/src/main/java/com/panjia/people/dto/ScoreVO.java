@@ -49,6 +49,12 @@ public class ScoreVO implements Serializable {
     /** 提成扣点小数（0 / -0.02 / -0.04） */
     private BigDecimal deductRate;
 
+    /** 当月晚提交次数（填报时间晚于 23:00 的天数） */
+    private Integer lateSubmitCount;
+
+    /** 积分扣款 = 晚提交次数 × 5 元/次 */
+    private BigDecimal pointsFee;
+
     /** 行级锁定标记：该月审批 SUBMITTED/APPROVED 时为 true（前端隐藏提交入口） */
     private Boolean locked;
 }

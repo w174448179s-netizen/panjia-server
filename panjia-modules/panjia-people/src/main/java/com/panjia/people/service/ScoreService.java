@@ -32,4 +32,31 @@ public interface ScoreService extends PeopleScoreQueryPort {
 
     /** 明细查询 */
     ScoreVO getById(Long id);
+
+    /**
+     * 手工新增积分记录（补录/修正）。
+     * 数据来源标记 MANUAL；后续同员工同月份的导入同步会覆盖该记录（导入为准）。
+     * 校验：员工存在、月份未锁定、同月无重复记录。
+     */
+    void create(Long employeeId, java.time.YearMonth scoreMonth, java.math.BigDecimal totalPoints,
+                Integer attendDays, Integer lateSubmitCount);
+
+    /**
+     * 删除积分记录。仅在期间未锁定（非 SUBMITTED/APPROVED）时允许删除。
+     */
+    void delete(Long id);
+
+    /**
+     * 修改积分原始事实（总积分/出勤天数/晚提交次数）。
+     * 用途：数据修正；晚提交处罚 = 晚提交次数 × 5 元/次，特殊情况（如谈单到深夜）
+     * 经总监同意可减免，由人事调整晚提交次数，扣款随查询实时重算，审批快照定格供总监核对。
+     * 平均积分/绩效等级/提成扣点为派生字段，随修改自动按新事实重算。
+     * 仅在期间未锁定（非 SUBMITTED/APPROVED）时允许修改。
+     *
+     * @param id              积分记录 ID
+     * @param totalPoints     总积分（≥0）
+     * @param attendDays      出勤天数（≥0）
+     * @param lateSubmitCount 晚提交次数（≥0）
+     */
+    void updateRawFacts(Long id, java.math.BigDecimal totalPoints, Integer attendDays, Integer lateSubmitCount);
 }

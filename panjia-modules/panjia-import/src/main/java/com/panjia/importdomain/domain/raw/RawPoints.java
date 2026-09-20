@@ -30,6 +30,8 @@ public class RawPoints implements RawData {
 
     private String employeeCode;
     private LocalDate pointDate;
+    /** 填报时间（含时分秒，用于判定 19:30~23:00 提交窗口与晚提交处罚） */
+    private LocalDateTime submitTime;
     private BigDecimal score;
     private Integer violationCount;
 }

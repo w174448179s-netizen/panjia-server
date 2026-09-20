@@ -60,6 +60,8 @@ public class SalaryCalculationEngine {
         public Map<Long, AttendanceMetricsDTO> attendanceMetrics;
         /** employeeId -> 绩效等级 A/B/C（积分表按出勤日平均积分判定；无数据默认 A 不扣点） */
         public Map<Long, String> perfGrade;
+        /** employeeId -> 积分扣款（晚提交处罚：次数 × 5 元） */
+        public Map<Long, BigDecimal> pointsFee;
         /** employeeId -> 提成点人工调整命中项（rate_adjust APPROVED 且区间命中，溯源写入 rate_adjust_json） */
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格徒弟数（招聘奖励加点用） */
@@ -152,6 +154,8 @@ public class SalaryCalculationEngine {
             BigDecimal commissionPerf = sumAmount(input.lockedByEmp.get(emp.getEmployeeId()));
             BigDecimal commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
             d.setCommissionIncome(commissionIncome);
+            // 落地结佣业绩（导出展示，避免前端反推误差）
+            d.setCommissionPerformance(MoneyUtil.round2(commissionPerf));
 
             // 招聘奖励（店长/总监 = 徒弟结佣 × 2%）
             BigDecimal mentorBonus = BigDecimal.ZERO;
@@ -176,11 +180,14 @@ public class SalaryCalculationEngine {
                 teamIncome = MoneyUtil.round2(deptTotal.multiply(teamRate));
                 d.setTeamIncome(teamIncome);
 
-                // 个人新签提成 = 个人新签 × 70% → 递延
+                // 个人新签提成 = 个人新签业绩 × 职级 personalRate → 递延
                 BigDecimal personalRate = bd(rank.path("personalRate").asText("0.70"));
                 BigDecimal personalNewsignPerf = sumAmount(input.newsignByEmp.get(emp.getEmployeeId()));
                 personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(personalRate));
                 d.setPersonalNewsignIncome(personalNewsign);
+                // 落地：当月新签业绩 + 提成比例（导出展示用）
+                d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerf));
+                d.setNewSignRate(personalRate);
 
                 // 保底补足 = MAX(min, team+ps) - ps - team
                 BigDecimal minSalary = bd(rank.path("minSalary").asText("0"));
@@ -200,9 +207,15 @@ public class SalaryCalculationEngine {
                 // 门店提成：逐店新签 × 跳点比例（总监管多店时按店汇总）
                 storeIncome = calcDirectorStoreIncome(emp, input, rank);
                 d.setStoreIncome(storeIncome);
+                // 总监无个人新签业绩，落地 0
+                d.setNewSignPerformance(BigDecimal.ZERO);
+                d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
             } else {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
                 baseSalary = bd(rank.path("baseSalary").asText("0"));
+                // 经纪人无个人新签业绩（提成来自结佣），落地 0
+                d.setNewSignPerformance(BigDecimal.ZERO);
+                d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
@@ -322,13 +335,20 @@ public class SalaryCalculationEngine {
             BigDecimal negativeCarryover = input.negativeBalance.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setNegativeCarryover(MoneyUtil.round2(negativeCarryover));
 
+            // 积分扣款（积分日报晚提交处罚：晚提交次数 × 5 元/次）
+            BigDecimal pointsFee = input.pointsFee == null
+                ? BigDecimal.ZERO
+                : input.pointsFee.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            d.setPointsFee(MoneyUtil.round2(pointsFee));
+
             // 其他支出
             BigDecimal otherDeduct = input.manualDeduct.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setOtherDeduct(MoneyUtil.round2(otherDeduct));
 
             // 支出合计
             BigDecimal deduct = socialFee.add(housingFund).add(attendanceFee)
-                .add(commercialInsurance).add(dormitoryFee).add(negativeCarryover).add(otherDeduct);
+                .add(commercialInsurance).add(dormitoryFee).add(negativeCarryover)
+                .add(pointsFee).add(otherDeduct);
             d.setDeduct(MoneyUtil.round2(deduct));
 
             // 个税（累计预扣）

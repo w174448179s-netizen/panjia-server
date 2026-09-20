@@ -16,8 +16,9 @@ import java.time.LocalDateTime;
  * 绩效积分月度汇总（一人一月一行）。
  * <p>
  * 数据全部来自《二手积分日报5.0版》导入同步（ScoreService.syncScoreSummaries
- * upsert 写入），无人工登记入口。平均积分 = 总积分 / 出勤天数，
- * 绩效等级按平均分判定（A≥8 / B 6~8 / C<6），服务薪酬绩效扣点。
+ * upsert 写入），无人工登记入口。仅存原始事实（总积分/出勤天数/晚提交次数）；
+ * 平均积分、绩效等级、提成扣点、积分扣款为派生字段，查询时按
+ * {@link ScoreGradePolicy} 实时计算，不落库。
  */
 @Data
 @TableName("pj_people_performance_score")
@@ -41,14 +42,8 @@ public class PerformanceScore implements Serializable {
     /** 出勤天数（有日报的 DISTINCT 填报日期数） */
     private Integer attendDays;
 
-    /** 平均积分 = 总积分 / 出勤天数（出勤 0 天为 null） */
-    private BigDecimal avgPoints;
-
-    /** 绩效等级：A(≥8) B(6~8) C(<6)（出勤 0 天为 null） */
-    private String grade;
-
-    /** 提成扣点小数：A=0 B=-0.02 C=-0.04（快照展示；算薪扣点走规则快照 policy.points） */
-    private BigDecimal deductRate;
+    /** 当月晚提交次数（填报时间晚于 23:00 的天数，每天最多 1 次） */
+    private Integer lateSubmitCount;
 
     /** 数据来源：IMPORT=积分日报导入同步 */
     private String dataSource;

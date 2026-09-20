@@ -63,6 +63,17 @@ public class ScoreApprovalVO implements Serializable {
     /** 扣点行明细（B/C 级，总监审阅内容） */
     private List<DeductRow> deductRows;
 
+    // ==================== 晚提交扣款行快照（提交时定格，总监核对豁免情况） ====================
+
+    /** 当月晚提交总次数 */
+    private Integer lateSubmitTotalCount;
+
+    /** 当月晚提交扣款总额（元） */
+    private BigDecimal lateSubmitTotalFee;
+
+    /** 晚提交行明细（lateSubmitCount > 0 的所有行，供总监核对豁免） */
+    private List<LateSubmitRow> lateSubmitRows;
+
     /** 扣点行（绩效等级 B/C） */
     @Data
     public static class DeductRow implements Serializable {
@@ -93,5 +104,28 @@ public class ScoreApprovalVO implements Serializable {
 
         /** 提成扣点小数 */
         private BigDecimal deductRate;
+    }
+
+    /** 晚提交行（lateSubmitCount > 0，总监核对豁免情况） */
+    @Data
+    public static class LateSubmitRow implements Serializable {
+
+        @Serial
+        private static final long serialVersionUID = 1L;
+
+        private Long employeeId;
+
+        private String employeeCode;
+
+        private String employeeName;
+
+        /** 积分月份（YYYY-MM-DD，当月 1 日） */
+        private String scoreMonth;
+
+        /** 晚提交次数（已扣除总监同意豁免的次数） */
+        private Integer lateSubmitCount;
+
+        /** 积分扣款 = 晚提交次数 × 5 元/次 */
+        private BigDecimal pointsFee;
     }
 }

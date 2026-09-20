@@ -52,6 +52,8 @@ public class PayrollDetail implements Serializable {
     private BigDecimal dormitoryFee;
     private BigDecimal negativeCarryover;
     private BigDecimal otherDeduct;
+    /** 积分扣款（积分日报晚提交处罚：晚提交次数 × 5 元/次） */
+    private BigDecimal pointsFee;
 
     // 汇总
     private BigDecimal gross;
@@ -59,6 +61,14 @@ public class PayrollDetail implements Serializable {
     private BigDecimal tax;
     private BigDecimal net;
     private BigDecimal employerSocial;
+
+    // 业绩溯源（导出展示用，落地避免前端反推误差）
+    /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */
+    private BigDecimal newSignPerformance;
+    /** 当月结佣业绩（不折算，贝壳实收到手值） */
+    private BigDecimal commissionPerformance;
+    /** 当月新签业绩提成比例（职级 personalRate，如 0.70） */
+    private BigDecimal newSignRate;
 
     // 溯源
     private BigDecimal finalRate;

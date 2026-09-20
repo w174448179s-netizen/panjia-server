@@ -30,4 +30,7 @@ public class ScoreSummarySyncDTO implements Serializable {
 
     /** 当月出勤天数（有积分日报的 DISTINCT 填报日期数，平均积分分母） */
     private Integer attendDays;
+
+    /** 当月晚提交次数（填报时间晚于 23:00 的天数，每天最多计 1 次；用于算薪积分扣款） */
+    private Integer lateSubmitCount;
 }

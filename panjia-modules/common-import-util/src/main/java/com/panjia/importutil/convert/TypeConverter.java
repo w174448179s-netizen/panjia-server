@@ -4,6 +4,7 @@ import com.panjia.importutil.exception.ImportUtilException;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Set;
 
@@ -48,6 +49,7 @@ public final class TypeConverter {
             case "INT" -> toInt(raw);
             case "DECIMAL" -> toDecimal(raw, transform);
             case "DATE" -> toDate(raw, dateFormat);
+            case "DATETIME" -> toDateTime(raw, dateFormat);
             case "BOOL" -> toBool(raw);
             default -> raw;
         };
@@ -132,6 +134,15 @@ public final class TypeConverter {
         DateTimeFormatter.ofPattern("yyyy.MM.d"),
     };
 
+    private static final DateTimeFormatter[] FALLBACK_DATETIME_FORMATS = {
+        DateTimeFormatter.ofPattern("yyyy-M-d HH:mm:ss"),
+        DateTimeFormatter.ofPattern("yyyy-M-d HH:mm"),
+        DateTimeFormatter.ofPattern("yyyy/M/d HH:mm:ss"),
+        DateTimeFormatter.ofPattern("yyyy/M/d HH:mm"),
+        DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm:ss"),
+        DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm"),
+    };
+
     private static LocalDate toDate(String raw, String dateFormat) {
         String pattern = (dateFormat == null || dateFormat.isBlank()) ? "yyyy-MM-dd" : dateFormat.trim();
         String trimmed = raw.trim();
@@ -145,6 +156,22 @@ public final class TypeConverter {
                 }
             }
             throw new ImportUtilException("无法转换为日期(" + pattern + "): " + raw);
+        }
+    }
+
+    private static LocalDateTime toDateTime(String raw, String dateFormat) {
+        String pattern = (dateFormat == null || dateFormat.isBlank()) ? "yyyy-MM-dd HH:mm:ss" : dateFormat.trim();
+        String trimmed = raw.trim();
+        try {
+            return LocalDateTime.parse(trimmed, DateTimeFormatter.ofPattern(pattern));
+        } catch (Exception e) {
+            for (DateTimeFormatter fmt : FALLBACK_DATETIME_FORMATS) {
+                try {
+                    return LocalDateTime.parse(trimmed, fmt);
+                } catch (Exception ignored) {
+                }
+            }
+            throw new ImportUtilException("无法转换为日期时间(" + pattern + "): " + raw);
         }
     }
 
