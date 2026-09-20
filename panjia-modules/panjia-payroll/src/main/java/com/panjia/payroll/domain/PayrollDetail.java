@@ -73,6 +73,8 @@ public class PayrollDetail implements Serializable {
     // 溯源
     private BigDecimal finalRate;
     private String perfGrade;
+    /** 绩效提成扣点（积分等级 A/B/C 对应扣点，A=0/B=-2%/C=-4%，负=扣点） */
+    private BigDecimal perfDeduct;
     /** 提成点调整合计（未参保自动扣点+审批通过人工项，负=扣点） */
     private BigDecimal manualAdjust;
     /** 提成点调整命中项溯源 JSON（adjustId/type/rate/reason/source） */

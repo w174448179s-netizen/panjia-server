@@ -97,6 +97,7 @@ public class SalaryCalculationEngine {
             String grade = input.perfGrade.getOrDefault(emp.getEmployeeId(), "A");
             d.setPerfGrade(grade);
             BigDecimal perfDeduct = resolvePerfDeduct(snap, grade);
+            d.setPerfDeduct(MoneyUtil.round6(perfDeduct));
 
             // 招聘加点（经纪人模式 RATE_ADD）
             int apprenticeCnt = input.qualifiedApprenticeCount.getOrDefault(emp.getEmployeeId(), 0);
