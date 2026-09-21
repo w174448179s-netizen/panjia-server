@@ -139,14 +139,44 @@ public class ImportTemplateBridge implements TemplateResolver {
             if (mappings.isEmpty()) {
                 continue;
             }
-            int rowIdx = t.getHeaderRow() == null ? 1 : t.getHeaderRow();
-            List<String> fileRow = rowIdx - 1 < headerRows.size() ? headerRows.get(rowIdx - 1) : null;
-            if (fileRow == null || fileRow.isEmpty()) {
-                missReasons.add(t.getTemplateCode() + ": 文件无第 " + rowIdx + " 行表头");
+            // 多行表头合并（与 XlsxFileParser.invokeHeadMap 一致）：收集
+            // [headerRow, dataStartRow) 范围内的所有表头行，对同一列取最后一个非空值
+            // （子表头覆盖主表头）。单行表头（dataStartRow 未配或 = headerRow+1）
+            // 时只取 headerRow 一行，行为不变。
+            // 钉钉月度汇总：headerRow=3 / dataStartRow=5，第 3 行 H-I 合并为「请假」、
+            // 第 4 行子表头分别为「事假(天)」「病假(天)」，合并后 H=事假(天)、I=病假(天)，
+            // 即可命中模板列映射；若仅取 headerRow 单行，H/I 匹配失败导致 2/16 缺失，
+            // 与简版 ATTENDANCE_SIMPLE 共存后触发「无模板匹配」回归。
+            int headerRowIdx = t.getHeaderRow() == null ? 1 : t.getHeaderRow();
+            int dataStartRowIdx = t.getDataStartRow() == null
+                ? headerRowIdx + 1
+                : Math.max(t.getDataStartRow(), headerRowIdx + 1);
+            List<String> mergedHeaders = new ArrayList<>();
+            for (int r = headerRowIdx; r < dataStartRowIdx; r++) {
+                int idx = r - 1;
+                if (idx < 0 || idx >= headerRows.size()) {
+                    continue;
+                }
+                List<String> fileRow = headerRows.get(idx);
+                if (fileRow == null) {
+                    continue;
+                }
+                while (mergedHeaders.size() < fileRow.size()) {
+                    mergedHeaders.add(null);
+                }
+                for (int i = 0; i < fileRow.size(); i++) {
+                    String v = fileRow.get(i);
+                    if (v != null && !v.isBlank()) {
+                        mergedHeaders.set(i, v.trim());
+                    }
+                }
+            }
+            if (mergedHeaders.isEmpty()) {
+                missReasons.add(t.getTemplateCode() + ": 文件无第 " + headerRowIdx + " 行表头");
                 continue;
             }
             java.util.Set<String> fileHeaders = new java.util.HashSet<>();
-            for (String h : fileRow) {
+            for (String h : mergedHeaders) {
                 if (h != null && !h.isBlank()) {
                     fileHeaders.add(h.trim());
                 }
