@@ -1187,17 +1187,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(s.property_address) AS "propertyAddress",
                MAX(s.business_date) AS "businessDate",
                COALESCE(SUM(s.amount), 0) AS "receivedAmount",
-               COALESCE((
-                   SELECT SUM(e.performance_amount)
-                   FROM pj_perf_fact e
-                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
-                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
-                   WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period}
-                     AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
-                               THEN COALESCE(ers.order_no, ers.contract_no)
-                               ELSE COALESCE(ers.contract_no, ers.order_no) END) = s.biz_key
-               ), 0) AS "expectedAmount",
                COUNT(*) AS "itemCount"
         FROM (
             SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
@@ -1225,6 +1214,85 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         """)
     List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
         @Param("batchId") Long batchId, @Param("period") String period);
+
+    /**
+     * 一次查询批次内全部待绑定的非零 ACTIVE 实收事实行（自动建单性能优化用）。
+     * <p>
+     * 合同匹配口径与 {@link #selectActiveFactsByContractNo} 完全一致
+     * （{@code contract_no = 键 OR 业务键 CASE = 键}），通过 JOIN 业务键表一次完成
+     * 全部合同的匹配。一条事实同时匹配多个业务键时会返回多行（每个匹配键一行），
+     * 由服务层按业务键字典序（= 组处理顺序）确定唯一归属，复刻原逐组查询时
+     * 「先处理的组先绑定、后续组自动排除已绑定事实」的竞争语义。
+     *
+     * @param batchId 导入批次 ID
+     * @param period  归属期间
+     * @param bizKeys 本批次聚合出的业务键（合同号/订单号）
+     * @return 待绑定事实行（received_apply_id 为空、金额非 0），同一 factId 可重复出现
+     */
+    @Select("""
+        <script>
+        SELECT f.id AS "factId",
+               kv.biz_key AS "bizKey",
+               f.dept_id AS "deptId",
+               f.performance_amount AS "amount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        JOIN (VALUES
+        <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
+        ) kv(biz_key)
+          ON rs.contract_no = kv.biz_key
+             OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                       THEN COALESCE(rs.order_no, rs.contract_no)
+                       ELSE COALESCE(rs.contract_no, rs.order_no) END) = kv.biz_key
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_REAL'
+          AND f.batch_id = #{batchId}
+          AND f.period = #{period}
+          AND f.received_apply_id IS NULL
+          AND f.performance_amount IS NOT NULL
+          AND f.performance_amount &lt;&gt; 0
+        ORDER BY kv.biz_key, f.id
+        </script>
+        """)
+    List<com.panjia.performance.dto.BatchFactBindRow> selectBatchUnboundRealFacts(
+        @Param("batchId") Long batchId, @Param("period") String period,
+        @Param("bizKeys") List<String> bizKeys);
+
+    /**
+     * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。
+     * <p>
+     * 口径与逐合同 {@code sumExpect → selectActiveFactsByContractNo} 一致
+     * （{@code contract_no = 键 OR 业务键 CASE = 键}），一条事实对同一键只计一次。
+     * 返回行复用 {@link com.panjia.performance.dto.BatchFactBindRow}：
+     * bizKey=业务键、amount=应收合计（factId/deptId 为空）。
+     *
+     * @param period  归属期间
+     * @param bizKeys 业务键集合
+     * @return 每个有应收事实的业务键一行
+     */
+    @Select("""
+        <script>
+        SELECT kv.biz_key AS "bizKey",
+               COALESCE(SUM(f.performance_amount), 0) AS "amount"
+        FROM pj_perf_fact f
+        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
+        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
+        JOIN (VALUES
+        <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
+        ) kv(biz_key)
+          ON rs.contract_no = kv.biz_key
+             OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
+                       THEN COALESCE(rs.order_no, rs.contract_no)
+                       ELSE COALESCE(rs.contract_no, rs.order_no) END) = kv.biz_key
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_EXPECT'
+          AND f.period = #{period}
+        GROUP BY kv.biz_key
+        </script>
+        """)
+    List<com.panjia.performance.dto.BatchFactBindRow> selectExpectSumsByBizKeys(
+        @Param("period") String period, @Param("bizKeys") List<String> bizKeys);
 
     /**
      * 按事实 ID 查询所属合同的基本信息（调整单详情展示用）。

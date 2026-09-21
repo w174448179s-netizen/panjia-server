@@ -26,9 +26,6 @@ public class ReceivedContractGroupDTO {
     /** 实收业绩合计 */
     private BigDecimal receivedAmount;
 
-    /** 同合同应收业绩合计（PERF_EXPECT） */
-    private BigDecimal expectedAmount;
-
-    /** 明细条数 */
+    /** 明细条数（含金额为 0 的行） */
     private Integer itemCount;
 }
