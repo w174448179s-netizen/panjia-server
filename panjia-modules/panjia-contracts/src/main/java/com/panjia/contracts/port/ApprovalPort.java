@@ -2,6 +2,7 @@ package com.panjia.contracts.port;
 
 import com.panjia.contracts.constant.BizType;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -48,6 +49,33 @@ public interface ApprovalPort {
      * @return true=当前用户有权办理该单当前节点；false=无权或无待办
      */
     boolean isMyTask(String bizType, Long bizId);
+
+    /**
+     * 批量查询当前登录用户可办理的当前待办任务（批量审批同步阶段预检用）。
+     * <p>
+     * 以 3 条 SQL（流程实例 IN + 当前任务 IN + flow_user 授权 IN）完成 N 个单据的
+     * 鉴权与任务定位，替代逐单调 {@link #isMyTask} 的 3N 条 SQL。
+     * 必须在 HTTP 线程中调用（依赖当前登录用户上下文判定 flow_user.processedBy）。
+     *
+     * @param bizType 业务类型（当前实现不参与过滤，仅语义占位，实例按 businessId 定位）
+     * @param bizIds  业务单据 ID 集合
+     * @return 仅包含「存在运行中实例 + 有当前待办（nodeType=1）+ 当前用户被授权」的单据，
+     *         key=bizId，value=任务摘要（taskId/nodeCode）；无权或无待办的单据不在 Map 中
+     */
+    Map<Long, MyTaskBrief> myCurrentTasks(String bizType, Collection<Long> bizIds);
+
+    /**
+     * 系统身份按已知任务 ID 办理节点（ignore=true，跳过办理人权限校验）。
+     * <p>
+     * 批量审批场景预检阶段已通过 {@link #myCurrentTasks} 拿到 taskId 并完成鉴权过滤，
+     * 异步办理时直接传 taskId，避免 {@link #completeAsSys} 内部再次按 bizId 查当前任务。
+     * 仅支持 PASS；预检后任务若已被他人办理，引擎会抛异常，由调用方计入失败（并发安全）。
+     *
+     * @param taskId  待办任务 ID
+     * @param comment 审批意见
+     * @return 是否办理成功
+     */
+    boolean completeTaskAsSys(Long taskId, String comment);
 
     /**
      * 撤销流程实例（系统级、无用户上下文，硬删实例/任务/历史）。

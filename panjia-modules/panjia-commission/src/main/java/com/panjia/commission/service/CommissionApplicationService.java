@@ -32,6 +32,7 @@ import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
+import com.panjia.contracts.port.MyTaskBrief;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -55,6 +56,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -123,6 +125,44 @@ public class CommissionApplicationService {
     private final ConfigService configService;
     private final DeptService deptService;
     private final TaskExecutor taskExecutor;
+
+    /**
+     * 批量发起上下文：承载在批量入口预加载的数据，贯穿 doBatchApply → apply → doApply 调用链，
+     * 避免逐合同重复查询（N 次全表/单行查询→1 次批量查询）。
+     * <ul>
+     *   <li>{@code factsMap}：同步阶段已查的实收事实，doApply 直接复用</li>
+     *   <li>{@code expectedAmounts}：全期间合同汇总一次性加载，doApply 按 contractNo 取值</li>
+     *   <li>{@code activeApps} / {@code rejectedApps}：一条 IN 查询取所有合同当月申请单</li>
+     * </ul>
+     * 单合同发起路径 ctx=null，走原有逐单查询逻辑。
+     */
+    private static class BatchApplyContext {
+        /** 输入合同号/订单号 → 实收事实列表（同步阶段查到，异步复用） */
+        final Map<String, List<PerformanceFactSummaryDTO>> factsMap = new HashMap<>();
+        /** 合同号 → 应收金额（全期间一次加载） */
+        final Map<String, BigDecimal> expectedAmounts = new HashMap<>();
+        /** 输入字符串 → 活跃申请单（DRAFT/SUBMITTED/APPROVED/LOCKED） */
+        final Map<String, CommissionApplication> activeApps = new HashMap<>();
+        /** 输入字符串 → 驳回申请单（REJECTED） */
+        final Map<String, CommissionApplication> rejectedApps = new HashMap<>();
+    }
+
+    /**
+     * 批量审批预检结果项：同步阶段已定位申请单 + 当前用户可办任务，
+     * 异步办理直接用 taskId，无需重复查申请单/当前任务/节点。
+     */
+    private static class BatchApproveItem {
+        /** 用户输入的合同号或订单号 */
+        final String contractNo;
+        final CommissionApplication application;
+        final MyTaskBrief task;
+
+        BatchApproveItem(String contractNo, CommissionApplication application, MyTaskBrief task) {
+            this.contractNo = contractNo;
+            this.application = application;
+            this.task = task;
+        }
+    }
 
     // ==================== 发起结佣（按合同） ====================
 
@@ -221,22 +261,43 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId, boolean skipDeptScope) {
+        return apply(period, contractNo, operatorId, skipDeptScope, null);
+    }
+
+    /**
+     * 发起结佣并提交审批。
+     *
+     * @param skipDeptScope 是否跳过门店数据权限校验。批量发起时门店权限已在 HTTP 线程的同步阶段
+     *                      逐个校验过；异步线程无 Sa-Token 上下文，而门店校验查询的部门表带
+     *                      {@code @DataPermission}，拦截器取登录态会抛 SaTokenContextException，
+     *                      故异步路径必须跳过（不构成越权：同步阶段已过滤）。
+     * @param ctx           批量上下文（预加载的应收/事实/申请单），null 时走单合同路径逐单查；
+     *                      非 null 时跳过 checkPeriodOpen（批量入口已查）、复用预加载的驳回单和事实
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionApplication apply(String period, String contractNo, Long operatorId,
+                                       boolean skipDeptScope, BatchApplyContext ctx) {
         if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
             throw new ServiceException("结算月与合同号不能为空");
         }
-        checkPeriodOpen(period, "发起结佣");
+        // 批量入口已查过封账状态，跳过（P1：N→1 次）
+        if (ctx == null) {
+            checkPeriodOpen(period, "发起结佣");
+        }
         // 门店数据权限校验：非超管只能发起自己门店（含下级）的合同
         if (!skipDeptScope) {
             Long contractDeptId = resolveContractDeptId(period, contractNo);
             checkContractDeptScope(contractDeptId);
         }
-        // 驳回单重提：该合同当月已有 REJECTED 单时，直接重新提交，不新建单
-        CommissionApplication rejected = findRejectedApplication(period, contractNo);
+        // 驳回单重提：从 ctx 取预加载的驳回单，避免逐单查（P1）
+        CommissionApplication rejected = ctx != null
+            ? ctx.rejectedApps.get(contractNo)
+            : findRejectedApplication(period, contractNo);
         if (rejected != null) {
             submit(rejected.getId(), operatorId);
             return rejected;
         }
-        CommissionApplication application = doApply(period, contractNo, operatorId);
+        CommissionApplication application = doApply(period, contractNo, operatorId, ctx);
         submit(application.getId(), operatorId);
         return application;
     }
@@ -278,12 +339,24 @@ public class CommissionApplicationService {
         // 非超管用户只能发起归属部门在本部门（含本部门下级）链路上的合同，无权的直接计入跳过；
         // 部门父链映射只加载一次，逐单沿父链向上校验
         Map<Long, Long> deptParentMap = LoginHelper.isSuperAdmin() ? null : loadDeptParentMap();
+        // 批量上下文：同步阶段缓存事实（避免 doApply 重复查）、预加载应收金额（避免逐单全表查）
+        BatchApplyContext ctx = new BatchApplyContext();
+        // 应收金额一次性加载：全期间合同汇总按 contractNo 建 Map，doApply 直接取值（P0）
+        ctx.expectedAmounts.putAll(loadExpectedAmountMap(period));
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
         BatchResultDTO syncResult = new BatchResultDTO();
         syncResult.setTotal(deduped.size());
         for (String contractNo : deduped) {
             try {
-                Long contractDeptId = resolveContractDeptId(period, contractNo);
+                // 查实收事实并缓存，doApply 直接复用（P0：减少一半事实查询）
+                List<PerformanceFactSummaryDTO> facts = performanceQueryPort
+                    .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+                ctx.factsMap.put(contractNo, facts);
+                Long contractDeptId = facts.stream()
+                    .map(PerformanceFactSummaryDTO::getDeptId)
+                    .filter(Objects::nonNull)
+                    .findFirst()
+                    .orElse(null);
                 if (contractDeptId == null) {
                     syncResult.getSkippedContracts().add(contractNo);
                     continue;
@@ -301,7 +374,7 @@ public class CommissionApplicationService {
         final BatchResultDTO preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> runWithOperatorToken(tokenName, tokenValue, () -> {
-                BatchResultDTO asyncResult = doBatchApply(period, myContracts, operatorId);
+                BatchResultDTO asyncResult = doBatchApply(period, myContracts, operatorId, ctx);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
                 asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
@@ -334,20 +407,30 @@ public class CommissionApplicationService {
      * 通过 SpringUtils.getBean 走代理调 apply，确保 @Transactional 生效。
      * 调用前已由 {@link #runWithOperatorToken} 安装操作人 Sa-Token Mock 上下文，
      * 流程发起、总监自动审批、监听器等行为与 HTTP 线程单个发起一致。
+     *
+     * @param ctx 批量上下文（预加载的应收/事实/申请单），null 时走单合同路径逐单查
      */
-    private BatchResultDTO doBatchApply(String period, LinkedHashSet<String> contractNos, Long operatorId) {
+    private BatchResultDTO doBatchApply(String period, LinkedHashSet<String> contractNos,
+                                        Long operatorId, BatchApplyContext ctx) {
         CommissionApplicationService self = SpringUtils.getBean(CommissionApplicationService.class);
         BatchResultDTO result = new BatchResultDTO();
         result.setTotal(contractNos.size());
+        // 批量预查：一条 IN 查询取所有合同当月活跃+驳回申请单（P1：N×3→1 次）
+        if (ctx != null) {
+            loadApplicationsBatch(period, contractNos, ctx);
+        }
         for (String contractNo : contractNos) {
             try {
-                CommissionApplication existing = findActiveApplication(period, contractNo);
+                // 从预加载 Map 取值，避免逐单查库（ctx=null 时走 findActiveApplication）
+                CommissionApplication existing = ctx != null
+                    ? ctx.activeApps.get(contractNo)
+                    : findActiveApplication(period, contractNo);
                 if (existing != null && existing.getStatus() != ApplicationStatus.REJECTED) {
                     result.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                // 门店权限已在批量入口的 HTTP 线程同步阶段校验，异步线程跳过，避免 @DataPermission 取登录态报错
-                self.apply(period, contractNo, operatorId, true);
+                // 门店权限已在批量入口的 HTTP 线程同步阶段校验，异步线程跳过
+                self.apply(period, contractNo, operatorId, true, ctx);
                 result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
                 result.getFailedContracts().add(contractNo);
@@ -364,10 +447,15 @@ public class CommissionApplicationService {
 
     /**
      * 发起核心逻辑（不含封账校验，由公共入口保证）。
+     *
+     * @param ctx 批量上下文，非 null 时复用预加载的活跃单/事实/应收金额，跳过逐单查
      */
-    private CommissionApplication doApply(String period, String contractNo, Long operatorId) {
-        // 幂等检查：该 (period, contractNo) 的未完结申请单
-        CommissionApplication existing = findActiveApplication(period, contractNo);
+    private CommissionApplication doApply(String period, String contractNo, Long operatorId,
+                                         BatchApplyContext ctx) {
+        // 幂等检查：从 ctx 取预加载的活跃单，避免逐单查（P1）
+        CommissionApplication existing = ctx != null
+            ? ctx.activeApps.get(contractNo)
+            : findActiveApplication(period, contractNo);
         if (existing != null) {
             if (existing.getStatus() == ApplicationStatus.APPROVED
                 || existing.getStatus() == ApplicationStatus.LOCKED) {
@@ -378,9 +466,10 @@ public class CommissionApplicationService {
                 + " 月已存在" + existing.getStatus().getDesc() + "申请单（" + existing.getApplyNo() + "），请勿重复发起");
         }
 
-        // 拉取该合同 ACTIVE 实收事实（含 0 值，本域过滤）
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-            .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+        // 拉取该合同 ACTIVE 实收事实：从 ctx 复用同步阶段缓存，避免重复查（P0）
+        List<PerformanceFactSummaryDTO> facts = ctx != null && ctx.factsMap.containsKey(contractNo)
+            ? ctx.factsMap.get(contractNo)
+            : performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL);
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
             throw new ServiceException("合同 " + contractNo + " " + period + " 月无可入账的实收业绩（amount>0 的实收事实为 0 条）");
@@ -435,7 +524,10 @@ public class CommissionApplicationService {
         application.setApplicantId(operatorId);
         application.setItemCount(nonZeroFacts.size());
         application.setTotalAmount(sumAmounts(nonZeroFacts));
-        application.setExpectedAmount(resolveExpectedAmount(period, contractNo));
+        // 应收金额：从 ctx 取预加载值，避免逐单全表查（P0）
+        application.setExpectedAmount(ctx != null
+            ? ctx.expectedAmounts.getOrDefault(contractNo, BigDecimal.ZERO)
+            : resolveExpectedAmount(period, contractNo));
         application.setAligned(false);
         try {
             applicationMapper.insert(application);
@@ -444,8 +536,13 @@ public class CommissionApplicationService {
             throw new ServiceException("合同 " + contractNo + " " + period + " 月申请单已由他人发起，请刷新");
         }
 
+        // 批量插入明细：insertBatch 替代逐条 insert（P1：N×K→1 次 round-trip）
+        List<CommissionItem> items = new ArrayList<>(nonZeroFacts.size());
         for (PerformanceFactSummaryDTO fact : nonZeroFacts) {
-            itemMapper.insert(buildItem(application, fact, null));
+            items.add(buildItem(application, fact, null));
+        }
+        if (!items.isEmpty()) {
+            itemMapper.insertBatch(items);
         }
 
         log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, received={}, expected={}",
@@ -461,6 +558,21 @@ public class CommissionApplicationService {
             .findFirst()
             .map(PerformanceContractSummaryDTO::getExpectedAmount)
             .orElse(BigDecimal.ZERO);
+    }
+
+    /**
+     * 批量加载全期间合同应收金额 Map（P0 优化）。
+     * <p>
+     * 单次调用 {@link CommissionPerformanceQueryPort#listContractSummaries} 取全期间汇总，
+     * 按 contractNo 建 Map，doApply 直接取值，避免逐合同全表查（N 次→1 次）。
+     */
+    private Map<String, BigDecimal> loadExpectedAmountMap(String period) {
+        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL).stream()
+            .collect(Collectors.toMap(
+                PerformanceContractSummaryDTO::getContractNo,
+                c -> c.getExpectedAmount() == null ? BigDecimal.ZERO : c.getExpectedAmount(),
+                (a, b) -> a,
+                HashMap::new));
     }
 
     /**
@@ -665,43 +777,40 @@ public class CommissionApplicationService {
         if (deduped.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，用 isMyTask 检查权限
-        // 只把当前用户有权办理的单子提交给异步线程，避免越权审批
-        LinkedHashSet<String> myTasks = new LinkedHashSet<>();
+        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文。
+        // ① 一条 IN 查询取所有 SUBMITTED 申请单（替代逐单 selectOne 的 N 次查询）；
+        // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
         BatchResultDTO syncResult = new BatchResultDTO();
         syncResult.setTotal(deduped.size());
+        Map<String, CommissionApplication> submittedApps = loadSubmittedApplicationsBatch(period, deduped);
+        List<CommissionApplication> appList = submittedApps.values().stream().distinct().toList();
+        Map<Long, MyTaskBrief> myTaskMap = appList.isEmpty()
+            ? Map.of()
+            : approvalPort.myCurrentTasks(BizType.COMMISSION,
+                appList.stream().map(CommissionApplication::getId).toList());
+        // 按用户输入顺序组装可办任务，异步直接用 taskId 办理
+        List<BatchApproveItem> approveItems = new ArrayList<>(deduped.size());
         for (String contractNo : deduped) {
-            try {
-                CommissionApplication application = applicationMapper.selectOne(
-                    new LambdaQueryWrapper<CommissionApplication>()
-                        .eq(CommissionApplication::getPeriod, period)
-                        .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
-                            .or().eq(CommissionApplication::getOrderNo, contractNo))
-                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
-                        .orderByDesc(CommissionApplication::getId)
-                        .last("LIMIT 1"));
-                if (application == null) {
-                    syncResult.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                if (!approvalPort.isMyTask(BizType.COMMISSION, application.getId())) {
-                    syncResult.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                myTasks.add(contractNo);
-            } catch (Exception e) {
-                syncResult.getFailedContracts().add(contractNo);
-                log.warn("[结佣-批量审批] 预检失败：contractNo={}, reason={}", contractNo, e.getMessage());
+            CommissionApplication application = submittedApps.get(contractNo);
+            if (application == null) {
+                syncResult.getSkippedContracts().add(contractNo);
+                continue;
             }
+            MyTaskBrief task = myTaskMap.get(application.getId());
+            if (task == null) {
+                syncResult.getSkippedContracts().add(contractNo);
+                continue;
+            }
+            approveItems.add(new BatchApproveItem(contractNo, application, task));
         }
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
         syncResult.setFailed(syncResult.getFailedContracts().size());
         log.info("[结佣-批量审批] period={}, total={}, myTasks={}, skipped={}, operator={}",
-            period, deduped.size(), myTasks.size(), syncResult.getSkipped(), operatorId);
+            period, deduped.size(), approveItems.size(), syncResult.getSkipped(), operatorId);
         final BatchResultDTO preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> {
-                BatchResultDTO asyncResult = doBatchApprove(period, myTasks);
+                BatchResultDTO asyncResult = doBatchApprove(period, approveItems);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 preResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
@@ -712,39 +821,65 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 逐单审批（线程池执行，CompletableFuture 供应方）。
-     * 异步线程无 Sa-Token 上下文，用 completeAsSys（ignore=true）办理，
-     * 权限由 @SaCheckPermission 前置保障。
+     * 一条 IN 查询批量取指定合同当月 SUBMITTED 申请单（批量审批预检用）。
+     * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
      */
-    private BatchResultDTO doBatchApprove(String period, LinkedHashSet<String> contractNos) {
+    private Map<String, CommissionApplication> loadSubmittedApplicationsBatch(
+            String period, Collection<String> contractNos) {
+        if (contractNos.isEmpty()) {
+            return Map.of();
+        }
+        List<CommissionApplication> apps = applicationMapper.selectList(
+            new LambdaQueryWrapper<CommissionApplication>()
+                .eq(CommissionApplication::getPeriod, period)
+                .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
+                    .or().in(CommissionApplication::getOrderNo, contractNos))
+                .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
+                .orderByDesc(CommissionApplication::getId));
+        Map<String, CommissionApplication> byContract = new HashMap<>();
+        Map<String, CommissionApplication> byOrder = new HashMap<>();
+        for (CommissionApplication app : apps) {
+            if (app.getContractNo() != null) {
+                byContract.putIfAbsent(app.getContractNo(), app);
+            }
+            if (app.getOrderNo() != null) {
+                byOrder.putIfAbsent(app.getOrderNo(), app);
+            }
+        }
+        Map<String, CommissionApplication> result = new HashMap<>(contractNos.size() * 2);
+        for (String input : contractNos) {
+            CommissionApplication app = byContract.getOrDefault(input, byOrder.get(input));
+            if (app != null) {
+                result.put(input, app);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 逐单审批（线程池执行，CompletableFuture 供应方）。
+     * 申请单与当前待办（taskId/nodeCode）均由同步阶段预检透传，异步不再查申请单/当前任务；
+     * 用 completeTaskAsSys 按 taskId 办理（ignore=true），权限已在预检阶段闭合。
+     * 预检后任务若被他人抢先办理，引擎抛异常计入失败（并发安全）。
+     */
+    private BatchResultDTO doBatchApprove(String period, List<BatchApproveItem> items) {
         BatchResultDTO result = new BatchResultDTO();
-        result.setTotal(contractNos.size());
-        for (String contractNo : contractNos) {
+        result.setTotal(items.size());
+        for (BatchApproveItem item : items) {
+            String contractNo = item.contractNo;
             try {
-                CommissionApplication application = applicationMapper.selectOne(
-                    new LambdaQueryWrapper<CommissionApplication>()
-                        .eq(CommissionApplication::getPeriod, period)
-                        .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
-                            .or().eq(CommissionApplication::getOrderNo, contractNo))
-                        .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
-                        .orderByDesc(CommissionApplication::getId)
-                        .last("LIMIT 1"));
-                if (application == null) {
-                    result.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                String node = approvalPort.currentNodeCode(BizType.COMMISSION, application.getId());
+                String node = item.task.getNodeCode();
                 if (!NODE_DIRECTOR.equals(node) && !NODE_FINANCE.equals(node)) {
                     result.getSkippedContracts().add(contractNo);
                     continue;
                 }
                 if (NODE_DIRECTOR.equals(node)) {
-                    updateAmountVariables(application);
+                    updateAmountVariables(item.application);
                 }
                 String defaultComment = NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过";
-                approvalPort.completeAsSys(BizType.COMMISSION, application.getId(),
-                    ApprovalAction.PASS, "批量审批：" + defaultComment);
-                refreshCurrentNode(application);
+                approvalPort.completeTaskAsSys(item.task.getTaskId(), "批量审批：" + defaultComment);
+                // 办理后节点已流转（总监→财务 或 结束），按最新节点回写 current_node（必要查询）
+                refreshCurrentNode(item.application);
                 result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
                 result.getFailedContracts().add(contractNo);
@@ -1469,6 +1604,55 @@ public class CommissionApplicationService {
             .eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED)
             .orderByDesc(CommissionApplication::getCreateTime)
             .last("LIMIT 1"));
+    }
+
+    /**
+     * 批量预查所有合同当月活跃+驳回申请单（P1 优化）。
+     * <p>
+     * 一条 IN 查询取所有输入合同号对应的活跃（DRAFT/SUBMITTED/APPROVED/LOCKED）和驳回
+     * （REJECTED）申请单，按输入字符串（合同号或订单号）分别建 Map，
+     * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→1 次）。
+     * <p>
+     * 同一合同多张单取最新一张（按 createTime DESC 排序后 putIfAbsent）。
+     */
+    private void loadApplicationsBatch(String period, Collection<String> contractNos, BatchApplyContext ctx) {
+        if (contractNos.isEmpty()) {
+            return;
+        }
+        List<CommissionApplication> all = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getPeriod, period)
+            .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
+                .or().in(CommissionApplication::getOrderNo, contractNos))
+            .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                ApplicationStatus.APPROVED, ApplicationStatus.LOCKED, ApplicationStatus.REJECTED)
+            .orderByDesc(CommissionApplication::getCreateTime));
+        // 按真实合同号/订单号分别建索引（同键取最新一张）
+        Map<String, CommissionApplication> activeByContract = new HashMap<>();
+        Map<String, CommissionApplication> activeByOrder = new HashMap<>();
+        Map<String, CommissionApplication> rejectedByContract = new HashMap<>();
+        Map<String, CommissionApplication> rejectedByOrder = new HashMap<>();
+        for (CommissionApplication app : all) {
+            boolean isActive = app.getStatus() != ApplicationStatus.REJECTED;
+            if (app.getContractNo() != null) {
+                if (isActive) {
+                    activeByContract.putIfAbsent(app.getContractNo(), app);
+                } else {
+                    rejectedByContract.putIfAbsent(app.getContractNo(), app);
+                }
+            }
+            if (app.getOrderNo() != null) {
+                if (isActive) {
+                    activeByOrder.putIfAbsent(app.getOrderNo(), app);
+                } else {
+                    rejectedByOrder.putIfAbsent(app.getOrderNo(), app);
+                }
+            }
+        }
+        // 按输入字符串（可能是合同号或订单号）匹配到对应申请单
+        for (String input : contractNos) {
+            ctx.activeApps.put(input, activeByContract.getOrDefault(input, activeByOrder.get(input)));
+            ctx.rejectedApps.put(input, rejectedByContract.getOrDefault(input, rejectedByOrder.get(input)));
+        }
     }
 
     /**

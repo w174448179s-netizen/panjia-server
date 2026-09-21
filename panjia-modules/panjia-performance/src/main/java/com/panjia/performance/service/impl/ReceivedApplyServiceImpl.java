@@ -29,6 +29,7 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.ConversionFactorPort;
+import com.panjia.contracts.port.MyTaskBrief;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.dromara.system.api.DeptService;
@@ -42,6 +43,7 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -314,43 +316,35 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         } catch (Exception e) {
             throw new ServiceException("无法获取当前登录用户信息，请重新登录");
         }
-        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，用 isMyTask 检查权限
-        // 只把当前用户有权办理的单子提交给异步线程，避免越权审批
-        LinkedHashSet<String> myTasks = new LinkedHashSet<>();
+        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文。
+        // ① 一条 IN 查询取所有 SUBMITTED 审批单（替代逐单 selectOne 的 N 次查询）；
+        // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
         BatchApproveResultDTO result = new BatchApproveResultDTO();
         result.setTotal(deduped.size());
+        Map<String, ReceivedApply> submittedApplies = loadSubmittedAppliesBatch(period, deduped);
+        List<ReceivedApply> applyList = submittedApplies.values().stream().distinct().toList();
+        Map<Long, MyTaskBrief> myTaskMap = applyList.isEmpty()
+            ? Map.of()
+            : approvalPort.myCurrentTasks(BizType.REAL_CONFIRM,
+                applyList.stream().map(ReceivedApply::getId).toList());
+        // 按用户输入顺序组装可办任务，异步直接用 taskId 办理
+        List<RcvApproveItem> approveItems = new ArrayList<>(deduped.size());
         for (String contractNo : deduped) {
-            try {
-                ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
-                    .eq(ReceivedApply::getPeriod, period)
-                    .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
-                        .or().eq(ReceivedApply::getOrderNo, contractNo))
-                    .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
-                    .orderByDesc(ReceivedApply::getId)
-                    .last("LIMIT 1"));
-                if (apply == null) {
-                    result.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                if (!approvalPort.isMyTask(BizType.REAL_CONFIRM, apply.getId())) {
-                    result.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                myTasks.add(contractNo);
-            } catch (Exception e) {
-                result.getFailedContracts().add(contractNo);
-                log.warn("[实收审批] 批量审批预检失败：period={}, contractNo={}, reason={}",
-                    period, contractNo, e.getMessage());
+            ReceivedApply apply = submittedApplies.get(contractNo);
+            if (apply == null || myTaskMap.get(apply.getId()) == null) {
+                result.getSkippedContracts().add(contractNo);
+                continue;
             }
+            approveItems.add(new RcvApproveItem(contractNo, apply, myTaskMap.get(apply.getId())));
         }
         result.setSkipped(result.getSkippedContracts().size());
         result.setFailed(result.getFailedContracts().size());
         log.info("[实收审批] 批量审批已提交：period={}, total={}, myTasks={}, skipped={}, operator={}",
-            period, deduped.size(), myTasks.size(), result.getSkipped(), operatorName);
+            period, deduped.size(), approveItems.size(), result.getSkipped(), operatorName);
         final BatchApproveResultDTO syncResult = result;
         return CompletableFuture.supplyAsync(
             () -> {
-                BatchApproveResultDTO asyncResult = doBatchApprove(period, myTasks, operatorId, operatorName);
+                BatchApproveResultDTO asyncResult = doBatchApprove(approveItems, operatorId, operatorName);
                 // 合并同步阶段已跳过/失败的
                 syncResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 syncResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
@@ -362,46 +356,72 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 逐单办理（TaskExecutor 线程池执行，CompletableFuture 供应方）。
-     * 不加 @Transactional：逐单处理，单据失败不中断整批，不回滚已处理的单据。
+     * 批量审批预检项：输入合同号 + 审批单 + 当前用户可办任务。
      */
-    private BatchApproveResultDTO doBatchApprove(String period, LinkedHashSet<String> contractNos,
+    private record RcvApproveItem(String contractNo, ReceivedApply apply, MyTaskBrief task) {
+    }
+
+    /**
+     * 一条 IN 查询批量取指定合同当月 SUBMITTED 实收审批单（批量审批预检用）。
+     * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
+     */
+    private Map<String, ReceivedApply> loadSubmittedAppliesBatch(String period, Collection<String> contractNos) {
+        if (contractNos.isEmpty()) {
+            return Map.of();
+        }
+        List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+            .eq(ReceivedApply::getPeriod, period)
+            .and(w -> w.in(ReceivedApply::getContractNo, contractNos)
+                .or().in(ReceivedApply::getOrderNo, contractNos))
+            .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
+            .orderByDesc(ReceivedApply::getId));
+        Map<String, ReceivedApply> byContract = new HashMap<>();
+        Map<String, ReceivedApply> byOrder = new HashMap<>();
+        for (ReceivedApply apply : applies) {
+            if (apply.getContractNo() != null) {
+                byContract.putIfAbsent(apply.getContractNo(), apply);
+            }
+            if (apply.getOrderNo() != null) {
+                byOrder.putIfAbsent(apply.getOrderNo(), apply);
+            }
+        }
+        Map<String, ReceivedApply> resultMap = new HashMap<>(contractNos.size() * 2);
+        for (String input : contractNos) {
+            ReceivedApply apply = byContract.getOrDefault(input, byOrder.get(input));
+            if (apply != null) {
+                resultMap.put(input, apply);
+            }
+        }
+        return resultMap;
+    }
+
+    /**
+     * 逐单办理（TaskExecutor 线程池执行，CompletableFuture 供应方）。
+     * 审批单与当前待办任务均由同步阶段预检透传，异步不再查审批单/当前任务；
+     * 用 completeTaskAsSys 按 taskId 办理。预检后任务若被他人抢先办理，
+     * 引擎抛异常计入失败（并发安全）。单据失败不中断整批。
+     */
+    private BatchApproveResultDTO doBatchApprove(List<RcvApproveItem> items,
                                                   Long operatorId, String operatorName) {
         BatchApproveResultDTO result = new BatchApproveResultDTO();
-        result.setTotal(contractNos.size());
-        for (String contractNo : contractNos) {
+        result.setTotal(items.size());
+        for (RcvApproveItem item : items) {
             try {
-                ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
-                    .eq(ReceivedApply::getPeriod, period)
-                    .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
-                        .or().eq(ReceivedApply::getOrderNo, contractNo))
-                    .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
-                    .orderByDesc(ReceivedApply::getId)
-                    .last("LIMIT 1"));
-                if (apply == null) {
-                    result.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                Long applyTaskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, apply.getId());
-                if (applyTaskId == null) {
-                    result.getSkippedContracts().add(contractNo);
-                    continue;
-                }
                 String approver = operatorName != null ? operatorName : String.valueOf(operatorId);
-                approvalPort.completeAsSys(BizType.REAL_CONFIRM, apply.getId(),
-                    ApprovalAction.PASS, "批量审批通过（操作人：" + approver + "）");
-                result.getSuccessContracts().add(contractNo);
+                approvalPort.completeTaskAsSys(item.task().getTaskId(),
+                    "批量审批通过（操作人：" + approver + "）");
+                result.getSuccessContracts().add(item.contractNo());
             } catch (Exception e) {
-                result.getFailedContracts().add(contractNo);
-                log.warn("[实收审批] 批量审批单据失败：period={}, contractNo={}, reason={}",
-                    period, contractNo, e.getMessage());
+                result.getFailedContracts().add(item.contractNo());
+                log.warn("[实收审批] 批量审批单据失败：contractNo={}, reason={}",
+                    item.contractNo(), e.getMessage());
             }
         }
         result.setSuccess(result.getSuccessContracts().size());
         result.setSkipped(result.getSkippedContracts().size());
         result.setFailed(result.getFailedContracts().size());
-        log.info("[实收审批] 批量审批完成：period={}, 成功={}, 跳过={}, 失败={}",
-            period, result.getSuccess(), result.getSkipped(), result.getFailed());
+        log.info("[实收审批] 批量审批完成：成功={}, 跳过={}, 失败={}",
+            result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 
