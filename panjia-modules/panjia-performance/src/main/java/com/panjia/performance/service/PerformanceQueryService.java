@@ -1,5 +1,6 @@
 package com.panjia.performance.service;
 
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
 import com.panjia.performance.dto.PerformanceFactSearchDTO;
@@ -151,30 +152,46 @@ public interface PerformanceQueryService {
      * 完整业绩查询（合同维度）。
      * <p>
      * 以合同为维度，聚合展示新签业绩、实收业绩、调整状态与金额、实收审批状态、结佣状态。
-     * 支持按期间、部门、业务类型、关键字（合同号/订单号/物业地址）筛选。
+     * 支持按期间、部门、业务类型、关键字（合同号/订单号/物业地址）、员工筛选。
+     * 指定 employeeId 时只返回该员工参与的合同，且金额仅汇总该员工本人份额。
      *
-     * @param period   归属期间（可选，为空时查全部期间）
-     * @param deptId   部门 ID（可选，含子部门）
-     * @param bizType  业务类型（可选，精确匹配）
-     * @param keyword  关键字（可选：合同号/订单号/物业地址）
-     * @param pageNum  页码（从 1 开始）
-     * @param pageSize 每页条数
+     * @param period     归属期间（可选，为空时查全部期间）
+     * @param deptId     部门 ID（可选，含子部门）
+     * @param bizType    业务类型（可选，精确匹配）
+     * @param keyword    关键字（可选：合同号/订单号/物业地址）
+     * @param employeeId 员工 ID（可选：员工筛选，命中后金额按该员工个人份额汇总）
+     * @param pageNum    页码（从 1 开始）
+     * @param pageSize   每页条数
      * @return 合同维度业绩汇总分页结果
      */
     PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId, String bizType,
-                                                          String keyword, Integer pageNum, Integer pageSize);
+                                                          String keyword, Long employeeId,
+                                                          Integer pageNum, Integer pageSize);
 
     /**
      * 完整业绩查询的业务类型下拉选项。
      * <p>
-     * 在与 {@link #searchByContract} 相同的数据权限范围（期间/部门子树/经纪人本人）内
+     * 在与 {@link #searchByContract} 相同的数据权限范围（期间/部门子树/经纪人本人/选中员工）内
      * 对 ACTIVE 事实的业务类型去重，不含关键字与类型本身的过滤。
      *
-     * @param period 归属期间（可选，为空时查全部期间）
-     * @param deptId 部门 ID（可选，含子部门）
+     * @param period     归属期间（可选，为空时查全部期间）
+     * @param deptId     部门 ID（可选，含子部门）
+     * @param employeeId 员工 ID（可选：员工筛选）
      * @return 业务类型名称列表（升序）
      */
-    List<String> searchBizTypes(String period, Long deptId);
+    List<String> searchBizTypes(String period, Long deptId, Long employeeId);
+
+    /**
+     * 完整业绩查询·员工下拉选项（按姓名/工号远程搜索）。
+     * <p>
+     * 数据权限与列表查询完全一致：经纪人只返回本人；其余角色在本部门（含下级）
+     * 子树内搜索，越权指定他部门 deptId 直接拒绝；超管/无归属部门系统账号不限。
+     *
+     * @param keyword 姓名或工号关键字（必填）
+     * @param deptId  部门 ID（可选，含子部门）
+     * @return 员工选项列表（含部门全路径名，最多 20 条）
+     */
+    List<EmployeeMainDataDTO> searchEmployeeOptions(String keyword, Long deptId);
 
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。

@@ -1,6 +1,7 @@
 package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.performance.dto.FactQuery;
 import com.panjia.performance.dto.PerformanceFactDTO;
@@ -266,7 +267,7 @@ public class PerformanceFactController extends BaseController {
      * 完整业绩查询（合同维度）。
      * <p>
      * 以合同为维度，展示新签业绩、实收业绩、调整状态与金额、实收审批状态、结佣状态。
-     * 支持按期间、部门、业务类型、关键字筛选。
+     * 支持按期间、部门、业务类型、关键字、员工筛选；指定 employeeId 时金额仅汇总该员工个人份额。
      */
     @SaCheckPermission("perf:fact:list")
     @GetMapping("/search")
@@ -275,20 +276,41 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) Long deptId,
             @RequestParam(required = false) String bizType,
             @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) Long employeeId,
             @RequestParam(defaultValue = "1") Integer pageNum,
             @RequestParam(defaultValue = "20") Integer pageSize) {
-        return R.ok(queryService.searchByContract(period, deptId, bizType, keyword, pageNum, pageSize));
+        return R.ok(queryService.searchByContract(period, deptId, bizType, keyword,
+            employeeId, pageNum, pageSize));
     }
 
     /**
-     * 完整业绩查询的业务类型下拉选项（数据范围与 /search 一致：期间/部门子树/经纪人本人）。
+     * 完整业绩查询的业务类型下拉选项（数据范围与 /search 一致：期间/部门子树/经纪人本人/选中员工）。
      */
     @SaCheckPermission("perf:fact:list")
     @GetMapping("/search/biz-types")
     public R<List<String>> searchBizTypes(
             @RequestParam(required = false) String period,
+            @RequestParam(required = false) Long deptId,
+            @RequestParam(required = false) Long employeeId) {
+        return R.ok(queryService.searchBizTypes(period, deptId, employeeId));
+    }
+
+    /**
+     * 完整业绩查询·员工下拉选项（按姓名/工号远程搜索）。
+     * <p>
+     * 仅返回当前登录用户部门数据权限范围内的员工（经纪人只返回本人），
+     * 供业绩查询页员工选择框使用，防止通过员工选择越权查询他部门员工业绩。
+     *
+     * @param keyword 姓名或工号关键字（必填）
+     * @param deptId  部门 ID（可选，含子部门）
+     * @return 员工选项（含工号/姓名/部门全路径名，最多 20 条）
+     */
+    @SaCheckPermission("perf:fact:list")
+    @GetMapping("/search/employee-options")
+    public R<List<EmployeeMainDataDTO>> searchEmployeeOptions(
+            @RequestParam String keyword,
             @RequestParam(required = false) Long deptId) {
-        return R.ok(queryService.searchBizTypes(period, deptId));
+        return R.ok(queryService.searchEmployeeOptions(keyword, deptId));
     }
 
     /**

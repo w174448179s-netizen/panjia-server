@@ -288,6 +288,9 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             row.setAvgPoints(avg);
             row.setGrade(grade);
             row.setDeductRate(scoreGradePolicy.deductOf(rule, grade));
+            row.setLateSubmitCount(r.getLateSubmitCount());
+            row.setPointsFee(r.getLateSubmitCount() != null && r.getLateSubmitCount() > 0
+                ? scoreGradePolicy.lateFeeOf(rule, r.getLateSubmitCount()) : null);
             return row;
         }).toList();
 
@@ -373,6 +376,8 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
                     row.setAvgPoints(dec(r.path("avgPoints")));
                     row.setGrade(textOrNull(r.path("grade")));
                     row.setDeductRate(dec(r.path("deductRate")));
+                    row.setLateSubmitCount(r.path("lateSubmitCount").isNumber() ? r.path("lateSubmitCount").asInt() : null);
+                    row.setPointsFee(dec(r.path("pointsFee")));
                     rows.add(row);
                 }
                 vo.setDeductRows(rows);

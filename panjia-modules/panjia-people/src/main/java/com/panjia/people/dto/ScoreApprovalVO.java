@@ -104,6 +104,12 @@ public class ScoreApprovalVO implements Serializable {
 
         /** 提成扣点小数 */
         private BigDecimal deductRate;
+
+        /** 晚提交次数（已扣除总监同意豁免的次数；0 或 null 表示无晚提交） */
+        private Integer lateSubmitCount;
+
+        /** 积分扣款 = 晚提交次数 × 5 元/次 */
+        private BigDecimal pointsFee;
     }
 
     /** 晚提交行（lateSubmitCount > 0，总监核对豁免情况） */

@@ -12,6 +12,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -87,6 +88,44 @@ public class EmployeeMainDataAdapter implements EmployeeMainDataQueryPort {
                 dto.setDeptName(deptNames.get(emp.getDeptId()));
             }
             result.put(emp.getEmployeeCode(), dto);
+        }
+        return result;
+    }
+
+    @Override
+    public List<EmployeeMainDataDTO> searchOptions(String keyword, Collection<Long> deptIds, int limit) {
+        if (StringUtils.isBlank(keyword) || limit <= 0) {
+            return List.of();
+        }
+        // 显式传入空部门集合 = 无可见范围，直接返回空（null 才表示不限制）
+        if (deptIds != null && deptIds.isEmpty()) {
+            return List.of();
+        }
+        String kw = keyword.trim();
+        List<Employee> list = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+            .and(w -> w.like(Employee::getEmployeeName, kw)
+                .or().like(Employee::getEmployeeCode, kw))
+            .in(deptIds != null, Employee::getDeptId, deptIds)
+            .orderByAsc(Employee::getEmployeeCode)
+            .last("LIMIT " + limit));
+        if (list.isEmpty()) {
+            return List.of();
+        }
+        // 批量取部门全路径名，避免逐行查部门
+        Set<Long> scopeDeptIds = list.stream()
+            .map(Employee::getDeptId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, String> deptNames = scopeDeptIds.isEmpty()
+            ? Map.of() : deptPort.findDeptFullNames(scopeDeptIds);
+
+        List<EmployeeMainDataDTO> result = new ArrayList<>(list.size());
+        for (Employee emp : list) {
+            EmployeeMainDataDTO dto = toDTO(emp);
+            if (emp.getDeptId() != null) {
+                dto.setDeptName(deptNames.get(emp.getDeptId()));
+            }
+            result.add(dto);
         }
         return result;
     }

@@ -3,6 +3,7 @@ package com.panjia.contracts.port;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -44,4 +45,17 @@ public interface EmployeeMainDataQueryPort {
      * @return 工号 → 员工主数据；未匹配的工号不在结果中
      */
     Map<String, EmployeeMainDataDTO> listByCodes(Collection<String> employeeCodes);
+
+    /**
+     * 按姓名/工号模糊搜索员工（员工下拉选择数据源），可选限定部门集合。
+     * <p>
+     * 部门集合由调用方按登录用户的数据权限解析后传入（如本部门及下级），
+     * 本方法只做查询不做权限判断。命中工号或姓名任一即返回（ILIKE 语义）。
+     *
+     * @param keyword 姓名或工号关键字（空白时返回空列表，避免无关键字全量拉取）
+     * @param deptIds 允许的部门 ID 集合；{@code null} 表示不限制部门，空集合返回空列表
+     * @param limit   最大返回条数（&lt;=0 时返回空列表）
+     * @return 员工主数据列表（含部门全路径名），按工号升序
+     */
+    List<EmployeeMainDataDTO> searchOptions(String keyword, Collection<Long> deptIds, int limit);
 }

@@ -37,6 +37,7 @@ import org.dromara.system.api.DeptService;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,6 +54,9 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     /** 经纪人角色 ID（仅本人业绩数据权限） */
     private static final Long ROLE_AGENT = 1761300000000000014L;
+
+    /** 员工下拉选项单次最大返回条数 */
+    private static final int EMPLOYEE_OPTION_LIMIT = 20;
 
     private final PerformanceFactMapper factMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
@@ -403,38 +407,108 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     @Override
     public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId, String bizType,
-                                                                  String keyword, Integer pageNum, Integer pageSize) {
+                                                                  String keyword, Long employeeId,
+                                                                  Integer pageNum, Integer pageSize) {
         int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
         int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
         long offset = (long) (page - 1) * size;
 
-        // 数据权限：经纪人仅本人参与的合同；店长/总监强制本部门（含下级），越权指定他部门直接拒绝
+        // 数据权限：经纪人仅本人参与的合同；店长/总监/人事强制本部门（含下级），越权指定他部门直接拒绝
         Long selfEmployeeId = resolveSelfEmployeeId();
         Long effectiveDeptId = deptId;
         if (selfEmployeeId == null) {
             effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
+        // 员工筛选：经纪人强制本人；其他角色所传 employeeId 必须落在本人部门数据权限内
+        Long filterEmployeeId = resolveSearchEmployeeId(selfEmployeeId, employeeId, effectiveDeptId);
 
         long total = factMapper.countFactSearchByContract(period, effectiveDeptId,
-            StringUtils.trimToNull(bizType), keyword, selfEmployeeId);
+            StringUtils.trimToNull(bizType), keyword, filterEmployeeId);
         List<PerformanceFactSearchDTO> rows = total == 0
             ? List.of()
             : factMapper.selectFactSearchByContract(period, effectiveDeptId,
-                StringUtils.trimToNull(bizType), keyword, selfEmployeeId, offset, size);
+                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, offset, size);
         fillSearchConversion(rows);
 
         return new PageResult<>(rows, total);
     }
 
     @Override
-    public List<String> searchBizTypes(String period, Long deptId) {
+    public List<String> searchBizTypes(String period, Long deptId, Long employeeId) {
         // 与 searchByContract 完全相同的数据权限口径，保证下拉选项即当前用户可见的类型
         Long selfEmployeeId = resolveSelfEmployeeId();
         Long effectiveDeptId = deptId;
         if (selfEmployeeId == null) {
             effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
-        return factMapper.selectSearchBizTypes(StringUtils.trimToNull(period), effectiveDeptId, selfEmployeeId);
+        Long filterEmployeeId = resolveSearchEmployeeId(selfEmployeeId, employeeId, effectiveDeptId);
+        return factMapper.selectSearchBizTypes(StringUtils.trimToNull(period), effectiveDeptId, filterEmployeeId);
+    }
+
+    @Override
+    public List<EmployeeMainDataDTO> searchEmployeeOptions(String keyword, Long deptId) {
+        String kw = StringUtils.trimToNull(keyword);
+        if (kw == null) {
+            return List.of();
+        }
+        Long selfEmployeeId = resolveSelfEmployeeId();
+        if (selfEmployeeId != null) {
+            // 经纪人只能选择本人，关键字不匹配本人时返回空（前端同时隐藏选择框，此处为后端兜底）
+            EmployeeMainDataDTO self = employeeMainDataQueryPort.getByEmployeeId(selfEmployeeId);
+            if (self == null || !matchesEmployeeKeyword(self, kw)) {
+                return List.of();
+            }
+            return List.of(self);
+        }
+        // 与列表查询同一口径：越权指定他部门直接拒绝；超管/无归属部门系统账号 effectiveDeptId=null 不限制
+        Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
+        Collection<Long> deptIds = null;
+        if (effectiveDeptId != null) {
+            deptIds = deptService.selectDeptAndChildById(effectiveDeptId);
+            if (deptIds == null || deptIds.isEmpty()) {
+                return List.of();
+            }
+        }
+        return employeeMainDataQueryPort.searchOptions(kw, deptIds, EMPLOYEE_OPTION_LIMIT);
+    }
+
+    /**
+     * 解析业绩查询实际生效的员工筛选 ID。
+     * <ul>
+     *   <li>经纪人：强制本人，外部传入的 employeeId 一律忽略；</li>
+     *   <li>其他角色：传入 employeeId 时校验该员工当前归属部门在本部门（含下级）子树内，否则拒绝；</li>
+     *   <li>超管/无归属部门系统账号（effectiveDeptId=null）：不限制，直接使用传入值。</li>
+     * </ul>
+     * 传入非法 employeeId（员工不存在）同样拒绝，避免被探测。
+     */
+    private Long resolveSearchEmployeeId(Long selfEmployeeId, Long requestedEmployeeId, Long effectiveDeptId) {
+        if (selfEmployeeId != null) {
+            return selfEmployeeId;
+        }
+        if (requestedEmployeeId == null) {
+            return null;
+        }
+        EmployeeMainDataDTO employee = employeeMainDataQueryPort.getByEmployeeId(requestedEmployeeId);
+        if (employee == null) {
+            throw new ServiceException("所选员工不存在");
+        }
+        if (effectiveDeptId != null) {
+            List<Long> scopeDeptIds = deptService.selectDeptAndChildById(effectiveDeptId);
+            if (employee.getDeptId() == null || scopeDeptIds == null
+                || !scopeDeptIds.contains(employee.getDeptId())) {
+                throw new ServiceException("无权查询该员工的业绩");
+            }
+        }
+        return requestedEmployeeId;
+    }
+
+    /** 员工选项关键字匹配（与 SQL ILIKE 同语义：姓名或工号包含关键字，忽略大小写）。 */
+    private boolean matchesEmployeeKeyword(EmployeeMainDataDTO employee, String keyword) {
+        String kw = keyword.toLowerCase();
+        return (employee.getEmployeeName() != null
+                && employee.getEmployeeName().toLowerCase().contains(kw))
+            || (employee.getEmployeeCode() != null
+                && employee.getEmployeeCode().toLowerCase().contains(kw));
     }
 
     /**

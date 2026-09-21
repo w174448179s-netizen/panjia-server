@@ -279,8 +279,8 @@ public class SalaryCalculationEngine {
                 }
                 storeIncome = MoneyUtil.round2(sumIncome);
                 d.setStoreIncome(storeIncome);
-                d.setNewSignPerformance(BigDecimal.ZERO);
-                d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
+              //  d.setNewSignPerformance(BigDecimal.ZERO);
+             //   d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
                 // 落地：汇总值（一行展示）+ JSON 明细（导出按门店分行）
                 d.setDeptNewSignTotal(MoneyUtil.round2(sumNewSign));
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(sumSocial));
@@ -291,8 +291,8 @@ public class SalaryCalculationEngine {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
                 baseSalary = bd(rank.path("baseSalary").asText("0"));
                 // 经纪人无个人新签业绩（提成来自结佣），落地 0
-                d.setNewSignPerformance(BigDecimal.ZERO);
-                d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
+              //  d.setNewSignPerformance(BigDecimal.ZERO);
+               // d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
