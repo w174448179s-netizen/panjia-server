@@ -4,8 +4,10 @@ import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 
+import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 业绩事实跨域查询端口（performance 域对外契约，对结佣域唯一出口）。
@@ -92,4 +94,53 @@ public interface CommissionPerformanceQueryPort {
      * @return 对齐结果（含替换映射与对齐前后合计）；无对应应收事实的实收事实保持不变
      */
     ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId);
+
+    /**
+     * 合同级金额调整：按合同下指定口径各 ACTIVE 事实当前金额占比分摊
+     * （targetAmount − 当前合计）差额，逐条 supersede 为新金额（结佣调整用）。
+     * <p>
+     * 分摊尾差补到业绩金额绝对值最大的一条，保证 Σ新金额 = targetAmount 精确成立。
+     * 与 {@code PerformanceAdjustServiceImpl.executeContractAmountAdjust} 同口径。
+     *
+     * @param period       归属期间
+     * @param contractNo   合同号
+     * @param factType     事实口径（PERF_REAL / PERF_EXPECT）
+     * @param targetAmount 调整后合计
+     * @param operatorId   操作人 ID
+     * @param adjustId     调整单 ID（写入新事实 adjust_id 与冲销链）
+     * @return 旧事实 ID → 新事实 ID 映射（供结佣域回写 CommissionItem.performance_fact_id）
+     */
+    Map<Long, Long> adjustContractFactsAmount(String period, String contractNo, String factType,
+                                              BigDecimal targetAmount, Long operatorId, Long adjustId);
+
+    /**
+     * 明细级金额调整：单条事实 supersede 为 targetAmount（结佣调整用）。
+     *
+     * @param factId       事实 ID
+     * @param targetAmount 调整后金额
+     * @param operatorId   操作人 ID
+     * @param adjustId     调整单 ID
+     * @return 新事实 ID
+     */
+    Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId);
+
+    /**
+     * 明细级业绩冲销：单条事实冲销（结佣调整 VOID 用）。
+     *
+     * @param factId     事实 ID
+     * @param operatorId 操作人 ID
+     * @param adjustId   调整单 ID
+     */
+    void voidFact(Long factId, Long operatorId, Long adjustId);
+
+    /**
+     * 明细级部门划转：单条事实 supersede 为新部门（结佣调整 TRANSFER 用）。
+     *
+     * @param factId       事实 ID
+     * @param targetDeptId 目标部门 ID
+     * @param operatorId   操作人 ID
+     * @param adjustId     调整单 ID
+     * @return 新事实 ID
+     */
+    Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId);
 }

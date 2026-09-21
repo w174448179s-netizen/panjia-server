@@ -9,7 +9,7 @@ import java.io.Serializable;
 import java.math.BigDecimal;
 
 /**
- * 发起结佣调整单请求 DTO（DISCOUNT / DIFF / VOID，结佣域详细设计 §4.5）。
+ * 发起结佣调整单请求 DTO（对齐新签调整：直接操作业绩事实 PERF_REAL + PERF_EXPECT）。
  */
 @Data
 public class AdjustCreateDTO implements Serializable {
@@ -21,24 +21,24 @@ public class AdjustCreateDTO implements Serializable {
     @NotNull(message = "申请单不能为空")
     private Long applicationId;
 
-    /** 调整对象结佣明细 ID */
-    @NotNull(message = "结佣明细不能为空")
+    /** 调整对象结佣明细 ID（明细级必填，合同级为空） */
     private Long itemId;
 
-    /** 调整类型（DISCOUNT / DIFF / VOID） */
+    /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
+    @NotBlank(message = "调整范围不能为空")
+    private String adjustScope;
+
+    /** 调整类型（AMOUNT / VOID / TRANSFER） */
     @NotBlank(message = "调整类型不能为空")
     private String adjustType;
 
-    /** 折后最终金额（DISCOUNT 用，必填，直接存折后值，非系数） */
-    private BigDecimal newAmount;
+    /** 调整后金额（AMOUNT 用，前端 = 当前金额 + 录入差额） */
+    private BigDecimal targetAmount;
 
-    /** 差额金额（DIFF 用，必填，正补负扣） */
-    private BigDecimal diffAmount;
+    /** 部门划转目标部门 ID（TRANSFER 用） */
+    private Long targetDeptId;
 
-    /** 补发目标月（DIFF 用，必填 YYYY-MM；封账校验按此月判定） */
-    private String targetPeriod;
-
-    /** 调整原因（必填，审计；折扣种类如 85 折写此处） */
+    /** 调整原因（必填，审计） */
     @NotBlank(message = "调整原因不能为空")
     private String reason;
 }

@@ -8,14 +8,21 @@ import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
+import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.ReceivedAlignmentService;
+import com.panjia.performance.service.ReverseService;
+import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 业绩事实跨域查询适配器（panjia-performance 实现 contracts {@link CommissionPerformanceQueryPort}）。
@@ -33,6 +40,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     private final PerformanceFactMapper factMapper;
     private final ReceivedAlignmentService receivedAlignmentService;
+    private final ReverseService reverseService;
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByDept(String period, Long deptId, String factType) {
@@ -122,5 +130,130 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         dto.setReceivedApplyId(fact.getReceivedApplyId());
         dto.setShareRatio(fact.getShareRatio());
         return dto;
+    }
+
+    // ==================== 结佣调整：事实变更（同 PerformanceAdjustServiceImpl 口径） ====================
+
+    @Override
+    public Map<Long, Long> adjustContractFactsAmount(String period, String contractNo, String factType,
+                                                      BigDecimal targetAmount, Long operatorId, Long adjustId) {
+        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+        Map<Long, Long> mapping = new HashMap<>();
+        if (facts == null || facts.isEmpty()) {
+            return mapping;
+        }
+        BigDecimal total = facts.stream()
+            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal deltaTotal = MoneyUtil.round2(targetAmount.subtract(total));
+        if (MoneyUtil.isZero(deltaTotal)) {
+            return mapping;
+        }
+        List<BigDecimal> amounts = facts.stream()
+            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
+            .toList();
+        BigDecimal[] parts = allocateByAmount(amounts, deltaTotal);
+        for (int i = 0; i < facts.size(); i++) {
+            if (MoneyUtil.isZero(parts[i])) {
+                continue;
+            }
+            PerformanceFact oldFact = facts.get(i);
+            PerformanceFact newFact = copyFactBase(oldFact);
+            newFact.setPerformanceAmount(MoneyUtil.round2(oldFact.getPerformanceAmount().add(parts[i])));
+            newFact.setAdjustId(adjustId);
+            PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
+            mapping.put(oldFact.getId(), created.getId());
+        }
+        return mapping;
+    }
+
+    @Override
+    public Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId) {
+        PerformanceFact oldFact = factMapper.selectById(factId);
+        if (oldFact == null) {
+            return null;
+        }
+        PerformanceFact newFact = copyFactBase(oldFact);
+        newFact.setPerformanceAmount(MoneyUtil.round2(targetAmount));
+        newFact.setAdjustId(adjustId);
+        PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
+        return created.getId();
+    }
+
+    @Override
+    public void voidFact(Long factId, Long operatorId, Long adjustId) {
+        reverseService.reverseByAdjust(factId, adjustId, ReversedReason.MANUAL_ADJUST, operatorId);
+    }
+
+    @Override
+    public Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId) {
+        PerformanceFact oldFact = factMapper.selectById(factId);
+        if (oldFact == null) {
+            return null;
+        }
+        PerformanceFact newFact = copyFactBase(oldFact);
+        newFact.setDeptId(targetDeptId);
+        newFact.setAdjustId(adjustId);
+        PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
+        return created.getId();
+    }
+
+    /** 按金额占比分摊差额（与 PerformanceAdjustServiceImpl.allocateByAmount 同口径）。 */
+    private BigDecimal[] allocateByAmount(List<BigDecimal> amounts, BigDecimal deltaTotal) {
+        BigDecimal total = amounts.stream()
+            .map(a -> a == null ? BigDecimal.ZERO : a)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal[] parts = new BigDecimal[amounts.size()];
+        if (total.signum() == 0) {
+            BigDecimal even = amounts.isEmpty() ? BigDecimal.ZERO
+                : MoneyUtil.round2(deltaTotal.divide(BigDecimal.valueOf(amounts.size()), 8, RoundingMode.HALF_UP));
+            BigDecimal allocated = BigDecimal.ZERO;
+            for (int i = 0; i < amounts.size(); i++) {
+                parts[i] = even;
+                allocated = allocated.add(even);
+            }
+            if (!amounts.isEmpty()) {
+                parts[0] = MoneyUtil.round2(parts[0].add(deltaTotal.subtract(allocated)));
+            }
+            return parts;
+        }
+        BigDecimal allocated = BigDecimal.ZERO;
+        int largestIdx = 0;
+        BigDecimal largestAbs = BigDecimal.ZERO;
+        for (int i = 0; i < amounts.size(); i++) {
+            BigDecimal abs = amounts.get(i).abs();
+            if (abs.compareTo(largestAbs) > 0) {
+                largestAbs = abs;
+                largestIdx = i;
+            }
+            parts[i] = MoneyUtil.round2(deltaTotal.multiply(amounts.get(i)).divide(total, 8, RoundingMode.HALF_UP));
+            allocated = allocated.add(parts[i]);
+        }
+        BigDecimal tail = MoneyUtil.round2(deltaTotal.subtract(allocated));
+        parts[largestIdx] = MoneyUtil.round2(parts[largestIdx].add(tail));
+        return parts;
+    }
+
+    /** 复制事实基础字段（batchId 置空，避免被批次 supersede 误冲销），与新签调整一致。 */
+    private PerformanceFact copyFactBase(PerformanceFact oldFact) {
+        PerformanceFact newFact = new PerformanceFact();
+        newFact.setFactType(oldFact.getFactType());
+        newFact.setPeriod(oldFact.getPeriod());
+        newFact.setBusinessDate(oldFact.getBusinessDate());
+        newFact.setBatchId(null);
+        newFact.setNormalizedRecordId(oldFact.getNormalizedRecordId());
+        newFact.setSourceKey(oldFact.getSourceKey());
+        newFact.setBizType(oldFact.getBizType());
+        newFact.setEmployeeId(oldFact.getEmployeeId());
+        newFact.setEmployeeExternalCode(oldFact.getEmployeeExternalCode());
+        newFact.setDeptId(oldFact.getDeptId());
+        newFact.setRoleType(oldFact.getRoleType());
+        newFact.setShareRatio(oldFact.getShareRatio());
+        newFact.setPerformanceAmount(oldFact.getPerformanceAmount());
+        newFact.setEffectiveDate(oldFact.getEffectiveDate() != null
+            ? oldFact.getEffectiveDate() : oldFact.getBusinessDate());
+        newFact.setFactStatus(FactStatus.ACTIVE);
+        newFact.setSource(oldFact.getSource());
+        return newFact;
     }
 }

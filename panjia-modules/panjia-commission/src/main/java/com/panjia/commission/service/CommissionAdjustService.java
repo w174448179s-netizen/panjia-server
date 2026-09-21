@@ -15,8 +15,10 @@ import com.panjia.commission.dto.AdjustQuery;
 import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
+import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
@@ -77,14 +79,21 @@ public class CommissionAdjustService {
     private final PeriodCloseQueryPort periodCloseQueryPort;
     private final ObjectMapper objectMapper;
     private final ApprovalPort approvalPort;
+    /** 业绩事实跨域端口：结佣调整直接操作 PERF_REAL + PERF_EXPECT 事实 */
+    private final CommissionPerformanceQueryPort performanceQueryPort;
+
+    private static final String FACT_TYPE_REAL = "PERF_REAL";
+    private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
+    private static final String SCOPE_CONTRACT = "CONTRACT";
+    private static final String SCOPE_DETAIL = "DETAIL";
 
     // ==================== 发起 ====================
 
     /**
      * 发起调整单（SUBMITTED，待审批）。
      * <p>
-     * 前置校验（§3.3）：① 封账校验（按 §2.5 三条判定规则，经 Port 实时查）；
-     * ② 原明细为 DRAFT、PENDING 或 APPROVED；③ 同一 item 无未完成调整单。
+     * 前置校验：① 申请单状态必须为 LOCKED（结佣锁定后方可调整）；
+     * ② 明细级 item 属于该申请单；③ 同一对象无未完成调整单；④ 封账校验。
      *
      * @param dto        调整单创建请求
      * @param operatorId 发起人 ID
@@ -96,56 +105,83 @@ public class CommissionAdjustService {
         if (adjustType == null) {
             throw new ServiceException("非法调整类型：" + dto.getAdjustType());
         }
+        boolean detailScope = SCOPE_DETAIL.equals(dto.getAdjustScope());
         CommissionApplication application = applicationService.getApplication(dto.getApplicationId());
-        CommissionItem item = itemMapper.selectById(dto.getItemId());
-        if (item == null) {
-            throw new ServiceException("结佣明细不存在：" + dto.getItemId());
-        }
-        if (!item.getApplicationId().equals(application.getId())) {
-            throw new ServiceException("结佣明细不属于该申请单：itemId=" + item.getId()
-                + ", applicationId=" + application.getId());
-        }
-        if (item.getStatus() != ItemStatus.DRAFT
-            && item.getStatus() != ItemStatus.PENDING
-            && item.getStatus() != ItemStatus.APPROVED) {
-            throw new ServiceException("仅待提交/待审批/已审批明细可发起调整（当前：" + item.getStatus().getDesc() + "）");
+        if (application.getStatus() != ApplicationStatus.LOCKED) {
+            throw new ServiceException("仅已锁定（LOCKED）的结佣申请单可发起调整（当前："
+                + application.getStatus().getDesc() + "）");
         }
 
-        // ① 封账校验（§2.5 判定规则）：DIFF 校验 target_period；DISCOUNT/VOID 校验明细自身 period
-        if (adjustType == AdjustType.DIFF) {
-            if (StringUtils.isBlank(dto.getTargetPeriod())) {
-                throw new ServiceException("差额补发必须指定补发目标月（target_period）");
+        CommissionItem item = null;
+        if (detailScope) {
+            if (dto.getItemId() == null) {
+                throw new ServiceException("明细级调整必须指定结佣明细 ID");
             }
-            if (dto.getDiffAmount() == null || dto.getDiffAmount().compareTo(BigDecimal.ZERO) == 0) {
-                throw new ServiceException("差额补发必须指定差额金额（diff_amount，正补负扣）");
+            item = itemMapper.selectById(dto.getItemId());
+            if (item == null) {
+                throw new ServiceException("结佣明细不存在：" + dto.getItemId());
             }
-            checkPeriodOpen(dto.getTargetPeriod(), "差额补发（DIFF）");
+            if (!item.getApplicationId().equals(application.getId())) {
+                throw new ServiceException("结佣明细不属于该申请单：itemId=" + item.getId()
+                    + ", applicationId=" + application.getId());
+            }
+        }
+
+        // ① 封账校验（按申请单期间）
+        checkPeriodOpen(application.getPeriod(), adjustType.getDesc());
+
+        // ② 类型参数校验
+        if (adjustType == AdjustType.AMOUNT) {
+            if (dto.getTargetAmount() == null || dto.getTargetAmount().compareTo(BigDecimal.ZERO) < 0) {
+                throw new ServiceException("金额调整必须指定调整后金额（targetAmount ≥ 0）");
+            }
+        } else if (adjustType == AdjustType.TRANSFER) {
+            if (dto.getTargetDeptId() == null) {
+                throw new ServiceException("部门划转必须指定目标部门");
+            }
+        }
+
+        // ③ 同一对象无未完成调整单（明细级按 itemId，合同级按 applicationId）
+        LambdaQueryWrapper<CommissionAdjust> unfinishedWrapper = new LambdaQueryWrapper<CommissionAdjust>()
+            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED);
+        if (detailScope) {
+            unfinishedWrapper.eq(CommissionAdjust::getItemId, item.getId());
         } else {
-            checkPeriodOpen(item.getPeriod(), adjustType == AdjustType.DISCOUNT ? "折扣（DISCOUNT）" : "作废（VOID）");
+            unfinishedWrapper.eq(CommissionAdjust::getApplicationId, application.getId())
+                .isNull(CommissionAdjust::getItemId);
         }
-        if (adjustType == AdjustType.DISCOUNT
-            && (dto.getNewAmount() == null || dto.getNewAmount().compareTo(BigDecimal.ZERO) < 0)) {
-            throw new ServiceException("折扣调整必须指定折后最终金额（new_amount ≥ 0，直接存折后值，非系数）");
+        Long unfinished = adjustMapper.selectCount(unfinishedWrapper);
+        if (unfinished != null && unfinished > 0) {
+            throw new ServiceException("该对象已有未完成调整单，请先完成审批后再发起新调整");
         }
 
-        // ③ 同一明细无未完成调整单
-        Long unfinished = adjustMapper.selectCount(new LambdaQueryWrapper<CommissionAdjust>()
-            .eq(CommissionAdjust::getItemId, item.getId())
-            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
-        if (unfinished != null && unfinished > 0) {
-            throw new ServiceException("该明细已有未完成调整单，请先完成审批后再发起新调整");
+        // 计算调整前金额与差额
+        BigDecimal originalAmount;
+        Long factId = null;
+        if (detailScope) {
+            originalAmount = item.getAmount();
+            factId = item.getPerformanceFactId();
+        } else {
+            originalAmount = sumFacts(application.getPeriod(), application.getContractNo(), FACT_TYPE_REAL);
         }
+        BigDecimal targetAmount = dto.getTargetAmount();
+        BigDecimal deltaAmount = targetAmount == null ? null
+            : targetAmount.subtract(originalAmount == null ? BigDecimal.ZERO : originalAmount);
 
         CommissionAdjust adjust = new CommissionAdjust();
         adjust.setAdjustNo("CADJ" + LocalDateTime.now().format(ADJUST_NO_FORMATTER));
         adjust.setApplicationId(application.getId());
-        adjust.setItemId(item.getId());
-        adjust.setPeriod(item.getPeriod());
+        adjust.setItemId(detailScope ? item.getId() : null);
+        adjust.setPeriod(application.getPeriod());
         adjust.setAdjustType(adjustType);
-        adjust.setNewAmount(dto.getNewAmount());
-        adjust.setDiffAmount(dto.getDiffAmount());
-        adjust.setTargetPeriod(dto.getTargetPeriod());
-        adjust.setPayloadJson(buildPayload(item, dto));
+        adjust.setNewAmount(targetAmount);            // 复用 new_amount 列：调整后金额
+        adjust.setDiffAmount(deltaAmount);            // 复用 diff_amount 列：调整差额
+        adjust.setOriginalAmount(originalAmount);
+        adjust.setContractNo(application.getContractNo());
+        adjust.setFactType(FACT_TYPE_REAL);
+        adjust.setAdjustScope(dto.getAdjustScope());
+        adjust.setFactId(factId);
+        adjust.setTargetDeptId(dto.getTargetDeptId());
         adjust.setReason(dto.getReason());
         adjust.setStatus(AdjustStatus.SUBMITTED);
         adjust.setApplicantId(operatorId);
@@ -153,7 +189,6 @@ public class CommissionAdjustService {
 
         // 发起审批流程（bizType=COMMISSION_ADJUST，businessId=调整单ID），失败则整体回滚
         ApprovalStartCmd cmd = buildStartCmd(adjust);
-
         boolean started;
         try {
             started = approvalPort.startAndCompleteFirst(BizType.COMMISSION_ADJUST, adjust.getId(), cmd);
@@ -165,7 +200,6 @@ public class CommissionAdjustService {
             throw new ServiceException("结佣调整审批流程发起失败");
         }
 
-        // 回填流程实例 ID（回调以 businessId 路由，回填失败不阻断主流程）
         try {
             Long instanceId = approvalPort.instanceId(BizType.COMMISSION_ADJUST, adjust.getId());
             if (instanceId != null) {
@@ -176,9 +210,20 @@ public class CommissionAdjustService {
             log.warn("[结佣-调整] 流程实例ID回填失败：adjustId={}", adjust.getId(), e);
         }
 
-        log.info("[结佣-调整] 调整单已发起并提交审批：adjustNo={}, type={}, itemId={}, applicantId={}",
-            adjust.getAdjustNo(), adjustType.getCode(), item.getId(), operatorId);
+        log.info("[结佣-调整] 调整单已发起并提交审批：adjustNo={}, type={}, scope={}, applicantId={}",
+            adjust.getAdjustNo(), adjustType.getCode(), dto.getAdjustScope(), operatorId);
         return adjust;
+    }
+
+    /** 按期间+合同号求指定口径 ACTIVE 事实金额合计。 */
+    private BigDecimal sumFacts(String period, String contractNo, String factType) {
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByContract(period, contractNo, factType);
+        if (facts == null || facts.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        return facts.stream()
+            .map(f -> f.getAmount() == null ? BigDecimal.ZERO : f.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
     // ==================== 工作流回调 ====================
@@ -274,12 +319,13 @@ public class CommissionAdjustService {
 
         AdjustType type = adjust.getAdjustType();
         switch (type) {
-            case DISCOUNT -> executeDiscount(adjust);
-            case DIFF -> executeDiff(adjust);
-            case VOID -> executeVoid(adjust);
+            case AMOUNT -> executeAmountAdjust(adjust, approverId);
+            case VOID -> executeVoidAdjust(adjust, approverId);
+            case TRANSFER -> executeTransferAdjust(adjust, approverId);
             default -> throw new ServiceException("非法调整类型：" + type);
         }
-        log.info("[结佣-调整] 调整单已执行：adjustNo={}, type={}", adjust.getAdjustNo(), type.getCode());
+        log.info("[结佣-调整] 调整单已执行：adjustNo={}, type={}, scope={}",
+            adjust.getAdjustNo(), type.getCode(), adjust.getAdjustScope());
     }
 
     /**
@@ -401,101 +447,184 @@ public class CommissionAdjustService {
     // ==================== EXECUTED 同事务动作 ====================
 
     /**
-     * DISCOUNT：旧明细 REVERSED + 新明细（amount=折后值，performance_fact_id 沿用原值）。
-     * <p>
-     * 新明细状态沿用源明细：PENDING → PENDING（随后续审批流转）；
-     * APPROVED → APPROVED（同 approved_month，保证 payroll 按锁定口径继续取到折后金额，
-     * 避免"旧行 REVERSED + 新行 PENDING"导致已确认金额从工资口径消失）。
-     * 调整单审批通过即视为该折后金额的审批确认。
+     * 金额调整（AMOUNT）：同步调整 PERF_REAL（结佣）与 PERF_EXPECT（应收），应用同一绝对差额。
+     * <ul>
+     *   <li>合同级：按金额占比分摊差额到各 PERF_REAL 事实；PERF_EXPECT 合计 + 同一差额并按占比分摊；
+     *       回写所有 CommissionItem 的 amount / performance_fact_id；</li>
+     *   <li>明细级：单条 PERF_REAL 事实 supersede 为 targetAmount；匹配同员工 PERF_EXPECT 事实 +delta；
+     *       回写该 CommissionItem。</li>
+     * </ul>
      */
-    private void executeDiscount(CommissionAdjust adjust) {
-        CommissionItem oldItem = itemMapper.selectById(adjust.getItemId());
-        requireItem(oldItem, adjust);
-
-        // 先冻结源明细状态（下方 oldItem 会被置为 REVERSED，新明细沿用源状态）
-        ItemStatus sourceStatus = oldItem.getStatus();
-
-        // 旧明细冲销（REVERSED 终态，永久保留）
-        oldItem.setStatus(ItemStatus.REVERSED);
-        oldItem.setReversedReason(ReversedReason.MANUAL_ADJUST);
-        oldItem.setAdjustId(adjust.getId());
-        int rows = itemMapper.updateById(oldItem);
-        if (rows == 0) {
-            throw new ServiceException("明细并发冲突，执行失败，请重试：itemId=" + oldItem.getId());
+    private void executeAmountAdjust(CommissionAdjust adjust, Long approverId) {
+        BigDecimal targetAmount = adjust.getNewAmount();
+        BigDecimal delta = adjust.getDiffAmount();
+        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
+            // 1. PERF_REAL 合同级分摊调整
+            Map<Long, Long> realMapping = performanceQueryPort.adjustContractFactsAmount(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_REAL, targetAmount, approverId, adjust.getId());
+            // 2. PERF_EXPECT 同步同一差额
+            BigDecimal currentExpect = sumFacts(adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT);
+            BigDecimal targetExpect = currentExpect.add(delta == null ? BigDecimal.ZERO : delta);
+            performanceQueryPort.adjustContractFactsAmount(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT, targetExpect, approverId, adjust.getId());
+            // 3. 回写 CommissionItem：amount 与 performance_fact_id 指向新事实
+            List<CommissionItem> items = listActiveItems(adjust.getApplicationId());
+            for (CommissionItem item : items) {
+                Long newFactId = realMapping.get(item.getPerformanceFactId());
+                if (newFactId != null) {
+                    item.setPerformanceFactId(newFactId);
+                    item.setAdjustId(adjust.getId());
+                }
+            }
+            // amount 从新事实批量回查
+            if (!items.isEmpty()) {
+                Map<Long, BigDecimal> amountByFact = loadFactAmounts(
+                    items.stream().map(CommissionItem::getPerformanceFactId).toList());
+                for (CommissionItem item : items) {
+                    BigDecimal amt = amountByFact.get(item.getPerformanceFactId());
+                    if (amt != null) {
+                        item.setAmount(amt);
+                    }
+                    itemMapper.updateById(item);
+                }
+            }
+            applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            log.info("[结佣-调整-AMOUNT-合同级] 完成：adjustId={}, delta={}, realFacts={}",
+                adjust.getId(), delta, realMapping.size());
+        } else {
+            // 明细级
+            CommissionItem item = itemMapper.selectById(adjust.getItemId());
+            requireItem(item, adjust);
+            // 1. PERF_REAL 单条 supersede
+            Long newRealFactId = performanceQueryPort.adjustFactAmount(
+                item.getPerformanceFactId(), targetAmount, approverId, adjust.getId());
+            // 2. PERF_EXPECT 同步同一差额（同合同+同员工匹配）
+            PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
+                adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
+            if (expectFact != null) {
+                BigDecimal expectTarget = expectFact.getAmount().add(delta == null ? BigDecimal.ZERO : delta);
+                performanceQueryPort.adjustFactAmount(
+                    expectFact.getFactId(), expectTarget, approverId, adjust.getId());
+            }
+            // 3. 回写 CommissionItem
+            item.setAmount(targetAmount);
+            if (newRealFactId != null) {
+                item.setPerformanceFactId(newRealFactId);
+            }
+            item.setAdjustId(adjust.getId());
+            itemMapper.updateById(item);
+            applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            log.info("[结佣-调整-AMOUNT-明细级] 完成：adjustId={}, itemId={}, delta={}",
+                adjust.getId(), item.getId(), delta);
         }
-
-        // 新明细：沿用同一 performance_fact_id（uk_citem_fact_active 排除 REVERSED → 不撞键）
-        CommissionItem newItem = new CommissionItem();
-        newItem.setApplicationId(oldItem.getApplicationId());
-        newItem.setPerformanceFactId(oldItem.getPerformanceFactId());
-        newItem.setContractNo(oldItem.getContractNo());
-        newItem.setPeriod(oldItem.getPeriod());
-        newItem.setApprovedMonth(oldItem.getApprovedMonth());
-        newItem.setEmployeeId(oldItem.getEmployeeId());
-        newItem.setDeptId(oldItem.getDeptId());
-        newItem.setBizType(oldItem.getBizType());
-        newItem.setRoleType(oldItem.getRoleType());
-        newItem.setFeeItem(oldItem.getFeeItem());
-        newItem.setAmount(adjust.getNewAmount());
-        newItem.setStatus(sourceStatus);
-        newItem.setOriginReversed(false);
-        newItem.setAdjustId(adjust.getId());
-        itemMapper.insert(newItem);
-
-        applicationService.recalcAggregates(adjust.getApplicationId(), null);
-        log.info("[结佣-调整-DISCOUNT] 折后金额落地：oldItemId={}, newItemId={}, amount={}",
-            oldItem.getId(), newItem.getId(), adjust.getNewAmount());
     }
 
     /**
-     * DIFF：新增差额明细（performance_fact_id = NULL，period = target_period）。
-     * <p>
-     * 差额明细为独立凭证：调整单审批通过即确认，status = APPROVED、approved_month = target_period
-     * （补发到哪个月就计入哪个月工资）。
+     * 业绩冲销（VOID）：冲销 PERF_REAL 事实并同步冲销 PERF_EXPECT，结佣明细置 REVERSED。
      */
-    private void executeDiff(CommissionAdjust adjust) {
-        CommissionItem sourceItem = itemMapper.selectById(adjust.getItemId());
-        requireItem(sourceItem, adjust);
-
-        CommissionItem diffItem = new CommissionItem();
-        diffItem.setApplicationId(adjust.getApplicationId());
-        diffItem.setPerformanceFactId(null);
-        diffItem.setContractNo(sourceItem.getContractNo());
-        diffItem.setPeriod(adjust.getTargetPeriod());
-        diffItem.setApprovedMonth(adjust.getTargetPeriod());
-        diffItem.setEmployeeId(sourceItem.getEmployeeId());
-        diffItem.setDeptId(sourceItem.getDeptId());
-        diffItem.setBizType(sourceItem.getBizType());
-        diffItem.setRoleType(sourceItem.getRoleType());
-        diffItem.setFeeItem(sourceItem.getFeeItem());
-        diffItem.setAmount(adjust.getDiffAmount());
-        diffItem.setStatus(ItemStatus.APPROVED);
-        diffItem.setOriginReversed(false);
-        diffItem.setAdjustId(adjust.getId());
-        itemMapper.insert(diffItem);
-
-        applicationService.recalcAggregates(adjust.getApplicationId(), null);
-        log.info("[结佣-调整-DIFF] 差额明细已生成：newItemId={}, targetPeriod={}, amount={}",
-            diffItem.getId(), adjust.getTargetPeriod(), adjust.getDiffAmount());
+    private void executeVoidAdjust(CommissionAdjust adjust, Long approverId) {
+        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
+            // 合同级：冲销该合同全部 PERF_REAL 与 PERF_EXPECT 事实
+            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByContract(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_REAL)) {
+                performanceQueryPort.voidFact(f.getFactId(), approverId, adjust.getId());
+            }
+            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByContract(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT)) {
+                performanceQueryPort.voidFact(f.getFactId(), approverId, adjust.getId());
+            }
+            for (CommissionItem item : listActiveItems(adjust.getApplicationId())) {
+                reverseItem(item, adjust.getId());
+            }
+            applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            log.info("[结佣-调整-VOID-合同级] 完成：adjustId={}", adjust.getId());
+        } else {
+            CommissionItem item = itemMapper.selectById(adjust.getItemId());
+            requireItem(item, adjust);
+            performanceQueryPort.voidFact(item.getPerformanceFactId(), approverId, adjust.getId());
+            PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
+                adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
+            if (expectFact != null) {
+                performanceQueryPort.voidFact(expectFact.getFactId(), approverId, adjust.getId());
+            }
+            reverseItem(item, adjust.getId());
+            applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            log.info("[结佣-调整-VOID-明细级] 完成：adjustId={}, itemId={}", adjust.getId(), item.getId());
+        }
     }
 
     /**
-     * VOID：旧明细 REVERSED + 聚合重算。
+     * 部门划转（TRANSFER）：划转 PERF_REAL 事实部门并同步 PERF_EXPECT，回写 CommissionItem.deptId。
      */
-    private void executeVoid(CommissionAdjust adjust) {
-        CommissionItem oldItem = itemMapper.selectById(adjust.getItemId());
-        requireItem(oldItem, adjust);
-
-        oldItem.setStatus(ItemStatus.REVERSED);
-        oldItem.setReversedReason(ReversedReason.MANUAL_ADJUST);
-        oldItem.setAdjustId(adjust.getId());
-        int rows = itemMapper.updateById(oldItem);
-        if (rows == 0) {
-            throw new ServiceException("明细并发冲突，执行失败，请重试：itemId=" + oldItem.getId());
+    private void executeTransferAdjust(CommissionAdjust adjust, Long approverId) {
+        Long targetDeptId = adjust.getTargetDeptId();
+        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
+            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByContract(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_REAL)) {
+                performanceQueryPort.transferFact(f.getFactId(), targetDeptId, approverId, adjust.getId());
+            }
+            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByContract(
+                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT)) {
+                performanceQueryPort.transferFact(f.getFactId(), targetDeptId, approverId, adjust.getId());
+            }
+            for (CommissionItem item : listActiveItems(adjust.getApplicationId())) {
+                item.setDeptId(targetDeptId);
+                item.setAdjustId(adjust.getId());
+                itemMapper.updateById(item);
+            }
+            log.info("[结佣-调整-TRANSFER-合同级] 完成：adjustId={}, targetDeptId={}", adjust.getId(), targetDeptId);
+        } else {
+            CommissionItem item = itemMapper.selectById(adjust.getItemId());
+            requireItem(item, adjust);
+            performanceQueryPort.transferFact(item.getPerformanceFactId(), targetDeptId, approverId, adjust.getId());
+            PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
+                adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
+            if (expectFact != null) {
+                performanceQueryPort.transferFact(expectFact.getFactId(), targetDeptId, approverId, adjust.getId());
+            }
+            item.setDeptId(targetDeptId);
+            item.setAdjustId(adjust.getId());
+            itemMapper.updateById(item);
+            log.info("[结佣-调整-TRANSFER-明细级] 完成：adjustId={}, itemId={}, targetDeptId={}",
+                adjust.getId(), item.getId(), targetDeptId);
         }
+    }
 
-        applicationService.recalcAggregates(adjust.getApplicationId(), null);
-        log.info("[结佣-调整-VOID] 明细已作废：itemId={}", oldItem.getId());
+    /** 查申请单下非 REVERSED 的结佣明细。 */
+    private List<CommissionItem> listActiveItems(Long applicationId) {
+        return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
+    }
+
+    /** 按事实 ID 批量查当前金额（回写 CommissionItem.amount 用）。 */
+    private Map<Long, BigDecimal> loadFactAmounts(List<Long> factIds) {
+        Map<Long, BigDecimal> map = new HashMap<>();
+        if (factIds == null || factIds.isEmpty()) {
+            return map;
+        }
+        for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByFacts(factIds)) {
+            map.put(f.getFactId(), f.getAmount());
+        }
+        return map;
+    }
+
+    /** 按同合同+同员工匹配 PERF_EXPECT 事实（明细级同步用）。 */
+    private PerformanceFactSummaryDTO findExpectByEmployee(String period, String contractNo, Long employeeId) {
+        if (employeeId == null) {
+            return null;
+        }
+        return performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_EXPECT).stream()
+            .filter(f -> employeeId.equals(f.getEmployeeId()))
+            .findFirst().orElse(null);
+    }
+
+    /** 结佣明细置 REVERSED。 */
+    private void reverseItem(CommissionItem item, Long adjustId) {
+        item.setStatus(ItemStatus.REVERSED);
+        item.setReversedReason(ReversedReason.MANUAL_ADJUST);
+        item.setAdjustId(adjustId);
+        itemMapper.updateById(item);
     }
 
     // ==================== 内部方法 ====================
@@ -513,30 +642,5 @@ public class CommissionAdjustService {
         if (item.getStatus() == ItemStatus.REVERSED) {
             throw new ServiceException("明细已被冲销（终态），调整单不可重复执行：itemId=" + item.getId());
         }
-    }
-
-    /**
-     * 变更前后值快照 JSON（审计）。
-     */
-    private String buildPayload(CommissionItem item, AdjustCreateDTO dto) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("before", Map.of(
-            "itemId", item.getId(),
-            "amount", item.getAmount(),
-            "status", item.getStatus().getCode(),
-            "period", item.getPeriod()));
-        Map<String, Object> after = new LinkedHashMap<>();
-        if (dto.getNewAmount() != null) {
-            after.put("amount", dto.getNewAmount());
-        }
-        if (dto.getDiffAmount() != null) {
-            after.put("diffAmount", dto.getDiffAmount());
-        }
-        if (StringUtils.isNotBlank(dto.getTargetPeriod())) {
-            after.put("targetPeriod", dto.getTargetPeriod());
-        }
-        payload.put("after", after);
-        payload.put("reason", dto.getReason());
-        return objectMapper.writeValueAsString(payload);
     }
 }

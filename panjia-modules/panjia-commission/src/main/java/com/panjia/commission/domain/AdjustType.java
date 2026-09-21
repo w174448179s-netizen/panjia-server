@@ -3,26 +3,30 @@ package com.panjia.commission.domain;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 /**
- * 结佣调整类型（结佣域详细设计 §3.3）。
+ * 结佣调整类型（对齐新签调整 PerformanceAdjust）。
  * <p>
- * 存储约定：DB 字段 adjust_type VARCHAR(16) 存 code（与枚举名一致），
- * MyBatis-Plus 默认按枚举 name() 映射；Jackson 经 {@link JsonValue @JsonValue} 输出 code。
+ * 重构后结佣调整直接操作业绩事实（PERF_REAL + PERF_EXPECT）：
+ * <ul>
+ *   <li>AMOUNT：金额调整，录入调整差额，后台存调整后金额，同步调 PERF_REAL 与 PERF_EXPECT；</li>
+ *   <li>VOID：业绩冲销；</li>
+ *   <li>TRANSFER：部门划转。</li>
+ * </ul>
+ * 旧 DISCOUNT / DIFF 类型已废弃（历史数据保留展示，不再新建）。
+ * <p>
+ * 存储约定：DB 字段 adjust_type VARCHAR(16) 存 code（与枚举名一致）。
  */
 public enum AdjustType {
 
-    /** 折扣：旧明细 REVERSED + 新明细（amount = 折后值直接存储，非系数；种类如85折写入 reason） */
-    DISCOUNT("折扣"),
+    /** 金额调整：调整后金额 = target_amount（new_amount 列），差额 = diff_amount */
+    AMOUNT("金额调整"),
 
-    /** 差额补发：新增差额明细（performance_fact_id = NULL，period = target_period） */
-    DIFF("差额补发"),
+    /** 业绩冲销 */
+    VOID("业绩冲销"),
 
-    /** 作废：旧明细 REVERSED */
-    VOID("作废");
+    /** 部门划转 */
+    TRANSFER("部门划转");
 
-    /** 类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;
-
-    /** 类型描述 */
     private final String desc;
 
     AdjustType(String desc) {
@@ -39,12 +43,6 @@ public enum AdjustType {
         return desc;
     }
 
-    /**
-     * 按 code 解析调整类型。
-     *
-     * @param code 类型码
-     * @return 调整类型；无法识别返回 null
-     */
     public static AdjustType fromCode(String code) {
         if (code == null || code.isBlank()) {
             return null;
