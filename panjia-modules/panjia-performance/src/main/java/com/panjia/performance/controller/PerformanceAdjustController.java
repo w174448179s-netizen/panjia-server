@@ -19,7 +19,6 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -83,25 +82,4 @@ public class PerformanceAdjustController extends BaseController {
         return R.ok("发起成功，已提交审批", adjust.getId());
     }
 
-    /**
-     * 取消调整单（仅进行中可取消）。
-     */
-    @SaCheckPermission("perf:adjust:edit")
-    @Log(title = "业绩调整单", businessType = BusinessType.UPDATE)
-    @PutMapping("/cancel/{id}")
-    public R<Void> cancel(@PathVariable Long id) {
-        adjustService.cancelAdjust(id, LoginHelper.getUserId());
-        return R.ok();
-    }
-
-    /**
-     * 执行调整单（一般由工作流审批通过后自动触发，此接口供手动兜底）。
-     */
-    @SaCheckPermission("perf:adjust:execute")
-    @Log(title = "业绩调整单执行", businessType = BusinessType.UPDATE)
-    @PutMapping("/execute/{id}")
-    public R<Void> execute(@PathVariable Long id) {
-        adjustService.executeAdjust(id, LoginHelper.getUserId());
-        return R.ok();
-    }
 }

@@ -475,8 +475,14 @@ public class PerformanceEngine {
         fact.setNormalizedRecordId(record.getId());
         fact.setSourceKey(sourceKey);
         fact.setBizType(record.getBizType());
+        // 合同维度冗余字段：从归一化记录快照，消除查询时关联 raw_signed
+        fact.setOrderNo(record.getOrderNo());
+        fact.setContractNo(record.getContractNo());
+        fact.setPropertyAddress(record.getPropertyAddress());
+        fact.setFeeItem(record.getFeeItem());
         // 所属角色（KE 角色类型，如 客源成交人/VR拍摄人）：归一化记录已携带，构建事实时原样落库
         fact.setRoleType(record.getRoleType());
+        fact.setRoleName(record.getRoleName());
 
         // 员工信息（联调后从 employeeSnapshot 填充）
         if (employeeSnapshot != null) {
@@ -591,11 +597,17 @@ public class PerformanceEngine {
         fact.setNormalizedRecordId(record.getId());
         fact.setSourceKey(sourceKey);
         fact.setBizType(record.getBizType());
+        // 合同维度冗余字段镜像原事实（退单红冲保持与成交月原事实一致）
+        fact.setOrderNo(original.getOrderNo());
+        fact.setContractNo(original.getContractNo());
+        fact.setPropertyAddress(original.getPropertyAddress());
+        fact.setFeeItem(original.getFeeItem());
         // ★ 人员归属/角色镜像原事实快照（不退单当月重查员工主数据）
         fact.setEmployeeId(original.getEmployeeId());
         fact.setEmployeeExternalCode(original.getEmployeeExternalCode());
         fact.setDeptId(original.getDeptId());
         fact.setRoleType(original.getRoleType());
+        fact.setRoleName(original.getRoleName());
         // ★ 分摊比例镜像原事实冻结值（仅展示用，不参与计算）
         fact.setShareRatio(original.getShareRatio());
         fact.setPerformanceAmount(redinkPerformance);

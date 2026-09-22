@@ -602,34 +602,6 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void cancelAdjust(Long id, Long operatorId) {
-        PerformanceAdjust adjust = getAndCheck(id);
-        checkTransition(adjust.getStatus(), AdjustStatus.CANCELLED, "调整单");
-
-        // 终止运行中的审批流程实例（触发 cancel 事件，监听器幂等置 CANCELLED），与实收/结佣作废一致
-        if (StringUtils.isNotBlank(adjust.getProcessInstanceId())) {
-            try {
-                approvalPort.cancel(BizType.PERF_ADJUST, id);
-            } catch (Exception e) {
-                log.warn("[调整单] 取消时终止流程实例失败，按业务取消继续：adjustId={}", id, e);
-            }
-            PerformanceAdjust latest = adjustMapper.selectById(id);
-            if (latest != null && latest.getStatus() == AdjustStatus.CANCELLED) {
-                log.info("[调整单] 取消（流程事件已置 CANCELLED）：adjustId={}, operatorId={}", id, operatorId);
-                return;
-            }
-            adjust = latest != null ? latest : adjust;
-        }
-
-        adjust.setStatus(AdjustStatus.CANCELLED);
-        adjust.setOperatorId(operatorId);
-        adjustMapper.updateById(adjust);
-
-        log.info("[调整单] 取消：adjustId={}, operatorId={}", id, operatorId);
-    }
-
-    @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markCallbackFailure(Long adjustId, String errorSummary) {
         if (adjustId == null) {
@@ -1150,10 +1122,15 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
         newFact.setNormalizedRecordId(oldFact.getNormalizedRecordId());
         newFact.setSourceKey(oldFact.getSourceKey());
         newFact.setBizType(oldFact.getBizType());
+        newFact.setOrderNo(oldFact.getOrderNo());
+        newFact.setContractNo(oldFact.getContractNo());
+        newFact.setPropertyAddress(oldFact.getPropertyAddress());
+        newFact.setFeeItem(oldFact.getFeeItem());
         newFact.setEmployeeId(oldFact.getEmployeeId());
         newFact.setEmployeeExternalCode(oldFact.getEmployeeExternalCode());
         newFact.setDeptId(oldFact.getDeptId());
         newFact.setRoleType(oldFact.getRoleType());
+        newFact.setRoleName(oldFact.getRoleName());
         newFact.setShareRatio(oldFact.getShareRatio());
         newFact.setPerformanceAmount(oldFact.getPerformanceAmount());
         newFact.setEffectiveDate(oldFact.getEffectiveDate() != null

@@ -53,6 +53,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
+        WITH reversed_expect AS (
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_perf_fact
+            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
+              AND period = #{period}
+            ORDER BY source_key, id ASC
+        )
         SELECT f.employee_id AS "employeeId",
                e.employee_code AS "employeeCode",
                e.employee_name AS "employeeName",
@@ -72,27 +79,25 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ) AS "deptPath",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
                COALESCE(SUM(
-                 COALESCE(
-                   (SELECT pf.performance_amount FROM pj_perf_fact pf
-                    WHERE pf.source_key = f.source_key
-                      AND pf.fact_type = f.fact_type
-                      AND pf.fact_status = 'REVERSED'
-                    ORDER BY pf.id ASC LIMIT 1),
-                   f.performance_amount
-                 )
+                 COALESCE(re.performance_amount, f.performance_amount)
                ), 0) AS "originalAmount",
-               COUNT(DISTINCT rs.contract_no) AS "contractCount",
+               COUNT(DISTINCT f.contract_no) AS "contractCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
         FROM pj_perf_fact f
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept ed ON ed.dept_id = e.dept_id
         LEFT JOIN sys_dept ep ON ep.dept_id = ed.parent_id
         LEFT JOIN sys_dept egp ON egp.dept_id = ep.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
@@ -118,12 +123,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND (
               e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="selfEmployeeId != null">
@@ -152,10 +155,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT COUNT(DISTINCT f.employee_id)
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
@@ -181,12 +188,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND (
               e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="selfEmployeeId != null">
@@ -208,15 +213,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
+        WITH reversed_expect AS (
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_perf_fact
+            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
+              AND period = #{period}
+            ORDER BY source_key, id ASC
+        )
         SELECT f.id,
                f.fact_status AS "factStatus",
                f.fact_type AS factType,
                f.period,
-               COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp) AS businessDate,
-               rs.order_no AS orderNo,
-               rs.contract_no AS contractNo,
+               f.business_date AS businessDate,
+               f.order_no AS orderNo,
+               f.contract_no AS contractNo,
                f.biz_type AS bizType,
-               rs.raw_json -&gt;&gt; 'propertyAddress' AS propertyAddress,
+               f.property_address AS propertyAddress,
+               f.fee_item AS feeItem,
                f.employee_id AS employeeId,
                e.employee_name AS employeeName,
                e.employee_code AS employeeCode,
@@ -232,30 +245,28 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS deptPath,
-               COALESCE(nr.role_type, f.role_type) AS roleType,
-               rs.role_name AS roleName,
+               f.role_type AS roleType,
+               f.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
-               COALESCE(
-                 (SELECT pf.performance_amount FROM pj_perf_fact pf
-                  WHERE pf.source_key = f.source_key
-                    AND pf.fact_type = f.fact_type
-                    AND pf.fact_status = 'REVERSED'
-                  ORDER BY pf.id ASC LIMIT 1),
-                 f.performance_amount
-               ) AS originalAmount,
+               COALESCE(re.performance_amount, f.performance_amount) AS originalAmount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey
         FROM pj_perf_fact f
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
                                               AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
         WHERE f.fact_status = 'ACTIVE'
@@ -285,18 +296,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND (
               e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
-        ORDER BY e.employee_name, rs.contract_no, businessDate, nr.role_type
+        ORDER BY e.employee_name, f.contract_no, businessDate, f.role_type
         </script>
         """)
     List<PerformanceManageDTO> selectManageListByIds(@Param("period") String period,
@@ -316,17 +325,21 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         <script>
         SELECT COUNT(*) AS "detailCount",
                COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                   THEN COALESCE(rs.order_no, rs.contract_no)
-                                   ELSE COALESCE(rs.contract_no, rs.order_no) END) AS "contractCount",
+                                   THEN COALESCE(f.order_no, f.contract_no)
+                                   ELSE COALESCE(f.contract_no, f.order_no) END) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COALESCE(SUM(f.performance_amount), 0) AS "totalAmount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -357,12 +370,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND (
               e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="employeeId != null">
@@ -421,10 +432,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      *
      * 【已统一】实收建单链路（2026-09-22 改动）：
      * - 分组维度 selectBatchReceivedContractGroups：`GROUP BY rs.order_no`，CASE 已删；
-     * - 单据匹配 selectActiveFactsByContractNo / selectBatchUnboundRealFacts /
-     *   selectExpectSumsByBizKeys / selectReceivedFactDetails / selectReceivedContractMetrics：
-     *   `rs.contract_no = 键 OR rs.order_no = 键`，兼容两类历史落库键
-     *   （实收审批单早期把订单号写进 contract_no 的一手房单据）。
+     * - 单据匹配 selectBatchUnboundRealFacts / selectExpectSumsByBizKeys：
+     *   纯 `f.order_no = 键`，不再 OR contract_no（订单号与合同号 1:1，简化为单一键）。
      *
      * 【未统一】本文件其余 21 处 CASE 分派（业绩管理列表 / 作废恢复 / 调整 / 结佣 / 业绩查询，见
      * line 318 起至 1741）保持原样：它们的调用方可能回传「按业务类型决定的展示键」（前端
@@ -452,32 +461,37 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        SELECT MAX(rs.contract_no) AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
+        WITH reversed_expect AS (
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_perf_fact
+            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
+              AND period = #{period}
+            ORDER BY source_key, id ASC
+        )
+        SELECT MAX(f.contract_no) AS "contractNo",
+               MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
-               MAX(rs.raw_json -&gt;&gt; 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate",
+               MAX(f.property_address) AS "propertyAddress",
+               MAX(f.business_date) AS "businessDate",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
                COALESCE(SUM(
-                 COALESCE(
-                   (SELECT pf.performance_amount FROM pj_perf_fact pf
-                    WHERE pf.source_key = f.source_key
-                      AND pf.fact_type = f.fact_type
-                      AND pf.fact_status = 'REVERSED'
-                    ORDER BY pf.id ASC LIMIT 1),
-                   f.performance_amount
-                 )
+                 COALESCE(re.performance_amount, f.performance_amount)
                ), 0) AS "originalAmount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
                COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount",
                CASE WHEN BOOL_OR(f.fact_status = 'ACTIVE') THEN 'ACTIVE' ELSE 'VOIDED' END AS "factStatus"
         FROM pj_perf_fact f
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -487,8 +501,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(rs.order_no, rs.contract_no)
-                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                   THEN COALESCE(f.order_no, f.contract_no)
+                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -509,14 +523,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="employeeId != null">
@@ -526,8 +538,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND f.employee_id = #{selfEmployeeId}
           </if>
         GROUP BY CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                     THEN COALESCE(rs.order_no, rs.contract_no)
-                     ELSE COALESCE(rs.contract_no, rs.order_no) END
+                     THEN COALESCE(f.order_no, f.contract_no)
+                     ELSE COALESCE(f.contract_no, f.order_no) END
         ORDER BY "businessDate" DESC, "contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
@@ -551,14 +563,18 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                    THEN COALESCE(rs.order_no, rs.contract_no)
-                                    ELSE COALESCE(rs.contract_no, rs.order_no) END)
+                                    THEN COALESCE(f.order_no, f.contract_no)
+                                    ELSE COALESCE(f.contract_no, f.order_no) END)
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -568,8 +584,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(rs.order_no, rs.contract_no)
-                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                   THEN COALESCE(f.order_no, f.contract_no)
+                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -590,14 +606,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
           <if test="employeeId != null">
@@ -630,15 +644,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
+        WITH reversed_expect AS (
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_perf_fact
+            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
+              AND period = #{period}
+            ORDER BY source_key, id ASC
+        )
         SELECT f.id,
                f.fact_status AS "factStatus",
                f.fact_type AS factType,
                f.period,
-               COALESCE((rs.raw_json -&gt;&gt; 'signDate')::timestamp, f.business_date::timestamp) AS businessDate,
-               rs.order_no AS orderNo,
-               rs.contract_no AS contractNo,
+               f.business_date AS businessDate,
+               f.order_no AS orderNo,
+               f.contract_no AS contractNo,
                f.biz_type AS bizType,
-               rs.raw_json -&gt;&gt; 'propertyAddress' AS propertyAddress,
+               f.property_address AS propertyAddress,
+               f.fee_item AS feeItem,
                f.employee_id AS employeeId,
                e.employee_name AS employeeName,
                e.employee_code AS employeeCode,
@@ -654,38 +676,36 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS deptPath,
-               COALESCE(nr.role_type, f.role_type) AS roleType,
-               rs.role_name AS roleName,
+               f.role_type AS roleType,
+               f.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
-               COALESCE(
-                 (SELECT pf.performance_amount FROM pj_perf_fact pf
-                  WHERE pf.source_key = f.source_key
-                    AND pf.fact_type = f.fact_type
-                    AND pf.fact_status = 'REVERSED'
-                  ORDER BY pf.id ASC LIMIT 1),
-                 f.performance_amount
-               ) AS originalAmount,
+               COALESCE(re.performance_amount, f.performance_amount) AS originalAmount,
                (ci.id IS NOT NULL) AS settled,
                ca.lock_time AS settleDate,
                f.source_key AS sourceKey
         FROM pj_perf_fact f
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status &lt;&gt; 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status &lt;&gt; 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
                                               AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           AND f.period = #{period}
           AND f.fact_type = #{factType}
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(rs.order_no, rs.contract_no)
-                   ELSE COALESCE(rs.contract_no, rs.order_no) END IN
+                   THEN COALESCE(f.order_no, f.contract_no)
+                   ELSE COALESCE(f.contract_no, f.order_no) END IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
@@ -707,17 +727,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
               OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR COALESCE(nr.role_type, f.role_type) ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'storeName' ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
-        ORDER BY rs.contract_no, e.employee_name, businessDate, nr.role_type
+        ORDER BY f.contract_no, e.employee_name, businessDate, f.role_type
         </script>
         """)
     List<PerformanceManageDTO> selectManageListByContractNos(@Param("period") String period,
@@ -744,12 +762,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         SELECT f.*
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND (rs.contract_no = #{contractNo} OR rs.order_no = #{contractNo})
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
@@ -769,15 +785,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         SELECT f.*
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'VOIDED'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFact> selectVoidedFactsByContractNo(@Param("period") String period,
@@ -796,20 +807,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         SELECT COUNT(*)
         FROM pj_perf_fact vf
-        JOIN pj_normalized_record vnr ON vnr.id = vf.normalized_record_id
-        JOIN pj_import_raw_signed vrs ON vrs.id = vnr.raw_data_id
         JOIN pj_perf_fact mf ON mf.id = #{factId}
-        JOIN pj_normalized_record mnr ON mnr.id = mf.normalized_record_id
-        JOIN pj_import_raw_signed mrs ON mrs.id = mnr.raw_data_id
         WHERE vf.fact_status = 'VOIDED'
           AND vf.period = mf.period
           AND vf.fact_type = mf.fact_type
-          AND (CASE WHEN vf.biz_type IN ('一手房','房产金融','家装荐客')
-                    THEN COALESCE(vrs.order_no, vrs.contract_no)
-                    ELSE COALESCE(vrs.contract_no, vrs.order_no) END)
-            = (CASE WHEN mf.biz_type IN ('一手房','房产金融','家装荐客')
-                    THEN COALESCE(mrs.order_no, mrs.contract_no)
-                    ELSE COALESCE(mrs.contract_no, mrs.order_no) END)
+          AND COALESCE(vf.contract_no, vf.order_no) = COALESCE(mf.contract_no, mf.order_no)
         """)
     long countVoidedSiblingsByFactId(@Param("factId") Long factId);
 
@@ -880,11 +882,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT COALESCE(MAX(n.total_receivable_amount), 0)
         FROM pj_perf_fact f
         JOIN pj_normalized_record n ON n.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = n.raw_data_id
         WHERE f.fact_type = 'PERF_EXPECT'
           AND f.fact_status = 'ACTIVE'
           AND f.period &lt; #{period}
-          AND rs.contract_no = #{contractNo}
+          AND f.contract_no = #{contractNo}
         </script>
         """)
     java.math.BigDecimal selectMaxPriorContractTotalReceivable(@Param("contractNo") String contractNo,
@@ -917,14 +918,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.source_key AS "sourceKey",
                f.received_apply_id AS "receivedApplyId",
                ra.status AS "receivedStatus",
-               rs.contract_no AS "contractNo",
-               rs.order_no AS "orderNo",
-               rs.raw_json ->> 'propertyAddress' AS "propertyAddress",
+               f.contract_no AS "contractNo",
+               f.order_no AS "orderNo",
+               f.property_address AS "propertyAddress",
                f.share_ratio AS "shareRatio",
-               rs.raw_json ->> 'signDate' AS "signDate"
+               f.business_date AS "signDate"
         FROM pj_perf_fact f
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.id IN
         <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
@@ -958,21 +957,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.source_key AS "sourceKey",
                f.received_apply_id AS "receivedApplyId",
                ra.status AS "receivedStatus",
-               rs.contract_no AS "contractNo",
-               rs.order_no AS "orderNo",
-               rs.raw_json ->> 'propertyAddress' AS "propertyAddress",
+               f.contract_no AS "contractNo",
+               f.order_no AS "orderNo",
+               f.property_address AS "propertyAddress",
                f.share_ratio AS "shareRatio"
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
@@ -996,6 +990,28 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
+        WITH src_keys AS (
+            SELECT DISTINCT source_key
+            FROM pj_perf_fact
+            WHERE fact_status = 'ACTIVE'
+              AND period = #{period}
+              AND fact_type = 'PERF_REAL'
+              AND (contract_no = #{contractNo} OR order_no = #{contractNo})
+        ),
+        reversed_expect AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
+               AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
+            ORDER BY sk.source_key, pe.id ASC
+        ),
+        active_expect AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
+               AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+            ORDER BY sk.source_key, pe.id
+        )
         SELECT f.id AS "factId",
                f.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
@@ -1012,49 +1028,25 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               COALESCE(nr.role_type, f.role_type) AS "roleType",
-               rs.role_name AS "roleName",
+               f.role_type AS "roleType",
+               f.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
-               (SELECT pe.performance_amount
-                  FROM pj_perf_fact pe
-                 WHERE pe.fact_status = 'ACTIVE'
-                   AND pe.fact_type = 'PERF_EXPECT'
-                   AND pe.source_key = f.source_key
-                 ORDER BY pe.id
-                 LIMIT 1) AS "expectedAmount",
-               COALESCE(
-                 (SELECT pr.performance_amount
-                    FROM pj_perf_fact pr
-                   WHERE pr.fact_status = 'REVERSED'
-                     AND pr.fact_type = 'PERF_EXPECT'
-                     AND pr.source_key = f.source_key
-                   ORDER BY pr.id ASC
-                   LIMIT 1),
-                 (SELECT pe.performance_amount
-                    FROM pj_perf_fact pe
-                   WHERE pe.fact_status = 'ACTIVE'
-                     AND pe.fact_type = 'PERF_EXPECT'
-                     AND pe.source_key = f.source_key
-                   ORDER BY pe.id
-                   LIMIT 1)
-               ) AS "originalExpectedAmount",
-               EXISTS(SELECT 1 FROM pj_perf_fact pe2
-                 WHERE pe2.fact_status = 'REVERSED'
-                   AND pe2.fact_type = 'PERF_EXPECT'
-                   AND pe2.source_key = f.source_key) AS "expectedAdjusted",
+               ae.performance_amount AS "expectedAmount",
+               COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
+               (re.source_key IS NOT NULL) AS "expectedAdjusted",
                f.performance_amount AS "amount"
         FROM pj_perf_fact f
+        LEFT JOIN active_expect ae ON ae.source_key = f.source_key
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = 'PERF_REAL'
-          AND (rs.contract_no = #{contractNo} OR rs.order_no = #{contractNo})
-        ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
         </script>
         """)
     List<ReceivedFactDetailDTO> selectReceivedFactDetails(@Param("period") String period,
@@ -1081,11 +1073,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE((
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
-                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
-                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      AND e.period = #{period}
-                     AND (ers.contract_no = k.key OR ers.order_no = k.key)
+                     AND (e.contract_no = k.key OR e.order_no = k.key)
                ), 0) AS "expectedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
@@ -1093,9 +1083,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
                            AND f.fact_type = 'PERF_REAL'
                            AND f.period = #{period}
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        WHERE (rs.contract_no = k.key OR rs.order_no = k.key)
+        WHERE (f.contract_no = k.key OR f.order_no = k.key)
         GROUP BY k.key
         </script>
         """)
@@ -1127,13 +1115,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE((
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
-                   JOIN pj_normalized_record enr ON enr.id = e.normalized_record_id
-                   JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      AND e.period = #{period}
                      AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
-                               THEN COALESCE(ers.order_no, ers.contract_no)
-                               ELSE COALESCE(ers.contract_no, ers.order_no) END) = s.biz_key
+                               THEN COALESCE(e.order_no, e.contract_no)
+                               ELSE COALESCE(e.contract_no, e.order_no) END) = s.biz_key
                ), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
@@ -1145,26 +1131,24 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COUNT(*) AS "detailCount"
         FROM (
             SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
-                   rs.order_no,
+                        THEN COALESCE(f.order_no, f.contract_no)
+                        ELSE COALESCE(f.contract_no, f.order_no) END AS biz_key,
+                   f.order_no,
                    f.biz_type,
-                   rs.raw_json ->> 'propertyAddress' AS property_address,
-                   COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS business_date,
+                   f.property_address,
+                   f.business_date,
                    f.performance_amount AS amount,
                    ra.status AS ra_status,
                    ra.id AS ra_id,
                    f.employee_id
             FROM pj_perf_fact f
-            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
             LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
             WHERE f.fact_status = 'ACTIVE'
               AND f.period = #{period}
               AND f.fact_type = #{factType}
               AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(rs.order_no, rs.contract_no)
-                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                       THEN COALESCE(f.order_no, f.contract_no)
+                       ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
             <if test="deptId != null">
               AND (f.dept_id = #{deptId}
                    OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -1206,21 +1190,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE(SUM(s.amount), 0) AS "receivedAmount",
                COUNT(*) AS "itemCount"
         FROM (
-            SELECT rs.order_no,
-                   rs.contract_no,
+            SELECT f.order_no,
+                   f.contract_no,
                    f.biz_type,
-                   rs.raw_json ->> 'propertyAddress' AS property_address,
-                   COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS business_date,
+                   f.property_address,
+                   f.business_date,
                    f.performance_amount AS amount
             FROM pj_perf_fact f
-            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
             WHERE f.fact_status = 'ACTIVE'
               AND f.fact_type = 'PERF_REAL'
               AND f.batch_id = #{batchId}
               AND f.period = #{period}
               AND f.received_apply_id IS NULL
-              AND rs.order_no IS NOT NULL
+              AND f.order_no IS NOT NULL
         ) s
         GROUP BY s.order_no
         HAVING COALESCE(SUM(s.amount), 0) <> 0
@@ -1232,16 +1214,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 一次查询批次内全部待绑定的非零 ACTIVE 实收事实行（自动建单性能优化用）。
      * <p>
-     * 匹配口径与 {@link #selectActiveFactsByContractNo} 完全一致
-     * （{@code contract_no = 键 OR order_no = 键}，二者 1:1 故与业务类型无关），通过 JOIN
-     * 业务键表一次完成全部订单的匹配。一条事实同时匹配多个业务键时会返回多行
-     * （每个匹配键一行），由服务层按业务键字典序（= 组处理顺序）确定唯一归属，
-     * 复刻原逐组查询时「先处理的组先绑定、后续组自动排除已绑定事实」的竞争语义。
+     * 纯订单号匹配（{@code f.order_no = 键}），每个 factId 唯一归属一个订单号，
+     * 无需服务层竞争裁决。
      *
      * @param batchId 导入批次 ID
      * @param period  归属期间
      * @param bizKeys 本批次聚合出的业务键（订单号）
-     * @return 待绑定事实行（received_apply_id 为空、金额非 0），同一 factId 可重复出现
+     * @return 待绑定事实行（received_apply_id 为空、金额非 0）
      */
     @Select("""
         <script>
@@ -1250,12 +1229,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.dept_id AS "deptId",
                f.performance_amount AS "amount"
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         JOIN (VALUES
         <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
         ) kv(biz_key)
-          ON rs.order_no = kv.biz_key OR rs.contract_no = kv.biz_key
+          ON f.order_no = kv.biz_key
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_REAL'
           AND f.batch_id = #{batchId}
@@ -1273,8 +1250,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。
      * <p>
-     * 口径与逐订单 {@code sumExpect → selectActiveFactsByContractNo} 一致
-     * （{@code contract_no = 键 OR order_no = 键}），一条事实对同一键只计一次。
+     * 纯订单号匹配，一条事实对一个键只计一次。
      * 返回行复用 {@link com.panjia.performance.dto.BatchFactBindRow}：
      * bizKey=业务键、amount=应收合计（factId/deptId 为空）。
      *
@@ -1287,12 +1263,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT kv.biz_key AS "bizKey",
                COALESCE(SUM(f.performance_amount), 0) AS "amount"
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         JOIN (VALUES
         <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
         ) kv(biz_key)
-          ON rs.order_no = kv.biz_key OR rs.contract_no = kv.biz_key
+          ON f.order_no = kv.biz_key
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
           AND f.period = #{period}
@@ -1309,17 +1283,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
-        SELECT rs.contract_no AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
-               MAX(f.biz_type) AS "bizType",
-               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate"
+        SELECT f.contract_no AS "contractNo",
+               f.order_no AS "orderNo",
+               f.biz_type AS "bizType",
+               f.property_address AS "propertyAddress",
+               f.business_date AS "businessDate"
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.id = #{factId}
-          AND rs.contract_no IS NOT NULL
-        GROUP BY rs.contract_no
+          AND f.contract_no IS NOT NULL
         """)
     java.util.Map<String, Object> selectContractInfoByFactId(@Param("factId") Long factId);
 
@@ -1331,21 +1302,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
-        SELECT COALESCE(rs.contract_no, MAX(rs.order_no)) AS "contractNo",
-               MAX(rs.order_no) AS "orderNo",
+        SELECT COALESCE(f.contract_no, MAX(f.order_no)) AS "contractNo",
+               MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
-               MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-               MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "businessDate"
+               MAX(f.property_address) AS "propertyAddress",
+               MAX(f.business_date) AS "businessDate"
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
-        GROUP BY rs.contract_no
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        GROUP BY f.contract_no
         """)
     java.util.Map<String, Object> selectContractInfoByContractNo(
         @Param("period") String period, @Param("contractNo") String contractNo);
@@ -1378,8 +1344,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               COALESCE(nr.role_type, f.role_type) AS "roleType",
-               rs.role_name AS "roleName",
+               f.role_type AS "roleType",
+               f.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
                (SELECT pe.performance_amount
                   FROM pj_perf_fact pe
@@ -1395,16 +1361,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
-        ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
         """)
     List<AdjustFactDetailDTO> selectAdjustFactDetails(@Param("period") String period,
                                                        @Param("contractNo") String contractNo,
@@ -1439,16 +1400,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         <script>
         WITH contract_period AS (
             SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
+                        THEN COALESCE(f.order_no, f.contract_no)
+                        ELSE COALESCE(f.contract_no, f.order_no) END AS biz_key,
                    MAX(f.period) AS max_period
             FROM pj_perf_fact f
-            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
             WHERE f.fact_status = 'ACTIVE'
               AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(rs.order_no, rs.contract_no)
-                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                       THEN COALESCE(f.order_no, f.contract_no)
+                       ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
             <if test="period != null and period != ''">
               AND f.period = #{period}
             </if>
@@ -1464,9 +1423,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND f.biz_type = #{bizType}
             </if>
             <if test="keyword != null and keyword != ''">
-              AND (rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%'))
+              AND (f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
             </if>
             GROUP BY 1
         ),
@@ -1476,16 +1435,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact pf
             WHERE pf.fact_type = 'PERF_EXPECT'
               AND pf.fact_status = 'REVERSED'
+            <if test="period != null and period != ''">
+              AND pf.period = #{period}
+            </if>
             ORDER BY pf.source_key, pf.id ASC
         ),
         fact_agg AS (
             SELECT cp.biz_key AS "bizKey",
                    cp.max_period AS "period",
-                   MAX(rs.contract_no) AS "contractNo",
-                   MAX(rs.order_no) AS "orderNo",
+                   MAX(f.contract_no) AS "contractNo",
+                   MAX(f.order_no) AS "orderNo",
                    MAX(f.biz_type) AS "bizType",
-                   MAX(rs.raw_json ->> 'propertyAddress') AS "propertyAddress",
-                   MAX(COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp)) AS "signDate",
+                   MAX(f.property_address) AS "propertyAddress",
+                   MAX(f.business_date) AS "signDate",
                    COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
                    COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT'
                                      THEN COALESCE(re.performance_amount, f.performance_amount) ELSE 0 END), 0) AS "expectOriginalAmount",
@@ -1495,11 +1457,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
             JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
-            JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-            JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
                 AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                         THEN COALESCE(rs.order_no, rs.contract_no)
-                         ELSE COALESCE(rs.contract_no, rs.order_no) END = cp.biz_key
+                         THEN COALESCE(f.order_no, f.contract_no)
+                         ELSE COALESCE(f.contract_no, f.order_no) END = cp.biz_key
             LEFT JOIN reversed_expect re ON re.source_key = f.source_key
             <if test="employeeId != null">
               WHERE f.employee_id = #{employeeId}
@@ -1572,15 +1532,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                    THEN COALESCE(rs.order_no, rs.contract_no)
-                                    ELSE COALESCE(rs.contract_no, rs.order_no) END)
+                                    THEN COALESCE(f.order_no, f.contract_no)
+                                    ELSE COALESCE(f.contract_no, f.order_no) END)
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(rs.order_no, rs.contract_no)
-                   ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+                   THEN COALESCE(f.order_no, f.contract_no)
+                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
           <if test="period != null and period != ''">
             AND f.period = #{period}
           </if>
@@ -1597,9 +1555,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              rs.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR rs.raw_json ->> 'propertyAddress' ILIKE CONCAT('%', #{keyword}::text, '%')
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
         </script>
@@ -1670,10 +1628,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               COALESCE(nr.role_type, f.role_type) AS "roleType",
-               rs.role_name AS "roleName",
+               f.role_type AS "roleType",
+               f.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
-               COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS "businessDate",
+               f.business_date AS "businessDate",
                f.performance_amount AS "expectAmount",
                COALESCE(
                  (SELECT pf.performance_amount FROM pj_perf_fact pf
@@ -1698,18 +1656,20 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        LEFT JOIN pj_commission_item ci ON ci.performance_fact_id = f.id
-                                       AND ci.status <> 'REVERSED'
+        LEFT JOIN LATERAL (
+            SELECT ci.id, ci.application_id
+            FROM pj_commission_item ci
+            WHERE ci.performance_fact_id = f.id
+              AND ci.status <> 'REVERSED'
+            ORDER BY ci.id
+            LIMIT 1
+        ) ci ON TRUE
         LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
                                               AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
-          AND (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                    THEN COALESCE(rs.order_no, rs.contract_no)
-                    ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{bizNo}
-        ORDER BY f.period DESC, e.employee_name, d.dept_id, nr.role_type, f.id
+          AND (f.contract_no = #{bizNo} OR f.order_no = #{bizNo})
+        ORDER BY f.period DESC, e.employee_name, d.dept_id, f.role_type, f.id
         """)
     List<PerformanceSearchDetailDTO> selectSearchDetailRows(@Param("bizNo") String bizNo);
 
@@ -1740,15 +1700,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         SELECT f2.biz_type
         FROM pj_perf_fact f2
-        JOIN pj_normalized_record nr2 ON nr2.id = f2.normalized_record_id
-        JOIN pj_import_raw_signed rs2 ON rs2.id = nr2.raw_data_id
         WHERE f2.fact_status = 'ACTIVE'
           AND f2.period = #{period}
           AND f2.fact_type = #{factType}
-          AND (rs2.contract_no = #{contractNo}
-               OR (CASE WHEN f2.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs2.order_no, rs2.contract_no)
-                        ELSE COALESCE(rs2.contract_no, rs2.order_no) END) = #{contractNo})
+          AND (f2.contract_no = #{contractNo} OR f2.order_no = #{contractNo})
         LIMIT 1
     """)
     String selectBizTypeByContract(@Param("period") String period,

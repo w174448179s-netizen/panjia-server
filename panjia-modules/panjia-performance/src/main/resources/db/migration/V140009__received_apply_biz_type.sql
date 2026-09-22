@@ -13,16 +13,3 @@
 ALTER TABLE pj_perf_received_apply ADD COLUMN IF NOT EXISTS biz_type VARCHAR(32);
 
 COMMENT ON COLUMN pj_perf_received_apply.biz_type IS '业务类型(一手房/二手买卖/租赁/租赁轻托管/写字楼租赁/轻托管推房等，建单时从实收事实快照)';
-
-UPDATE pj_perf_received_apply a
-SET biz_type = sub.biz_type
-FROM (
-    SELECT f.received_apply_id AS apply_id,
-           MAX(f.biz_type)     AS biz_type
-    FROM pj_perf_fact f
-    WHERE f.received_apply_id IS NOT NULL
-      AND f.biz_type IS NOT NULL
-    GROUP BY f.received_apply_id
-) sub
-WHERE sub.apply_id = a.id
-  AND a.biz_type IS NULL;

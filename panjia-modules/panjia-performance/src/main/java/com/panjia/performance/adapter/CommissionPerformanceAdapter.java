@@ -244,10 +244,15 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         newFact.setNormalizedRecordId(oldFact.getNormalizedRecordId());
         newFact.setSourceKey(oldFact.getSourceKey());
         newFact.setBizType(oldFact.getBizType());
+        newFact.setOrderNo(oldFact.getOrderNo());
+        newFact.setContractNo(oldFact.getContractNo());
+        newFact.setPropertyAddress(oldFact.getPropertyAddress());
+        newFact.setFeeItem(oldFact.getFeeItem());
         newFact.setEmployeeId(oldFact.getEmployeeId());
         newFact.setEmployeeExternalCode(oldFact.getEmployeeExternalCode());
         newFact.setDeptId(oldFact.getDeptId());
         newFact.setRoleType(oldFact.getRoleType());
+        newFact.setRoleName(oldFact.getRoleName());
         newFact.setShareRatio(oldFact.getShareRatio());
         newFact.setPerformanceAmount(oldFact.getPerformanceAmount());
         newFact.setEffectiveDate(oldFact.getEffectiveDate() != null

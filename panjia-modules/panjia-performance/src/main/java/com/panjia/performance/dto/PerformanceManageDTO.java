@@ -51,6 +51,9 @@ public class PerformanceManageDTO {
     /** 房源地址（来自原始签约明细 raw_json.propertyAddress） */
     private String propertyAddress;
 
+    /** 费用项（佣金/垫佣/服务费 等） */
+    private String feeItem;
+
     // ==================== 人员维度 ====================
 
     /** 员工 ID */

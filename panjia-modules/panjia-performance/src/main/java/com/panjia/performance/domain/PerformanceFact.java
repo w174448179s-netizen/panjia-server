@@ -50,6 +50,18 @@ public class PerformanceFact implements Serializable {
     /** 来源业务单号（幂等锚点） */
     private String sourceKey;
 
+    /** 订单号（冗余自归一化记录，消除关联 raw_signed） */
+    private String orderNo;
+
+    /** 合同号（冗余自归一化记录，消除关联 raw_signed） */
+    private String contractNo;
+
+    /** 物业地址（冗余自归一化记录，消除关联 raw_signed） */
+    private String propertyAddress;
+
+    /** 费用项（冗余自归一化记录，消除关联 raw_signed） */
+    private String feeItem;
+
     /** 业务类型 */
     private String bizType;
 
@@ -64,6 +76,9 @@ public class PerformanceFact implements Serializable {
 
     /** 角色类型 */
     private String roleType;
+
+    /** 角色人姓名（冗余自归一化记录，消除关联 raw_signed） */
+    private String roleName;
 
     /** 分摊比例（仅展示用，不参与计算） */
     private BigDecimal shareRatio;

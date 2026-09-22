@@ -39,6 +39,21 @@ public class NormalizedRecord implements Serializable {
     /** 业务唯一键（订单号/合同号/考勤日期），下游去重依据 */
     private String sourceKey;
 
+    /** 订单号（贝壳原始行 order_no，业绩域快照到 pj_perf_fact） */
+    private String orderNo;
+
+    /** 合同号（贝壳原始行 contract_no，业绩域快照到 pj_perf_fact） */
+    private String contractNo;
+
+    /** 物业地址（raw_json.propertyAddress，业绩域快照到 pj_perf_fact） */
+    private String propertyAddress;
+
+    /** 签约(成销)时间原始字符串（raw_json.signDate，业绩层解析为 business_date） */
+    private String signDate;
+
+    /** 费用项（raw_json.feeItem，业绩域快照到 pj_perf_fact） */
+    private String feeItem;
+
     private String bizType;
     private BigDecimal receivableAmount;
     private BigDecimal receivedAmount;
@@ -48,6 +63,9 @@ public class NormalizedRecord implements Serializable {
     private BigDecimal totalReceivedAmount;
     private BigDecimal shareRatio;
     private String roleType;
+
+    /** 角色人姓名（raw_json.roleName，业绩域快照到 pj_perf_fact） */
+    private String roleName;
 
     /** 扩展字段（扣款金额、考勤细分等） */
     private String extraJson;

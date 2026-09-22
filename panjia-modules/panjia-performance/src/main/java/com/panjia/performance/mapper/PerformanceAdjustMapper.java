@@ -85,12 +85,10 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
     @Select("""
         SELECT COALESCE(SUM(f.performance_amount), 0)
         FROM pj_perf_fact f
-        JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND rs.contract_no = #{contractNo}
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         """)
     java.math.BigDecimal selectContractTotalAmount(@Param("period") String period,
                                                     @Param("factType") String factType,

@@ -35,6 +35,28 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
      */
     @Select("""
         <script>
+        WITH src_keys AS (
+            SELECT DISTINCT f.source_key
+            FROM pj_commission_item ci2
+            JOIN pj_perf_fact f ON f.id = ci2.performance_fact_id
+            WHERE ci2.application_id = #{applicationId}
+              AND ci2.status != 'REVERSED'
+              AND f.source_key IS NOT NULL
+        ),
+        reversed_expect AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
+               AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
+            ORDER BY sk.source_key, pe.id ASC
+        ),
+        active_expect AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
+               AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+            ORDER BY sk.source_key, pe.id
+        )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
                ci.employee_id AS "employeeId",
@@ -52,51 +74,27 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               COALESCE(nr.role_type, f.role_type, ci.role_type) AS "roleType",
-               rs.role_name AS "roleName",
+               COALESCE(f.role_type, ci.role_type) AS "roleType",
+               f.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
                ci.biz_type AS "bizType",
-               (SELECT pe.performance_amount
-                  FROM pj_perf_fact pe
-                 WHERE pe.fact_status = 'ACTIVE'
-                   AND pe.fact_type = 'PERF_EXPECT'
-                   AND pe.source_key = f.source_key
-                 ORDER BY pe.id
-                 LIMIT 1) AS "expectedAmount",
-               COALESCE(
-                 (SELECT pr.performance_amount
-                    FROM pj_perf_fact pr
-                   WHERE pr.fact_status = 'REVERSED'
-                     AND pr.fact_type = 'PERF_EXPECT'
-                     AND pr.source_key = f.source_key
-                   ORDER BY pr.id ASC
-                   LIMIT 1),
-                 (SELECT pe.performance_amount
-                    FROM pj_perf_fact pe
-                   WHERE pe.fact_status = 'ACTIVE'
-                     AND pe.fact_type = 'PERF_EXPECT'
-                     AND pe.source_key = f.source_key
-                   ORDER BY pe.id
-                   LIMIT 1)
-               ) AS "originalExpectedAmount",
-               EXISTS(SELECT 1 FROM pj_perf_fact pe2
-                 WHERE pe2.fact_status = 'REVERSED'
-                   AND pe2.fact_type = 'PERF_EXPECT'
-                   AND pe2.source_key = f.source_key) AS "expectedAdjusted",
+               ae.performance_amount AS "expectedAmount",
+               COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
+               (re.source_key IS NOT NULL) AS "expectedAdjusted",
                ci.amount AS "amount",
                ci.fee_item AS "feeItem",
                ci.status AS "status"
         FROM pj_commission_item ci
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
+        LEFT JOIN active_expect ae ON ae.source_key = f.source_key
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = ci.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = ci.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
-        LEFT JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
         WHERE ci.application_id = #{applicationId}
           AND ci.status != 'REVERSED'
-        ORDER BY e.employee_name, d.dept_id, nr.role_type, ci.id
+        ORDER BY e.employee_name, d.dept_id, f.role_type, ci.id
         </script>
         """)
     List<CommissionItemDetailDTO> selectItemDetails(@Param("applicationId") Long applicationId);

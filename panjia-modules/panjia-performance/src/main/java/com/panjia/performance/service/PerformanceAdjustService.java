@@ -81,16 +81,6 @@ public interface PerformanceAdjustService {
     void markCallbackFailure(Long adjustId, String errorSummary);
 
     /**
-     * 取消调整单。
-     * <p>
-     * 状态流转：SUBMITTED → CANCELLED。
-     *
-     * @param id          调整单 ID
-     * @param operatorId  操作人 ID
-     */
-    void cancelAdjust(Long id, Long operatorId);
-
-    /**
      * 执行调整单（审批通过后由工作流回调自动触发，一般不手动调用）。
      * <p>
      * 状态流转：SUBMITTED → EXECUTED。

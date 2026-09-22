@@ -1,7 +1,6 @@
 package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
-import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.dto.BatchApproveByContractRequest;
 import com.panjia.performance.dto.BatchApproveResultDTO;
@@ -21,7 +20,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
@@ -111,28 +109,5 @@ public class ReceivedApplyController extends BaseController {
                 log.error("[实收批量审批] 异步处理异常", ex);
                 return R.fail("批量审批处理异常：" + ex.getCause().getMessage());
             });
-    }
-
-    /**
-     * 业务明细直接审批（双入口 §三）：从实收审批单详情页直接审批，与「我的待办」共用同一审批服务。
-     * <p>设计文档 §3.3 三条底线：
-     * <ol>
-     *   <li>调用同一 {@link com.panjia.performance.service.ReceivedApplyService#approve} 方法，留痕一致；</li>
-     *   <li>服务端鉴权由 {@code completeTaskAsLoginUser} 走流程引擎原生权限校验；</li>
-     *   <li>非当前节点审批人 → 服务端拒绝（前端隐藏按钮 ≠ 安全）。</li>
-     * </ol>
-     *
-     * @param id     审批单 ID
-     * @param action 审批动作（PASS / REJECT）
-     * @param comment 审批意见（可选，留空时按动作给默认值）
-     */
-    @SaCheckPermission("perf:received:approve")
-    @Log(title = "实收审批单审批", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/approve")
-    public R<Void> approve(@PathVariable Long id,
-                           @RequestParam ApprovalAction action,
-                           @RequestParam(required = false) String comment) {
-        receivedApplyService.approve(id, action, comment);
-        return R.ok();
     }
 }

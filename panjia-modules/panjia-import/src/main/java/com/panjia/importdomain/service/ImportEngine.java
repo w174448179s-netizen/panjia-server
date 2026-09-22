@@ -559,6 +559,13 @@ public class ImportEngine {
                 nr.setTotalReceivedAmount(decimal(json, "totalReceived"));
                 nr.setShareRatio(decimal(json, "shareRatio"));
                 nr.setRoleType(str(json, "roleType"));
+                nr.setRoleName(str(json, "roleName"));
+                // 合同维度冗余字段：业绩域快照到 pj_perf_fact，消除关联查询
+                nr.setOrderNo(str(json, "orderNo"));
+                nr.setContractNo(str(json, "contractNo"));
+                nr.setPropertyAddress(str(json, "propertyAddress"));
+                nr.setSignDate(str(json, "signDate"));
+                nr.setFeeItem(str(json, "feeItem"));
             }
             case ATTENDANCE -> {
                 nr.setReceivableAmount(decimal(json, "leaveAmount"));

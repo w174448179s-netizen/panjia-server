@@ -114,10 +114,15 @@ public class ReceivedAlignmentService {
         n.setNormalizedRecordId(realFact.getNormalizedRecordId());
         n.setSourceKey(realFact.getSourceKey());
         n.setBizType(realFact.getBizType());
+        n.setOrderNo(realFact.getOrderNo());
+        n.setContractNo(realFact.getContractNo());
+        n.setPropertyAddress(realFact.getPropertyAddress());
+        n.setFeeItem(realFact.getFeeItem());
         n.setEmployeeId(realFact.getEmployeeId());
         n.setEmployeeExternalCode(realFact.getEmployeeExternalCode());
         n.setDeptId(realFact.getDeptId());
         n.setRoleType(realFact.getRoleType());
+        n.setRoleName(realFact.getRoleName());
         n.setShareRatio(expect.getShareRatio());
         n.setPerformanceAmount(expect.getPerformanceAmount());
         n.setEffectiveDate(realFact.getEffectiveDate() != null ? realFact.getEffectiveDate()

@@ -109,24 +109,17 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             log.info("[实收审批] 批次无待建单实收订单组：batchId={}, period={}", batchId, period);
             return 0;
         }
-        // ===== 批量预加载（原逐合同 6~8 次 SQL → 循环前 3 次） =====
-        // 业务键 = 订单号（聚合维度；贝壳原始行中订单号与合同号 1:1，等价）
+        // ===== 批量预加载（3 次 SQL） =====
+        // 业务键 = 订单号（聚合维度）
         List<String> bizKeys = groups.stream().map(ReceivedContractGroupDTO::getOrderNo).toList();
-        // ① 一条 IN 查询取全部订单的活跃审批单（DRAFT/SUBMITTED/APPROVED），
-        //    匹配 contract_no OR order_no，兼容早期把订单号写入 contract_no 的历史单据
+        // ① 一条 IN 查询取全部订单的活跃审批单（DRAFT/SUBMITTED/APPROVED）
         Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, bizKeys);
-        // ② 一次查询批次内全部待绑定非零实收事实行（宽口径，同 factId 可匹配多个键），
-        //    内存按组处理顺序（biz_key 字典序）确定唯一归属，复刻原逐组查询的先到先得竞争语义
-        Map<Long, BatchFactBindRow> factData = new LinkedHashMap<>();
-        Map<Long, List<String>> matchedKeys = new LinkedHashMap<>();
+        // ② 一次查询批次内全部待绑定非零实收事实行，按订单号直接分组（每条事实唯一归属一个订单号）
+        Map<String, List<BatchFactBindRow>> rowsByKey = new LinkedHashMap<>();
         for (BatchFactBindRow row : factMapper.selectBatchUnboundRealFacts(batchId, period, bizKeys)) {
-            factData.putIfAbsent(row.getFactId(), row);
-            matchedKeys.computeIfAbsent(row.getFactId(), id -> new ArrayList<>()).add(row.getBizKey());
+            rowsByKey.computeIfAbsent(row.getBizKey(), k -> new ArrayList<>()).add(row);
         }
-        // factId → 当前归属业务键（初始为字典序最小匹配键）
-        Map<Long, String> factOwner = new HashMap<>();
-        matchedKeys.forEach((factId, keys) -> factOwner.put(factId, keys.get(0)));
-        // ③ 一次批量聚合全部业务键的应收合计（PERF_EXPECT，宽口径，同原 sumExpect）
+        // ③ 一次批量聚合全部业务键的应收合计（PERF_EXPECT）
         Map<String, BigDecimal> expectedMap = factMapper.selectExpectSumsByBizKeys(period, bizKeys)
             .stream()
             .collect(Collectors.toMap(BatchFactBindRow::getBizKey,
@@ -135,18 +128,12 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
         int created = 0;
         for (ReceivedContractGroupDTO group : groups) {
-            // 业务键 = 订单号（聚合维度）；单据落库键仍为合同号 + 订单号两个快照列
             String bizKey = group.getOrderNo();
-            // 本轮归属到该键的事实（已被前序组绑定的 factId 已从 factOwner 移除）
-            List<Long> factIds = factOwner.entrySet().stream()
-                .filter(e -> bizKey.equals(e.getValue()))
-                .map(Map.Entry::getKey)
-                .toList();
-            if (factIds.isEmpty()) {
-                // 宽口径下事实可能全部被字典序更小的前序组绑定（与原逐组查询实时排除行为一致）
+            List<BatchFactBindRow> rows = rowsByKey.getOrDefault(bizKey, List.of());
+            if (rows.isEmpty()) {
                 continue;
             }
-            List<BatchFactBindRow> rows = factIds.stream().map(factData::get).toList();
+            List<Long> factIds = rows.stream().map(BatchFactBindRow::getFactId).toList();
             BigDecimal realSum = rows.stream()
                 .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -155,55 +142,40 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             try {
                 ReceivedApply existing = activeApplies.get(bizKey);
                 if (existing == null) {
-                    // ===== 新建：insert 前金额/门店已在内存算好，startWorkflow 的 updateById 一并落库，
-                    //       省掉原 insert 后的 refreshTotals（重查事实+重查应收）+ updateById =====
+                    // ===== 新建：insert 前金额/门店已在内存算好，startWorkflow 的 updateById 一并落库 =====
                     ReceivedApply apply = newApplyFromGroup(period, group, batchId, operatorId,
                         rows.size(), realSum, expectedAmount, uniqueDeptId);
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
-                    factIds.forEach(factOwner::remove);
                     startWorkflow(apply, apply.getApplicantId(), Set.of());
                     created++;
-                    log.info("[实收审批] 导入自动建单并提交：applyNo={}, contractNo={}, received={}",
-                        apply.getApplyNo(), apply.getContractNo(), apply.getReceivedAmount());
+                    log.info("[实收审批] 导入自动建单并提交：applyNo={}, orderNo={}, received={}",
+                        apply.getApplyNo(), apply.getOrderNo(), apply.getReceivedAmount());
                 } else if (existing.getStatus() == ReceivedApplyStatus.APPROVED) {
-                    // ★ 已审批通过单（APPROVED）不再合并新事实：避免绕过审批流程改变已审批金额。
-                    //   归属键让渡给该事实匹配的下一个业务键（复刻原宽口径逐组查询时后续组可接管的行为）
-                    for (Long factId : factIds) {
-                        List<String> keys = matchedKeys.get(factId);
-                        int idx = keys.indexOf(bizKey);
-                        if (idx + 1 < keys.size()) {
-                            factOwner.put(factId, keys.get(idx + 1));
-                        } else {
-                            factOwner.remove(factId);
-                        }
-                    }
-                    log.info("[实收审批] 合同本月审批单已 APPROVED，跳过新批次事实合并：applyId={}, contractNo={}",
+                    // ★ 已审批通过单不再合并新事实：避免绕过审批流程改变已审批金额
+                    log.info("[实收审批] 订单本月审批单已 APPROVED，跳过新批次事实合并：applyId={}, orderNo={}",
                         existing.getId(), bizKey);
                 } else {
                     // ===== 合并 DRAFT/SUBMITTED：绑定新事实后在内存累加合计，无需重查已绑定事实 =====
                     bindFacts(factIds, existing.getId());
-                    factIds.forEach(factOwner::remove);
                     existing.setItemCount((existing.getItemCount() == null ? 0 : existing.getItemCount())
                         + rows.size());
                     existing.setReceivedAmount(
                         (existing.getReceivedAmount() == null ? BigDecimal.ZERO : existing.getReceivedAmount())
                             .add(realSum));
                     existing.setExpectedAmount(expectedAmount);
-                    // 与原 refreshTotals 边界一致：绑定后仅 1 条事实且原门店为空时补门店
                     if (existing.getItemCount() == 1 && existing.getDeptId() == null) {
                         existing.setDeptId(uniqueDeptId);
                     }
-                    // 业务类型补空（历史空单合并新事实时顺带补齐，供列表展示/筛选）
                     if (StringUtils.isBlank(existing.getBizType())) {
                         existing.setBizType(group.getBizType());
                     }
                     applyMapper.updateById(existing);
-                    log.info("[实收审批] 新批次实收事实合并入既有审批单：applyId={}, contractNo={}, status={}",
+                    log.info("[实收审批] 新批次实收事实合并入既有审批单：applyId={}, orderNo={}, status={}",
                         existing.getId(), bizKey, existing.getStatus());
                 }
             } catch (DuplicateKeyException e) {
-                log.warn("[实收审批] 并发建单撞唯一索引，跳过：period={}, contractNo={}", period, bizKey);
+                log.warn("[实收审批] 并发建单撞唯一索引，跳过：period={}, orderNo={}", period, bizKey);
             }
         }
         log.info("[实收审批] 批次自动建单完成：batchId={}, period={}, 新建={}", batchId, period, created);
@@ -211,35 +183,22 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 一条 IN 查询批量取指定业务键当月活跃审批单（DRAFT/SUBMITTED/APPROVED），
-     * 按 contract_no 与 order_no 双列建映射（业务键为订单号时走 order_no 分支），同一键取最新一张。
+     * 一条 IN 查询批量取指定订单号当月活跃审批单（DRAFT/SUBMITTED/APPROVED），同一订单号取最新一张。
      */
-    private Map<String, ReceivedApply> loadActiveAppliesBatch(String period, Collection<String> contractNos) {
-        if (contractNos.isEmpty()) {
+    private Map<String, ReceivedApply> loadActiveAppliesBatch(String period, Collection<String> orderNos) {
+        if (orderNos.isEmpty()) {
             return Map.of();
         }
         List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
-            .and(w -> w.in(ReceivedApply::getContractNo, contractNos)
-                .or().in(ReceivedApply::getOrderNo, contractNos))
+            .in(ReceivedApply::getOrderNo, orderNos)
             .in(ReceivedApply::getStatus,
                 ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
             .orderByDesc(ReceivedApply::getId));
-        Map<String, ReceivedApply> byContract = new HashMap<>();
-        Map<String, ReceivedApply> byOrder = new HashMap<>();
+        Map<String, ReceivedApply> result = new HashMap<>(orderNos.size() * 2);
         for (ReceivedApply apply : applies) {
-            if (apply.getContractNo() != null) {
-                byContract.putIfAbsent(apply.getContractNo(), apply);
-            }
             if (apply.getOrderNo() != null) {
-                byOrder.putIfAbsent(apply.getOrderNo(), apply);
-            }
-        }
-        Map<String, ReceivedApply> result = new HashMap<>(contractNos.size() * 2);
-        for (String bizKey : contractNos) {
-            ReceivedApply apply = byContract.getOrDefault(bizKey, byOrder.get(bizKey));
-            if (apply != null) {
-                result.put(bizKey, apply);
+                result.putIfAbsent(apply.getOrderNo(), apply);
             }
         }
         return result;
@@ -315,55 +274,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         return apply;
     }
 
-    // ==================== 审批 / 驳回 / 作废 ====================
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void approve(Long id, ApprovalAction action, String comment) {
-        ReceivedApply apply = getAndCheck(id);
-        if (apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
-            throw new ServiceException("仅审批中的单据可审批（当前：" + apply.getStatus().getDesc() + "）");
-        }
-        Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, id);
-        if (taskId == null) {
-            throw new ServiceException("当前无待办任务");
-        }
-        // 以当前登录人身份办理：不设置 ignore，由流程引擎按 flow_user 中的本节点办理人判权。
-        // 财务在总监节点、或任何非本节点办理人调用，都会被引擎拒绝（不能再用 ignore 绕过）。
-        String defaultComment = action == ApprovalAction.PASS ? "审批通过" : "审批驳回";
-        String message = StringUtils.isBlank(comment) ? defaultComment : comment;
-        completeTaskAsLoginUser(id, action, message);
-        refreshCurrentNode(apply);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void approve(Long id, String message) {
-        approve(id, ApprovalAction.PASS, message);
-    }
-
-    /**
-     * 以当前登录人身份办理任务（不忽略权限）。
-     * <p>越权时流程引擎抛 {@code NULL_ROLE_NODE}（"无法跳转到该节点,请检查当前用户是否有权限!"），
-     * 此处转为业务可读提示；其余异常原样抛出，避免掩盖真实故障。</p>
-     */
-    private void completeTaskAsLoginUser(Long id, ApprovalAction action, String message) {
-        // 平台约定：超管等同系统身份（原生 TaskOpPrepareComponent 亦对超管置 ignore），
-        // 保留其运维解卡能力；除此之外的所有业务角色一律走引擎原生鉴权。
-        if (LoginHelper.isSuperAdmin()) {
-            approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, action, message);
-            return;
-        }
-        try {
-            approvalPort.complete(BizType.REAL_CONFIRM, id, action, message);
-        } catch (RuntimeException e) {
-            String msg = e.getMessage() == null ? "" : e.getMessage();
-            if (msg.contains("请检查当前用户是否有权限") || msg.contains("无法跳转到该节点")) {
-                throw new ServiceException("您不是该单据当前审批节点的办理人，无权审批", e);
-            }
-            throw e;
-        }
-    }
+    // ==================== 作废 ====================
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -632,13 +543,26 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             .orderByDesc(ReceivedApply::getCreateTime);
         // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）
         applyApprovalNodeScope(wrapper);
-        // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
-        // 子查询直接用 sys_dept.ancestors 匹配，避免逐层展开。
+        // 门店/组别筛选：通过事实表过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。
+        // 只要有一笔事实属于本部门（含下级），该审批单就可见。
         if (effectiveDeptId != null) {
             wrapper.and(w -> w.apply(
-                "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                    + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))",
+                "EXISTS (SELECT 1 FROM pj_perf_fact f"
+                    + " WHERE f.received_apply_id = id"
+                    + " AND f.fact_status = 'ACTIVE'"
+                    + " AND (f.dept_id = {0}"
+                    + " OR f.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                    + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))))",
                 effectiveDeptId));
+        }
+        // 员工筛选：通过事实表的 employee_id 过滤（合同下可能有多个员工）
+        if (query.getEmployeeId() != null) {
+            wrapper.and(w -> w.apply(
+                "EXISTS (SELECT 1 FROM pj_perf_fact f"
+                    + " WHERE f.received_apply_id = id"
+                    + " AND f.fact_status = 'ACTIVE'"
+                    + " AND f.employee_id = {0})",
+                query.getEmployeeId()));
         }
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
         List<ReceivedApply> records = page.getRecords();

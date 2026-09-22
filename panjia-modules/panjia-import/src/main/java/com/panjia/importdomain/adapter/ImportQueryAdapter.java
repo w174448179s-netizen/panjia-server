@@ -129,7 +129,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setId(r.getId());
         dto.setBatchId(r.getBatchId());
         dto.setSourceType(sourceType);
-        dto.setBusinessDate(periodStartDate(r.getPeriod()));
+        dto.setBusinessDate(parseSignDate(r.getSignDate(), r.getPeriod()));
         dto.setPeriod(r.getPeriod());
         dto.setEmployeeCode(r.getEmployeeExternalCode());
 
@@ -140,6 +140,11 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setDeptFullName(emp == null ? null : emp.getDeptName());
         dto.setBizType(r.getBizType());
         dto.setSourceKey(r.getSourceKey());
+        dto.setOrderNo(r.getOrderNo());
+        dto.setContractNo(r.getContractNo());
+        dto.setPropertyAddress(r.getPropertyAddress());
+        dto.setSignDate(r.getSignDate());
+        dto.setFeeItem(r.getFeeItem());
         dto.setRecordType(r.getRecordType() == null ? null : r.getRecordType().name());
         // ★ 双口径金额同时透传（V4.2 算薪对齐 / C-12 锚点）：
         //  receivableAmount 当月应收 → PERF_EXPECT（新签业绩，样本 206,274.04 / 273 非零行）
@@ -152,6 +157,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setOriginAmount(resolveOriginAmount(r));
         dto.setShareRatio(r.getShareRatio());
         dto.setRoleType(r.getRoleType());
+        dto.setRoleName(r.getRoleName());
         dto.setExtJson(r.getExtraJson());
         return dto;
     }
@@ -178,5 +184,39 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * 解析签约(成销)时间为 LocalDate。
+     * <p>
+     * 贝壳 Excel 中签约时间格式不统一（yyyy-MM-dd / yyyy/MM/dd / yyyy.MM.dd 等），
+     * 逐一尝试常见格式；全部解析失败时回退归属月初，保证 pj_perf_fact.business_date 非空。
+     *
+     * @param signDate 原始签约时间字符串
+     * @param period   归属期间（回退用）
+     * @return 签约日期；解析失败且 period 非法时返回 null
+     */
+    private java.time.LocalDate parseSignDate(String signDate, String period) {
+        if (signDate != null && !signDate.isBlank()) {
+            String s = signDate.trim();
+            // 统一分隔符为 "-"
+            String normalized = s.replace('/', '-').replace('.', '-');
+            try {
+                return java.time.LocalDate.parse(normalized);
+            } catch (Exception ignored) {
+                // 尝试 yyyyMMdd
+                try {
+                    String compact = normalized.replace("-", "");
+                    if (compact.length() == 8) {
+                        return java.time.LocalDate.of(
+                            Integer.parseInt(compact.substring(0, 4)),
+                            Integer.parseInt(compact.substring(4, 6)),
+                            Integer.parseInt(compact.substring(6, 8)));
+                    }
+                } catch (Exception ignored2) {
+                }
+            }
+        }
+        return periodStartDate(period);
     }
 }

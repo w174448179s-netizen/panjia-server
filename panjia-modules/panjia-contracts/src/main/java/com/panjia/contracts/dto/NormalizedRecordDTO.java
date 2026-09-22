@@ -57,6 +57,21 @@ public class NormalizedRecordDTO {
     /** 来源单号 */
     private String sourceKey;
 
+    /** 订单号（贝壳原始行 order_no） */
+    private String orderNo;
+
+    /** 合同号（贝壳原始行 contract_no） */
+    private String contractNo;
+
+    /** 物业地址 */
+    private String propertyAddress;
+
+    /** 签约(成销)时间原始字符串（业绩层解析为 business_date） */
+    private String signDate;
+
+    /** 费用项 */
+    private String feeItem;
+
     /**
      * 原始金额（兼容单口径消费方的默认金额）。
      * <p>
@@ -91,6 +106,9 @@ public class NormalizedRecordDTO {
 
     /** 角色类型 */
     private String roleType;
+
+    /** 角色人姓名（业绩域快照到 pj_perf_fact，消除关联 raw_signed） */
+    private String roleName;
 
     /** 扩展字段JSON */
     private String extJson;
