@@ -548,7 +548,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (effectiveDeptId != null) {
             wrapper.and(w -> w.apply(
                 "EXISTS (SELECT 1 FROM pj_perf_fact f"
-                    + " WHERE f.received_apply_id = id"
+                    + " WHERE f.received_apply_id = pj_perf_received_apply.id"
                     + " AND f.fact_status = 'ACTIVE'"
                     + " AND (f.dept_id = {0}"
                     + " OR f.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
@@ -559,7 +559,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (query.getEmployeeId() != null) {
             wrapper.and(w -> w.apply(
                 "EXISTS (SELECT 1 FROM pj_perf_fact f"
-                    + " WHERE f.received_apply_id = id"
+                    + " WHERE f.received_apply_id = pj_perf_received_apply.id"
                     + " AND f.fact_status = 'ACTIVE'"
                     + " AND f.employee_id = {0})",
                 query.getEmployeeId()));
