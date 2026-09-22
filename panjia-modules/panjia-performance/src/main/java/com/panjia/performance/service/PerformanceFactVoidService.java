@@ -4,6 +4,7 @@ import com.panjia.contracts.port.PayrollBatchQueryPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
+import com.panjia.performance.domain.bo.ContractVoidBo;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -30,7 +31,7 @@ import java.util.List;
 public class PerformanceFactVoidService {
 
     private final PerformanceFactMapper factMapper;
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
     private final PayrollBatchQueryPort payrollBatchQueryPort;
 
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
@@ -41,14 +42,15 @@ public class PerformanceFactVoidService {
      * 作废后整张合同业绩不参与算薪/结佣，可由总监按合同整体恢复。
      * 封账/算薪批次校验与单条作废一致。
      *
-     * @param period     归属期间
-     * @param factType   事实口径（新签明细页为 PERF_EXPECT）
-     * @param contractNo 合同号（或订单号）
-     * @param reason     作废原因
+     * @param query 作废条件（期间/事实口径/合同号/原因）
      * @return 作废明细条数
      */
     @Transactional(rollbackFor = Exception.class)
-    public int voidByContract(String period, String factType, String contractNo, String reason) {
+    public int voidByContract(ContractVoidBo query) {
+        String period = query.getPeriod();
+        String factType = query.getFactType();
+        String contractNo = query.getContractNo();
+        String reason = query.getReason();
         if (periodCloseService.isClosed(period)) {
             throw new ServiceException("期间已封账，禁止作废：period=" + period);
         }
@@ -74,14 +76,15 @@ public class PerformanceFactVoidService {
      * 合同级恢复：该合同该期间全部已作废（VOIDED）业绩一次性恢复为 ACTIVE，
      * period 统一改为当前月（落入当月算薪），口径与单条恢复一致。
      *
-     * @param period     原归属期间（作废时保持不变）
-     * @param factType   事实口径
-     * @param contractNo 合同号（或订单号）
-     * @param reason     恢复原因
+     * @param query 恢复条件（原期间/事实口径/合同号/原因）
      * @return 恢复明细条数
      */
     @Transactional(rollbackFor = Exception.class)
-    public int restoreByContract(String period, String factType, String contractNo, String reason) {
+    public int restoreByContract(ContractVoidBo query) {
+        String period = query.getPeriod();
+        String factType = query.getFactType();
+        String contractNo = query.getContractNo();
+        String reason = query.getReason();
         String currentPeriod = LocalDate.now().format(PERIOD_FORMATTER);
         if (periodCloseService.isClosed(currentPeriod)) {
             throw new ServiceException("当前期间已封账，禁止恢复：period=" + currentPeriod);

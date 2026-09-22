@@ -1,0 +1,33 @@
+package com.panjia.performance.domain.bo;
+
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+/**
+ * 业绩调整单查询条件。
+ */
+@Data
+@NoArgsConstructor
+public class PerformanceAdjustBo {
+
+    /** 归属期间 YYYY-MM */
+    private String period;
+
+    /** 调整类型：AMOUNT / VOID / TRANSFER */
+    private String adjustType;
+
+    /** 状态：SUBMITTED / APPROVED / REJECTED / CANCELLED / EXECUTED */
+    private String status;
+
+    /** 员工 ID */
+    private Long employeeId;
+
+    /** 部门 ID */
+    private Long deptId;
+
+    /** 业务类型 */
+    private String bizType;
+
+    /** 关键字（合同号 / 订单号 / 物业地址） */
+    private String keyword;
+}

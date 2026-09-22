@@ -2,8 +2,8 @@ package com.panjia.commission.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionAdjust;
-import com.panjia.commission.dto.AdjustCreateDTO;
-import com.panjia.commission.dto.AdjustQuery;
+import com.panjia.commission.domain.bo.CommissionAdjustCreateBo;
+import com.panjia.commission.domain.bo.CommissionAdjustBo;
 import com.panjia.commission.service.CommissionAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -47,7 +47,7 @@ public class CommissionAdjustController extends BaseController {
      */
     @SaCheckPermission("commission:adjust:list")
     @GetMapping("/list")
-    public R<PageResult<CommissionAdjust>> list(AdjustQuery query, PageQuery pageQuery) {
+    public R<PageResult<CommissionAdjust>> list(CommissionAdjustBo query, PageQuery pageQuery) {
         return R.ok(adjustService.listAdjusts(query, pageQuery));
     }
 
@@ -68,13 +68,13 @@ public class CommissionAdjustController extends BaseController {
      * <p>
      * 折扣不存系数：DISCOUNT 直接存折后金额（new_amount = 8500），reason 写"85折"供审计。
      *
-     * @param dto 调整单创建请求
+     * @param dto 调整创建条件（期间/合同号/调整类型/金额/原因等）
      * @return 调整单 ID
      */
     @SaCheckPermission("commission:adjust:add")
     @Log(title = "结佣调整单", businessType = BusinessType.INSERT)
     @PostMapping
-    public R<Long> add(@Validated @RequestBody AdjustCreateDTO dto) {
+    public R<Long> add(@Validated @RequestBody CommissionAdjustCreateBo dto) {
         CommissionAdjust adjust = adjustService.create(dto, LoginHelper.getUserId());
         return R.ok("发起成功", adjust.getId());
     }

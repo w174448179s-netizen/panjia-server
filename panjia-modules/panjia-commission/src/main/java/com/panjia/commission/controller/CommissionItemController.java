@@ -3,9 +3,9 @@ package com.panjia.commission.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionConsumeLog;
 import com.panjia.commission.domain.CommissionItem;
-import com.panjia.commission.dto.ConsumeLogQuery;
-import com.panjia.commission.dto.ItemQuery;
-import com.panjia.commission.dto.ItemTraceVO;
+import com.panjia.commission.domain.bo.CommissionConsumeLogBo;
+import com.panjia.commission.domain.bo.CommissionItemBo;
+import com.panjia.commission.domain.vo.ItemTraceVo;
 import com.panjia.commission.service.CommissionApplicationService;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -45,7 +45,7 @@ public class CommissionItemController extends BaseController {
      */
     @SaCheckPermission("commission:item:list")
     @GetMapping("/commission/item/list")
-    public R<PageResult<CommissionItem>> listItems(ItemQuery query, PageQuery pageQuery) {
+    public R<PageResult<CommissionItem>> listItems(CommissionItemBo query, PageQuery pageQuery) {
         return R.ok(applicationService.listItems(query, pageQuery));
     }
 
@@ -73,12 +73,12 @@ public class CommissionItemController extends BaseController {
      */
     @SaCheckPermission("commission:trace:query")
     @GetMapping("/commission/trace/{itemId}")
-    public R<ItemTraceVO> trace(@PathVariable Long itemId) {
+    public R<ItemTraceVo> trace(@PathVariable Long itemId) {
         CommissionItem item = applicationService.getItem(itemId);
         if (item == null) {
             return R.fail("结佣明细不存在：" + itemId);
         }
-        ItemTraceVO vo = new ItemTraceVO();
+        ItemTraceVo vo = new ItemTraceVo();
         vo.setItem(item);
         if (item.getPerformanceFactId() != null) {
             PerformanceFactSummaryDTO fact = performanceQueryPort.getByFactId(item.getPerformanceFactId());
@@ -99,7 +99,7 @@ public class CommissionItemController extends BaseController {
      */
     @SaCheckPermission("commission:consumelog:list")
     @GetMapping("/commission/consume-log/list")
-    public R<PageResult<CommissionConsumeLog>> listConsumeLogs(ConsumeLogQuery query, PageQuery pageQuery) {
+    public R<PageResult<CommissionConsumeLog>> listConsumeLogs(CommissionConsumeLogBo query, PageQuery pageQuery) {
         return R.ok(applicationService.listConsumeLogs(query, pageQuery));
     }
 }

@@ -9,16 +9,16 @@ import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.domain.ReceivedApplyStatus;
-import com.panjia.performance.dto.BatchApproveResultDTO;
+import com.panjia.performance.domain.vo.BatchApproveResultVo;
 import com.panjia.performance.dto.BatchFactBindRow;
-import com.panjia.performance.dto.ReceivedApplyQuery;
+import com.panjia.performance.domain.bo.ReceivedApplyBo;
 import com.panjia.performance.dto.ReceivedContractGroupDTO;
-import com.panjia.performance.dto.ReceivedContractMetricsDTO;
-import com.panjia.performance.dto.ReceivedFactDetailDTO;
+import com.panjia.performance.domain.vo.ReceivedContractMetricsVo;
+import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.performance.service.FactConversionResolver;
-import com.panjia.performance.service.ReceivedApplyService;
+import com.panjia.performance.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -64,7 +64,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class ReceivedApplyServiceImpl implements ReceivedApplyService {
+public class ReceivedApplyServiceImpl implements IReceivedApplyService {
 
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
@@ -314,7 +314,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     // ==================== 批量审批（线程池异步 + CompletableFuture 挂起等待） ====================
 
     @Override
-    public CompletableFuture<BatchApproveResultDTO> batchApproveByContractAsync(String period, List<String> contractNos) {
+    public CompletableFuture<BatchApproveResultVo> batchApproveByContractAsync(String period, List<String> contractNos) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
         }
@@ -341,7 +341,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文。
         // ① 一条 IN 查询取所有 SUBMITTED 审批单（替代逐单 selectOne 的 N 次查询）；
         // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
-        BatchApproveResultDTO result = new BatchApproveResultDTO();
+        BatchApproveResultVo result = new BatchApproveResultVo();
         result.setTotal(deduped.size());
         Map<String, ReceivedApply> submittedApplies = loadSubmittedAppliesBatch(period, deduped);
         List<ReceivedApply> applyList = submittedApplies.values().stream().distinct().toList();
@@ -363,10 +363,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         result.setFailed(result.getFailedContracts().size());
         log.info("[实收审批] 批量审批已提交：period={}, total={}, myTasks={}, skipped={}, operator={}",
             period, deduped.size(), approveItems.size(), result.getSkipped(), operatorName);
-        final BatchApproveResultDTO syncResult = result;
+        final BatchApproveResultVo syncResult = result;
         return CompletableFuture.supplyAsync(
             () -> {
-                BatchApproveResultDTO asyncResult = doBatchApprove(approveItems, operatorId, operatorName);
+                BatchApproveResultVo asyncResult = doBatchApprove(approveItems, operatorId, operatorName);
                 // 合并同步阶段已跳过/失败的
                 syncResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 syncResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
@@ -423,9 +423,9 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
      * 用 completeTaskAsSys 按 taskId 办理。预检后任务若被他人抢先办理，
      * 引擎抛异常计入失败（并发安全）。单据失败不中断整批。
      */
-    private BatchApproveResultDTO doBatchApprove(List<RcvApproveItem> items,
+    private BatchApproveResultVo doBatchApprove(List<RcvApproveItem> items,
                                                   Long operatorId, String operatorName) {
-        BatchApproveResultDTO result = new BatchApproveResultDTO();
+        BatchApproveResultVo result = new BatchApproveResultVo();
         result.setTotal(items.size());
         for (RcvApproveItem item : items) {
             try {
@@ -522,7 +522,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     // ==================== 查询 ====================
 
     @Override
-    public PageResult<ReceivedApply> list(ReceivedApplyQuery query, PageQuery pageQuery) {
+    public PageResult<ReceivedApply> list(ReceivedApplyBo query, PageQuery pageQuery) {
         // §3.6 数据权限：所有登录用户仅本部门（含下级）审批单（统一走 DeptScopeUtils，超管不限）
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query == null ? null : query.getDeptId(), deptService::selectDeptAndChildById, "实收审批");
         // 默认排除已作废（CANCELLED），与业绩明细只查 ACTIVE 一致；
@@ -594,22 +594,22 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         if (contractsByPeriod.isEmpty()) {
             return;
         }
-        Map<String, ReceivedContractMetricsDTO> metrics = new HashMap<>();
+        Map<String, ReceivedContractMetricsVo> metrics = new HashMap<>();
         for (Map.Entry<String, Set<String>> entry : contractsByPeriod.entrySet()) {
-            List<ReceivedContractMetricsDTO> rows =
+            List<ReceivedContractMetricsVo> rows =
                 factMapper.selectReceivedContractMetrics(entry.getKey(), entry.getValue());
-            for (ReceivedContractMetricsDTO row : rows) {
+            for (ReceivedContractMetricsVo row : rows) {
                 metrics.put(metricsKey(entry.getKey(), row.getContractNo()), row);
             }
         }
         // 一次性批量取本页全部 bizType 的折算因子（避免循环内逐条 factorOf(String) 触发全表扫描 pj_payroll_conversion_rule）
         Set<String> bizTypes = metrics.values().stream()
-            .map(ReceivedContractMetricsDTO::getBizType)
+            .map(ReceivedContractMetricsVo::getBizType)
             .filter(StringUtils::isNotBlank)
             .collect(java.util.stream.Collectors.toSet());
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
         for (ReceivedApply apply : records) {
-            ReceivedContractMetricsDTO m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
+            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
             if (m != null) {
                 // 业务类型优先用落库快照值；旧数据（列新增前建单）为空时回退实时聚合
                 String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
@@ -658,16 +658,16 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
             apply.setOriginalExpectedAmount(apply.getExpectedAmount());
             apply.setExpectedAmount(expected);
         }
-        List<ReceivedFactDetailDTO> facts = factMapper.selectReceivedFactDetails(
+        List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
             apply.getPeriod(), apply.getContractNo());
         // 折算后金额：按 factId 批量解析因子，应收业绩与实收业绩同取本行因子，
         // 取比例与乘算都走公共方法（ConversionFactorPort）
-        Set<Long> factIds = facts.stream().map(ReceivedFactDetailDTO::getFactId).filter(f -> f != null).collect(java.util.stream.Collectors.toSet());
+        Set<Long> factIds = facts.stream().map(ReceivedFactDetailVo::getFactId).filter(f -> f != null).collect(java.util.stream.Collectors.toSet());
         Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
         BigDecimal recvConvertedSum = BigDecimal.ZERO;
         BigDecimal expectConvertedSum = BigDecimal.ZERO;
         BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
-        for (ReceivedFactDetailDTO f : facts) {
+        for (ReceivedFactDetailVo f : facts) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getFactId());
             f.setConvertedAmount(conversionFactorPort.convert(f.getAmount(), factor));
             f.setExpectedConvertedAmount(conversionFactorPort.convert(f.getExpectedAmount(), factor));

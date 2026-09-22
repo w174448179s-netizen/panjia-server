@@ -10,8 +10,8 @@ import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
-import com.panjia.commission.dto.AdjustCreateDTO;
-import com.panjia.commission.dto.AdjustQuery;
+import com.panjia.commission.domain.bo.CommissionAdjustCreateBo;
+import com.panjia.commission.domain.bo.CommissionAdjustBo;
 import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
@@ -96,12 +96,12 @@ public class CommissionAdjustService {
      * 前置校验：① 申请单状态必须为 LOCKED（结佣锁定后方可调整）；
      * ② 明细级 item 属于该申请单；③ 同一对象无未完成调整单；④ 封账校验。
      *
-     * @param dto        调整单创建请求
+     * @param dto        调整创建条件（期间/合同号/调整类型/金额/原因等）
      * @param operatorId 发起人 ID
      * @return 调整单
      */
     @Transactional(rollbackFor = Exception.class)
-    public CommissionAdjust create(AdjustCreateDTO dto, Long operatorId) {
+    public CommissionAdjust create(CommissionAdjustCreateBo dto, Long operatorId) {
         AdjustType adjustType = AdjustType.fromCode(dto.getAdjustType());
         if (adjustType == null) {
             throw new ServiceException("非法调整类型：" + dto.getAdjustType());
@@ -352,7 +352,7 @@ public class CommissionAdjustService {
      * @param pageQuery 分页参数
      * @return 调整单分页
      */
-    public PageResult<CommissionAdjust> listAdjusts(AdjustQuery query, PageQuery pageQuery) {
+    public PageResult<CommissionAdjust> listAdjusts(CommissionAdjustBo query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionAdjust> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionAdjust::getPeriod, query.getPeriod())
             .eq(query.getApplicationId() != null, CommissionAdjust::getApplicationId, query.getApplicationId())

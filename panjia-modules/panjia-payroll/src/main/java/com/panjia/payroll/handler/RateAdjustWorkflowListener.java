@@ -2,7 +2,7 @@ package com.panjia.payroll.handler;
 
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.event.ApprovalEvent;
-import com.panjia.payroll.service.RateAdjustService;
+import com.panjia.payroll.service.IRateAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -26,7 +26,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class RateAdjustWorkflowListener {
 
-    private final RateAdjustService rateAdjustService;
+    private final IRateAdjustService rateAdjustService;
 
     @EventListener(condition = "#approvalEvent.bizType == '" + BizType.RATE_ADJUST + "'")
     public void onApprovalEvent(ApprovalEvent approvalEvent) {

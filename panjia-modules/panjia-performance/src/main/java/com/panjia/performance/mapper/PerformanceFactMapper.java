@@ -3,13 +3,13 @@ package com.panjia.performance.mapper;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.PerformanceFact;
-import com.panjia.performance.dto.AdjustFactDetailDTO;
-import com.panjia.performance.dto.PerformanceFactSearchDTO;
-import com.panjia.performance.dto.PerformanceManageContractVO;
-import com.panjia.performance.dto.PerformanceManageDTO;
-import com.panjia.performance.dto.PerformanceSearchDetailDTO;
-import com.panjia.performance.dto.ReceivedContractMetricsDTO;
-import com.panjia.performance.dto.ReceivedFactDetailDTO;
+import com.panjia.performance.domain.vo.AdjustFactDetailVo;
+import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
+import com.panjia.performance.domain.vo.PerformanceManageContractVo;
+import com.panjia.performance.domain.vo.PerformanceManageVo;
+import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
+import com.panjia.performance.domain.vo.ReceivedContractMetricsVo;
+import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -193,7 +193,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
-    List<PerformanceManageContractVO> selectManagePageContracts(@Param("period") String period,
+    List<PerformanceManageContractVo> selectManagePageContracts(@Param("period") String period,
                                             @Param("factType") String factType,
                                             @Param("deptId") Long deptId,
                                             @Param("employeeId") Long employeeId,
@@ -203,47 +203,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("selfEmployeeId") Long selfEmployeeId,
                                             @Param("offset") long offset,
                                             @Param("pageSize") int pageSize);
-
-    /**
-     * 批量查合同的调整前金额（originalAmount）。
-     * <p>
-     * 对每条 ACTIVE 事实：若同 source_key 存在 REVERSED 事实，取 REVERSED 金额（调整前），
-     * 否则取当前金额。按 COALESCE(order_no, contract_no) 聚合返回。
-     * 与主查询分离，避免主 SQL 挂 CTE + JOIN 增加复杂度。
-     *
-     * @param period   归属期间
-     * @param factType 事实口径
-     * @param bizKeys  业务键集合（COALESCE(order_no, contract_no)）
-     * @return 每行含 bizKey / originalAmount
-     */
-    @Select("""
-        <script>
-        WITH reversed_expect AS (
-            SELECT DISTINCT ON (source_key) source_key, performance_amount
-            FROM pj_perf_fact
-            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
-              AND period = #{period}
-              AND COALESCE(order_no, contract_no) IN
-              <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
-            ORDER BY source_key, id ASC
-        )
-        SELECT COALESCE(f.order_no, f.contract_no) AS "bizKey",
-               COALESCE(SUM(
-                 COALESCE(re.performance_amount, f.performance_amount)
-               ), 0) AS "originalAmount"
-        FROM pj_perf_fact f
-        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = #{factType}
-          AND f.period = #{period}
-          AND COALESCE(f.order_no, f.contract_no) IN
-          <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
-        GROUP BY COALESCE(f.order_no, f.contract_no)
-        </script>
-        """)
-    List<Map<String, Object>> selectOriginalAmounts(@Param("period") String period,
-                                                      @Param("factType") String factType,
-                                                      @Param("bizKeys") Collection<String> bizKeys);
 
     /**
      * 统计符合条件的合同数（分页 total，按 COALESCE(order_no, contract_no) 去重）。
@@ -298,22 +257,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 按业务键集合查询业绩明细（合同维度树表懒加载数据源）。
      * <p>
-     * 键口径与 {@link #selectManagePageContracts} 一致：一手房、房产金融、家装荐客传订单号，
-     * 其余传合同号（合同号为空回退订单号，即列表行展示的键）。
-     * 过滤条件与 {@link #selectManagePageContracts} 一致，返回该业务键下所有签约人的明细行，
-     * 前端按「合同 → 人 → 明细」组装树。
+     * 单表查询 pj_perf_fact，employeeName/employeeCode/deptPath/originalAmount/settled/settleDate
+     * 由 Service 层批量补充查询填充，避免 CTE + 5 个 JOIN 的复杂执行计划。
+     * 键口径与 {@link #selectManagePageContracts} 一致。
      *
      * @param contractNos 业务键集合（不能为空；列表行展示的合同号/订单号）
      */
     @Select("""
         <script>
-        WITH reversed_expect AS (
-            SELECT DISTINCT ON (source_key) source_key, performance_amount
-            FROM pj_perf_fact
-            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
-              AND period = #{period}
-            ORDER BY source_key, id ASC
-        )
         SELECT f.id,
                f.fact_status AS "factStatus",
                f.fact_type AS factType,
@@ -325,44 +276,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.property_address AS propertyAddress,
                f.fee_item AS feeItem,
                f.employee_id AS employeeId,
-               e.employee_name AS employeeName,
-               e.employee_code AS employeeCode,
-               CASE
-                   WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
-                       CONCAT_WS('-',
-                           NULLIF(gp.dept_name, 'tenant_name'),
-                           NULLIF(p.dept_name, 'tenant_name'),
-                           CASE WHEN d.dept_name = p.dept_name THEN NULL
-                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
-                   ELSE
-                       CONCAT_WS('-',
-                           NULLIF(p.dept_name, 'tenant_name'),
-                           NULLIF(d.dept_name, 'tenant_name'))
-               END AS deptPath,
                f.role_type AS roleType,
                f.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
-               COALESCE(re.performance_amount, f.performance_amount) AS originalAmount,
-               (ci.id IS NOT NULL) AS settled,
-               ca.lock_time AS settleDate,
                f.source_key AS sourceKey
         FROM pj_perf_fact f
-        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
-        LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
-        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN LATERAL (
-            SELECT ci.id, ci.application_id
-            FROM pj_commission_item ci
-            WHERE ci.performance_fact_id = f.id
-              AND ci.status &lt;&gt; 'REVERSED'
-            ORDER BY ci.id
-            LIMIT 1
-        ) ci ON TRUE
-        LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
-                                              AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           AND f.period = #{period}
           AND f.fact_type = #{factType}
@@ -370,43 +289,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    THEN COALESCE(f.order_no, f.contract_no)
                    ELSE COALESCE(f.contract_no, f.order_no) END IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
-          <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
-                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
-          </if>
-          <if test="bizType != null and bizType != ''">
-            AND f.biz_type = #{bizType}
-          </if>
-          <if test="settled != null">
-            <choose>
-                <when test="settled">
-                  AND ci.id IS NOT NULL
-                </when>
-                <otherwise>
-                  AND ci.id IS NULL
-                </otherwise>
-            </choose>
-          </if>
-          <if test="keyword != null and keyword != ''">
-            AND (
-              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
-            )
-          </if>
-        ORDER BY f.contract_no, e.employee_name, businessDate, f.role_type
+        ORDER BY f.contract_no, f.employee_id, businessDate, f.role_type
         </script>
         """)
-    List<PerformanceManageDTO> selectManageListByContractNos(@Param("period") String period,
+    List<PerformanceManageVo> selectManageListByContractNos(@Param("period") String period,
                                                              @Param("factType") String factType,
-                                                             @Param("deptId") Long deptId,
-                                                             @Param("bizType") String bizType,
-                                                             @Param("settled") Boolean settled,
-                                                             @Param("keyword") String keyword,
                                                              @Param("contractNos") List<String> contractNos);
 
     /**
@@ -712,7 +599,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
         </script>
         """)
-    List<ReceivedFactDetailDTO> selectReceivedFactDetails(@Param("period") String period,
+    List<ReceivedFactDetailVo> selectReceivedFactDetails(@Param("period") String period,
                                                            @Param("contractNo") String contractNo);
 
     /**
@@ -750,7 +637,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         GROUP BY k.key
         </script>
         """)
-    List<ReceivedContractMetricsDTO> selectReceivedContractMetrics(
+    List<ReceivedContractMetricsVo> selectReceivedContractMetrics(
         @Param("period") String period,
         @Param("contractNos") Collection<String> contractNos);
 
@@ -1030,7 +917,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
         """)
-    List<AdjustFactDetailDTO> selectAdjustFactDetails(@Param("period") String period,
+    List<AdjustFactDetailVo> selectAdjustFactDetails(@Param("period") String period,
                                                        @Param("contractNo") String contractNo,
                                                        @Param("factType") String factType);
 
@@ -1180,7 +1067,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
-    List<PerformanceFactSearchDTO> selectFactSearchByContract(
+    List<PerformanceFactSearchVo> selectFactSearchByContract(
             @Param("period") String period,
             @Param("deptId") Long deptId,
             @Param("bizType") String bizType,
@@ -1334,7 +1221,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND (f.contract_no = #{bizNo} OR f.order_no = #{bizNo})
         ORDER BY f.period DESC, e.employee_name, d.dept_id, f.role_type, f.id
         """)
-    List<PerformanceSearchDetailDTO> selectSearchDetailRows(@Param("bizNo") String bizNo);
+    List<PerformanceSearchDetailVo> selectSearchDetailRows(@Param("bizNo") String bizNo);
 
     /**
      * 按业绩事实 ID 批量查业务类型（factId → bizType）。
@@ -1372,5 +1259,30 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     String selectBizTypeByContract(@Param("period") String period,
                                    @Param("contractNo") String contractNo,
                                    @Param("factType") String factType);
+
+    /**
+     * 批量查事实的结佣状态（settled / settleDate）。
+     * <p>
+     * 每个事实取最早一条非 REVERSED 的结佣明细，关联其审批单取 lock_time。
+     * 与主查询分离，避免 LATERAL JOIN 逐行子查询。
+     *
+     * @param factIds 事实 ID 集合
+     * @return 每行含 factId / settleDate；空集合返回空列表
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (ci.performance_fact_id)
+               ci.performance_fact_id AS "factId",
+               ca.lock_time AS "settleDate"
+        FROM pj_commission_item ci
+        LEFT JOIN pj_commission_application ca ON ca.id = ci.application_id
+                                              AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+        WHERE ci.status &lt;&gt; 'REVERSED'
+          AND ci.performance_fact_id IN
+        <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+        ORDER BY ci.performance_fact_id, ci.id ASC
+        </script>
+        """)
+    List<Map<String, Object>> selectSettledInfoByFactIds(@Param("factIds") Collection<Long> factIds);
 }
 

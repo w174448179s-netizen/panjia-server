@@ -47,6 +47,14 @@ public interface EmployeeMainDataQueryPort {
     Map<String, EmployeeMainDataDTO> listByCodes(Collection<String> employeeCodes);
 
     /**
+     * 按员工 ID 集合批量查员工主数据（明细页关联展示用，避免 N+1）。
+     *
+     * @param employeeIds 员工 ID 集合
+     * @return 员工 ID → 员工主数据；未匹配的 ID 不在结果中
+     */
+    Map<Long, EmployeeMainDataDTO> listByIds(Collection<Long> employeeIds);
+
+    /**
      * 按姓名/工号模糊搜索员工（员工下拉选择数据源），可选限定部门集合。
      * <p>
      * 部门集合由调用方按登录用户的数据权限解析后传入（如本部门及下级），

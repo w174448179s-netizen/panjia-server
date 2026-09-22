@@ -2,7 +2,7 @@ package com.panjia.payroll.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.payroll.domain.RateAdjust;
-import com.panjia.payroll.service.RateAdjustService;
+import com.panjia.payroll.service.IRateAdjustService;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.log.annotation.Log;
@@ -37,7 +37,7 @@ import java.util.Map;
 @RequestMapping("/payroll/rateadjust")
 public class RateAdjustController extends BaseController {
 
-    private final RateAdjustService rateAdjustService;
+    private final IRateAdjustService rateAdjustService;
 
     /** 列表查询（employeeId/adjustType/status 过滤；period 传则仅查该月生效中的调整） */
     @SaCheckPermission("payroll:rateadjust:list")

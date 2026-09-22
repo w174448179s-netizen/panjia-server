@@ -101,4 +101,58 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
         }
         return selectFactAmountsByIds(ids);
     }
+
+
+
+    /**
+     * 批量查询已执行调整单的原始金额（按合同号聚合，取最早一条的 original_amount 快照）。
+     *
+     * @param period      归属期间
+     * @param factType    事实口径
+     * @param contractNos 合同号集合
+     * @return 每行含 bizKey(contract_no) / originalAmount；空集合时返回空列表
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (contract_no)
+               contract_no AS "bizKey",
+               original_amount AS "originalAmount"
+        FROM pj_perf_adjust
+        WHERE period = #{period}
+          AND status = 'EXECUTED'
+          AND contract_no IN
+        <foreach collection="contractNos" item="k" open="(" separator="," close=")">#{k}</foreach>
+        ORDER BY contract_no, id ASC
+        </script>
+        """)
+    List<Map<String, Object>> doSelectOriginalAmounts(@Param("period") String period,
+                                                       @Param("factType") String factType,
+                                                       @Param("contractNos") java.util.Collection<String> contractNos);
+
+    /**
+     * 批量查事实的调整前金额（按 factId 取最早一条 EXECUTED 调整单的 original_amount 快照）。
+     *
+     * @param factIds 事实 ID 集合
+     * @return 每行含 factId / originalAmount；空集合返回空列表
+     */
+    default List<Map<String, Object>> selectOriginalAmountsByFactIds(java.util.Collection<Long> factIds) {
+        if (CollectionUtils.isEmpty(factIds)) {
+            return Collections.emptyList();
+        }
+        return doSelectOriginalAmountsByFactIds(factIds);
+    }
+
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (fact_id)
+               fact_id AS "factId",
+               original_amount AS "originalAmount"
+        FROM pj_perf_adjust
+        WHERE status = 'EXECUTED'
+          AND fact_id IN
+        <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+        ORDER BY fact_id, id ASC
+        </script>
+        """)
+    List<Map<String, Object>> doSelectOriginalAmountsByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
 }

@@ -13,9 +13,9 @@ import com.panjia.commission.domain.CommissionConsumeLog;
 import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
-import com.panjia.commission.dto.ApplyQuery;
-import com.panjia.commission.dto.BatchResultDTO;
-import com.panjia.commission.dto.CommissionContractVO;
+import com.panjia.commission.domain.bo.CommissionApplyBo;
+import com.panjia.commission.domain.vo.CommissionBatchResultVo;
+import com.panjia.commission.domain.vo.CommissionContractVo;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
@@ -312,7 +312,7 @@ public class CommissionApplicationService {
      * @param operatorId  发起人 ID
      * @return 批量发起结果
      */
-    public CompletableFuture<BatchResultDTO> batchApplyByContract(
+    public CompletableFuture<CommissionBatchResultVo> batchApplyByContract(
             String period, List<String> contractNos, Long operatorId) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
@@ -344,7 +344,7 @@ public class CommissionApplicationService {
         // 应收金额一次性加载：全期间合同汇总按 contractNo 建 Map，doApply 直接取值（P0）
         ctx.expectedAmounts.putAll(loadExpectedAmountMap(period));
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
-        BatchResultDTO syncResult = new BatchResultDTO();
+        CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
         syncResult.setTotal(deduped.size());
         for (String contractNo : deduped) {
             try {
@@ -371,10 +371,10 @@ public class CommissionApplicationService {
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
         log.info("[结佣-批量发起] period={}, total={}, myContracts={}, skipped={}, operator={}",
             period, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
-        final BatchResultDTO preResult = syncResult;
+        final CommissionBatchResultVo preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> runWithOperatorToken(tokenName, tokenValue, () -> {
-                BatchResultDTO asyncResult = doBatchApply(period, myContracts, operatorId, ctx);
+                CommissionBatchResultVo asyncResult = doBatchApply(period, myContracts, operatorId, ctx);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
                 asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
@@ -410,10 +410,10 @@ public class CommissionApplicationService {
      *
      * @param ctx 批量上下文（预加载的应收/事实/申请单），null 时走单合同路径逐单查
      */
-    private BatchResultDTO doBatchApply(String period, LinkedHashSet<String> contractNos,
+    private CommissionBatchResultVo doBatchApply(String period, LinkedHashSet<String> contractNos,
                                         Long operatorId, BatchApplyContext ctx) {
         CommissionApplicationService self = SpringUtils.getBean(CommissionApplicationService.class);
-        BatchResultDTO result = new BatchResultDTO();
+        CommissionBatchResultVo result = new CommissionBatchResultVo();
         result.setTotal(contractNos.size());
         // 批量预查：一条 IN 查询取所有合同当月活跃+驳回申请单（P1：N×3→1 次）
         if (ctx != null) {
@@ -760,7 +760,7 @@ public class CommissionApplicationService {
      * @param operatorId  操作人 ID（异步线程无 Sa-Token 上下文，同步阶段捕获）
      * @return 批量审批结果
      */
-    public CompletableFuture<BatchResultDTO> batchApproveByContract(
+    public CompletableFuture<CommissionBatchResultVo> batchApproveByContract(
             String period, List<String> contractNos, Long operatorId) {
         if (StringUtils.isBlank(period)) {
             throw new ServiceException("结算月不能为空");
@@ -780,7 +780,7 @@ public class CommissionApplicationService {
         // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文。
         // ① 一条 IN 查询取所有 SUBMITTED 申请单（替代逐单 selectOne 的 N 次查询）；
         // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
-        BatchResultDTO syncResult = new BatchResultDTO();
+        CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
         syncResult.setTotal(deduped.size());
         Map<String, CommissionApplication> submittedApps = loadSubmittedApplicationsBatch(period, deduped);
         List<CommissionApplication> appList = submittedApps.values().stream().distinct().toList();
@@ -807,10 +807,10 @@ public class CommissionApplicationService {
         syncResult.setFailed(syncResult.getFailedContracts().size());
         log.info("[结佣-批量审批] period={}, total={}, myTasks={}, skipped={}, operator={}",
             period, deduped.size(), approveItems.size(), syncResult.getSkipped(), operatorId);
-        final BatchResultDTO preResult = syncResult;
+        final CommissionBatchResultVo preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> {
-                BatchResultDTO asyncResult = doBatchApprove(period, approveItems);
+                CommissionBatchResultVo asyncResult = doBatchApprove(period, approveItems);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 preResult.getFailedContracts().forEach(asyncResult.getFailedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
@@ -862,8 +862,8 @@ public class CommissionApplicationService {
      * 用 completeTaskAsSys 按 taskId 办理（ignore=true），权限已在预检阶段闭合。
      * 预检后任务若被他人抢先办理，引擎抛异常计入失败（并发安全）。
      */
-    private BatchResultDTO doBatchApprove(String period, List<BatchApproveItem> items) {
-        BatchResultDTO result = new BatchResultDTO();
+    private CommissionBatchResultVo doBatchApprove(String period, List<BatchApproveItem> items) {
+        CommissionBatchResultVo result = new CommissionBatchResultVo();
         result.setTotal(items.size());
         for (BatchApproveItem item : items) {
             String contractNo = item.contractNo;
@@ -1090,7 +1090,7 @@ public class CommissionApplicationService {
 
     // ==================== 查询 ====================
 
-    public PageResult<CommissionApplication> listApplications(ApplyQuery query, PageQuery pageQuery) {
+    public PageResult<CommissionApplication> listApplications(CommissionApplyBo query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionApplication> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionApplication::getPeriod, query.getPeriod())
             .eq(StringUtils.isNotBlank(query.getStatus()), CommissionApplication::getStatus,
@@ -1112,7 +1112,7 @@ public class CommissionApplicationService {
     /**
      * 按「合同」维度分页查询结佣申请（与业绩明细页合同维度对齐）。
      */
-    public PageResult<CommissionContractVO> listContracts(ApplyQuery query, PageQuery pageQuery) {
+    public PageResult<CommissionContractVo> listContracts(CommissionApplyBo query, PageQuery pageQuery) {
         String period = StringUtils.isNotBlank(query.getPeriod())
             ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
 
@@ -1146,7 +1146,7 @@ public class CommissionApplicationService {
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
-        List<CommissionContractVO> all = new ArrayList<>(contracts.size());
+        List<CommissionContractVo> all = new ArrayList<>(contracts.size());
         // 列表所有合同同属一个 period，封账状态只查一次
         boolean periodClosed = periodCloseQueryPort.isClosed(period);
         for (PerformanceContractSummaryDTO c : contracts) {
@@ -1202,9 +1202,9 @@ public class CommissionApplicationService {
      *
      * @param factor 该合同 bizType 的折算因子（调用方批量取好后传入，避免逐行回表）
      */
-    private CommissionContractVO toContractVO(String period, boolean periodClosed, PerformanceContractSummaryDTO c,
+    private CommissionContractVo toContractVO(String period, boolean periodClosed, PerformanceContractSummaryDTO c,
                                               CommissionApplication app, String status, BigDecimal factor) {
-        CommissionContractVO vo = new CommissionContractVO();
+        CommissionContractVo vo = new CommissionContractVo();
         vo.setPeriod(period);
         vo.setPeriodClosed(periodClosed);
         vo.setContractNo(c.getContractNo());
@@ -1327,8 +1327,8 @@ public class CommissionApplicationService {
      * 查询申请单下每人结佣明细详情（列口径对齐实收明细详情）。
      * 过滤掉已冲销（REVERSED）行。
      */
-    public List<com.panjia.commission.dto.CommissionItemDetailDTO> listItemDetails(Long applicationId) {
-        List<com.panjia.commission.dto.CommissionItemDetailDTO> details = itemMapper.selectItemDetails(applicationId);
+    public List<com.panjia.commission.domain.vo.CommissionItemDetailVo> listItemDetails(Long applicationId) {
+        List<com.panjia.commission.domain.vo.CommissionItemDetailVo> details = itemMapper.selectItemDetails(applicationId);
         fillItemDetailConversion(details);
         return details;
     }
@@ -1337,15 +1337,15 @@ public class CommissionApplicationService {
      * 结佣明细折算填充：按明细自带的 bizType 批量取折算因子，计算
      * convertedAmount / expectedConvertedAmount。空集合安全。
      */
-    private void fillItemDetailConversion(List<com.panjia.commission.dto.CommissionItemDetailDTO> details) {
+    private void fillItemDetailConversion(List<com.panjia.commission.domain.vo.CommissionItemDetailVo> details) {
         if (details == null || details.isEmpty()) {
             return;
         }
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             details.stream()
-                .map(com.panjia.commission.dto.CommissionItemDetailDTO::getBizType)
+                .map(com.panjia.commission.domain.vo.CommissionItemDetailVo::getBizType)
                 .collect(Collectors.toSet()));
-        for (com.panjia.commission.dto.CommissionItemDetailDTO d : details) {
+        for (com.panjia.commission.domain.vo.CommissionItemDetailVo d : details) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, d.getBizType());
             if (d.getAmount() != null) {
                 d.setConvertedAmount(conversionFactorPort.convert(d.getAmount(), factor));
@@ -1364,7 +1364,7 @@ public class CommissionApplicationService {
         return itemMapper.selectById(itemId);
     }
 
-    public PageResult<CommissionItem> listItems(com.panjia.commission.dto.ItemQuery query, PageQuery pageQuery) {
+    public PageResult<CommissionItem> listItems(com.panjia.commission.domain.bo.CommissionItemBo query, PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionItem> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionItem::getPeriod, query.getPeriod())
             .eq(query.getEmployeeId() != null, CommissionItem::getEmployeeId, query.getEmployeeId())
@@ -1377,7 +1377,7 @@ public class CommissionApplicationService {
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
-    public PageResult<CommissionConsumeLog> listConsumeLogs(com.panjia.commission.dto.ConsumeLogQuery query,
+    public PageResult<CommissionConsumeLog> listConsumeLogs(com.panjia.commission.domain.bo.CommissionConsumeLogBo query,
                                                             PageQuery pageQuery) {
         LambdaQueryWrapper<CommissionConsumeLog> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), CommissionConsumeLog::getPeriod, query.getPeriod())

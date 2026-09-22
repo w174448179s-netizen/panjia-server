@@ -1,7 +1,7 @@
 package com.panjia.performance.listener;
 
 import com.panjia.contracts.event.PayrollLockedEvent;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -18,13 +18,13 @@ import org.springframework.stereotype.Service;
 @Slf4j
 public class PayrollEventListener {
 
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
 
     /**
      * 监听发薪锁定事件，自动封账对应期间。
      * <p>
      * 工资批次 LOCKED 即代表该归属月工资已发，业绩事实与结佣窗口必须同步终态关闭
-     * （架构 §2.1 业务事实链 / 结佣域 B16）。Outbox 可能重复投递，{@link PeriodCloseService#isClosed}
+     * （架构 §2.1 业务事实链 / 结佣域 B16）。Outbox 可能重复投递，{@link IPeriodCloseService#isClosed}
      * 提供天然幂等：已 CLOSED 直接跳过，不重复写封账记录。
      *
      * @param event 发薪锁定事件（V1.9.2 §7.3.1 契约，含 period）

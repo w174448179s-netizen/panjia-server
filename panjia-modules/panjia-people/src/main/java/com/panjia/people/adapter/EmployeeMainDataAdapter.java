@@ -93,6 +93,33 @@ public class EmployeeMainDataAdapter implements EmployeeMainDataQueryPort {
     }
 
     @Override
+    public Map<Long, EmployeeMainDataDTO> listByIds(Collection<Long> employeeIds) {
+        if (CollectionUtils.isEmpty(employeeIds)) {
+            return Map.of();
+        }
+        List<Employee> list = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+            .in(Employee::getEmployeeId, employeeIds));
+        if (list.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> deptIds = list.stream()
+            .map(Employee::getDeptId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, String> deptNames = deptIds.isEmpty() ? Map.of() : deptPort.findDeptFullNames(deptIds);
+
+        Map<Long, EmployeeMainDataDTO> result = new LinkedHashMap<>(list.size());
+        for (Employee emp : list) {
+            EmployeeMainDataDTO dto = toDTO(emp);
+            if (emp.getDeptId() != null) {
+                dto.setDeptName(deptNames.get(emp.getDeptId()));
+            }
+            result.put(emp.getEmployeeId(), dto);
+        }
+        return result;
+    }
+
+    @Override
     public List<EmployeeMainDataDTO> searchOptions(String keyword, Collection<Long> deptIds, int limit) {
         if (StringUtils.isBlank(keyword) || limit <= 0) {
             return List.of();

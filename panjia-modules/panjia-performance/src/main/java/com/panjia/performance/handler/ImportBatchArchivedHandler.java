@@ -4,7 +4,7 @@ import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.service.PerformanceEngine;
-import com.panjia.performance.service.ReceivedApplyService;
+import com.panjia.performance.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -37,7 +37,7 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
     private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED");
 
     private final PerformanceEngine performanceEngine;
-    private final ReceivedApplyService receivedApplyService;
+    private final IReceivedApplyService receivedApplyService;
     private final ObjectMapper objectMapper;
 
     @Override

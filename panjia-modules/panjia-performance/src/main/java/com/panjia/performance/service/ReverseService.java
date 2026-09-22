@@ -9,7 +9,7 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -48,7 +48,7 @@ public class ReverseService {
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
     private final EventPort eventPort;
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
 
     /**
      * 替换冲销。

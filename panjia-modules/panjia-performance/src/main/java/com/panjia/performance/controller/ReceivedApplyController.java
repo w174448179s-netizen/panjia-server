@@ -2,10 +2,10 @@ package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.domain.ReceivedApply;
-import com.panjia.performance.dto.BatchApproveByContractRequest;
-import com.panjia.performance.dto.BatchApproveResultDTO;
-import com.panjia.performance.dto.ReceivedApplyQuery;
-import com.panjia.performance.service.ReceivedApplyService;
+import com.panjia.performance.domain.bo.ReceivedBatchApproveBo;
+import com.panjia.performance.domain.vo.BatchApproveResultVo;
+import com.panjia.performance.domain.bo.ReceivedApplyBo;
+import com.panjia.performance.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -38,19 +38,19 @@ import java.util.concurrent.CompletableFuture;
 @RequestMapping("/performance/received")
 public class ReceivedApplyController extends BaseController {
 
-    private final ReceivedApplyService receivedApplyService;
+    private final IReceivedApplyService receivedApplyService;
 
     /** 分页查询实收审批单 */
     @SaCheckPermission("perf:received:list")
     @GetMapping("/list")
-    public R<PageResult<ReceivedApply>> list(ReceivedApplyQuery query, PageQuery pageQuery) {
+    public R<PageResult<ReceivedApply>> list(ReceivedApplyBo query, PageQuery pageQuery) {
         return R.ok(receivedApplyService.list(query, pageQuery));
     }
 
     /** 详情（含合同下每人实收事实） */
     @SaCheckPermission("perf:received:query")
     @GetMapping("/{id}")
-    public R<ReceivedApplyService.ReceivedApplyDetail> getInfo(@PathVariable Long id) {
+    public R<IReceivedApplyService.ReceivedApplyDetail> getInfo(@PathVariable Long id) {
         return R.ok(receivedApplyService.getDetail(id));
     }
 
@@ -99,7 +99,7 @@ public class ReceivedApplyController extends BaseController {
     @SaCheckPermission("perf:received:batch")
     @Log(title = "实收业绩批量审批", businessType = BusinessType.UPDATE)
     @PostMapping("/batch-approve-by-contract-async")
-    public CompletableFuture<R<BatchApproveResultDTO>> batchApproveByContractAsync(@RequestBody BatchApproveByContractRequest request) {
+    public CompletableFuture<R<BatchApproveResultVo>> batchApproveByContractAsync(@RequestBody ReceivedBatchApproveBo request) {
         return receivedApplyService.batchApproveByContractAsync(request.getPeriod(), request.getContractNos())
             .thenApply(result -> R.ok(
                 "批量审批完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()

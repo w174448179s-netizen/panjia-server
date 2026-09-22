@@ -2,10 +2,10 @@ package com.panjia.commission.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.commission.domain.CommissionApplication;
-import com.panjia.commission.dto.ApplyCreateDTO;
-import com.panjia.commission.dto.ApplyQuery;
-import com.panjia.commission.dto.BatchApproveByContractRequest;
-import com.panjia.commission.dto.BatchResultDTO;
+import com.panjia.commission.domain.bo.CommissionApplyCreateBo;
+import com.panjia.commission.domain.bo.CommissionApplyBo;
+import com.panjia.commission.domain.bo.CommissionBatchApproveBo;
+import com.panjia.commission.domain.vo.CommissionBatchResultVo;
 import com.panjia.commission.service.CommissionApplicationService;
 import com.panjia.contracts.port.ApprovalAction;
 import lombok.RequiredArgsConstructor;
@@ -54,7 +54,7 @@ public class CommissionApplyController extends BaseController {
      */
     @SaCheckPermission("commission:apply:list")
     @GetMapping("/list")
-    public R<PageResult<CommissionApplication>> list(ApplyQuery query, PageQuery pageQuery) {
+    public R<PageResult<CommissionApplication>> list(CommissionApplyBo query, PageQuery pageQuery) {
         return R.ok(applicationService.listApplications(query, pageQuery));
     }
 
@@ -67,7 +67,7 @@ public class CommissionApplyController extends BaseController {
      */
     @SaCheckPermission("commission:apply:list")
     @GetMapping("/contract-list")
-    public R<PageResult<com.panjia.commission.dto.CommissionContractVO>> contractList(ApplyQuery query,
+    public R<PageResult<com.panjia.commission.domain.vo.CommissionContractVo>> contractList(CommissionApplyBo query,
                                                                                       PageQuery pageQuery) {
         return R.ok(applicationService.listContracts(query, pageQuery));
     }
@@ -82,7 +82,7 @@ public class CommissionApplyController extends BaseController {
     @GetMapping("/{id}")
     public R<Map<String, Object>> getInfo(@PathVariable Long id) {
         CommissionApplication application = applicationService.getApplication(id);
-        List<com.panjia.commission.dto.CommissionItemDetailDTO> items = applicationService.listItemDetails(id);
+        List<com.panjia.commission.domain.vo.CommissionItemDetailVo> items = applicationService.listItemDetails(id);
         return R.ok(Map.of("application", application, "items", items));
     }
 
@@ -100,13 +100,13 @@ public class CommissionApplyController extends BaseController {
      * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
      * 已审批/锁定拒绝，变更走调整单。
      *
-     * @param dto 发起请求（period + contractNo）
+     * @param dto 发起条件（期间 + 合同号）
      * @return 申请单 ID
      */
     @SaCheckPermission("commission:apply:add")
     @Log(title = "结佣申请单", businessType = BusinessType.INSERT)
     @PostMapping
-    public R<Long> add(@Validated @RequestBody ApplyCreateDTO dto) {
+    public R<Long> add(@Validated @RequestBody CommissionApplyCreateBo dto) {
         CommissionApplication application = applicationService.apply(
             dto.getPeriod(), dto.getContractNo(), LoginHelper.getUserId());
         return R.ok("发起成功", application.getId());
@@ -122,7 +122,7 @@ public class CommissionApplyController extends BaseController {
     @SaCheckPermission("commission:apply:add")
     @Log(title = "结佣批量发起", businessType = BusinessType.INSERT)
     @PostMapping("/batch-apply-by-contract")
-    public CompletableFuture<R<BatchResultDTO>> batchApplyByContract(@RequestBody BatchApproveByContractRequest request) {
+    public CompletableFuture<R<CommissionBatchResultVo>> batchApplyByContract(@RequestBody CommissionBatchApproveBo request) {
         return applicationService.batchApplyByContract(
                 request.getPeriod(), request.getContractNos(), LoginHelper.getUserId())
             .thenApply(result -> R.ok(
@@ -145,7 +145,7 @@ public class CommissionApplyController extends BaseController {
     @SaCheckPermission("commission:apply:batch")
     @Log(title = "结佣批量审批", businessType = BusinessType.UPDATE)
     @PostMapping("/batch-approve-by-contract")
-    public CompletableFuture<R<BatchResultDTO>> batchApproveByContract(@RequestBody BatchApproveByContractRequest request) {
+    public CompletableFuture<R<CommissionBatchResultVo>> batchApproveByContract(@RequestBody CommissionBatchApproveBo request) {
         return applicationService.batchApproveByContract(
                 request.getPeriod(), request.getContractNos(), LoginHelper.getUserId())
             .thenApply(result -> R.ok(

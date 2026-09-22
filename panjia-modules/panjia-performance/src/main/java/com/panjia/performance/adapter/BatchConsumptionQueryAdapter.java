@@ -8,7 +8,7 @@ import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -30,7 +30,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class BatchConsumptionQueryAdapter implements BatchConsumptionQueryPort {
 
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
     private final ReceivedApplyMapper receivedApplyMapper;

@@ -20,7 +20,7 @@ import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.PayrollEmployeeSnapshot;
 import com.panjia.payroll.domain.RuleSnapshot;
-import com.panjia.payroll.dto.MyPayrollDetailVO;
+import com.panjia.payroll.domain.vo.MyPayrollDetailVo;
 import com.panjia.payroll.dto.RateAdjustItem;
 import com.panjia.payroll.mapper.PayrollBatchMapper;
 import com.panjia.payroll.mapper.PayrollDetailMapper;
@@ -80,7 +80,7 @@ public class PayrollBatchService {
     private final PeopleAttendanceApprovalQueryPort attendanceApprovalQueryPort;
     private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
     private final PeopleScoreQueryPort scoreQueryPort;
-    private final RateAdjustService rateAdjustService;
+    private final IRateAdjustService rateAdjustService;
 
     // ==================== 创建 ====================
 
@@ -639,7 +639,7 @@ public class PayrollBatchService {
     /**
      * 查当前登录人在指定批次的工资明细 + 员工主数据（姓名/工号/门店名）。
      */
-    public MyPayrollDetailVO getMyDetail(Long userId, Long batchId) {
+    public MyPayrollDetailVo getMyDetail(Long userId, Long batchId) {
         EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
         if (me == null || me.getEmployeeId() == null) {
             throw new ServiceException("当前账号未关联员工档案，无法查询工资，请联系人事绑定");
@@ -652,7 +652,7 @@ public class PayrollBatchService {
         if (batch == null) {
             throw new ServiceException("工资批次不存在");
         }
-        MyPayrollDetailVO vo = new MyPayrollDetailVO();
+        MyPayrollDetailVo vo = new MyPayrollDetailVo();
         vo.setBatch(batch);
         vo.setDetail(detail);
         vo.setEmployee(me);

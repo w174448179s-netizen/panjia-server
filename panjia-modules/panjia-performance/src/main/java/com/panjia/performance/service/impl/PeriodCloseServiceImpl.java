@@ -5,7 +5,7 @@ import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformancePeriodClose;
 import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -23,7 +23,7 @@ import java.util.List;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class PeriodCloseServiceImpl implements PeriodCloseService {
+public class PeriodCloseServiceImpl implements IPeriodCloseService {
 
     private final PerformancePeriodCloseMapper periodCloseMapper;
 

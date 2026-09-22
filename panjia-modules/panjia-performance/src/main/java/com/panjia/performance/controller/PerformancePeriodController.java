@@ -2,7 +2,7 @@ package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.domain.PerformancePeriodClose;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
@@ -33,7 +33,7 @@ import java.util.List;
 @RequestMapping("/perf/period")
 public class PerformancePeriodController extends BaseController {
 
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
 
     /**
      * 查询期间列表。

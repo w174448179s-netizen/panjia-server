@@ -1,6 +1,6 @@
 package com.panjia.performance.port;
 
-import com.panjia.performance.dto.PerformanceFactDTO;
+import com.panjia.performance.domain.vo.PerformanceFactVo;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -31,7 +31,7 @@ public interface CommissionPerformanceQueryPort {
      * @param factType   事实口径
      * @return 业绩事实明细列表
      */
-    List<PerformanceFactDTO> listByEmployeeAndPeriod(Long employeeId, String period, String factType);
+    List<PerformanceFactVo> listByEmployeeAndPeriod(Long employeeId, String period, String factType);
 
     /**
      * 查询期间是否已封账。

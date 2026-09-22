@@ -11,15 +11,15 @@ import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
-import com.panjia.performance.dto.AdjustCreateDTO;
-import com.panjia.performance.dto.AdjustDetailDTO;
-import com.panjia.performance.dto.AdjustFactDetailDTO;
-import com.panjia.performance.dto.AdjustQuery;
+import com.panjia.performance.domain.bo.PerformanceAdjustCreateBo;
+import com.panjia.performance.domain.vo.AdjustDetailVo;
+import com.panjia.performance.domain.vo.AdjustFactDetailVo;
+import com.panjia.performance.domain.bo.PerformanceAdjustBo;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.FactConversionResolver;
-import com.panjia.performance.service.PerformanceAdjustService;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPerformanceAdjustService;
+import com.panjia.performance.service.IPeriodCloseService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import com.panjia.contracts.constant.BizType;
@@ -72,7 +72,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
+public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     /** 调整单号前缀 */
     private static final String ADJUST_NO_PREFIX = "ADJ";
@@ -102,7 +102,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final PerformanceFactMapper factMapper;
     private final ReverseService reverseService;
     private final ApprovalPort approvalPort;
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
     /** 折算因子公共方法（取比例 / 金额乘算的唯一入口） */
     private final ConversionFactorPort conversionFactorPort;
     /** 业绩域自有标识 → bizType 的解析（factId / 合同号反查） */
@@ -111,7 +111,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     private final DeptService deptService;
 
     @Override
-    public PageResult<PerformanceAdjust> listAdjusts(AdjustQuery query, PageQuery pageQuery) {
+    public PageResult<PerformanceAdjust> listAdjusts(PerformanceAdjustBo query, PageQuery pageQuery) {
         // §3.6 数据权限：所有登录用户仅本部门（含下级）。未传 deptId 强制本部门，越权传他部门直接拒绝
         if (query != null) {
             query.setDeptId(DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "业绩调整"));
@@ -222,12 +222,12 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     }
 
     @Override
-    public AdjustDetailDTO getAdjustDetail(Long id) {
+    public AdjustDetailVo getAdjustDetail(Long id) {
         PerformanceAdjust adjust = getAdjust(id);
         if (adjust == null) {
             return null;
         }
-        AdjustDetailDTO dto = new AdjustDetailDTO();
+        AdjustDetailVo dto = new AdjustDetailVo();
         // 拷贝基础字段
         org.springframework.beans.BeanUtils.copyProperties(adjust, dto);
 
@@ -260,7 +260,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             factType = "PERF_EXPECT"; // 默认应收口径
         }
         if (StringUtils.isNotBlank(targetContractNo)) {
-            List<AdjustFactDetailDTO> details =
+            List<AdjustFactDetailVo> details =
                 factMapper.selectAdjustFactDetails(period, targetContractNo, factType);
             // 计算变动金额
             BigDecimal delta = deltaOf(adjust);
@@ -271,13 +271,13 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             // 再反推原始金额 amount = afterAmount - delta，避免在调整后金额上再叠加 delta 重复计算。
             boolean alreadyExecuted = adjust.getStatus() == AdjustStatus.EXECUTED;
             if (alreadyExecuted) {
-                for (AdjustFactDetailDTO d : details) {
+                for (AdjustFactDetailVo d : details) {
                     BigDecimal currentAmount = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
                     // 反推原始金额：原始 = 当前 - 变动；但此时 delta 尚未计算，先暂存当前 amount
                     d.setAfterAmount(currentAmount);
                 }
                 // 已执行场景：原始 amount 需在 delta 计算后反推，先重置为 null 标记
-                for (AdjustFactDetailDTO d : details) {
+                for (AdjustFactDetailVo d : details) {
                     d.setAmount(null);
                 }
             }
@@ -297,7 +297,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                     .toList();
                 BigDecimal[] parts = allocateByAmount(amounts, delta);
                 for (int i = 0; i < details.size(); i++) {
-                    AdjustFactDetailDTO d = details.get(i);
+                    AdjustFactDetailVo d = details.get(i);
                     BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
                     d.setDeltaAmount(parts[i]);
                     if (alreadyExecuted) {
@@ -312,7 +312,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
                 }
             } else {
                 // 明细级：只标记目标行
-                for (AdjustFactDetailDTO d : details) {
+                for (AdjustFactDetailVo d : details) {
                     if (d.getFactId() != null && d.getFactId().equals(factId)) {
                         d.setDeltaAmount(delta);
                         if (alreadyExecuted) {
@@ -339,11 +339,11 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
             }
             // 补充折算后金额：按 factId 批量取折算因子
             Set<Long> detailFactIds = details.stream()
-                .map(AdjustFactDetailDTO::getFactId)
+                .map(AdjustFactDetailVo::getFactId)
                 .filter(f -> f != null)
                 .collect(Collectors.toSet());
             Map<Long, BigDecimal> detailFactorMap = factConversionResolver.factorByFactIds(detailFactIds);
-            for (AdjustFactDetailDTO d : details) {
+            for (AdjustFactDetailVo d : details) {
                 BigDecimal factor = conversionFactorPort.factorOf(detailFactorMap, d.getFactId());
                 d.setConvertedAmount(conversionFactorPort.convert(d.getAmount(), factor));
                 d.setConvertedAfterAmount(conversionFactorPort.convert(d.getAfterAmount(), factor));
@@ -383,7 +383,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public PerformanceAdjust createAdjust(AdjustCreateDTO dto, Long applicantId) {
+    public PerformanceAdjust createAdjust(PerformanceAdjustCreateBo dto, Long applicantId) {
         // 1. 校验调整类型
         AdjustType adjustType = AdjustType.fromCode(dto.getAdjustType());
         if (adjustType == null) {
@@ -740,7 +740,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
     /**
      * 构建查询条件。
      */
-    private LambdaQueryWrapper<PerformanceAdjust> buildQueryWrapper(AdjustQuery query) {
+    private LambdaQueryWrapper<PerformanceAdjust> buildQueryWrapper(PerformanceAdjustBo query) {
         LambdaQueryWrapper<PerformanceAdjust> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()),
             PerformanceAdjust::getPeriod, query.getPeriod());
@@ -1076,7 +1076,7 @@ public class PerformanceAdjustServiceImpl implements PerformanceAdjustService {
      * 合同级：汇总该合同下全部 ACTIVE 事实的 performance_amount；
      * 明细级：取单条事实的 performance_amount。
      */
-    private BigDecimal calculateCurrentAmount(AdjustCreateDTO dto, String scope) {
+    private BigDecimal calculateCurrentAmount(PerformanceAdjustCreateBo dto, String scope) {
         String factType = dto.getFactType();
         String period = StringUtils.isNotBlank(dto.getOriginalPeriod())
             ? dto.getOriginalPeriod() : dto.getPeriod();

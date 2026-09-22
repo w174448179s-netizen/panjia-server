@@ -20,7 +20,7 @@ import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
-import com.panjia.performance.service.PeriodCloseService;
+import com.panjia.performance.service.IPeriodCloseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -67,7 +67,7 @@ public class PerformanceEngine {
     private final ReverseService reverseService;
     private final EventPort eventPort;
     private final ConfigService configService;
-    private final PeriodCloseService periodCloseService;
+    private final IPeriodCloseService periodCloseService;
     private final ReceivedApplyMapper receivedApplyMapper;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 

@@ -12,24 +12,30 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformancePeriodClose;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
-import com.panjia.performance.dto.FactQuery;
-import com.panjia.performance.dto.PerformanceFactDTO;
-import com.panjia.performance.dto.PerformanceFactSearchDTO;
-import com.panjia.performance.dto.PerformanceManageContractVO;
-import com.panjia.performance.dto.PerformanceManageDTO;
-import com.panjia.performance.dto.PerformanceManagePageVO;
-import com.panjia.performance.dto.PerformanceSearchDetailDTO;
+import com.panjia.performance.domain.bo.PerformanceFactBo;
+import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
+import com.panjia.performance.domain.bo.PerformanceManageContractBo;
+import com.panjia.performance.domain.vo.PerformanceFactVo;
+import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
+import com.panjia.performance.domain.vo.PerformanceManageContractVo;
+import com.panjia.performance.domain.vo.PerformanceManageVo;
+import com.panjia.performance.domain.vo.PerformanceManagePageVo;
+import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
+import com.panjia.performance.domain.bo.PerformanceSearchBo;
+import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
+import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
+import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.FactConversionResolver;
-import com.panjia.performance.service.PerformanceQueryService;
+import com.panjia.performance.service.IPerformanceQueryService;
 import com.panjia.performance.service.PerformanceViewLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
-import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.DeptService;
 import org.springframework.stereotype.Service;
@@ -49,7 +55,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class PerformanceQueryServiceImpl implements PerformanceQueryService {
+public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     /** 经纪人角色 ID（仅本人业绩数据权限） */
     private static final Long ROLE_AGENT = 1761300000000000014L;
@@ -58,6 +64,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     private static final int EMPLOYEE_OPTION_LIMIT = 20;
 
     private final PerformanceFactMapper factMapper;
+    private final PerformanceAdjustMapper adjustMapper;
     private final PerformancePeriodCloseMapper periodCloseMapper;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final PerformanceViewLogService viewLogService;
@@ -69,12 +76,12 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     private final DeptService deptService;
 
     @Override
-    public PageResult<PerformanceFactDTO> listFacts(FactQuery query, PageQuery pageQuery) {
+    public PageResult<PerformanceFactVo> listFacts(PerformanceFactBo query, PageQuery pageQuery) {
         LambdaQueryWrapper<PerformanceFact> wrapper = buildQueryWrapper(query);
         wrapper.orderByDesc(PerformanceFact::getCreateTime);
 
         Page<PerformanceFact> page = factMapper.selectPage(pageQuery.build(), wrapper);
-        List<PerformanceFactDTO> dtoList = page.getRecords().stream()
+        List<PerformanceFactVo> dtoList = page.getRecords().stream()
             .map(this::toDTO)
             .toList();
         fillEmployeeInfo(dtoList);
@@ -87,19 +94,19 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
      * 统一按 employee_code 关联（历史事实行 employee_id/dept_id 为空也能补上），
      * 一次 IN 查询 + 一次部门名批量查询，无 N+1。
      */
-    private void fillEmployeeInfo(List<PerformanceFactDTO> dtoList) {
+    private void fillEmployeeInfo(List<PerformanceFactVo> dtoList) {
         if (dtoList == null || dtoList.isEmpty()) {
             return;
         }
         Set<String> codes = dtoList.stream()
-            .map(PerformanceFactDTO::getEmployeeCode)
+            .map(PerformanceFactVo::getEmployeeCode)
             .filter(StringUtils::isNotBlank)
             .collect(Collectors.toSet());
         if (codes.isEmpty()) {
             return;
         }
         Map<String, EmployeeMainDataDTO> mainMap = employeeMainDataQueryPort.listByCodes(codes);
-        for (PerformanceFactDTO dto : dtoList) {
+        for (PerformanceFactVo dto : dtoList) {
             EmployeeMainDataDTO main = mainMap.get(dto.getEmployeeCode());
             if (main == null) {
                 continue;
@@ -118,7 +125,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public List<PerformanceFactDTO> listByEmployeeAndPeriod(Long employeeId, String period, String factType) {
+    public List<PerformanceFactVo> listByEmployeeAndPeriod(Long employeeId, String period, String factType) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getEmployeeId, employeeId)
             .eq(PerformanceFact::getPeriod, period)
@@ -142,21 +149,28 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
-                                              Long deptId, Long employeeId, String bizType, String keyword,
-                                              String factStatus, Integer pageNum, Integer pageSize) {
-        PerformanceManagePageVO<PerformanceManageContractVO> vo = new PerformanceManagePageVO<>();
+    public PerformanceManagePageVo<PerformanceManageContractVo> pageManageByContract(PerformanceManageContractBo query, PageQuery pageQuery) {
+        String period = query.getPeriod();
+        String factType = query.getFactType();
+        Long deptId = query.getDeptId();
+        Long employeeId = query.getEmployeeId();
+        String bizType = query.getBizType();
+        String keyword = query.getKeyword();
+        String factStatus = query.getFactStatus();
+        int pageNum = pageQuery.getPageNum() == null ? 1 : pageQuery.getPageNum();
+        int pageSize = pageQuery.getPageSize() == null ? 20 : pageQuery.getPageSize();
+        PerformanceManagePageVo<PerformanceManageContractVo> vo = new PerformanceManagePageVo<>();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
             vo.setTotal(0);
             vo.setRows(List.of());
-            PerformanceManagePageVO.Summary empty = new PerformanceManagePageVO.Summary();
+            PerformanceManagePageVo.Summary empty = new PerformanceManagePageVo.Summary();
             empty.setTotalAmount(BigDecimal.ZERO);
             vo.setSummary(empty);
             return vo;
         }
         String kw = StringUtils.trimToNull(keyword);
-        int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
-        int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
+        int page = Math.max(pageNum, 1);
+        int size = Math.min(Math.max(pageSize, 1), 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
         // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
         if (selfEmployeeId == null) {
@@ -166,7 +180,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
         vo.setTotal(total);
 
-        List<PerformanceManageContractVO> contracts = List.of();
+        List<PerformanceManageContractVo> contracts = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
@@ -179,7 +193,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
         Map<String, Object> stat = factMapper.selectManageSummary(
             period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
-        PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
+        PerformanceManagePageVo.Summary summary = new PerformanceManagePageVo.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
         summary.setDetailCount(toLong(stat.get("detailCount")));
@@ -190,17 +204,19 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public List<PerformanceManageDTO> listManageDetailsByContractNos(String period, String factType, Long deptId,
-                                                        String bizType, Boolean settled, String keyword,
-                                                        List<String> contractNos) {
+    public List<PerformanceManageVo> listManageDetailsByContractNos(PerformanceManageContractDetailBo query) {
+        String period = query.getPeriod();
+        String factType = query.getFactType();
+        List<String> contractNos = query.getContractNos();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)
             || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
-        // §3.6 数据级行级权限：所有登录用户仅能钻取本部门（含下级）明细，越权传他部门 deptId 直接拒绝
-        Long scopedDeptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
-        List<PerformanceManageDTO> rows = factMapper.selectManageListByContractNos(
-            period, factType, scopedDeptId, bizType, settled, StringUtils.trimToNull(keyword), contractNos);
+        List<PerformanceManageVo> rows = factMapper.selectManageListByContractNos(
+            period, factType, contractNos);
+        fillManageDetailEmployeeAndDept(rows);
+        fillManageDetailOriginalAmount(rows);
+        fillManageDetailSettled(rows);
         fillManageDetailConversion(rows);
 
         // §3.6 查看留痕：经纪人打开含他人业绩的合同 → 异步写 view_log
@@ -210,7 +226,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             Long viewerId = resolveSelfEmployeeId();
             if (viewerId != null) {
                 List<Long> viewedEmployeeIds = rows.stream()
-                    .map(PerformanceManageDTO::getEmployeeId)
+                    .map(PerformanceManageVo::getEmployeeId)
                     .filter(Objects::nonNull)
                     .distinct()
                     .toList();
@@ -263,7 +279,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     /**
      * 构建查询条件。
      */
-    private LambdaQueryWrapper<PerformanceFact> buildQueryWrapper(FactQuery query) {
+    private LambdaQueryWrapper<PerformanceFact> buildQueryWrapper(PerformanceFactBo query) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()),
             PerformanceFact::getPeriod, query.getPeriod());
@@ -290,8 +306,8 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
      * @param fact 业绩事实实体
      * @return 业绩事实 DTO
      */
-    private PerformanceFactDTO toDTO(PerformanceFact fact) {
-        PerformanceFactDTO dto = new PerformanceFactDTO();
+    private PerformanceFactVo toDTO(PerformanceFact fact) {
+        PerformanceFactVo dto = new PerformanceFactVo();
         dto.setId(fact.getId());
         dto.setFactType(fact.getFactType() != null ? fact.getFactType().getCode() : null);
         dto.setPeriod(fact.getPeriod());
@@ -312,12 +328,15 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public PageResult<PerformanceFactSearchDTO> searchByContract(String period, Long deptId, String bizType,
-                                                                  String keyword, Long employeeId,
-                                                                  Integer pageNum, Integer pageSize) {
-        int page = pageNum == null || pageNum < 1 ? 1 : pageNum;
-        int size = pageSize == null || pageSize < 1 ? 20 : pageSize;
-        long offset = (long) (page - 1) * size;
+    public PageResult<PerformanceFactSearchVo> searchByContract(PerformanceSearchBo query, PageQuery pageQuery) {
+        String period = query.getPeriod();
+        Long deptId = query.getDeptId();
+        String bizType = query.getBizType();
+        String keyword = query.getKeyword();
+        Long employeeId = query.getEmployeeId();
+        int pageNum = pageQuery.getPageNum() == null || pageQuery.getPageNum() < 1 ? 1 : pageQuery.getPageNum();
+        int pageSize = pageQuery.getPageSize() == null || pageQuery.getPageSize() < 1 ? 20 : pageQuery.getPageSize();
+        long offset = (long) (pageNum - 1) * pageSize;
 
         // 数据权限：经纪人仅本人参与的合同；店长/总监/人事强制本部门（含下级），越权指定他部门直接拒绝
         Long selfEmployeeId = resolveSelfEmployeeId();
@@ -330,17 +349,20 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
         long total = factMapper.countFactSearchByContract(period, effectiveDeptId,
             StringUtils.trimToNull(bizType), keyword, filterEmployeeId);
-        List<PerformanceFactSearchDTO> rows = total == 0
+        List<PerformanceFactSearchVo> rows = total == 0
             ? List.of()
             : factMapper.selectFactSearchByContract(period, effectiveDeptId,
-                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, offset, size);
+                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, offset, pageSize);
         fillSearchConversion(rows);
 
         return new PageResult<>(rows, total);
     }
 
     @Override
-    public List<String> searchBizTypes(String period, Long deptId, Long employeeId) {
+    public List<String> searchBizTypes(PerformanceSearchBizTypesBo query) {
+        String period = query.getPeriod();
+        Long deptId = query.getDeptId();
+        Long employeeId = query.getEmployeeId();
         // 与 searchByContract 完全相同的数据权限口径，保证下拉选项即当前用户可见的类型
         Long selfEmployeeId = resolveSelfEmployeeId();
         Long effectiveDeptId = deptId;
@@ -352,7 +374,9 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public List<EmployeeMainDataDTO> searchEmployeeOptions(String keyword, Long deptId) {
+    public List<EmployeeMainDataDTO> searchEmployeeOptions(PerformanceSearchEmployeeOptionsBo query) {
+        String keyword = query.getKeyword();
+        Long deptId = query.getDeptId();
         String kw = StringUtils.trimToNull(keyword);
         if (kw == null) {
             return List.of();
@@ -420,16 +444,16 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     /**
      * 完整业绩查询·按业务键查询合同下明细。
      * <p>
-     * 业务键口径见 {@link PerformanceQueryService#searchDetails}：一手房、房产金融、
+     * 业务键口径见 {@link IPerformanceQueryService#searchDetails}：一手房、房产金融、
      * 家装荐客为订单号，其余为合同号（空回退订单号）。查询覆盖该业务键全部期间，
      * 与列表行的合同全周期聚合口径一致。
      */
     @Override
-    public List<PerformanceSearchDetailDTO> searchDetails(String bizNo) {
+    public List<PerformanceSearchDetailVo> searchDetails(String bizNo) {
         if (StringUtils.isBlank(bizNo)) {
             return List.of();
         }
-        List<PerformanceSearchDetailDTO> rows = factMapper.selectSearchDetailRows(bizNo.trim());
+        List<PerformanceSearchDetailVo> rows = factMapper.selectSearchDetailRows(bizNo.trim());
         // 钻取防越权：经纪人仅能打开本人参与的合同；店长/总监仅能打开本部门（含下级）的合同。
         // 命中后仍返回该合同下全部分成行（与合同业绩页「展开可见同合同他人分成」口径一致）。
         assertSearchDetailInScope(rows);
@@ -445,7 +469,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
      *   <li>财务/超管及其它角色：不限制。</li>
      * </ul>
      */
-    private void assertSearchDetailInScope(List<PerformanceSearchDetailDTO> rows) {
+    private void assertSearchDetailInScope(List<PerformanceSearchDetailVo> rows) {
         try {
             Long selfEmployeeId = resolveSelfEmployeeId();
             if (selfEmployeeId != null) {
@@ -465,7 +489,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
                 return;
             }
             boolean hit = rows.stream()
-                .map(PerformanceSearchDetailDTO::getDeptId)
+                .map(PerformanceSearchDetailVo::getDeptId)
                 .filter(Objects::nonNull)
                 .anyMatch(scopeDeptIds::contains);
             if (!hit) {
@@ -482,49 +506,45 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     // ==================== 折算填充（统一入口） ====================
 
     /**
-     * 合同管理列表：批量查调整前金额（originalAmount），与主查询分离。
-     * <p>
-     * 主查询已返回 amount（调整后）；本方法查出每合同的 originalAmount（调整前），
-     * 对于无调整的合同，originalAmount = amount（保持不变）。
+     * 合同管理列表：批量查调整前金额（originalAmount），直接查调整表的 original_amount 快照。
+     * 无调整的合同 originalAmount 为 null，前端据此只显示单值。
      */
-    private void fillContractOriginalAmount(List<PerformanceManageContractVO> rows,
+    private void fillContractOriginalAmount(List<PerformanceManageContractVo> rows,
                                             String period, String factType) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
-        Set<String> bizKeys = rows.stream()
-            .map(r -> r.getOrderNo() != null ? r.getOrderNo() : r.getContractNo())
+        Set<String> contractNos = rows.stream()
+            .map(PerformanceManageContractVo::getContractNo)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
-        if (bizKeys.isEmpty()) {
+        if (contractNos.isEmpty()) {
             return;
         }
-        List<Map<String, Object>> list = factMapper.selectOriginalAmounts(period, factType, bizKeys);
         Map<String, BigDecimal> originalMap = new HashMap<>();
-        for (Map<String, Object> row : list) {
+        for (Map<String, Object> row : adjustMapper.doSelectOriginalAmounts(period, factType, contractNos)) {
             Object key = row.get("bizKey");
             Object val = row.get("originalAmount");
             if (key != null && val != null) {
                 originalMap.put(key.toString(), new BigDecimal(val.toString()));
             }
         }
-        for (PerformanceManageContractVO row : rows) {
-            String bizKey = row.getOrderNo() != null ? row.getOrderNo() : row.getContractNo();
-            row.setOriginalAmount(originalMap.getOrDefault(bizKey, row.getAmount()));
+        for (PerformanceManageContractVo row : rows) {
+            row.setOriginalAmount(originalMap.get(row.getContractNo()));
         }
     }
 
     /**
      * 合同管理列表：按 bizType 批量取因子，填充 convertedAmount / originalConvertedAmount。
      */
-    private void fillContractConversion(List<PerformanceManageContractVO> rows) {
+    private void fillContractConversion(List<PerformanceManageContractVo> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
-            .map(PerformanceManageContractVO::getBizType)
+            .map(PerformanceManageContractVo::getBizType)
             .collect(Collectors.toSet()));
-        for (PerformanceManageContractVO row : rows) {
+        for (PerformanceManageContractVo row : rows) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
@@ -532,16 +552,102 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     /**
+     * 合同管理明细：批量填充员工姓名/工号/部门路径（一次 IN 查询，避免 N+1）。
+     */
+    private void fillManageDetailEmployeeAndDept(List<PerformanceManageVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<Long> employeeIds = rows.stream()
+            .map(PerformanceManageVo::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (employeeIds.isEmpty()) {
+            return;
+        }
+        Map<Long, EmployeeMainDataDTO> empMap = employeeMainDataQueryPort.listByIds(employeeIds);
+        for (PerformanceManageVo row : rows) {
+            EmployeeMainDataDTO emp = empMap.get(row.getEmployeeId());
+            if (emp == null) {
+                continue;
+            }
+            row.setEmployeeName(emp.getEmployeeName());
+            row.setEmployeeCode(emp.getEmployeeCode());
+            row.setDeptPath(emp.getDeptName());
+        }
+    }
+
+    /**
+     * 合同管理明细：批量查调整前金额（直接查调整表 original_amount 快照，无调整为 null）。
+     */
+    private void fillManageDetailOriginalAmount(List<PerformanceManageVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<Long> factIds = rows.stream()
+            .map(PerformanceManageVo::getId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (factIds.isEmpty()) {
+            return;
+        }
+        Map<Long, BigDecimal> originalMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.selectOriginalAmountsByFactIds(factIds)) {
+            Object key = row.get("factId");
+            Object val = row.get("originalAmount");
+            if (key != null && val != null) {
+                originalMap.put(((Number) key).longValue(), new BigDecimal(val.toString()));
+            }
+        }
+        for (PerformanceManageVo row : rows) {
+            row.setOriginalAmount(originalMap.get(row.getId()));
+        }
+    }
+
+    /**
+     * 合同管理明细：批量查结佣状态（settled / settleDate）。
+     */
+    private void fillManageDetailSettled(List<PerformanceManageVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<Long> factIds = rows.stream()
+            .map(PerformanceManageVo::getId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (factIds.isEmpty()) {
+            return;
+        }
+        Map<Long, java.time.LocalDateTime> settleMap = new HashMap<>();
+        for (Map<String, Object> row : factMapper.selectSettledInfoByFactIds(factIds)) {
+            Object key = row.get("factId");
+            Object val = row.get("settleDate");
+            if (key != null) {
+                settleMap.put(((Number) key).longValue(),
+                    val == null ? null : java.time.LocalDateTime.class.cast(val));
+            }
+        }
+        for (PerformanceManageVo row : rows) {
+            if (settleMap.containsKey(row.getId())) {
+                row.setSettled(true);
+                row.setSettleDate(settleMap.get(row.getId()));
+            } else {
+                row.setSettled(false);
+            }
+        }
+    }
+
+    /**
      * 合同管理明细：按 bizType 批量取因子，填充 convertedAmount / originalConvertedAmount。
      */
-    private void fillManageDetailConversion(List<PerformanceManageDTO> rows) {
+    private void fillManageDetailConversion(List<PerformanceManageVo> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
-            .map(PerformanceManageDTO::getBizType)
+            .map(PerformanceManageVo::getBizType)
             .collect(Collectors.toSet()));
-        for (PerformanceManageDTO row : rows) {
+        for (PerformanceManageVo row : rows) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
@@ -551,14 +657,14 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     /**
      * 业绩查询列表：按 bizType 批量取因子，填充所有折算后金额。
      */
-    private void fillSearchConversion(List<PerformanceFactSearchDTO> rows) {
+    private void fillSearchConversion(List<PerformanceFactSearchVo> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(rows.stream()
-            .map(PerformanceFactSearchDTO::getBizType)
+            .map(PerformanceFactSearchVo::getBizType)
             .collect(Collectors.toSet()));
-        for (PerformanceFactSearchDTO row : rows) {
+        for (PerformanceFactSearchVo row : rows) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
             // 新签业绩两列：expectConvertedAmount = 当前值折算，originalExpectConvertedAmount = 调整前折算；
             // 前端按 expectAmount 与 expectOriginalAmount 是否相等决定单值展示还是「原值 → 调整后值」
@@ -575,16 +681,16 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
      * <p>
      * 同一行的新签业绩（应收）与实收业绩（实收）共用本行因子，取值与乘算都走公共方法。
      */
-    private void fillSearchDetailConversion(List<PerformanceSearchDetailDTO> rows) {
+    private void fillSearchDetailConversion(List<PerformanceSearchDetailVo> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
         Set<Long> factIds = rows.stream()
-            .map(PerformanceSearchDetailDTO::getFactId)
+            .map(PerformanceSearchDetailVo::getFactId)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
         Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
-        for (PerformanceSearchDetailDTO row : rows) {
+        for (PerformanceSearchDetailVo row : rows) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getFactId());
             row.setOriginalExpectConvertedAmount(conversionFactorPort.convert(row.getOriginalExpectAmount(), factor));
             row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectAmount(), factor));

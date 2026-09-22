@@ -2,10 +2,10 @@ package com.panjia.performance.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.domain.PerformanceAdjust;
-import com.panjia.performance.dto.AdjustCreateDTO;
-import com.panjia.performance.dto.AdjustDetailDTO;
-import com.panjia.performance.dto.AdjustQuery;
-import com.panjia.performance.service.PerformanceAdjustService;
+import com.panjia.performance.domain.bo.PerformanceAdjustCreateBo;
+import com.panjia.performance.domain.vo.AdjustDetailVo;
+import com.panjia.performance.domain.bo.PerformanceAdjustBo;
+import com.panjia.performance.service.IPerformanceAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -37,14 +37,14 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/perf/adjust")
 public class PerformanceAdjustController extends BaseController {
 
-    private final PerformanceAdjustService adjustService;
+    private final IPerformanceAdjustService adjustService;
 
     /**
      * 分页查询调整单列表。
      */
     @SaCheckPermission("perf:adjust:list")
     @GetMapping("/list")
-    public R<PageResult<PerformanceAdjust>> list(AdjustQuery query, PageQuery pageQuery) {
+    public R<PageResult<PerformanceAdjust>> list(PerformanceAdjustBo query, PageQuery pageQuery) {
         return R.ok(adjustService.listAdjusts(query, pageQuery));
     }
 
@@ -55,20 +55,20 @@ public class PerformanceAdjustController extends BaseController {
      */
     @SaCheckPermission("perf:adjust:query")
     @GetMapping("/{id}/detail")
-    public R<AdjustDetailDTO> getDetail(@PathVariable Long id) {
+    public R<AdjustDetailVo> getDetail(@PathVariable Long id) {
         return R.ok(adjustService.getAdjustDetail(id));
     }
 
     /**
      * 发起调整单并启动审批流程。
      *
-     * @param dto 调整单创建请求
+     * @param dto 调整创建条件（期间/事实口径/合同号/调整类型/调整金额/原因等）
      * @return 调整单 ID
      */
     @SaCheckPermission("perf:adjust:add")
     @Log(title = "业绩调整单", businessType = BusinessType.INSERT)
     @PostMapping
-    public R<Long> add(@Validated @RequestBody AdjustCreateDTO dto) {
+    public R<Long> add(@Validated @RequestBody PerformanceAdjustCreateBo dto) {
         PerformanceAdjust adjust = adjustService.createAdjust(dto, LoginHelper.getUserId());
         return R.ok("发起成功，已提交审批", adjust.getId());
     }

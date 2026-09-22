@@ -1,7 +1,7 @@
 package com.panjia.commission.mapper;
 
 import com.panjia.commission.domain.CommissionItem;
-import com.panjia.commission.dto.CommissionItemDetailDTO;
+import com.panjia.commission.domain.vo.CommissionItemDetailVo;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -97,7 +97,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         ORDER BY e.employee_name, d.dept_id, f.role_type, ci.id
         </script>
         """)
-    List<CommissionItemDetailDTO> selectItemDetails(@Param("applicationId") Long applicationId);
+    List<CommissionItemDetailVo> selectItemDetails(@Param("applicationId") Long applicationId);
 
     /**
      * 按结佣明细 ID 批量查业务类型（itemId → bizType）。
