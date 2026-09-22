@@ -1,7 +1,6 @@
 package com.panjia.performance.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
@@ -18,7 +17,6 @@ import com.panjia.performance.dto.PerformanceFactDTO;
 import com.panjia.performance.dto.PerformanceFactSearchDTO;
 import com.panjia.performance.dto.PerformanceManageContractVO;
 import com.panjia.performance.dto.PerformanceManageDTO;
-import com.panjia.performance.dto.PerformanceManageEmployeeVO;
 import com.panjia.performance.dto.PerformanceManagePageVO;
 import com.panjia.performance.dto.PerformanceSearchDetailDTO;
 import com.panjia.performance.mapper.PerformanceFactMapper;
@@ -120,39 +118,6 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     @Override
-    public PerformanceFactDTO getFact(Long id) {
-        PerformanceFact fact = factMapper.selectById(id);
-        if (fact == null) {
-            return null;
-        }
-        PerformanceFactDTO dto = toDTO(fact);
-        fillEmployeeInfo(List.of(dto));
-        return dto;
-    }
-
-    @Override
-    public BigDecimal sumPerformance(String period, String factType, Long employeeId, Long deptId) {
-        // 聚合查询用 QueryWrapper（Lambda 不支持函数字符串 select）
-        QueryWrapper<PerformanceFact> wrapper = new QueryWrapper<>();
-        wrapper.eq(StringUtils.isNotBlank(period), "period", period)
-            .eq(StringUtils.isNotBlank(factType), "fact_type", factType)
-            .eq(employeeId != null, "employee_id", employeeId)
-            .eq(deptId != null, "dept_id", deptId)
-            .eq("fact_status", FactStatus.ACTIVE.getCode())
-            .select("COALESCE(SUM(performance_amount), 0) as performance_amount");
-
-        List<Map<String, Object>> result = factMapper.selectMaps(wrapper);
-        if (result == null || result.isEmpty()) {
-            return BigDecimal.ZERO;
-        }
-        Object val = result.get(0).get("performance_amount");
-        if (val == null) {
-            return BigDecimal.ZERO;
-        }
-        return new BigDecimal(val.toString());
-    }
-
-    @Override
     public List<PerformanceFactDTO> listByEmployeeAndPeriod(Long employeeId, String period, String factType) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getEmployeeId, employeeId)
@@ -174,65 +139,6 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             new LambdaQueryWrapper<PerformancePeriodClose>()
                 .eq(PerformancePeriodClose::getPeriod, period));
         return record != null && record.getStatus() == PeriodCloseStatus.CLOSED;
-    }
-
-    @Override
-    public PerformanceManagePageVO<PerformanceManageEmployeeVO> pageManage(String period, String factType, Long deptId,
-                                              String bizType, Boolean settled, String keyword,
-                                              Integer pageNum, Integer pageSize) {
-        PerformanceManagePageVO<PerformanceManageEmployeeVO> vo = new PerformanceManagePageVO<>();
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
-            vo.setTotal(0);
-            vo.setRows(List.of());
-            PerformanceManagePageVO.Summary empty = new PerformanceManagePageVO.Summary();
-            empty.setTotalAmount(BigDecimal.ZERO);
-            vo.setSummary(empty);
-            return vo;
-        }
-        String kw = StringUtils.trimToNull(keyword);
-        int page = (pageNum == null || pageNum < 1) ? 1 : pageNum;
-        int size = (pageSize == null || pageSize < 1) ? 20 : Math.min(pageSize, 200);
-        Long selfEmployeeId = resolveSelfEmployeeId();
-        // §3.6 数据级行级权限：店长/总监仅本部门（含下级）。未传 deptId 时强制设为登录用户的 dept_id
-        if (selfEmployeeId == null) {
-            deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
-        }
-
-        long total = factMapper.countManageEmployees(period, factType, deptId, bizType, settled, kw, selfEmployeeId);
-        vo.setTotal(total);
-
-        List<PerformanceManageEmployeeVO> employees = List.of();
-        if (total > 0) {
-            long offset = (long) (page - 1) * size;
-            employees = factMapper.selectManagePageEmployees(
-                period, factType, deptId, bizType, settled, kw, selfEmployeeId, offset, size);
-        }
-        vo.setRows(employees);
-        vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
-
-        Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, null, bizType, kw, null, selfEmployeeId);
-        PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
-        summary.setEmployeeCount(toLong(stat.get("employeeCount")));
-        summary.setContractCount(toLong(stat.get("contractCount")));
-        summary.setDetailCount(toLong(stat.get("detailCount")));
-        Object sum = stat.get("totalAmount");
-        summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
-        vo.setSummary(summary);
-        return vo;
-    }
-
-    @Override
-    public List<PerformanceManageDTO> listManageDetails(String period, String factType, Long deptId,
-                                                        String bizType, Boolean settled, String keyword,
-                                                        List<Long> employeeIds) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)
-            || employeeIds == null || employeeIds.isEmpty()) {
-            return List.of();
-        }
-        return factMapper.selectManageListByIds(
-            period, factType, deptId, bizType, settled, StringUtils.trimToNull(keyword),
-            resolveSelfEmployeeId(), employeeIds);
     }
 
     @Override
