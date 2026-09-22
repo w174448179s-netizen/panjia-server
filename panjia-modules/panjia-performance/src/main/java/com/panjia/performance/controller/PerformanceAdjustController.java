@@ -49,15 +49,6 @@ public class PerformanceAdjustController extends BaseController {
     }
 
     /**
-     * 查询调整单详情。
-     */
-    @SaCheckPermission("perf:adjust:query")
-    @GetMapping("/{id}")
-    public R<PerformanceAdjust> getInfo(@PathVariable Long id) {
-        return R.ok(adjustService.getAdjust(id));
-    }
-
-    /**
      * 查询调整单完整详情（含合同信息 + 受影响明细）。
      * <p>
      * 审批办理页使用，让审批人能看清调整的标的合同和影响范围。

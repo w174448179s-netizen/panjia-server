@@ -47,18 +47,6 @@ public class PerformancePeriodController extends BaseController {
     }
 
     /**
-     * 查询期间详情。
-     *
-     * @param period 期间（YYYY-MM）
-     * @return 期间封账记录
-     */
-    @SaCheckPermission("perf:period:query")
-    @GetMapping("/{period}")
-    public R<PerformancePeriodClose> getInfo(@PathVariable String period) {
-        return R.ok(periodCloseService.getPeriod(period));
-    }
-
-    /**
      * 封账。
      *
      * @param period 期间（YYYY-MM）
