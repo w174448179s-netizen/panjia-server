@@ -668,6 +668,12 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                 metrics.put(metricsKey(entry.getKey(), row.getContractNo()), row);
             }
         }
+        // 一次性批量取本页全部 bizType 的折算因子（避免循环内逐条 factorOf(String) 触发全表扫描 pj_payroll_conversion_rule）
+        Set<String> bizTypes = metrics.values().stream()
+            .map(ReceivedContractMetricsDTO::getBizType)
+            .filter(StringUtils::isNotBlank)
+            .collect(java.util.stream.Collectors.toSet());
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
         for (ReceivedApply apply : records) {
             ReceivedContractMetricsDTO m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
             if (m != null) {
@@ -681,8 +687,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                         && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
-                // 折算后金额：应收合计与实收合计用同一因子，走公共方法取比例与乘算
-                BigDecimal factor = conversionFactorPort.factorOf(m.getBizType());
+                // 折算后金额：应收合计与实收合计用同一因子，从批量结果中取（Map 查询，无 DB 访问）
+                BigDecimal factor = conversionFactorPort.factorOf(factorMap, m.getBizType());
                 if (m.getExpectedAmount() != null) {
                     apply.setExpectedConvertedAmount(conversionFactorPort.convert(m.getExpectedAmount(), factor));
                     if (apply.getOriginalExpectedAmount() != null) {
