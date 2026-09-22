@@ -210,7 +210,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, bizType, settled, kw, null, selfEmployeeId);
+            period, factType, deptId, null, bizType, settled, kw, null, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
@@ -237,7 +237,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     @Override
     public PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
-                                              Long deptId, String bizType, Boolean settled, String keyword,
+                                              Long deptId, Long employeeId, String bizType, Boolean settled, String keyword,
                                               String factStatus, Integer pageNum, Integer pageSize) {
         PerformanceManagePageVO<PerformanceManageContractVO> vo = new PerformanceManagePageVO<>();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
@@ -257,21 +257,21 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
-        long total = factMapper.countManageContracts(period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
+        long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId);
         vo.setTotal(total);
 
         List<PerformanceManageContractVO> contracts = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
-                period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId, offset, size);
+                period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId, offset, size);
             fillContractConversion(contracts);
         }
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, bizType, settled, kw, factStatus, selfEmployeeId);
+            period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));

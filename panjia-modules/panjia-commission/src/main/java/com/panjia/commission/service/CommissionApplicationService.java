@@ -553,7 +553,7 @@ public class CommissionApplicationService {
 
     /** 应收合计：取业绩域合同汇总的应收列（PERF_EXPECT 合计）。 */
     private BigDecimal resolveExpectedAmount(String period, String contractNo) {
-        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL).stream()
+        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
             .filter(c -> contractNo.equals(c.getContractNo()))
             .findFirst()
             .map(PerformanceContractSummaryDTO::getExpectedAmount)
@@ -567,7 +567,7 @@ public class CommissionApplicationService {
      * 按 contractNo 建 Map，doApply 直接取值，避免逐合同全表查（N 次→1 次）。
      */
     private Map<String, BigDecimal> loadExpectedAmountMap(String period) {
-        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL).stream()
+        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
             .collect(Collectors.toMap(
                 PerformanceContractSummaryDTO::getContractNo,
                 c -> c.getExpectedAmount() == null ? BigDecimal.ZERO : c.getExpectedAmount(),
@@ -978,7 +978,7 @@ public class CommissionApplicationService {
             checkContractDeptScope(contractDeptId);
         }
         PerformanceContractSummaryDTO summary = performanceQueryPort
-            .listContractSummaries(period, null, FACT_TYPE_REAL).stream()
+            .listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
             .filter(c -> no.equals(c.getContractNo()) || no.equals(c.getOrderNo()))
             .findFirst()
             .orElse(null);
@@ -1120,7 +1120,7 @@ public class CommissionApplicationService {
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
 
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL);
+            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId());
 
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
@@ -1137,6 +1137,7 @@ public class CommissionApplicationService {
         }
 
         String keyword = StringUtils.trimToNull(query.getKeyword());
+        String bizType = StringUtils.trimToNull(query.getBizType());
         // 审批节点数据隔离：审批中单据仅本人角色对应节点可见（财务→FINANCE，总监→DIRECTOR），超管看全部
         boolean nodeScopeAll = LoginHelper.isSuperAdmin();
         Set<String> myNodes = nodeScopeAll ? Set.of() : currentApprovalNodes();
@@ -1168,6 +1169,9 @@ public class CommissionApplicationService {
                 continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
+                continue;
+            }
+            if (bizType != null && !bizType.equals(c.getBizType())) {
                 continue;
             }
             all.add(toContractVO(period, periodClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
@@ -1302,7 +1306,7 @@ public class CommissionApplicationService {
             || (StringUtils.isBlank(app.getContractNo()) && StringUtils.isBlank(app.getOrderNo()))) {
             return;
         }
-        performanceQueryPort.listContractSummaries(app.getPeriod(), null, FACT_TYPE_REAL).stream()
+        performanceQueryPort.listContractSummaries(app.getPeriod(), null, FACT_TYPE_REAL, null).stream()
             .filter(c -> (StringUtils.isNotBlank(app.getContractNo())
                 && app.getContractNo().equals(c.getContractNo()))
                 || (StringUtils.isNotBlank(app.getOrderNo())

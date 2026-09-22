@@ -94,8 +94,8 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType) {
-        return factMapper.selectContractSummaries(period, factType, deptId);
+    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId) {
+        return factMapper.selectContractSummaries(period, factType, deptId, employeeId);
     }
 
     @Override

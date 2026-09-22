@@ -365,6 +365,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
@@ -373,6 +376,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     java.util.Map<String, Object> selectManageSummary(@Param("period") String period,
                                                       @Param("factType") String factType,
                                                       @Param("deptId") Long deptId,
+                                                      @Param("employeeId") Long employeeId,
                                                       @Param("bizType") String bizType,
                                                       @Param("settled") Boolean settled,
                                                       @Param("keyword") String keyword,
@@ -508,6 +512,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
@@ -521,6 +528,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceManageContractVO> selectManagePageContracts(@Param("period") String period,
                                             @Param("factType") String factType,
                                             @Param("deptId") Long deptId,
+                                            @Param("employeeId") Long employeeId,
                                             @Param("bizType") String bizType,
                                             @Param("settled") Boolean settled,
                                             @Param("keyword") String keyword,
@@ -585,6 +593,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               OR rs.raw_json -&gt;&gt; 'deptName' ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
@@ -593,6 +604,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long countManageContracts(@Param("period") String period,
                               @Param("factType") String factType,
                               @Param("deptId") Long deptId,
+                              @Param("employeeId") Long employeeId,
                               @Param("bizType") String bizType,
                               @Param("settled") Boolean settled,
                               @Param("keyword") String keyword,
@@ -1160,6 +1172,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
                               AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
             </if>
+            <if test="employeeId != null">
+              AND f.employee_id = #{employeeId}
+            </if>
         ) s
         GROUP BY s.biz_key
         ORDER BY MAX(s.business_date) DESC, s.biz_key
@@ -1167,7 +1182,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         """)
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
                                                                  @Param("factType") String factType,
-                                                                 @Param("deptId") Long deptId);
+                                                                 @Param("deptId") Long deptId,
+                                                                 @Param("employeeId") Long employeeId);
 
     /**
      * 按导入批次聚合「实收业绩合同组」（实收审批单自动建单用，§2.1）。

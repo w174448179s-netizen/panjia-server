@@ -25,4 +25,10 @@ public class ReceivedApplyQuery {
 
     /** 部门 ID（店长仅能查本店，服务端强制注入） */
     private Long deptId;
+
+    /** 员工 ID */
+    private Long employeeId;
+
+    /** 业务类型 */
+    private String bizType;
 }

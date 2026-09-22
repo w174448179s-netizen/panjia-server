@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 结佣调整单服务（DISCOUNT / DIFF / VOID，结佣域详细设计 §4.5）。
@@ -359,7 +360,38 @@ public class CommissionAdjustService {
                 AdjustType.fromCode(query.getAdjustType()))
             .eq(StringUtils.isNotBlank(query.getStatus()), CommissionAdjust::getStatus,
                 AdjustStatus.fromCode(query.getStatus()))
+            .like(StringUtils.isNotBlank(query.getKeyword()), CommissionAdjust::getContractNo, query.getKeyword())
             .orderByDesc(CommissionAdjust::getCreateTime);
+
+        // employeeId / bizType 过滤：通过 CommissionItem 反查 itemId 集合
+        if (query.getEmployeeId() != null || StringUtils.isNotBlank(query.getBizType())) {
+            LambdaQueryWrapper<CommissionItem> itemWrapper = new LambdaQueryWrapper<>();
+            if (query.getEmployeeId() != null) {
+                itemWrapper.eq(CommissionItem::getEmployeeId, query.getEmployeeId());
+            }
+            if (StringUtils.isNotBlank(query.getBizType())) {
+                itemWrapper.eq(CommissionItem::getBizType, query.getBizType());
+            }
+            List<CommissionItem> items = itemMapper.selectList(itemWrapper);
+            Set<Long> itemIds = items.stream().map(CommissionItem::getId).collect(Collectors.toSet());
+            if (itemIds.isEmpty()) {
+                return PageResult.build(List.of(), 0);
+            }
+            wrapper.in(CommissionAdjust::getItemId, itemIds);
+        }
+
+        // deptId 过滤：通过 CommissionItem 的 deptId 反查
+        if (query.getDeptId() != null) {
+            LambdaQueryWrapper<CommissionItem> deptWrapper = new LambdaQueryWrapper<>();
+            deptWrapper.eq(CommissionItem::getDeptId, query.getDeptId());
+            List<CommissionItem> deptItems = itemMapper.selectList(deptWrapper);
+            Set<Long> deptItemIds = deptItems.stream().map(CommissionItem::getId).collect(Collectors.toSet());
+            if (deptItemIds.isEmpty()) {
+                return PageResult.build(List.of(), 0);
+            }
+            wrapper.in(CommissionAdjust::getItemId, deptItemIds);
+        }
+
         var page = adjustMapper.selectPage(pageQuery.build(), wrapper);
         List<CommissionAdjust> records = page.getRecords();
         fillConvertedAmounts(records);

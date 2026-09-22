@@ -27,4 +27,16 @@ public class AdjustQuery implements Serializable {
 
     /** 状态（AdjustStatus code） */
     private String status;
+
+    /** 员工 ID */
+    private Long employeeId;
+
+    /** 部门 ID */
+    private Long deptId;
+
+    /** 业务类型 */
+    private String bizType;
+
+    /** 关键字（合同号 / 订单号 / 物业地址） */
+    private String keyword;
 }

@@ -24,4 +24,10 @@ public class AdjustQuery {
 
     /** 部门 ID */
     private Long deptId;
+
+    /** 业务类型 */
+    private String bizType;
+
+    /** 关键字（合同号 / 订单号 / 物业地址） */
+    private String keyword;
 }

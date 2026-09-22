@@ -125,7 +125,7 @@ public interface PerformanceQueryService {
      * @return 合同维度分页结果（合同聚合行 + 总合同数 + 业务类型集合 + 全局汇总）
      */
     PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
-                                       Long deptId, String bizType, Boolean settled, String keyword,
+                                       Long deptId, Long employeeId, String bizType, Boolean settled, String keyword,
                                        String factStatus, Integer pageNum, Integer pageSize);
 
     /**
