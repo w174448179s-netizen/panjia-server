@@ -427,23 +427,6 @@ public class CommissionAdjustService {
         return map;
     }
 
-    /**
-     * 取消调整单：仅 SUBMITTED 可取消。
-     *
-     * @param adjustId   调整单 ID
-     * @param operatorId 操作人 ID
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void cancel(Long adjustId, Long operatorId) {
-        CommissionAdjust adjust = getAdjust(adjustId);
-        if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
-            throw new ServiceException("仅已提交状态可取消（当前：" + adjust.getStatus().getDesc() + "）");
-        }
-        adjust.setStatus(AdjustStatus.CANCELLED);
-        adjustMapper.updateById(adjust);
-        log.info("[结佣-调整] 调整单已取消：adjustNo={}, operatorId={}", adjust.getAdjustNo(), operatorId);
-    }
-
     // ==================== EXECUTED 同事务动作 ====================
 
     /**

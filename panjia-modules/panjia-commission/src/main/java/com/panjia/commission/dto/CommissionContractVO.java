@@ -80,6 +80,9 @@ public class CommissionContractVO implements Serializable {
     /** 业绩归属月 */
     private String period;
 
+    /** 该期间是否已封账（封账后不可作废/调整，仅展示） */
+    private Boolean periodClosed;
+
     /** 门店 ID */
     private Long deptId;
 

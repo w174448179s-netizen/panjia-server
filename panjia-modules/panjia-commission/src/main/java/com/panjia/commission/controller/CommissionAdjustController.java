@@ -78,18 +78,4 @@ public class CommissionAdjustController extends BaseController {
         CommissionAdjust adjust = adjustService.create(dto, LoginHelper.getUserId());
         return R.ok("发起成功", adjust.getId());
     }
-
-    /**
-     * 取消调整单：仅 SUBMITTED 可取消。
-     *
-     * @param id 调整单 ID
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:adjust:cancel")
-    @Log(title = "结佣调整单取消", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/cancel")
-    public R<Void> cancel(@PathVariable Long id) {
-        adjustService.cancel(id, LoginHelper.getUserId());
-        return R.ok();
-    }
 }

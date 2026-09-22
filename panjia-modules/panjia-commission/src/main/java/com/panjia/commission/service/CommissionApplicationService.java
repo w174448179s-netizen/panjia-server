@@ -895,9 +895,13 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED/REJECTED 可作废（未锁定均可）；
+     * 作废申请单：DRAFT/SUBMITTED/REJECTED/LOCKED 可作废；
      * 超管可作废任意单据，其他用户仅可作废本人发起的单据（服务端兜底防越权）。
-     * 运行中的流程先终止（cancel 事件回调冲销明细）；REJECTED 单据的流程已结束，
+     * <p>
+     * - 未锁定单（DRAFT/SUBMITTED/REJECTED）：冲销未审批明细（DRAFT/PENDING），释放事实；
+     * - 已锁定单（LOCKED）：冲销全部明细（含 APPROVED），释放事实，薪资域 findLocked 仅取 APPROVED，
+     *   作废后该单不再计入工资；后续可重新发起，按发起日重新生成当月结佣记录。
+     * 运行中的流程先终止（cancel 事件回调冲销明细）；REJECTED/LOCKED 单据的流程已结束，
      * deleteInstanceSys 走标准删除链清理实例记录。
      */
     @Transactional(rollbackFor = Exception.class)
@@ -909,15 +913,19 @@ public class CommissionApplicationService {
         }
         if (application.getStatus() != ApplicationStatus.DRAFT
             && application.getStatus() != ApplicationStatus.SUBMITTED
-            && application.getStatus() != ApplicationStatus.REJECTED) {
-            throw new ServiceException("仅未锁定（草稿/审批中/已驳回）状态可作废（当前：" + application.getStatus().getDesc() + "）");
+            && application.getStatus() != ApplicationStatus.REJECTED
+            && application.getStatus() != ApplicationStatus.LOCKED) {
+            throw new ServiceException("仅草稿/审批中/已驳回/已锁定状态可作废（当前：" + application.getStatus().getDesc() + "）");
         }
+        // 封账后不可作废（含已锁定单）：封账期间结佣数据已固化，作废会导致已发工资追溯，必须先解封
+        checkPeriodOpen(application.getPeriod(), "作废结佣");
         if (StringUtils.isNotBlank(application.getProcessInstanceId())) {
             // 终止运行中的流程实例（触发 cancel 事件，监听器置 CANCELLED + 冲销明细，幂等）
             approvalPort.cancel(BizType.COMMISSION, applicationId);
         }
-        // 草稿无流程实例：本地直接置 CANCELLED 并冲销明细
-        reverseUnapprovedItems(applicationId);
+        // 草稿无流程实例：本地直接置 CANCELLED 并冲销明细；
+        // 已锁定单：冲销全部明细（含 APPROVED），释放事实供重新发起
+        reverseAllItems(applicationId);
         // 明细 UPDATE 会清空 MyBatis 一级缓存并推进数据版本，这里重新加载避免乐观锁更新丢失
         application = applicationMapper.selectById(applicationId);
         if (application != null && application.getStatus() != ApplicationStatus.CANCELLED) {
@@ -927,8 +935,9 @@ public class CommissionApplicationService {
             application.setCurrentNode(null);
             applicationMapper.updateById(application);
         }
-        log.info("[结佣-作废] applyNo={}, operator={}",
-            application == null ? applicationId : application.getApplyNo(), operatorId);
+        log.info("[结佣-作废] applyNo={}, fromStatus={}, operator={}",
+            application == null ? applicationId : application.getApplyNo(),
+            application == null ? "?" : application.getStatus(), operatorId);
     }
 
     /**
@@ -1137,6 +1146,8 @@ public class CommissionApplicationService {
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
         List<CommissionContractVO> all = new ArrayList<>(contracts.size());
+        // 列表所有合同同属一个 period，封账状态只查一次
+        boolean periodClosed = periodCloseQueryPort.isClosed(period);
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
             if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
@@ -1159,7 +1170,7 @@ public class CommissionApplicationService {
             if (keyword != null && !containsKeyword(c, keyword)) {
                 continue;
             }
-            all.add(toContractVO(period, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
+            all.add(toContractVO(period, periodClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
         }
 
         all.sort((a, b) -> {
@@ -1187,10 +1198,11 @@ public class CommissionApplicationService {
      *
      * @param factor 该合同 bizType 的折算因子（调用方批量取好后传入，避免逐行回表）
      */
-    private CommissionContractVO toContractVO(String period, PerformanceContractSummaryDTO c,
+    private CommissionContractVO toContractVO(String period, boolean periodClosed, PerformanceContractSummaryDTO c,
                                               CommissionApplication app, String status, BigDecimal factor) {
         CommissionContractVO vo = new CommissionContractVO();
         vo.setPeriod(period);
+        vo.setPeriodClosed(periodClosed);
         vo.setContractNo(c.getContractNo());
         vo.setOrderNo(c.getOrderNo());
         vo.setBizType(c.getBizType());
@@ -1562,6 +1574,18 @@ public class CommissionApplicationService {
         return itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
             .eq(CommissionItem::getApplicationId, applicationId)
             .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
+            .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
+    }
+
+    /**
+     * 作废已锁定单时冲销全部明细（含 APPROVED），释放业绩事实供重新发起。
+     * 薪资域 findLocked 仅取 APPROVED 明细，冲销后该单不再计入工资。
+     */
+    private int reverseAllItems(Long applicationId) {
+        return itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED)
             .set(CommissionItem::getStatus, ItemStatus.REVERSED)
             .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
     }

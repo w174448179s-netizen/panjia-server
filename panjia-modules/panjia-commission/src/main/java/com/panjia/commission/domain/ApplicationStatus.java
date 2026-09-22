@@ -7,11 +7,12 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * <p>
  * 状态机（结佣域详细设计 §3.1）：
  * <pre>
- * DRAFT ──提交──▶ SUBMITTED ──审批通过──▶ APPROVED ──锁定──▶ LOCKED（终态）
- *                     │                        │
- *                     └──驳回──▶ REJECTED      └──作废──▶ CANCELLED
+ * DRAFT ──提交──▶ SUBMITTED ──审批通过──▶ APPROVED ──锁定──▶ LOCKED
+ *                     │                        │                │
+ *                     └──驳回──▶ REJECTED      └──作废──▶ CANCELLED ◀──作废──┘
  * </pre>
  * 简化审批实现：审批回调在单事务内完成 SUBMITTED → LOCKED（内部先 APPROVED 落 approved_month）。
+ * 已锁定（LOCKED）单可作废：冲销全部明细（含 APPROVED），释放事实供重新发起，作废后不计入工资。
  * <p>
  * 存储约定：DB 字段 status VARCHAR(16) 存 code（与枚举名一致），
  * MyBatis-Plus 默认按枚举 name() 映射；Jackson 经 {@link JsonValue @JsonValue} 输出 code。

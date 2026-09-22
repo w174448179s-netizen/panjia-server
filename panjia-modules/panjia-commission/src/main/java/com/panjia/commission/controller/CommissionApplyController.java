@@ -159,7 +159,9 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED/REJECTED 可作废（未锁定均可），未审批明细随单冲销。
+     * 作废申请单：DRAFT/SUBMITTED/REJECTED/LOCKED 可作废。
+     * 未锁定单冲销未审批明细；已锁定单冲销全部明细（含 APPROVED），释放事实供重新发起，
+     * 作废后不计入工资，重新发起按发起日生成当月结佣记录。
      *
      * @param id 申请单 ID
      * @return 操作结果
