@@ -18,6 +18,7 @@ import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 业绩事实 Mapper。
@@ -318,28 +319,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                      @Param("employeeIds") List<Long> employeeIds);
 
     /**
-     * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、金额合计、未结算条数。
+     * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、金额合计。
      * 签约人数由 {@link #countManageEmployees} 给出。
      */
     @Select("""
         <script>
         SELECT COUNT(*) AS "detailCount",
-               COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                   THEN COALESCE(f.order_no, f.contract_no)
-                                   ELSE COALESCE(f.contract_no, f.order_no) END) AS "contractCount",
+               COUNT(DISTINCT COALESCE(f.order_no, f.contract_no)) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
-               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount",
-               COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount"
+               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
         FROM pj_perf_fact f
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN LATERAL (
-            SELECT ci.id, ci.application_id
-            FROM pj_commission_item ci
-            WHERE ci.performance_fact_id = f.id
-              AND ci.status &lt;&gt; 'REVERSED'
-            ORDER BY ci.id
-            LIMIT 1
-        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -356,21 +345,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="bizType != null and bizType != ''">
             AND f.biz_type = #{bizType}
           </if>
-          <if test="settled != null">
-            <choose>
-                <when test="settled">
-                  AND ci.id IS NOT NULL
-                </when>
-                <otherwise>
-                  AND ci.id IS NULL
-                </otherwise>
-            </choose>
-          </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
@@ -389,7 +366,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                       @Param("deptId") Long deptId,
                                                       @Param("employeeId") Long employeeId,
                                                       @Param("bizType") String bizType,
-                                                      @Param("settled") Boolean settled,
                                                       @Param("keyword") String keyword,
                                                       @Param("factStatus") String factStatus,
                                                       @Param("selfEmployeeId") Long selfEmployeeId);
@@ -443,11 +419,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
 
     /**
-     * 业绩管理合同维度分页（以「业务键」为分页维度）。
+     * 业绩管理合同维度分页（以 COALESCE(order_no, contract_no) 为分页维度）。
      * <p>
      * 每业务键一行：合同号/订单号/业务类型/房源地址/签约日期/合同金额合计/涉及人数/明细数/未结算数。
-     * 一手房、房产金融、家装荐客按订单号聚合；其它按合同号聚合（合同号为空回退订单号）。
-     * 合同下的签约人明细由 {@link #selectManageListByContractNos} 懒加载。仅查 ACTIVE 事实。
+     * 订单号与合同号 1:1，统一用 COALESCE(order_no, contract_no) 分组。
+     * 合同下的签约人明细由 {@link #selectManageListByContractNos} 懒加载。
+     * <p>
+     * originalAmount 已移除（如需调整前金额，另查）；pj_people_employee JOIN 已移除
+     * （UI 改为按 employeeId 查询，keyword 不再搜员工工号/姓名）；
+     * pj_commission_item LATERAL JOIN 仅 PERF_REAL 时生效（结佣只关联实收事实）。
      *
      * @param period   归属期间（必填）
      * @param factType 事实口径（必填）
@@ -461,37 +441,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        WITH reversed_expect AS (
-            SELECT DISTINCT ON (source_key) source_key, performance_amount
-            FROM pj_perf_fact
-            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
-              AND period = #{period}
-            ORDER BY source_key, id ASC
-        )
         SELECT MAX(f.contract_no) AS "contractNo",
                MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(f.property_address) AS "propertyAddress",
                MAX(f.business_date) AS "businessDate",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
-               COALESCE(SUM(
-                 COALESCE(re.performance_amount, f.performance_amount)
-               ), 0) AS "originalAmount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
-               COUNT(*) FILTER (WHERE ci.id IS NULL) AS "unsettledCount",
                CASE WHEN BOOL_OR(f.fact_status = 'ACTIVE') THEN 'ACTIVE' ELSE 'VOIDED' END AS "factStatus"
         FROM pj_perf_fact f
-        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN LATERAL (
-            SELECT ci.id, ci.application_id
-            FROM pj_commission_item ci
-            WHERE ci.performance_fact_id = f.id
-              AND ci.status &lt;&gt; 'REVERSED'
-            ORDER BY ci.id
-            LIMIT 1
-        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -500,9 +459,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         </choose>
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(f.order_no, f.contract_no)
-                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
+          AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -511,23 +468,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="bizType != null and bizType != ''">
             AND f.biz_type = #{bizType}
           </if>
-          <if test="settled != null">
-            <choose>
-                <when test="settled">
-                  AND ci.id IS NOT NULL
-                </when>
-                <otherwise>
-                  AND ci.id IS NULL
-                </otherwise>
-            </choose>
-          </if>
           <if test="keyword != null and keyword != ''">
             AND (
               f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
@@ -537,9 +482,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
-        GROUP BY CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                     THEN COALESCE(f.order_no, f.contract_no)
-                     ELSE COALESCE(f.contract_no, f.order_no) END
+        GROUP BY COALESCE(f.order_no, f.contract_no)
         ORDER BY "businessDate" DESC, "contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
@@ -549,7 +492,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("deptId") Long deptId,
                                             @Param("employeeId") Long employeeId,
                                             @Param("bizType") String bizType,
-                                            @Param("settled") Boolean settled,
                                             @Param("keyword") String keyword,
                                             @Param("factStatus") String factStatus,
                                             @Param("selfEmployeeId") Long selfEmployeeId,
@@ -557,24 +499,54 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("pageSize") int pageSize);
 
     /**
-     * 统计符合条件的合同数（分页 total，按业务键去重：订单键类型按订单号，其余按合同号）。
+     * 批量查合同的调整前金额（originalAmount）。
+     * <p>
+     * 对每条 ACTIVE 事实：若同 source_key 存在 REVERSED 事实，取 REVERSED 金额（调整前），
+     * 否则取当前金额。按 COALESCE(order_no, contract_no) 聚合返回。
+     * 与主查询分离，避免主 SQL 挂 CTE + JOIN 增加复杂度。
+     *
+     * @param period   归属期间
+     * @param factType 事实口径
+     * @param bizKeys  业务键集合（COALESCE(order_no, contract_no)）
+     * @return 每行含 bizKey / originalAmount
+     */
+    @Select("""
+        <script>
+        WITH reversed_expect AS (
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_perf_fact
+            WHERE fact_status = 'REVERSED' AND fact_type = #{factType}
+              AND period = #{period}
+              AND COALESCE(order_no, contract_no) IN
+              <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
+            ORDER BY source_key, id ASC
+        )
+        SELECT COALESCE(f.order_no, f.contract_no) AS "bizKey",
+               COALESCE(SUM(
+                 COALESCE(re.performance_amount, f.performance_amount)
+               ), 0) AS "originalAmount"
+        FROM pj_perf_fact f
+        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = #{factType}
+          AND f.period = #{period}
+          AND COALESCE(f.order_no, f.contract_no) IN
+          <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
+        GROUP BY COALESCE(f.order_no, f.contract_no)
+        </script>
+        """)
+    List<Map<String, Object>> selectOriginalAmounts(@Param("period") String period,
+                                                      @Param("factType") String factType,
+                                                      @Param("bizKeys") Collection<String> bizKeys);
+
+    /**
+     * 统计符合条件的合同数（分页 total，按 COALESCE(order_no, contract_no) 去重）。
      * 参数语义同 {@link #selectManagePageContracts}。
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                    THEN COALESCE(f.order_no, f.contract_no)
-                                    ELSE COALESCE(f.contract_no, f.order_no) END)
+        SELECT COUNT(DISTINCT COALESCE(f.order_no, f.contract_no))
         FROM pj_perf_fact f
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN LATERAL (
-            SELECT ci.id, ci.application_id
-            FROM pj_commission_item ci
-            WHERE ci.performance_fact_id = f.id
-              AND ci.status &lt;&gt; 'REVERSED'
-            ORDER BY ci.id
-            LIMIT 1
-        ) ci ON TRUE
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
@@ -583,9 +555,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         </choose>
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(f.order_no, f.contract_no)
-                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
+          AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -594,23 +564,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="bizType != null and bizType != ''">
             AND f.biz_type = #{bizType}
           </if>
-          <if test="settled != null">
-            <choose>
-                <when test="settled">
-                  AND ci.id IS NOT NULL
-                </when>
-                <otherwise>
-                  AND ci.id IS NULL
-                </otherwise>
-            </choose>
-          </if>
           <if test="keyword != null and keyword != ''">
             AND (
               f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_code ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR e.employee_name ILIKE CONCAT('%', #{keyword}::text, '%')
               OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
@@ -627,7 +585,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                               @Param("deptId") Long deptId,
                               @Param("employeeId") Long employeeId,
                               @Param("bizType") String bizType,
-                              @Param("settled") Boolean settled,
                               @Param("keyword") String keyword,
                               @Param("factStatus") String factStatus,
                               @Param("selfEmployeeId") Long selfEmployeeId);

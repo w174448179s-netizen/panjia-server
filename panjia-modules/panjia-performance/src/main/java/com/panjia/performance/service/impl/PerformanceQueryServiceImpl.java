@@ -38,6 +38,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -210,12 +211,11 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, null, bizType, settled, kw, null, selfEmployeeId);
+            period, factType, deptId, null, bizType, kw, null, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
         summary.setDetailCount(toLong(stat.get("detailCount")));
-        summary.setUnsettledCount(toLong(stat.get("unsettledCount")));
         Object sum = stat.get("totalAmount");
         summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
         vo.setSummary(summary);
@@ -237,7 +237,7 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
 
     @Override
     public PerformanceManagePageVO<PerformanceManageContractVO> pageManageByContract(String period, String factType,
-                                              Long deptId, Long employeeId, String bizType, Boolean settled, String keyword,
+                                              Long deptId, Long employeeId, String bizType, String keyword,
                                               String factStatus, Integer pageNum, Integer pageSize) {
         PerformanceManagePageVO<PerformanceManageContractVO> vo = new PerformanceManagePageVO<>();
         if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
@@ -257,26 +257,26 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
             deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
-        long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId);
+        long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
         vo.setTotal(total);
 
         List<PerformanceManageContractVO> contracts = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
-                period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId, offset, size);
+                period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId, offset, size);
+            fillContractOriginalAmount(contracts, period, factType);
             fillContractConversion(contracts);
         }
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, employeeId, bizType, settled, kw, factStatus, selfEmployeeId);
+            period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
         PerformanceManagePageVO.Summary summary = new PerformanceManagePageVO.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
         summary.setDetailCount(toLong(stat.get("detailCount")));
-        summary.setUnsettledCount(toLong(stat.get("unsettledCount")));
         Object sum = stat.get("totalAmount");
         summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
         vo.setSummary(summary);
@@ -574,6 +574,39 @@ public class PerformanceQueryServiceImpl implements PerformanceQueryService {
     }
 
     // ==================== 折算填充（统一入口） ====================
+
+    /**
+     * 合同管理列表：批量查调整前金额（originalAmount），与主查询分离。
+     * <p>
+     * 主查询已返回 amount（调整后）；本方法查出每合同的 originalAmount（调整前），
+     * 对于无调整的合同，originalAmount = amount（保持不变）。
+     */
+    private void fillContractOriginalAmount(List<PerformanceManageContractVO> rows,
+                                            String period, String factType) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<String> bizKeys = rows.stream()
+            .map(r -> r.getOrderNo() != null ? r.getOrderNo() : r.getContractNo())
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (bizKeys.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> list = factMapper.selectOriginalAmounts(period, factType, bizKeys);
+        Map<String, BigDecimal> originalMap = new HashMap<>();
+        for (Map<String, Object> row : list) {
+            Object key = row.get("bizKey");
+            Object val = row.get("originalAmount");
+            if (key != null && val != null) {
+                originalMap.put(key.toString(), new BigDecimal(val.toString()));
+            }
+        }
+        for (PerformanceManageContractVO row : rows) {
+            String bizKey = row.getOrderNo() != null ? row.getOrderNo() : row.getContractNo();
+            row.setOriginalAmount(originalMap.getOrDefault(bizKey, row.getAmount()));
+        }
+    }
 
     /**
      * 合同管理列表：按 bizType 批量取因子，填充 convertedAmount / originalConvertedAmount。

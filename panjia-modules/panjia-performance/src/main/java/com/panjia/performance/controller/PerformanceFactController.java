@@ -189,12 +189,11 @@ public class PerformanceFactController extends BaseController {
             @RequestParam(required = false) Long deptId,
             @RequestParam(required = false) Long employeeId,
             @RequestParam(required = false) String bizType,
-            @RequestParam(required = false) Boolean settled,
             @RequestParam(required = false) String keyword,
             @RequestParam(required = false) String factStatus,
             @RequestParam(required = false, defaultValue = "1") Integer pageNum,
             @RequestParam(required = false, defaultValue = "20") Integer pageSize) {
-        return R.ok(queryService.pageManageByContract(period, factType, deptId, employeeId, bizType, settled,
+        return R.ok(queryService.pageManageByContract(period, factType, deptId, employeeId, bizType,
             keyword, factStatus, pageNum, pageSize));
     }
 
