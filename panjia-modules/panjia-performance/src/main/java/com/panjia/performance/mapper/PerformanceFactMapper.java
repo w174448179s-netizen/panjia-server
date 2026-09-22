@@ -415,15 +415,22 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     // ==================== 合同维度 ====================
 
     /*
-     * 业务键（合同号/订单号）统一口径——凡按「合同」聚合/匹配的查询均使用该规则
-     * （前端 src/utils/panjiaBiz.ts 的 resolveBizNo 与之同步，改动须两侧一致）：
-     * - 一手房、房产金融、家装荐客：以订单号为准（订单号为空回退合同号）；
-     * - 其它类型：以合同号为准（合同号为空回退订单号）。
-     * 键表达式（f/rs 为本 Mapper 查询的固定别名）：
-     *   CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-     *        THEN COALESCE(rs.order_no, rs.contract_no)
-     *        ELSE COALESCE(rs.contract_no, rs.order_no) END
-     * 单据（调整/实收/结佣）按单据上存的合同号匹配时用「或」形式（兼容合同号/订单号两种落库键）。
+     * 业务键（订单号 / 合同号）口径——贝壳原始行中 order_no 与 contract_no 严格 1:1
+     * （实测双向 0 冲突、按订单号分组与按业务类型 CASE 分组组数完全相等：238 = 238、order_no 无 NULL），
+     * 故二者互为等价业务键，`CASE WHEN biz_type IN ('一手房','房产金融','家装荐客')` 的分派是冗余的。
+     *
+     * 【已统一】实收建单链路（2026-09-22 改动）：
+     * - 分组维度 selectBatchReceivedContractGroups：`GROUP BY rs.order_no`，CASE 已删；
+     * - 单据匹配 selectActiveFactsByContractNo / selectBatchUnboundRealFacts /
+     *   selectExpectSumsByBizKeys / selectReceivedFactDetails / selectReceivedContractMetrics：
+     *   `rs.contract_no = 键 OR rs.order_no = 键`，兼容两类历史落库键
+     *   （实收审批单早期把订单号写进 contract_no 的一手房单据）。
+     *
+     * 【未统一】本文件其余 21 处 CASE 分派（业绩管理列表 / 作废恢复 / 调整 / 结佣 / 业绩查询，见
+     * line 318 起至 1741）保持原样：它们的调用方可能回传「按业务类型决定的展示键」（前端
+     * src/utils/panjiaBiz.ts 的 resolveBizNo），单改 SQL 一侧会漏匹配，须前后端一起动。
+     * 统一时：分组维度可用 `COALESCE(rs.order_no, rs.contract_no)`；对传入键做匹配必须用
+     * `键 = contract_no OR 键 = order_no`（不能用单一列的 COALESCE，否则按展示键回传时漏命中）。
      */
 
     /**
@@ -722,14 +729,17 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                              @Param("contractNos") List<String> contractNos);
 
     /**
-     * 查询指定合同号下全部 ACTIVE 业绩事实（合同级调整时按比例分摊用）。
+     * 查询指定合同号/订单号下全部 ACTIVE 业绩事实（合同级调整 / 实收建单用）。
      * <p>
-     * 通过 normalized_record → raw_signed 关联 contract_no 定位同合同的所有明细事实。
+     * 通过 normalized_record → raw_signed 关联定位同组的所有明细事实。
+     * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可——
+     * 二者在贝壳原始行中严格 1:1（实测 0 冲突），故「命中任一」与按业务类型取键等价，
+     * 且同时兼容两类历史落库键（实收审批单早期把订单号写进 contract_no 的一手房单据）。
      *
      * @param period     归属期间
      * @param factType   事实口径
-     * @param contractNo 合同号
-     * @return 该合同下全部 ACTIVE 事实列表
+     * @param contractNo 合同号或订单号（业务键）
+     * @return 同组全部 ACTIVE 事实列表
      */
     @Select("""
         SELECT f.*
@@ -739,10 +749,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
+          AND (rs.contract_no = #{contractNo} OR rs.order_no = #{contractNo})
         ORDER BY f.id
         """)
     List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
@@ -1046,10 +1053,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND f.fact_type = 'PERF_REAL'
-          AND (rs.contract_no = #{contractNo}
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = #{contractNo})
+          AND (rs.contract_no = #{contractNo} OR rs.order_no = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, nr.role_type, f.id
         </script>
         """)
@@ -1057,16 +1061,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                            @Param("contractNo") String contractNo);
 
     /**
-     * 按期间 + 合同号集合查询实收明细列表的补充字段（业务类型、涉及人数、应收合计），每传入键一行。
+     * 按期间 + 业务键集合查询实收明细列表的补充字段（涉及人数、应收合计），每传入键一行。
      * <p>
-     * 实收审批单表不存这几个字段，列表页按 (period, contractNo) 从 ACTIVE 事实聚合回填，
-     * 口径与详情弹窗的「每人实收明细」一致（同期间同口径）。
+     * <b>业务类型已落库</b>到 {@code pj_perf_received_apply.biz_type}（建单时快照），
+     * 列表页不再依赖本查询回填 bizType；此处仍带出 bizType 便于口径核对。
      * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
-     * 匹配口径：传入键既可命中按合同号落库的事实，也可命中按订单号聚合的事实
-     * （一手房、房产金融、家装荐客以订单号为准）。
+     * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
+     * 兼容早期把订单号写进 contract_no 的一手房单据）。
      *
      * @param period      归属期间
-     * @param contractNos 单据上的合同号/业务键集合（不可为空，调用方需先过滤）
+     * @param contractNos 单据上的合同号/订单号集合（不可为空，调用方需先过滤）
      * @return 每键一行的业务类型、涉及人数与应收合计
      */
     @Select("""
@@ -1081,10 +1085,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    JOIN pj_import_raw_signed ers ON ers.id = enr.raw_data_id
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      AND e.period = #{period}
-                     AND (ers.contract_no = k.key
-                          OR (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
-                                   THEN COALESCE(ers.order_no, ers.contract_no)
-                                   ELSE COALESCE(ers.contract_no, ers.order_no) END) = k.key)
+                     AND (ers.contract_no = k.key OR ers.order_no = k.key)
                ), 0) AS "expectedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
@@ -1094,10 +1095,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            AND f.period = #{period}
         JOIN pj_normalized_record nr ON nr.id = f.normalized_record_id
         JOIN pj_import_raw_signed rs ON rs.id = nr.raw_data_id
-        WHERE (rs.contract_no = k.key
-               OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END) = k.key)
+        WHERE (rs.contract_no = k.key OR rs.order_no = k.key)
         GROUP BY k.key
         </script>
         """)
@@ -1186,29 +1184,31 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                                  @Param("employeeId") Long employeeId);
 
     /**
-     * 按导入批次聚合「实收业绩合同组」（实收审批单自动建单用，§2.1）。
+     * 按导入批次聚合「实收业绩订单组」（实收审批单自动建单用，§2.1）。
      * <p>
      * 仅取本批新建、ACTIVE、尚未挂实收审批单（received_apply_id IS NULL）的 PERF_REAL 事实，
-     * 按业务键聚合（一手房/房产金融/家装荐客取订单号，其余取合同号、空回退订单号）：
-     * 实收合计、同键应收合计（PERF_EXPECT）、快照字段、明细条数。
-     * 输出的 contractNo 即业务键，实收审批单的存储键 / 批量审批匹配均以此为准。
+     * <b>按订单号聚合</b>：实收合计、快照字段、业务类型、明细条数。
+     * <p>
+     * 订单号即业务键：贝壳原始行中 {@code order_no} 与 {@code contract_no} 严格 1:1
+     * （实测 0 冲突、238 组全等），故无需按业务类型做 CASE 分派——统一按订单号聚合，
+     * 结果与旧的「一手房/房产金融/家装荐客取订单号、其余取合同号」口径完全等价。
      *
      * @param batchId 导入批次 ID
      * @param period  归属期间
-     * @return 合同聚合组列表（contractNo = 业务键）
+     * @return 订单聚合组列表（orderNo = 业务键）
      */
     @Select("""
-        SELECT s.biz_key AS "contractNo",
-               MAX(s.order_no) AS "orderNo",
+        SELECT MAX(s.contract_no) AS "contractNo",
+               s.order_no AS "orderNo",
                MAX(s.property_address) AS "propertyAddress",
                MAX(s.business_date) AS "businessDate",
+               MAX(s.biz_type) AS "bizType",
                COALESCE(SUM(s.amount), 0) AS "receivedAmount",
                COUNT(*) AS "itemCount"
         FROM (
-            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(rs.order_no, rs.contract_no)
-                        ELSE COALESCE(rs.contract_no, rs.order_no) END AS biz_key,
-                   rs.order_no,
+            SELECT rs.order_no,
+                   rs.contract_no,
+                   f.biz_type,
                    rs.raw_json ->> 'propertyAddress' AS property_address,
                    COALESCE((rs.raw_json ->> 'signDate')::timestamp, f.business_date::timestamp) AS business_date,
                    f.performance_amount AS amount
@@ -1220,13 +1220,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND f.batch_id = #{batchId}
               AND f.period = #{period}
               AND f.received_apply_id IS NULL
-              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(rs.order_no, rs.contract_no)
-                       ELSE COALESCE(rs.contract_no, rs.order_no) END IS NOT NULL
+              AND rs.order_no IS NOT NULL
         ) s
-        GROUP BY s.biz_key
+        GROUP BY s.order_no
         HAVING COALESCE(SUM(s.amount), 0) <> 0
-        ORDER BY s.biz_key
+        ORDER BY s.order_no
         """)
     List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
         @Param("batchId") Long batchId, @Param("period") String period);
@@ -1234,15 +1232,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 一次查询批次内全部待绑定的非零 ACTIVE 实收事实行（自动建单性能优化用）。
      * <p>
-     * 合同匹配口径与 {@link #selectActiveFactsByContractNo} 完全一致
-     * （{@code contract_no = 键 OR 业务键 CASE = 键}），通过 JOIN 业务键表一次完成
-     * 全部合同的匹配。一条事实同时匹配多个业务键时会返回多行（每个匹配键一行），
-     * 由服务层按业务键字典序（= 组处理顺序）确定唯一归属，复刻原逐组查询时
-     * 「先处理的组先绑定、后续组自动排除已绑定事实」的竞争语义。
+     * 匹配口径与 {@link #selectActiveFactsByContractNo} 完全一致
+     * （{@code contract_no = 键 OR order_no = 键}，二者 1:1 故与业务类型无关），通过 JOIN
+     * 业务键表一次完成全部订单的匹配。一条事实同时匹配多个业务键时会返回多行
+     * （每个匹配键一行），由服务层按业务键字典序（= 组处理顺序）确定唯一归属，
+     * 复刻原逐组查询时「先处理的组先绑定、后续组自动排除已绑定事实」的竞争语义。
      *
      * @param batchId 导入批次 ID
      * @param period  归属期间
-     * @param bizKeys 本批次聚合出的业务键（合同号/订单号）
+     * @param bizKeys 本批次聚合出的业务键（订单号）
      * @return 待绑定事实行（received_apply_id 为空、金额非 0），同一 factId 可重复出现
      */
     @Select("""
@@ -1257,10 +1255,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         JOIN (VALUES
         <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
         ) kv(biz_key)
-          ON rs.contract_no = kv.biz_key
-             OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(rs.order_no, rs.contract_no)
-                       ELSE COALESCE(rs.contract_no, rs.order_no) END) = kv.biz_key
+          ON rs.order_no = kv.biz_key OR rs.contract_no = kv.biz_key
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_REAL'
           AND f.batch_id = #{batchId}
@@ -1278,13 +1273,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。
      * <p>
-     * 口径与逐合同 {@code sumExpect → selectActiveFactsByContractNo} 一致
-     * （{@code contract_no = 键 OR 业务键 CASE = 键}），一条事实对同一键只计一次。
+     * 口径与逐订单 {@code sumExpect → selectActiveFactsByContractNo} 一致
+     * （{@code contract_no = 键 OR order_no = 键}），一条事实对同一键只计一次。
      * 返回行复用 {@link com.panjia.performance.dto.BatchFactBindRow}：
      * bizKey=业务键、amount=应收合计（factId/deptId 为空）。
      *
      * @param period  归属期间
-     * @param bizKeys 业务键集合
+     * @param bizKeys 业务键集合（订单号）
      * @return 每个有应收事实的业务键一行
      */
     @Select("""
@@ -1297,10 +1292,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         JOIN (VALUES
         <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
         ) kv(biz_key)
-          ON rs.contract_no = kv.biz_key
-             OR (CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(rs.order_no, rs.contract_no)
-                       ELSE COALESCE(rs.contract_no, rs.order_no) END) = kv.biz_key
+          ON rs.order_no = kv.biz_key OR rs.contract_no = kv.biz_key
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
           AND f.period = #{period}

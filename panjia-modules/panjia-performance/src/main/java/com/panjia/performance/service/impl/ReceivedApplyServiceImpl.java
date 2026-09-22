@@ -106,12 +106,14 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         }
         List<ReceivedContractGroupDTO> groups = factMapper.selectBatchReceivedContractGroups(batchId, period);
         if (groups.isEmpty()) {
-            log.info("[实收审批] 批次无待建单实收合同组：batchId={}, period={}", batchId, period);
+            log.info("[实收审批] 批次无待建单实收订单组：batchId={}, period={}", batchId, period);
             return 0;
         }
         // ===== 批量预加载（原逐合同 6~8 次 SQL → 循环前 3 次） =====
-        List<String> bizKeys = groups.stream().map(ReceivedContractGroupDTO::getContractNo).toList();
-        // ① 一条 IN 查询取全部合同的活跃审批单（DRAFT/SUBMITTED/APPROVED）
+        // 业务键 = 订单号（聚合维度；贝壳原始行中订单号与合同号 1:1，等价）
+        List<String> bizKeys = groups.stream().map(ReceivedContractGroupDTO::getOrderNo).toList();
+        // ① 一条 IN 查询取全部订单的活跃审批单（DRAFT/SUBMITTED/APPROVED），
+        //    匹配 contract_no OR order_no，兼容早期把订单号写入 contract_no 的历史单据
         Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, bizKeys);
         // ② 一次查询批次内全部待绑定非零实收事实行（宽口径，同 factId 可匹配多个键），
         //    内存按组处理顺序（biz_key 字典序）确定唯一归属，复刻原逐组查询的先到先得竞争语义
@@ -133,7 +135,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
 
         int created = 0;
         for (ReceivedContractGroupDTO group : groups) {
-            String bizKey = group.getContractNo();
+            // 业务键 = 订单号（聚合维度）；单据落库键仍为合同号 + 订单号两个快照列
+            String bizKey = group.getOrderNo();
             // 本轮归属到该键的事实（已被前序组绑定的 factId 已从 factOwner 移除）
             List<Long> factIds = factOwner.entrySet().stream()
                 .filter(e -> bizKey.equals(e.getValue()))
@@ -191,6 +194,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                     if (existing.getItemCount() == 1 && existing.getDeptId() == null) {
                         existing.setDeptId(uniqueDeptId);
                     }
+                    // 业务类型补空（历史空单合并新事实时顺带补齐，供列表展示/筛选）
+                    if (StringUtils.isBlank(existing.getBizType())) {
+                        existing.setBizType(group.getBizType());
+                    }
                     applyMapper.updateById(existing);
                     log.info("[实收审批] 新批次实收事实合并入既有审批单：applyId={}, contractNo={}, status={}",
                         existing.getId(), bizKey, existing.getStatus());
@@ -204,8 +211,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 一条 IN 查询批量取指定合同当月活跃审批单（DRAFT/SUBMITTED/APPROVED），
-     * 按业务键（合同号或订单号，与导入聚合 biz_key 同口径）双键建映射，同一合同取最新一张。
+     * 一条 IN 查询批量取指定业务键当月活跃审批单（DRAFT/SUBMITTED/APPROVED），
+     * 按 contract_no 与 order_no 双列建映射（业务键为订单号时走 order_no 分支），同一键取最新一张。
      */
     private Map<String, ReceivedApply> loadActiveAppliesBatch(String period, Collection<String> contractNos) {
         if (contractNos.isEmpty()) {
@@ -612,6 +619,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
             .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
+            // 业务类型已落库（biz_type，见 V140009）：筛选下推到 SQL（旧实现在接口层无谓传入后被静默忽略）
+            .eq(StringUtils.isNotBlank(query.getBizType()), ReceivedApply::getBizType, query.getBizType())
             .ne(StringUtils.isBlank(query.getStatus()),
                 ReceivedApply::getStatus, ReceivedApplyStatus.CANCELLED)
             .eq(StringUtils.isNotBlank(query.getStatus()),
@@ -638,9 +647,10 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
     }
 
     /**
-     * 回填实收明细列表的补充字段（业务类型、涉及人数、应收合计）。
+     * 回填实收明细列表的补充字段（涉及人数、应收合计）。
      * <p>
-     * 审批单表不存这几个字段，按 (period, contractNo) 从 ACTIVE 事实聚合，
+     * 业务类型已落库（{@code biz_type}，见 V140009），本方法只在旧数据 bizType 为空时
+     * 按 (period, contractNo) 从 ACTIVE 事实回退补齐；涉及人数与应收合计仍需实时聚合，
      * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
      * 应收合计含已生效调整（新签业绩显示调整后金额），与快照不一致时置「已调整」标记。
      * 期间或合同号缺失的行保持 null，前端显示占位符。
@@ -677,7 +687,9 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         for (ReceivedApply apply : records) {
             ReceivedContractMetricsDTO m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
             if (m != null) {
-                apply.setBizType(m.getBizType());
+                // 业务类型优先用落库快照值；旧数据（列新增前建单）为空时回退实时聚合
+                String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
+                apply.setBizType(bizType);
                 apply.setEmployeeCount(m.getEmployeeCount());
                 // 新签业绩展示实时值（含已生效调整），与详情/每人明细口径一致；与快照不一致时标「已调整」
                 if (m.getExpectedAmount() != null) {
@@ -688,7 +700,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
                 // 折算后金额：应收合计与实收合计用同一因子，从批量结果中取（Map 查询，无 DB 访问）
-                BigDecimal factor = conversionFactorPort.factorOf(factorMap, m.getBizType());
+                BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
                 if (m.getExpectedAmount() != null) {
                     apply.setExpectedConvertedAmount(conversionFactorPort.convert(m.getExpectedAmount(), factor));
                     if (apply.getOriginalExpectedAmount() != null) {
@@ -880,6 +892,7 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
                                             BigDecimal expectedAmount, Long deptId) {
         ReceivedApply apply = baseApply(period, group.getContractNo(), applicantId);
         apply.setOrderNo(group.getOrderNo());
+        apply.setBizType(group.getBizType());
         apply.setPropertyAddress(group.getPropertyAddress());
         apply.setBusinessDate(group.getBusinessDate());
         apply.setBatchId(batchId);
@@ -901,6 +914,8 @@ public class ReceivedApplyServiceImpl implements ReceivedApplyService {
         ReceivedApply apply = baseApply(period, contractNo, applicantId);
         if (!nonZero.isEmpty()) {
             PerformanceFact first = nonZero.get(0);
+            // 业务类型快照（落库列 biz_type）：手工建单也要带上，供列表展示/筛选
+            apply.setBizType(first.getBizType());
             // 快照字段由事实 JOIN 取出的摘要回填
             List<PerformanceFactSummaryDTO> summaries = factMapper
                 .selectActiveFactSummariesByContractNo(period, FACT_TYPE_REAL, contractNo);

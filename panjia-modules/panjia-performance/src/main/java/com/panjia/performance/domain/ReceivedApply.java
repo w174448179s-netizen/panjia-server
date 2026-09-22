@@ -67,9 +67,10 @@ public class ReceivedApply implements Serializable {
     private Integer itemCount;
 
     /**
-     * 业务类型（非入库字段；列表查询时按 (period, contractNo) 回填 ACTIVE PERF_REAL 事实的 biz_type）。
+     * 业务类型（一手房/二手买卖/租赁/租赁轻托管/写字楼租赁/轻托管推房/房产金融/家装荐客…）。
+     * <p>建单时从实收事实快照落库（见 V140009），列表展示与「类型」筛选均直接取本列，
+     * 不再依赖按 (period, contractNo) 实时回查事实。</p>
      */
-    @TableField(exist = false)
     private String bizType;
 
     /**
