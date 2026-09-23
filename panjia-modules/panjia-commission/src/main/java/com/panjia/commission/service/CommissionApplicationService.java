@@ -1194,7 +1194,42 @@ public class CommissionApplicationService {
         int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
         int from = Math.min((pageNum - 1) * pageSize, total);
         int to = Math.min(from + pageSize, total);
-        return PageResult.build(all.subList(from, to), (long) total);
+        List<CommissionContractVo> pageRows = new ArrayList<>(all.subList(from, to));
+        // 结佣业绩「原值 → 调整后值」：仅对当前页批量查事实链最早值（避免全期间回表），
+        // 与当前合计不一致时置调整标记（口径与每人明细 originalAmount 一致）
+        fillOriginalReceivedAmounts(period, pageRows, factorMap);
+        return PageResult.build(pageRows, (long) total);
+    }
+
+    /**
+     * 批量填充列表行的结佣业绩调整前合计（PERF_REAL 事实链最早值）及折算后金额。
+     * 未调整（原值=当前合计）或无 ACTIVE 事实的行保持 null，前端按单值展示。
+     */
+    private void fillOriginalReceivedAmounts(String period, List<CommissionContractVo> pageRows,
+                                             Map<String, BigDecimal> factorMap) {
+        if (pageRows == null || pageRows.isEmpty()) {
+            return;
+        }
+        Set<String> keys = pageRows.stream()
+            .map(CommissionContractVo::getContractNo)
+            .filter(StringUtils::isNotBlank)
+            .collect(Collectors.toSet());
+        if (keys.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> originalMap =
+            performanceQueryPort.sumOriginalAmountsByKeys(period, keys, FACT_TYPE_REAL);
+        for (CommissionContractVo vo : pageRows) {
+            BigDecimal original = originalMap.get(vo.getContractNo());
+            if (original == null || vo.getAmount() == null
+                || original.compareTo(vo.getAmount()) == 0) {
+                continue;
+            }
+            vo.setReceivedAdjusted(true);
+            vo.setOriginalAmount(original);
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, vo.getBizType());
+            vo.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(original, factor));
+        }
     }
 
     /**
@@ -1356,6 +1391,10 @@ public class CommissionApplicationService {
             // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出
             if (d.getOriginalExpectedAmount() != null) {
                 d.setOriginalConvertedAmount(conversionFactorPort.convert(d.getOriginalExpectedAmount(), factor));
+            }
+            // 调整前结佣业绩的折算后金额：仅被调整行展示，未调整时原值=当前值无需输出
+            if (Boolean.TRUE.equals(d.getReceivedAdjusted()) && d.getOriginalAmount() != null) {
+                d.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(d.getOriginalAmount(), factor));
             }
         }
     }

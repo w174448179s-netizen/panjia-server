@@ -82,6 +82,20 @@ public interface CommissionPerformanceQueryPort {
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId);
 
     /**
+     * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
+     * <p>
+     * 口径：以各合同当前 ACTIVE 事实的 sourceKey 集合为准，沿事实链（同 sourceKey，
+     * 含历史 REVERSED 事实）取最早一条事实金额求和；从未调整的合同其原值=当前合计。
+     * 已 VOID 冲销（无 ACTIVE 事实）的行不计入原值，与当前列表口径一致。
+     *
+     * @param period   归属期间 YYYY-MM
+     * @param bizKeys  合同号/订单号业务键集合（不可为空）
+     * @param factType 事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return bizKey → 调整前合计；无 ACTIVE 事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, Collection<String> bizKeys, String factType);
+
+    /**
      * 实收自动对齐应收（§3.5，结佣总监审批发现差异时调用）。
      * <p>
      * 将指定合同当月每条 ACTIVE 的 PERF_REAL 事实，按同 sourceKey 的 PERF_EXPECT 事实口径

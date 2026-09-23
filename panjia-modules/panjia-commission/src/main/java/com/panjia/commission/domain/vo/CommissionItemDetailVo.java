@@ -57,8 +57,18 @@ public class CommissionItemDetailVo implements Serializable {
     /** 调整前应收金额（同 sourceKey 最早一条 REVERSED 的 PERF_EXPECT；无调整时回退当前值） */
     private BigDecimal originalExpectedAmount;
 
-    /** 结佣金额（结佣明细确认的业绩金额） */
+    /** 结佣金额（结佣明细确认的业绩金额，结佣调整后为新事实金额） */
     private BigDecimal amount;
+
+    /**
+     * 结佣原始金额（调整前：同 sourceKey 最早一条 PERF_REAL 事实金额；未调整时 = amount）。
+     * 结佣调整 supersede 事实时保留 sourceKey，口径与实收详情 originalAmount 一致，
+     * 供前端展示「原值 → 调整后值」。
+     */
+    private BigDecimal originalAmount;
+
+    /** 该行结佣业绩已被调整（同 sourceKey 存在 REVERSED 的 PERF_REAL 事实） */
+    private Boolean receivedAdjusted;
 
     /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
     private BigDecimal expectedConvertedAmount;
@@ -68,6 +78,9 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 结佣业绩折算后金额（amount × conversionFactor） */
     private BigDecimal convertedAmount;
+
+    /** 调整前结佣业绩折算后金额（originalAmount × conversionFactor） */
+    private BigDecimal originalReceivedConvertedAmount;
 
     /** 费用项 */
     private String feeItem;

@@ -107,6 +107,26 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private BigDecimal receivedConvertedAmount;
 
+    /**
+     * 实收已被调整（非入库字段；展示标记）。
+     * <p>当前 ACTIVE PERF_REAL 合计 ≠ 事实链最早值（结佣调整 AMOUNT 生效）时置 true，
+     * 前端据此显示「原值 → 调整后值」。部门划转金额不变，不置标记。</p>
+     */
+    @TableField(exist = false)
+    private Boolean receivedAdjusted;
+
+    /**
+     * 调整前实收（非入库字段）＝事实链 sourceKey 最早一条 PERF_REAL 金额合计。
+     * <p>列表/详情把 {@link #receivedAmount} 覆盖为实时 ACTIVE 合计时留存，
+     * 供前端展示「原值 → 调整后值」；未调整时为 null。</p>
+     */
+    @TableField(exist = false)
+    private BigDecimal originalReceivedAmount;
+
+    /** 调整前实收的折算后金额（非入库字段；originalReceivedAmount × 同一折算因子） */
+    @TableField(exist = false)
+    private BigDecimal originalReceivedConvertedAmount;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 

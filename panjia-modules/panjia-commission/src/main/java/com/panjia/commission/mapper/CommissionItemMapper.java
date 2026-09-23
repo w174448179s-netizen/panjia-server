@@ -29,6 +29,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
      * 应收同时给出 originalExpectedAmount（调整前：同 sourceKey 最早一条 REVERSED 的
      * PERF_EXPECT，无则回退当前 ACTIVE 值）与 expectedAdjusted 标记，
      * 与「实收明细详情」同口径，供前端展示「原值 → 调整后值」。
+     * 结佣（PERF_REAL）同口径给出 originalAmount / receivedAdjusted（结佣调整 supersede
+     * 事实保留 sourceKey；无关联事实的历史差额行回退 ci.amount 且不置调整标记）。
      *
      * @param applicationId 申请单 ID
      * @return 明细详情列表
@@ -56,6 +58,13 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
                AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
             ORDER BY sk.source_key, pe.id
+        ),
+        reversed_real AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pr.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pr ON pr.source_key = sk.source_key
+               AND pr.fact_status = 'REVERSED' AND pr.fact_type = 'PERF_REAL'
+            ORDER BY sk.source_key, pr.id ASC
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
@@ -82,12 +91,15 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
                (re.source_key IS NOT NULL) AS "expectedAdjusted",
                ci.amount AS "amount",
+               COALESCE(rr.performance_amount, f.performance_amount, ci.amount) AS "originalAmount",
+               (rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
                ci.status AS "status"
         FROM pj_commission_item ci
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
         LEFT JOIN active_expect ae ON ae.source_key = f.source_key
         LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+        LEFT JOIN reversed_real rr ON rr.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = ci.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = ci.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id

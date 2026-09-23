@@ -561,6 +561,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
                AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
             ORDER BY sk.source_key, pe.id
+        ),
+        reversed_real AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pr.performance_amount
+            FROM src_keys sk
+            JOIN pj_perf_fact pr ON pr.source_key = sk.source_key
+               AND pr.fact_status = 'REVERSED' AND pr.fact_type = 'PERF_REAL'
+            ORDER BY sk.source_key, pr.id ASC
         )
         SELECT f.id AS "factId",
                f.employee_id AS "employeeId",
@@ -584,10 +591,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ae.performance_amount AS "expectedAmount",
                COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
                (re.source_key IS NOT NULL) AS "expectedAdjusted",
-               f.performance_amount AS "amount"
+               f.performance_amount AS "amount",
+               COALESCE(rr.performance_amount, f.performance_amount) AS "originalAmount",
+               (rr.source_key IS NOT NULL) AS "receivedAdjusted"
         FROM pj_perf_fact f
         LEFT JOIN active_expect ae ON ae.source_key = f.source_key
         LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+        LEFT JOIN reversed_real rr ON rr.source_key = f.source_key
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
@@ -607,26 +617,48 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * <p>
      * <b>业务类型已落库</b>到 {@code pj_perf_received_apply.biz_type}（建单时快照），
      * 列表页不再依赖本查询回填 bizType；此处仍带出 bizType 便于口径核对。
-     * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
+     * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
+     * 实收合计取 ACTIVE PERF_REAL，并额外给出 originalReceivedAmount（按当前 ACTIVE 事实
+     * sourceKey 链取最早一条事实金额求和，含已生效结佣调整前原值），使列表「实收业绩」
+     * 可展示「原值 → 调整后值」。
      * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
      * 兼容早期把订单号写进 contract_no 的一手房单据）。
      *
      * @param period      归属期间
      * @param contractNos 单据上的合同号/订单号集合（不可为空，调用方需先过滤）
-     * @return 每键一行的业务类型、涉及人数与应收合计
+     * @return 每键一行的业务类型、涉及人数、实收/应收合计与实收调整前合计
      */
     @Select("""
         <script>
         SELECT k.key AS "contractNo",
                MAX(f.biz_type) AS "bizType",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
+               COALESCE(SUM(f.performance_amount), 0) AS "receivedAmount",
                COALESCE((
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      AND e.period = #{period}
                      AND (e.contract_no = k.key OR e.order_no = k.key)
-               ), 0) AS "expectedAmount"
+               ), 0) AS "expectedAmount",
+               COALESCE((
+                   SELECT SUM(o.performance_amount)
+                   FROM (
+                       SELECT DISTINCT ON (a.source_key) a.source_key, a.performance_amount
+                       FROM pj_perf_fact a
+                       WHERE a.fact_type = 'PERF_REAL'
+                         AND a.period = #{period}
+                         AND (a.contract_no = k.key OR a.order_no = k.key)
+                         AND a.source_key IN (
+                             SELECT b.source_key
+                             FROM pj_perf_fact b
+                             WHERE b.fact_status = 'ACTIVE' AND b.fact_type = 'PERF_REAL'
+                               AND b.period = #{period}
+                               AND (b.contract_no = k.key OR b.order_no = k.key)
+                         )
+                       ORDER BY a.source_key, a.id ASC
+                   ) o
+               ), 0) AS "originalReceivedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
         ) AS k(key)
@@ -640,6 +672,49 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<ReceivedContractMetricsVo> selectReceivedContractMetrics(
         @Param("period") String period,
         @Param("contractNos") Collection<String> contractNos);
+
+    /**
+     * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
+     * <p>
+     * 以各业务键当前 ACTIVE 事实的 sourceKey 集合为准，沿事实链（同 sourceKey，
+     * 不区分 fact_status）取 id 最早一条事实金额求和——未调整时最早一条即 ACTIVE 自身，
+     * 已调整（新签调整 / 结佣调整 supersede 均保留 sourceKey）时为最早 REVERSED 原值。
+     *
+     * @param period   归属期间
+     * @param factType 事实口径
+     * @param keys     合同号/订单号业务键集合（不可为空）
+     * @return 每行 bizKey / originalAmount
+     */
+    @Select("""
+        <script>
+        WITH sk AS (
+            SELECT DISTINCT k.key, f.source_key
+            FROM (VALUES
+              <foreach collection="keys" item="bk" separator=",">(#{bk})</foreach>
+            ) AS k(key)
+            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
+                               AND f.fact_type = #{factType}
+                               AND f.period = #{period}
+                               AND (f.contract_no = k.key OR f.order_no = k.key)
+        ),
+        orig AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt
+            FROM sk
+            JOIN pj_perf_fact x ON x.source_key = sk.source_key
+                               AND x.fact_type = #{factType}
+                               AND x.period = #{period}
+            ORDER BY sk.source_key, x.id ASC
+        )
+        SELECT sk.key AS "bizKey",
+               COALESCE(SUM(orig.amt), 0) AS "originalAmount"
+        FROM sk
+        LEFT JOIN orig ON orig.source_key = sk.source_key
+        GROUP BY sk.key
+        </script>
+        """)
+    List<Map<String, Object>> selectOriginalFactAmountsByKeys(@Param("period") String period,
+                                                               @Param("factType") String factType,
+                                                               @Param("keys") Collection<String> keys);
 
     /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。

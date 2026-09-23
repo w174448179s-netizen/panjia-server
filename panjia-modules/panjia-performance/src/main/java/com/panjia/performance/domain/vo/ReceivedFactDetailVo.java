@@ -56,8 +56,18 @@ public class ReceivedFactDetailVo implements Serializable {
     /** 该行的应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
     private Boolean expectedAdjusted;
 
-    /** 实收金额（PERF_REAL 事实金额） */
+    /** 实收金额（PERF_REAL 事实金额，已含结佣调整） */
     private BigDecimal amount;
+
+    /**
+     * 实收原始金额（调整前：同 sourceKey + 同 fact_type 下最早一条事实的金额；
+     * 未调整时 = amount）。结佣调整 supersede 事实时保留 sourceKey，故与应收侧
+     * originalExpectedAmount 同口径，仅用于前端展示「原值 → 调整后值」。
+     */
+    private BigDecimal originalAmount;
+
+    /** 该行的实收已被调整（同 sourceKey 存在 REVERSED 的 PERF_REAL 事实） */
+    private Boolean receivedAdjusted;
 
     /** 应收业绩折算后金额（expectedAmount × conversionFactor） */
     private BigDecimal expectedConvertedAmount;
@@ -67,4 +77,7 @@ public class ReceivedFactDetailVo implements Serializable {
 
     /** 实收业绩折算后金额（amount × conversionFactor） */
     private BigDecimal convertedAmount;
+
+    /** 实收业绩折算后原始金额（originalAmount × conversionFactor） */
+    private BigDecimal originalReceivedConvertedAmount;
 }

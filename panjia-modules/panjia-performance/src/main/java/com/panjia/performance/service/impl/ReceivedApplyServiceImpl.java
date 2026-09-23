@@ -623,6 +623,17 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
                         && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
+                // 实收业绩展示实时值（ACTIVE PERF_REAL 合计，含已生效结佣调整）；
+                // 事实链最早值留存为「调整前」，与实时值不一致时置「已调整」，供前端展示「原值 → 调整后值」
+                if (m.getReceivedAmount() != null) {
+                    boolean receivedAdjusted = m.getOriginalReceivedAmount() != null
+                        && m.getOriginalReceivedAmount().compareTo(m.getReceivedAmount()) != 0;
+                    apply.setReceivedAdjusted(receivedAdjusted);
+                    if (receivedAdjusted) {
+                        apply.setOriginalReceivedAmount(m.getOriginalReceivedAmount());
+                    }
+                    apply.setReceivedAmount(m.getReceivedAmount());
+                }
                 // 折算后金额：应收合计与实收合计用同一因子，从批量结果中取（Map 查询，无 DB 访问）
                 BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
                 if (m.getExpectedAmount() != null) {
@@ -634,6 +645,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
                 }
                 if (apply.getReceivedAmount() != null) {
                     apply.setReceivedConvertedAmount(conversionFactorPort.convert(apply.getReceivedAmount(), factor));
+                    if (apply.getOriginalReceivedAmount() != null) {
+                        apply.setOriginalReceivedConvertedAmount(
+                            conversionFactorPort.convert(apply.getOriginalReceivedAmount(), factor));
+                    }
                 }
             }
         }
@@ -664,9 +679,13 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
         // 取比例与乘算都走公共方法（ConversionFactorPort）
         Set<Long> factIds = facts.stream().map(ReceivedFactDetailVo::getFactId).filter(f -> f != null).collect(java.util.stream.Collectors.toSet());
         Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
+        BigDecimal recvSum = BigDecimal.ZERO;
+        BigDecimal recvOriginalSum = BigDecimal.ZERO;
         BigDecimal recvConvertedSum = BigDecimal.ZERO;
+        BigDecimal recvOriginalConvertedSum = BigDecimal.ZERO;
         BigDecimal expectConvertedSum = BigDecimal.ZERO;
         BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
+        boolean receivedAdjusted = false;
         for (ReceivedFactDetailVo f : facts) {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getFactId());
             f.setConvertedAmount(conversionFactorPort.convert(f.getAmount(), factor));
@@ -675,9 +694,29 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
             if (f.getOriginalExpectedAmount() != null) {
                 f.setOriginalConvertedAmount(conversionFactorPort.convert(f.getOriginalExpectedAmount(), factor));
             }
+            // 调整前实收的折算后金额：结佣调整 supersede 后同 sourceKey 存在 REVERSED 的 PERF_REAL
+            if (f.getOriginalAmount() != null) {
+                f.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(f.getOriginalAmount(), factor));
+            }
+            if (Boolean.TRUE.equals(f.getReceivedAdjusted())) {
+                receivedAdjusted = true;
+            }
+            if (f.getAmount() != null) recvSum = recvSum.add(f.getAmount());
+            if (f.getOriginalAmount() != null) recvOriginalSum = recvOriginalSum.add(f.getOriginalAmount());
             if (f.getConvertedAmount() != null) recvConvertedSum = recvConvertedSum.add(f.getConvertedAmount());
+            if (f.getOriginalReceivedConvertedAmount() != null) {
+                recvOriginalConvertedSum = recvOriginalConvertedSum.add(f.getOriginalReceivedConvertedAmount());
+            }
             if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
             if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
+        }
+        // 实收合计与明细列同源（实时 ACTIVE PERF_REAL 求和，含已生效结佣调整）；
+        // 存在已调整行时留存「调整前合计」，供详情「实收合计」展示「原值 → 调整后值」
+        apply.setReceivedAmount(recvSum);
+        apply.setReceivedAdjusted(receivedAdjusted);
+        if (receivedAdjusted) {
+            apply.setOriginalReceivedAmount(recvOriginalSum);
+            apply.setOriginalReceivedConvertedAmount(recvOriginalConvertedSum);
         }
         apply.setReceivedConvertedAmount(recvConvertedSum);
         apply.setExpectedConvertedAmount(expectConvertedSum);

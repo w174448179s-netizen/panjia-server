@@ -44,11 +44,23 @@ public class CommissionContractVo implements Serializable {
     /** 签约/认购时间 */
     private LocalDateTime businessDate;
 
-    /** 合同结佣金额合计（实收口径；§3.5 对齐后=应收合计） */
+    /** 合同结佣金额合计（实收口径；§3.5 对齐后=应收合计，含已生效结佣调整） */
     private BigDecimal amount;
+
+    /**
+     * 调整前结佣金额合计（按当前 ACTIVE PERF_REAL 事实 sourceKey 链取最早一条事实金额求和；
+     * 仅 {@link #receivedAdjusted}=true 时有值，供展示「原值 → 调整后值」）。
+     */
+    private BigDecimal originalAmount;
+
+    /** 结佣业绩已被调整（结佣调整 AMOUNT 生效后当前合计 ≠ 事实链最早值；划转金额不变不置标记） */
+    private Boolean receivedAdjusted;
 
     /** 结佣业绩折算后金额（amount × conversionFactor） */
     private BigDecimal convertedAmount;
+
+    /** 调整前结佣业绩折算后金额（originalAmount × conversionFactor） */
+    private BigDecimal originalReceivedConvertedAmount;
 
     /** 应收业绩合计（差异判定展示） */
     private BigDecimal expectedAmount;

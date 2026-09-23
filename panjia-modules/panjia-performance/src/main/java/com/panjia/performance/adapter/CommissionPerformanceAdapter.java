@@ -99,6 +99,23 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, java.util.Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<Map<String, Object>> rows = factMapper.selectOriginalFactAmountsByKeys(period, factType, bizKeys);
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Object key = row.get("bizKey");
+            Object amount = row.get("originalAmount");
+            if (key != null && amount instanceof BigDecimal bd) {
+                result.put(String.valueOf(key), bd);
+            }
+        }
+        return result;
+    }
+
+    @Override
     public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
         return receivedAlignmentService.align(period, contractNo, operatorId);
     }
