@@ -1511,15 +1511,16 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 总监节点办理完成后的联动（§3.5 实收对齐，由 capp_finance 任务创建事件驱动）。
+     * 总监节点办理完成后的联动（由 capp_finance 任务创建事件驱动）。
      * <p>
      * T-04 改造后：实收==应收时互斥网关 skip_condition 直接跳到 capp_end，
-     * 财务节点不创建，本方法不触发；本方法仅在「有差异进入财务节点」时执行实收对齐。
+     * 财务节点不创建，本方法不触发；本方法仅在「有差异进入财务节点」时执行。
      * </p>
      * <ol>
-     *   <li>比对单内实收合计与应收合计：有差异且未对齐 → 调业绩域对齐端口，
-     *       实收事实（合同+每人明细）supersede 为应收口径，结佣明细按映射重绑事实+金额并重算；</li>
-     *   <li>对齐后停留财务节点，由财务人工审批（网关已路由到 capp_finance，不再旁路 completeAsSys）。</li>
+     *   <li>回填最近审批人/审批时间；</li>
+     *   <li>实收对齐应收改为<b>手工确认</b>：系统不再自动改实收事实，
+     *       由财务审批人核对差异后在审批弹窗点「对齐」执行（{@link #alignToExpected}），
+     *       本方法仅记录差异日志供追踪。</li>
      * </ol>
      * <p>监听器在总监 completeTask 的事务内同步执行；warm-flow 引擎在进入监听前已完成
      * 任务持久化。</p>
@@ -1532,33 +1533,63 @@ public class CommissionApplicationService {
             return;
         }
         // 流程进入财务节点 = 总监节点已办理：回填最近审批人/审批时间（与实收 stampApproverOnDirectorNode 同口径）。
-        // 定向更新两列，避免触碰 current_node/version；同时写回内存实体，防止下方对齐分支整实体 updateById 覆盖。
+        // 定向更新两列，避免触碰 current_node/version。
         if (application.getStatus() == ApplicationStatus.SUBMITTED && operatorId != null) {
             LocalDateTime approvedAt = LocalDateTime.now();
             applicationMapper.update(null, new LambdaUpdateWrapper<CommissionApplication>()
                 .eq(CommissionApplication::getId, applicationId)
                 .set(CommissionApplication::getApproverId, operatorId)
                 .set(CommissionApplication::getApproveTime, approvedAt));
-            application.setApproverId(operatorId);
-            application.setApproveTime(approvedAt);
         }
         BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
         BigDecimal expected = application.getExpectedAmount() == null
             ? BigDecimal.ZERO : application.getExpectedAmount();
-        // 差异在容忍阈值（1 元）以内视为无差异，不触发实收对齐应收，保持实收原样
-        boolean hasDiff = !isWithinTolerance(received, expected);
-
-        if (hasDiff && !Boolean.TRUE.equals(application.getAligned())) {
-            log.info("[结佣-对齐] 实收与应收存在差异，触发自动对齐：id={}, received={}, expected={}",
+        // 实收对齐应收已改为手工确认（§3.5 改造）：有差异时仅记录日志，等待财务人工对齐
+        if (!isWithinTolerance(received, expected) && !Boolean.TRUE.equals(application.getAligned())) {
+            log.info("[结佣-对齐] 实收与应收存在差异，等待财务手工对齐确认：id={}, received={}, expected={}",
                 application.getId(), received, expected);
-            ReceivedAlignmentResultDTO result = performanceQueryPort.alignReceivedToExpected(
-                application.getPeriod(), application.getContractNo(), operatorId);
-            rebindItemsAfterAlignment(application, result);
-            application.setAligned(true);
-            recalcAggregates(application.getId(), application);
         }
-        // T-04：不再调 completeAsSys 旁路完成财务节点——交由互斥网关 skip_condition 决定路由
         refreshCurrentNode(application);
+    }
+
+    /**
+     * 手工对齐确认（§3.5 改造：实收对齐应收由财务审批人人工触发，系统不再自动对齐）。
+     * <p>
+     * 校验通过后执行原自动对齐逻辑：调业绩域对齐端口，实收事实（合同+每人明细）
+     * supersede 为应收口径，结佣明细按映射重绑事实+金额并重算合计。
+     * 对齐后停留在财务节点，由财务继续人工审批（通过或驳回）。
+     *
+     * @param applicationId 申请单 ID
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void alignToExpected(Long applicationId) {
+        CommissionApplication application = applicationMapper.selectById(applicationId);
+        if (application == null) {
+            throw new ServiceException("结佣申请单不存在");
+        }
+        if (application.getStatus() != ApplicationStatus.SUBMITTED) {
+            throw new ServiceException("仅审批中的申请单可执行对齐（当前：" + application.getStatus().getDesc() + "）");
+        }
+        if (!NODE_FINANCE.equals(application.getCurrentNode())) {
+            throw new ServiceException("仅财务审批节点可执行对齐（当前节点：" + application.getCurrentNode() + "）");
+        }
+        if (Boolean.TRUE.equals(application.getAligned())) {
+            throw new ServiceException("该申请单已完成对齐，无需重复操作");
+        }
+        BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
+        BigDecimal expected = application.getExpectedAmount() == null
+            ? BigDecimal.ZERO : application.getExpectedAmount();
+        if (isWithinTolerance(received, expected)) {
+            throw new ServiceException("实收与应收无差异，无需对齐");
+        }
+        Long operatorId = LoginHelper.getUserId();
+        log.info("[结佣-对齐] 财务手工确认对齐：id={}, operatorId={}, received={}, expected={}",
+            application.getId(), operatorId, received, expected);
+        ReceivedAlignmentResultDTO result = performanceQueryPort.alignReceivedToExpected(
+            application.getPeriod(), application.getContractNo(), operatorId);
+        rebindItemsAfterAlignment(application, result);
+        application.setAligned(true);
+        recalcAggregates(application.getId(), application);
     }
 
     /**

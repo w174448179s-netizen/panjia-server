@@ -212,4 +212,18 @@ public class CommissionApplyController extends BaseController {
         applicationService.approve(id, action, comment);
         return R.ok();
     }
+
+    /**
+     * 手工对齐确认（§3.5 改造）：实收对齐应收不再随总监通过自动执行，
+     * 由财务审批人核对差异后人工触发。仅审批中 + 财务节点 + 有差异 + 未对齐可执行。
+     *
+     * @param id 申请单 ID
+     */
+    @SaCheckPermission("commission:apply:approve")
+    @Log(title = "结佣申请单手工对齐", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/align")
+    public R<Void> align(@PathVariable Long id) {
+        applicationService.alignToExpected(id);
+        return R.ok();
+    }
 }

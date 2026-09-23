@@ -47,22 +47,29 @@ class CommissionApprovalIntegrationTest {
      * <ul>
      *   <li>流程定义新增 flow_skip {@code capp_director→capp_end, skip_condition=eq@@${realAmount}@@${expectedAmount}}
      *       （见 V150004 迁移脚本）；</li>
-     *   <li>{@link CommissionApplicationService#afterDirectorPassed} 仅保留实收对齐逻辑，
-     *       <b>不再调 {@code approvalPort.completeAsSys}</b> 旁路完成财务节点——
+     *   <li>{@link CommissionApplicationService#afterDirectorPassed} 不再调
+     *       {@code approvalPort.completeAsSys} 旁路完成财务节点——
      *       无差异时网关直接跳到 capp_end，capp_finance 节点不创建，监听器不触发。</li>
+     * </ul>
+     * 实收对齐手工确认改造后（§3.5 改造）：
+     * <ul>
+     *   <li>{@code afterDirectorPassed} <b>不再自动对齐</b>（总监通过后不得改实收事实）；</li>
+     *   <li>对齐逻辑移入 {@link CommissionApplicationService#alignToExpected}，
+     *       由财务审批人人工触发（仅审批中 + 财务节点 + 有差异 + 未对齐可执行）。</li>
      * </ul>
      * 静态契约校验：
      * <ul>
      *   <li>存在 {@code afterDirectorPassed} 公共方法签名（监听器可调用）；</li>
-     *   <li>方法体内必须保留实收对齐分支（{@code hasDiff} + {@code alignReceivedToExpected}）；</li>
-     *   <li>方法体内<b>不得</b>调 {@code approvalPort.completeAsSys}（旁路已移除，交由网关）。</li>
+     *   <li>方法体内<b>不得</b>调 {@code alignReceivedToExpected}（自动对齐已移除）；</li>
+     *   <li>方法体内<b>不得</b>调 {@code approvalPort.completeAsSys}（旁路已移除，交由网关）；</li>
+     *   <li>存在 {@code alignToExpected} 公共方法且含对齐端口调用与前置校验。</li>
      * </ul>
      */
     @Test
     void S16_8_afterDirectorPassedNoLongerBypassesFinance() throws IOException {
         String content = read(APPLICATION_SERVICE);
         assertTrue(content.contains("afterDirectorPassed("),
-            "S16-8 违规：缺少 afterDirectorPassed 方法，总监通过后无法触发实收对齐");
+            "S16-8 违规：缺少 afterDirectorPassed 方法，总监通过后无法触发联动");
 
         // 抽取 afterDirectorPassed 方法体
         int idx = content.indexOf("afterDirectorPassed(");
@@ -73,15 +80,26 @@ class CommissionApprovalIntegrationTest {
             ? content.substring(methodStart, nextPublic)
             : content.substring(methodStart);
 
-        // 必须保留实收对齐分支（hasDiff + alignReceivedToExpected）
-        assertTrue(body.contains("hasDiff"),
-            "S16-8 违规：afterDirectorPassed 缺少 hasDiff 差异判断分支");
-        assertTrue(body.contains("alignReceivedToExpected"),
-            "S16-8 违规：afterDirectorPassed 缺少 alignReceivedToExpected 调用，实收对齐逻辑丢失");
-
+        // 不得自动对齐：总监通过后系统不得改实收事实，改为财务手工确认
+        assertFalse(body.contains("alignReceivedToExpected("),
+            "S16-8 违规：afterDirectorPassed 仍自动调 alignReceivedToExpected，应改为财务手工对齐确认");
         // 不得再调 approvalPort.completeAsSys（旁路已移除，交由互斥网关 skip_condition）
         assertFalse(body.contains("approvalPort.completeAsSys("),
             "S16-8 违规：afterDirectorPassed 仍调 approvalPort.completeAsSys，未移交互斥网关路由");
+
+        // 手工对齐入口必须存在且含对齐端口调用与前置校验
+        int alignIdx = content.indexOf("public void alignToExpected(");
+        assertTrue(alignIdx > 0, "S16-8 违规：缺少 alignToExpected 手工对齐方法");
+        int alignNext = content.indexOf("\n    public ", alignIdx + 10);
+        String alignBody = alignNext > 0
+            ? content.substring(alignIdx, alignNext)
+            : content.substring(alignIdx);
+        assertTrue(alignBody.contains("alignReceivedToExpected("),
+            "S16-8 违规：alignToExpected 缺少 alignReceivedToExpected 调用，手工对齐逻辑丢失");
+        assertTrue(alignBody.contains("isWithinTolerance("),
+            "S16-8 违规：alignToExpected 缺少 isWithinTolerance 差异校验");
+        assertTrue(alignBody.contains("getAligned()"),
+            "S16-8 违规：alignToExpected 缺少 aligned 已对齐防重校验");
     }
 
     /**
