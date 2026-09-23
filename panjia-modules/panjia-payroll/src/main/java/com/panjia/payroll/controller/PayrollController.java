@@ -136,4 +136,18 @@ public class PayrollController {
     public R<List<CommissionItemDTO>> teamNewSign(@RequestParam String period, @RequestParam Long deptId) {
         return R.ok(batchService.listTeamNewSign(period, deptId));
     }
+
+    /** 导出用：指定期间全部结佣明细（不限门店/员工） */
+    @SaCheckPermission("payroll:detail:list")
+    @GetMapping("/all-commission")
+    public R<List<CommissionItemDTO>> allCommission(@RequestParam String period) {
+        return R.ok(batchService.listAllCommissionForExport(period));
+    }
+
+    /** 导出用：指定期间全部新签明细（不限门店/员工） */
+    @SaCheckPermission("payroll:detail:list")
+    @GetMapping("/all-newsign")
+    public R<List<CommissionItemDTO>> allNewSign(@RequestParam String period) {
+        return R.ok(batchService.listAllNewSignForExport(period));
+    }
 }

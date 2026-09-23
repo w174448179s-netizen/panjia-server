@@ -700,6 +700,20 @@ public class PayrollBatchService {
     }
 
     /**
+     * 导出用：查指定期间全部结佣明细（deptId=null 不限门店）。
+     */
+    public List<CommissionItemDTO> listAllCommissionForExport(String period) {
+        return enrichConvertedAmounts(commissionQueryPort.findLocked(period, null));
+    }
+
+    /**
+     * 导出用：查指定期间全部新签明细（deptId=null 不限门店）。
+     */
+    public List<CommissionItemDTO> listAllNewSignForExport(String period) {
+        return enrichConvertedAmounts(commissionQueryPort.findNewSignByDept(period, null));
+    }
+
+    /**
      * 为 CommissionItemDTO 列表批量填充 convertedAmount（amount × 当前生效折算因子）。
      * 比例统一经 {@link ConversionFactorPort} 取（工资明细页与业务明细页同口径）。
      */

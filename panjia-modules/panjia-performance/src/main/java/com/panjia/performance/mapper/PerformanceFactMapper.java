@@ -472,7 +472,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.order_no AS "orderNo",
                f.property_address AS "propertyAddress",
                f.share_ratio AS "shareRatio",
-               f.business_date AS "signDate"
+               CAST(f.business_date AS VARCHAR) AS "signDate"
         FROM pj_perf_fact f
         LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.id IN
