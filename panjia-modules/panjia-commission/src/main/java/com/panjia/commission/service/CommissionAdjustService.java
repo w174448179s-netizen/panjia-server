@@ -377,7 +377,16 @@ public class CommissionAdjustService {
             if (itemIds.isEmpty()) {
                 return PageResult.build(List.of(), 0);
             }
-            wrapper.in(CommissionAdjust::getItemId, itemIds);
+            Set<Long> appIds = items.stream()
+                .map(CommissionItem::getApplicationId)
+                .filter(java.util.Objects::nonNull)
+                .collect(Collectors.toSet());
+            // 明细级调整按 itemId 命中，合同级调整（itemId IS NULL）按 applicationId 命中
+            wrapper.and(w -> w
+                .in(CommissionAdjust::getItemId, itemIds)
+                .or()
+                .isNull(CommissionAdjust::getItemId)
+                .in(CommissionAdjust::getApplicationId, appIds));
         }
 
         // deptId 过滤：通过 CommissionItem 的 deptId 反查
@@ -389,7 +398,15 @@ public class CommissionAdjustService {
             if (deptItemIds.isEmpty()) {
                 return PageResult.build(List.of(), 0);
             }
-            wrapper.in(CommissionAdjust::getItemId, deptItemIds);
+            Set<Long> deptAppIds = deptItems.stream()
+                .map(CommissionItem::getApplicationId)
+                .filter(java.util.Objects::nonNull)
+                .collect(Collectors.toSet());
+            wrapper.and(w -> w
+                .in(CommissionAdjust::getItemId, deptItemIds)
+                .or()
+                .isNull(CommissionAdjust::getItemId)
+                .in(CommissionAdjust::getApplicationId, deptAppIds));
         }
 
         var page = adjustMapper.selectPage(pageQuery.build(), wrapper);

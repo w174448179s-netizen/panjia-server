@@ -93,6 +93,8 @@ public class PayrollDetail implements Serializable {
     private BigDecimal perfDeduct;
     /** 提成点调整合计（未参保自动扣点+审批通过人工项，负=扣点） */
     private BigDecimal manualAdjust;
+    /** 所有扣点合计（等级扣点 + 未参保自动扣点 + 人工调整，负=扣点，前端"绩效提成扣点"列统一取此值） */
+    private BigDecimal totalDeduct;
     /** 提成点调整命中项溯源 JSON（adjustId/type/rate/reason/source） */
     private String rateAdjustJson;
     private Long ruleSnapshotId;

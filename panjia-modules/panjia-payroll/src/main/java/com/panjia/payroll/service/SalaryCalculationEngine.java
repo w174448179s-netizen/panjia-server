@@ -158,6 +158,8 @@ public class SalaryCalculationEngine {
             }
             d.setFinalRate(MoneyUtil.round6(finalRate));
             d.setManualAdjust(MoneyUtil.round6(manualAdjust));
+            // 所有扣点合计：前端"绩效提成扣点"列统一展示此值（等级 + 未参保自动 + 人工调整）
+            d.setTotalDeduct(MoneyUtil.round6(perfDeduct.add(manualAdjust)));
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
             // 结佣业绩（折算后）：按 bizType 应用折算因子（一手房 ×0.9024、其他 ×0.96），
