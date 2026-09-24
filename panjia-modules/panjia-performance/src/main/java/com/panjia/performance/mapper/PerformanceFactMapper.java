@@ -392,56 +392,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                @Param("factType") String factType);
 
     /**
-     * 按业务键前缀汇总更早期间已 ACTIVE 认列事实的「贝壳当前金额」合计，
-     * 用于跨月重复导入时应收「只认一次」的增量认定（§双口径契约）。
-     * <p>
-     * 当前金额 = performance_amount（即导入的折后金额）；
-     * 仅统计 ACTIVE 事实，被 supersede/冲销的历史不认列不参与。
-     *
-     * @param sourceKeyPrefix 业务键前缀（订单|合同|角色人|费项|角色类型）
-     * @param factType        事实口径（PERF_EXPECT）
-     * @param period          当前导入期间（仅统计更早期间）
-     * @return 已认列当前金额合计（无历史返回 0）
-     */
-    @Select("""
-        <script>
-        SELECT COALESCE(SUM(f.performance_amount), 0)
-        FROM pj_perf_fact f
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = #{factType}
-          AND f.period &lt; #{period}
-          AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
-        </script>
-        """)
-    java.math.BigDecimal sumRecognizedCurrentByPrefix(@Param("sourceKeyPrefix") String sourceKeyPrefix,
-                                                      @Param("factType") String factType,
-                                                      @Param("period") String period);
-
-    /**
-     * 查询某合同在更早期间已认列事实所携带的最大「合同累计应收（总应收业绩）」。
-     * <p>
-     * 该列在合同每个角色行重复出现，取 MAX 即合同口径历史累计值；
-     * 仅取 ACTIVE 应收事实关联的归一化行，天然排除已 supersede 批次。
-     *
-     * @param contractNo 合同号
-     * @param period     当前导入期间
-     * @return 历史最大合同累计应收（无历史返回 0）
-     */
-    @Select("""
-        <script>
-        SELECT COALESCE(MAX(n.total_receivable_amount), 0)
-        FROM pj_perf_fact f
-        JOIN pj_normalized_record n ON n.id = f.normalized_record_id
-        WHERE f.fact_type = 'PERF_EXPECT'
-          AND f.fact_status = 'ACTIVE'
-          AND f.period &lt; #{period}
-          AND f.contract_no = #{contractNo}
-        </script>
-        """)
-    java.math.BigDecimal selectMaxPriorContractTotalReceivable(@Param("contractNo") String contractNo,
-                                                               @Param("period") String period);
-
-    /**
      * 按事实 ID 集合查询事实摘要（含合同号/订单号/房源地址）。
      * <p>
      * 供结佣域按合同维度展示申请单列表使用，通过 normalized_record → raw_signed

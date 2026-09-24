@@ -41,6 +41,9 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
     /** 新签口径：应收业绩（只读透传） */
     private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
 
+    /** 结佣口径：实收业绩（只读透传，用于无结佣申请单期间的历史数据回退） */
+    private static final String FACT_TYPE_REAL = "PERF_REAL";
+
     private final CommissionItemMapper itemMapper;
     private final CommissionPerformanceQueryPort performanceQueryPort;
 
@@ -78,6 +81,15 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         List<PerformanceFactSummaryDTO> facts = performanceQueryPort
             .findActiveByEmployee(period, employeeId, FACT_TYPE_EXPECT);
         return facts.stream().map(this::fromFact).toList();
+    }
+
+    @Override
+    public List<CommissionItemDTO> findRealFacts(String period, Long deptId) {
+        List<PerformanceFactSummaryDTO> baseFacts = performanceQueryPort
+            .findActiveByDept(period, deptId, FACT_TYPE_REAL);
+        if (baseFacts.isEmpty()) return Collections.emptyList();
+        List<Long> factIds = baseFacts.stream().map(PerformanceFactSummaryDTO::getFactId).toList();
+        return performanceQueryPort.findActiveByFacts(factIds).stream().map(this::fromFact).toList();
     }
 
     @Override

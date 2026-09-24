@@ -7,8 +7,11 @@ import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.RuleSnapshot;
 import com.panjia.payroll.domain.vo.MyPayrollDetailVo;
 import com.panjia.payroll.service.PayrollBatchService;
+import com.panjia.payroll.tools.HistoryPayrollImporter;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.log.annotation.Log;
+import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,7 +20,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 
@@ -34,6 +39,7 @@ import java.util.Map;
 public class PayrollController {
 
     private final PayrollBatchService batchService;
+    private final HistoryPayrollImporter historyImporter;
 
     /** 创建批次 */
     @SaCheckPermission("payroll:batch:add")
@@ -145,9 +151,29 @@ public class PayrollController {
     }
 
     /** 导出用：指定期间全部新签明细（不限门店/员工） */
-    @SaCheckPermission("payroll:detail:list")
+    @SaCheckPermission("payroll:batch:add")
     @GetMapping("/all-newsign")
     public R<List<CommissionItemDTO>> allNewSign(@RequestParam String period) {
         return R.ok(batchService.listAllNewSignForExport(period));
+    }
+
+    /**
+     * 历史工资 Excel 导入（仅超级管理员）：上传 xlsx 文件，回写工资批次+明细+业绩事实。
+     * @param period 工资归属月（如 2026-07）
+     * @param file xlsx 文件（7 个 sheet：工资表/店长/总监/新签业绩/结佣业绩/人事数据/绩效和扣款）
+     */
+    @SaCheckPermission("payroll:history:import")
+    @Log(title = "历史工资导入", businessType = BusinessType.IMPORT)
+    @PostMapping("/history-import")
+    public R<String> historyImport(@RequestParam String period, @RequestParam("file") MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            return R.fail("文件不能为空");
+        }
+        try (InputStream is = file.getInputStream()) {
+            String result = historyImporter.importFromStream(period, is);
+            return R.ok(result);
+        } catch (Exception e) {
+            return R.fail("导入失败：" + e.getMessage());
+        }
     }
 }

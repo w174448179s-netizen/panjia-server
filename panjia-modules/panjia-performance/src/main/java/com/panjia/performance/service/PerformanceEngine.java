@@ -745,42 +745,6 @@ public class PerformanceEngine {
     private static final BigDecimal RECEIVABLE_DEDUP_TOLERANCE = new BigDecimal("0.01");
 
     /**
-     * 跨月重复导入时的应收增量认定（查库版，决策逻辑见
-     * {@link #resolveIncrementalReceivable} 纯函数）。
-     *
-     * @param record            当月归一化行
-     * @param monthlyReceivable 当月行「当月应收业绩」金额（&gt; 0）
-     * @return 本月实际认列的应收当前金额（0 表示重复行，仍落 0 元事实留痕）
-     */
-    private BigDecimal recognizeCrossMonthIncrement(NormalizedRecordDTO record, BigDecimal monthlyReceivable) {
-        String prefix = buildSourceKeyPrefix(record);
-        BigDecimal priorRole = factMapper.sumRecognizedCurrentByPrefix(
-            prefix, FactType.PERF_EXPECT.getCode(), record.getPeriod());
-        if (priorRole == null) {
-            priorRole = BigDecimal.ZERO;
-        }
-        BigDecimal priorContractTotal = BigDecimal.ZERO;
-        BigDecimal totalNow = record.getTotalReceivableAmount();
-        String contractNo = extractContractNo(record.getSourceKey());
-        if (totalNow != null && contractNo != null) {
-            priorContractTotal = factMapper.selectMaxPriorContractTotalReceivable(
-                contractNo, record.getPeriod());
-            if (priorContractTotal == null) {
-                priorContractTotal = BigDecimal.ZERO;
-            }
-        }
-        BigDecimal recognized = resolveIncrementalReceivable(
-            monthlyReceivable, priorRole, totalNow, priorContractTotal);
-        if (recognized.compareTo(monthlyReceivable) != 0) {
-            log.info("[业绩应收防重] 跨月重复行增量认定：sourceKey={}, 合同={}, 期间={}, "
-                    + "当月应收={}, 该角色已认={}, 合同累计={}/历史累计={}, 本次认列={}",
-                prefix, contractNo, record.getPeriod(), monthlyReceivable, priorRole,
-                totalNow, priorContractTotal, recognized);
-        }
-        return recognized;
-    }
-
-    /**
      * 应收跨月增量认定纯规则（无 IO，便于单测）。业务铁律：应收只计算一次。
      * <ul>
      *   <li>该角色行首次出现（历史已认 ≤ 0）：当月金额全额认列；</li>

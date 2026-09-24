@@ -63,4 +63,16 @@ public interface CommissionQueryPort {
      * @return 结佣明细全量列表
      */
     List<CommissionItemDTO> findByApplication(Long applicationId);
+
+    /**
+     * 按期间 + 门店查结佣业绩（PERF_REAL 实收事实，只读透传，未折算）。
+     * <p>
+     * 用于该期间无结佣申请单的场景（如历史工资 Excel 导入期间：只写业绩事实，不建申请单），
+     * 薪资域展示/导出结佣业绩时作为 findLocked 空结果的数据回退。
+     *
+     * @param period 业绩归属月 YYYY-MM
+     * @param deptId 门店 ID（可空）
+     * @return 实收业绩事实列表（原样透传）
+     */
+    List<CommissionItemDTO> findRealFacts(String period, Long deptId);
 }

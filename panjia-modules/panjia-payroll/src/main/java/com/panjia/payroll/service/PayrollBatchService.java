@@ -700,10 +700,17 @@ public class PayrollBatchService {
     }
 
     /**
-     * 导出用：查指定期间全部结佣明细（deptId=null 不限门店）。
+     * 导出/展示用：查指定期间全部结佣明细（deptId=null 不限门店）。
+     * <p>
+     * 该期间无结佣申请单明细时（如历史工资 Excel 导入期间只写业绩事实、不建申请单），
+     * 回退为 PERF_REAL 实收业绩事实透传，保证结佣业绩 tab 与导出 sheet 有数据。
      */
     public List<CommissionItemDTO> listAllCommissionForExport(String period) {
-        return enrichConvertedAmounts(commissionQueryPort.findLocked(period, null));
+        List<CommissionItemDTO> locked = commissionQueryPort.findLocked(period, null);
+        if (locked != null && !locked.isEmpty()) {
+            return enrichConvertedAmounts(locked);
+        }
+        return enrichConvertedAmounts(commissionQueryPort.findRealFacts(period, null));
     }
 
     /**
