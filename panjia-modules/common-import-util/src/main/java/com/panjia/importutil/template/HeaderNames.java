@@ -31,4 +31,37 @@ public final class HeaderNames {
         }
         return h;
     }
+
+    /**
+     * 剥离 occurrence 后缀：「姓名@2」→「姓名」，无后缀原样返回。
+     * <p>
+     * occurrence 语法用于同文件重复列表头（如天街工资表「绩效和扣款」sheet 左右
+     * 双表各有「姓名」列）：模板 source_header 写「姓名@1」取第 1 次出现、
+     * 「姓名@2」取第 2 次。嗅探/防呆比对表头时须先剥后缀再比对。
+     */
+    public static String baseName(String colName) {
+        int idx = occurrenceIndex(colName);
+        return idx > 0 ? colName.substring(0, idx) : colName;
+    }
+
+    /**
+     * occurrence 序号：「姓名@2」→ 2；无后缀（或 @ 后非纯数字）返回 null。
+     */
+    public static Integer occurrence(String colName) {
+        int idx = occurrenceIndex(colName);
+        return idx > 0 ? Integer.valueOf(colName.substring(idx + 1)) : null;
+    }
+
+    /** occurrence 分隔符位置；无 occurrence 返回 -1 */
+    private static int occurrenceIndex(String colName) {
+        if (colName == null) {
+            return -1;
+        }
+        int idx = colName.lastIndexOf('@');
+        if (idx > 0 && idx < colName.length() - 1
+            && colName.substring(idx + 1).chars().allMatch(Character::isDigit)) {
+            return idx;
+        }
+        return -1;
+    }
 }

@@ -27,6 +27,22 @@ public interface ScoreService extends PeopleScoreQueryPort {
      */
     void syncScoreSummaries(String period, List<ScoreSummarySyncDTO> summaries);
 
+    /**
+     * 历史工资导入：积分月度同步（upsert，data_source=IMPORT，批次撤销按此标记清理），
+     * 同步成功后该期间积分审批单直接置 APPROVED 终态（无流程实例）。
+     *
+     * @param period    归属期间（YYYY-MM）
+     * @param summaries 月度汇总（一人一行）
+     */
+    void syncHistorySummaries(String period, List<ScoreSummarySyncDTO> summaries);
+
+    /**
+     * 历史工资导入批次撤销：删除该月 data_source=IMPORT 的积分行 + 历史审批单。
+     *
+     * @param period 归属期间（YYYY-MM）
+     */
+    void revokeHistoryImport(String period);
+
     /** 管理端分页查询（人事/总监） */
     PageResult<ScoreVO> page(ScoreQuery query, PageQuery pageQuery);
 

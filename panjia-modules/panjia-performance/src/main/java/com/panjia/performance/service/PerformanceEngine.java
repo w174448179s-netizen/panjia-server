@@ -37,8 +37,11 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -69,6 +72,7 @@ public class PerformanceEngine {
     private final ConfigService configService;
     private final IPeriodCloseService periodCloseService;
     private final ReceivedApplyMapper receivedApplyMapper;
+    private final IReceivedApplyService receivedApplyService;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /** 期间格式：YYYY-MM */
@@ -113,7 +117,9 @@ public class PerformanceEngine {
                                                 String sourceType, String period) {
         // ========== 0. 期间封账校验（§3.5 CLOSED 期间禁止重新消费） ==========
         // period 为空时（MANUAL_BUILD）延迟到消费完成由 derivedPeriod 兜底；此处仅校验显式传入的 period
-        if (StringUtils.isNotBlank(period) && periodCloseService.isClosed(period)) {
+        // 历史工资导入（HISTORY_PAYROLL）豁免封账校验：历史期间早已封账，导入的是存量补录数据
+        if (StringUtils.isNotBlank(period) && periodCloseService.isClosed(period)
+                && !"HISTORY_PAYROLL".equals(sourceType)) {
             throw new IllegalStateException("期间已封账，禁止重新消费批次：period=" + period);
         }
 
@@ -481,7 +487,8 @@ public class PerformanceEngine {
         fact.setPropertyAddress(record.getPropertyAddress());
         fact.setFeeItem(record.getFeeItem());
         // 所属角色（KE 角色类型，如 客源成交人/VR拍摄人）：归一化记录已携带，构建事实时原样落库
-        fact.setRoleType(record.getRoleType());
+        // DB 字段 VARCHAR(30)，归一化层已截断；此处双保险兜底
+        fact.setRoleType(truncate(record.getRoleType(), 30));
         fact.setRoleName(record.getRoleName());
 
         // 员工信息（联调后从 employeeSnapshot 填充）
@@ -606,7 +613,7 @@ public class PerformanceEngine {
         fact.setEmployeeId(original.getEmployeeId());
         fact.setEmployeeExternalCode(original.getEmployeeExternalCode());
         fact.setDeptId(original.getDeptId());
-        fact.setRoleType(original.getRoleType());
+        fact.setRoleType(truncate(original.getRoleType(), 30));
         fact.setRoleName(original.getRoleName());
         // ★ 分摊比例镜像原事实冻结值（仅展示用，不参与计算）
         fact.setShareRatio(original.getShareRatio());
@@ -683,6 +690,12 @@ public class PerformanceEngine {
     /** 归一化记录类型 code：贝壳业绩明细行，同携当月应收 + 当月实收两列金额 */
     public static final String RECORD_TYPE_SIGNED = "SIGNED";
 
+    /** 归一化记录类型 code：历史工资·新签业绩行（单口径，仅当月应收列有值） */
+    public static final String RECORD_TYPE_HIST_EXPECT = "HIST_EXPECT";
+
+    /** 归一化记录类型 code：历史工资·结佣业绩行（单口径，仅实收列有值） */
+    public static final String RECORD_TYPE_HIST_REAL = "HIST_REAL";
+
     /**
      * 按归一化记录类型决定本条记录要生成的事实口径集合（V4.2 双口径契约，纯函数）。
      * <p>
@@ -691,7 +704,9 @@ public class PerformanceEngine {
      *       <b>PERF_REAL（实收，结佣计薪）+ PERF_EXPECT（应收，新签/团队基数）</b>；
      *       两事实 sourceKey 相同、factType 不同，由部分唯一索引
      *       {@code uk_perf_fact_source_key(fact_type, source_key, fact_status)} 保证共存不冲突；</li>
-     *   <li>其余类型（考勤 / 积分 / 手工）：不产生业绩事实，返回空列表。</li>
+     *   <li>{@code HIST_EXPECT}（历史工资·新签业绩）：单发 PERF_EXPECT；
+     *   <li>{@code HIST_REAL}（历史工资·结佣业绩）：单发 PERF_REAL；</li>
+     *   <li>其余类型（考勤 / 积分 / 手工 / 历史工资族）：不产生业绩事实，返回空列表。</li>
      * </ul>
      * 顺序固定 REAL 在前 EXPECT 在后，保证事件发布顺序稳定可预期。
      *
@@ -704,6 +719,8 @@ public class PerformanceEngine {
         }
         return switch (record.getRecordType()) {
             case RECORD_TYPE_SIGNED -> List.of(FactType.PERF_REAL, FactType.PERF_EXPECT);
+            case RECORD_TYPE_HIST_EXPECT -> List.of(FactType.PERF_EXPECT);
+            case RECORD_TYPE_HIST_REAL -> List.of(FactType.PERF_REAL);
             default -> List.of();
         };
     }
@@ -718,13 +735,17 @@ public class PerformanceEngine {
      * 实收列有值——若回退，9 月 PERF_EXPECT 会错取实收额，导致店长团队提成/总监门店
      * 提成按同一笔钱在 8、9 两月重复计提。
      * <p>
-     * 仅非 SIGNED 的历史单口径行（无应收/实收分列）才回退 DTO.originAmount 兼容。
+     * 历史工资单口径行（HIST_EXPECT/HIST_REAL）同样并入 dualCaliber 语义：
+     * 该口径金额列为空按 0 处理，禁止回退 originAmount（另一口径）。
+     * 仅其余非金额型历史行才回退 DTO.originAmount 兼容。
      */
     public static BigDecimal resolveFactCurrentAmount(NormalizedRecordDTO record, FactType factType) {
         if (record == null || factType == null) {
             return null;
         }
-        boolean dualCaliber = RECORD_TYPE_SIGNED.equals(record.getRecordType());
+        boolean dualCaliber = RECORD_TYPE_SIGNED.equals(record.getRecordType())
+            || RECORD_TYPE_HIST_EXPECT.equals(record.getRecordType())
+            || RECORD_TYPE_HIST_REAL.equals(record.getRecordType());
         if (factType == FactType.PERF_EXPECT) {
             if (record.getReceivableAmount() != null) {
                 return record.getReceivableAmount();
@@ -791,4 +812,149 @@ public class PerformanceEngine {
         return parts.length >= 2 && !parts[1].isEmpty() ? parts[1] : null;
     }
 
+    /** DB 字段长度兜底截断（双保险：归一化层已截断，此处再兜一层防直接构造对象）。 */
+    private static String truncate(String value, int max) {
+        if (value == null || value.length() <= max) {
+            return value;
+        }
+        return value.substring(0, max);
+    }
+
+    // ==================== 手工镜像 PERF_REAL ====================
+
+    /**
+     * 从 PERF_EXPECT 事实镜像生成 PERF_REAL 事实（手工提交实收的核心）。
+     * <p>
+     * 语义：选一条已有的 PERF_EXPECT → 基于它的快照字段（合同/房源/角色/金额等）镜像一条 PERF_REAL，
+     * source=MANUAL、batch_id/normalized_record_id=null。PERF_REAL 生成后由调用方（手工提交入口）
+     * 按订单号分组建 ReceivedApply 并走审批流。
+     * <p>
+     * 幂等阻断：同一 sourceKey + PERF_REAL + ACTIVE 已存在则跳过（DB 唯一索引兜底，此处预检给 UX）。
+     * 事实链：PERF_REAL sourceKey 复用 PERF_EXPECT（unique index 靠 fact_type 区分），
+     * 但 source 不同（MANUAL vs IMPORT）——同业务键 PERF_REAL 可能有多条（分批实收）。
+     *
+     * @param expectFactIds PERF_EXPECT 事实 ID 列表
+     * @param operatorId    操作人
+     * @return 镜像结果：成功创建的 PERF_REAL 事实 + 每条状态（成功/跳过原因）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ManualReceivedResult createManualRealFromExpect(List<Long> expectFactIds, Long operatorId) {
+        ManualReceivedResult result = new ManualReceivedResult();
+        if (expectFactIds == null || expectFactIds.isEmpty()) {
+            return result;
+        }
+        // 批量查 PERF_EXPECT 事实（必须 ACTIVE + fact_type=PERF_EXPECT）
+        List<PerformanceFact> expects = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .in(PerformanceFact::getId, expectFactIds)
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE));
+        Set<Long> validIds = expects.stream().map(PerformanceFact::getId).collect(java.util.stream.Collectors.toSet());
+        // 前端可能传了已作废/非 PERF_EXPECT 的 ID，跳过
+        for (Long id : expectFactIds) {
+            if (!validIds.contains(id)) {
+                result.addSkipped(id, "事实不存在/已作废/非 PERF_EXPECT");
+            }
+        }
+        // 预检：同 sourceKey 的 ACTIVE PERF_REAL 已存在？
+        Set<String> existingRealKeys = new HashSet<>();
+        if (!expects.isEmpty()) {
+            List<String> keys = expects.stream().map(PerformanceFact::getSourceKey).toList();
+            factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getFactType, FactType.PERF_REAL)
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+                .in(PerformanceFact::getSourceKey, keys)
+                .select(PerformanceFact::getSourceKey))
+                .forEach(f -> existingRealKeys.add(f.getSourceKey()));
+        }
+        for (PerformanceFact expect : expects) {
+            if (existingRealKeys.contains(expect.getSourceKey())) {
+                result.addSkipped(expect.getId(), "已有实收事实，不能重复提交");
+                continue;
+            }
+            // 镜像 PERF_REAL
+            PerformanceFact real = new PerformanceFact();
+            real.setFactType(FactType.PERF_REAL);
+            real.setPeriod(expect.getPeriod());
+            real.setBusinessDate(expect.getBusinessDate());
+            real.setBatchId(null);
+            real.setNormalizedRecordId(null);
+            real.setSourceKey(expect.getSourceKey()); // 复用！unique index 靠 fact_type 区分
+            real.setOrderNo(expect.getOrderNo());
+            real.setContractNo(expect.getContractNo());
+            real.setPropertyAddress(expect.getPropertyAddress());
+            real.setBizType(expect.getBizType());
+            real.setFeeItem(expect.getFeeItem());
+            real.setRoleType(truncate(expect.getRoleType(), 30));
+            real.setRoleName(expect.getRoleName());
+            real.setShareRatio(expect.getShareRatio());
+            real.setPerformanceAmount(expect.getPerformanceAmount()); // 金额=PERF_EXPECT 默认值（前端弹窗可让用户改）
+            real.setEffectiveDate(expect.getEffectiveDate());
+            real.setFactStatus(FactStatus.ACTIVE);
+            real.setSource(PerformanceSource.MANUAL);
+            real.setOperatorId(operatorId);
+            try {
+                factMapper.insert(real);
+                result.addSuccess(real);
+            } catch (Exception e) {
+                result.addSkipped(expect.getId(), "插入失败：" + e.getMessage());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 手工提交实收的完整入口：造 PERF_REAL + 按订单号分组建审批单 + 走审批流。
+     * <p>
+     * 两步同一事务内执行：
+     * ① 从 PERF_EXPECT 镜像造 PERF_REAL（预检 + 幂等阻断）；
+     * ② 刚造好的 PERF_REAL 委托 {@link IReceivedApplyService#createApplyForRealFacts}
+     *    按订单号分组建 ReceivedApply + startWorkflow。
+     *
+     * @param expectFactIds 选 PERF_EXPECT 事实 ID 列表（支持合同维度多选）
+     * @param period        归属月
+     * @param operatorId    操作人
+     * @return 提交结果（新建 PERF_REAL 数 + 跳过事实 + 新建审批单数）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ManualSubmitResult submitManualReceived(List<Long> expectFactIds, String period, Long operatorId) {
+        ManualSubmitResult result = new ManualSubmitResult();
+        // ① 镜像造 PERF_REAL
+        ManualReceivedResult mirror = createManualRealFromExpect(expectFactIds, operatorId);
+        result.createdRealCount = mirror.getCreatedCount();
+        result.skippedReasons.putAll(mirror.getSkipped());
+        if (mirror.getCreated().isEmpty()) {
+            return result;
+        }
+        // ② 建审批单（source=MANUAL，batchId=null）
+        int applyCount = receivedApplyService.createApplyForRealFacts(
+            mirror.getCreated(), period, operatorId, null);
+        result.createdApplyCount = applyCount;
+        return result;
+    }
+
+    /** 手工提交实收结果 */
+    public static class ManualSubmitResult {
+        /** 新建 PERF_REAL 事实数 */
+        public int createdRealCount;
+        /** 新建审批单数（合并不计） */
+        public int createdApplyCount;
+        /** 跳过的 PERF_EXPECT ID + 原因 */
+        public final Map<Long, String> skippedReasons = new LinkedHashMap<>();
+    }
+
+    /** 手工实收镜像结果 */
+    public static class ManualReceivedResult {
+        /** 成功创建的 PERF_REAL 事实 */
+        private final List<PerformanceFact> created = new ArrayList<>();
+        /** 跳过（未创建）的 PERF_EXPECT ID + 原因 */
+        private final Map<Long, String> skipped = new LinkedHashMap<>();
+
+        public List<PerformanceFact> getCreated() { return created; }
+        public Map<Long, String> getSkipped() { return skipped; }
+        public int getCreatedCount() { return created.size(); }
+        public int getSkippedCount() { return skipped.size(); }
+
+        void addSuccess(PerformanceFact fact) { created.add(fact); }
+        void addSkipped(Long expectId, String reason) { skipped.put(expectId, reason); }
+    }
 }

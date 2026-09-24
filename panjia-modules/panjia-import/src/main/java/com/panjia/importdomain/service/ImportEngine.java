@@ -4,7 +4,7 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
-import com.panjia.contracts.port.HistoryPayrollImportPort;
+import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
@@ -18,6 +18,7 @@ import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
 import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.domain.raw.RawManual;
+import com.panjia.importdomain.domain.raw.RawPayroll;
 import com.panjia.importdomain.domain.raw.RawPoints;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.datasource.DataSource;
@@ -29,6 +30,7 @@ import com.panjia.importdomain.mapper.ImportIssueMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
+import com.panjia.importdomain.mapper.RawPayrollMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.template.ImportTemplateBridge;
@@ -51,6 +53,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -88,12 +91,16 @@ public class ImportEngine {
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
+    private final RawPayrollMapper rawPayrollMapper;
     private final PeopleQueryPort peopleQueryPort;
+    private final ConversionFactorPort conversionFactorPort;
     private final EventPort eventPort;
     private final AttendanceSummaryAggregator attendanceSummaryAggregator;
     private final ScoreSummaryAggregator scoreSummaryAggregator;
     private final BatchSupersedeService batchSupersedeService;
-    private final HistoryPayrollImportPort historyPayrollImportPort;
+
+    /** 历史工资多模板批次的模板版本快照（一文件 10 套模板，批次级统一标识） */
+    private static final String HIST_TEMPLATE_VERSION = "HIST_MULTI_V1";
 
     /**
      * 自身代理引用（绕过同类内部方法调用的代理拦截问题）。
@@ -133,10 +140,9 @@ public class ImportEngine {
      */
     public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
-        // 历史工资旁路：多 sheet 跨域直写（薪酬域），不走模板解析/归一化管线
+        // 历史工资：多模板管线（同 source_type 10 套激活模板逐 sheet 解析，建一个批次）
         if (sourceType == ImportSourceType.HISTORY_PAYROLL) {
-            ArchiveResult archived = fileArchiver.archive(content, fileName, "import");
-            return self.doHistoryPayrollPhase(archived, content, fileName, period, operatorId, deptId);
+            return self.importHistoryPayroll(sourceType, content, fileName, period, operatorId, deptId);
         }
         // 1. 嗅探文件表头 → 多激活模板时按表头自动匹配（原始文件/简版模板共存）
         List<List<String>> headerRows;
@@ -185,75 +191,280 @@ public class ImportEngine {
         return batch.getId();
     }
 
-    // ==================== 历史工资旁路 ====================
+    // ==================== 历史工资多模板管线 ====================
+
+    /** 单 sheet 解析产物（模板 code + 基础校验错误随行，事务 A 一并落库） */
+    private record HistorySheetParse(ParsedSheet sheet, String templateCode, List<FieldError> errors) {
+    }
 
     /**
-     * 历史工资导入（HISTORY_PAYROLL 旁路）：归档已完成，本方法建批次 → 委托
-     * {@link HistoryPayrollImportPort}（薪酬域）直写各域表 → 告警回填问题清单 →
-     * 小事务收口批次状态（有告警 PENDING_CONFIRM / 无告警 ARCHIVED，自动 supersede 同维度旧批次并发归档事件）。
+     * 历史工资导入（HISTORY_PAYROLL 标准管线）：同文件全部激活模板逐 sheet 解析
+     * （一模板一 sheet：工资族/考勤口径/积分口径/新签/结佣各自成模板；绩效和扣款
+     * 左右双表拆两套模板各取一个「姓名」列），建 <b>一个</b> 批次
+     * （templateVersion=HIST_MULTI_V1），RawData 按运行时类型分流 4 张 raw 表
+     * （RawSigned/RawAttendance/RawPoints/RawPayroll）。
      * <p>
-     * <b>刻意不包大事务</b>：导入器逐行 catch-continue 的容错语义只在逐条自动提交下成立
-     * （PG 事务内任一语句失败即整个事务 aborted，后续语句全部 25P02）；且导入按分段幂等设计，
-     * 失败重跑即为恢复手段，与 CLI 兜底路径语义一致。失败时批次置 FAILED 并抛出原始异常
-     * （markFailed 自身失败不掩盖根因）。
+     * 事务语义与标准管线一致：事务 A（批次+RawData+PARSE issue）→ 事务 B
+     * （归一化+归档事件）。员工按姓名批量匹配（天街历史表无工号列），未匹配
+     * → NORMALIZE issue → PENDING_CONFIRM 人工处理后重归一化。
+     * <p>
+     * 与标准管线的差异点（模板层已配置）：
+     * <ul>
+     *   <li>历史数据脏（标题行/透视残留/「不考核」文本）：模板全列 STRING+非必填，
+     *       宽容解析放消费端；空姓名行视为合并单元格残留静默跳过（与老导入器
+     *       「仅取有姓名行」一致）；</li>
+     *   <li>缺失 sheet（无总监的门店）容忍跳过；</li>
+     *   <li>业绩「85后」列为折算后金额：归一化期 ÷ bizType 折算因子还原原始金额。</li>
+     * </ul>
      */
-    public Long doHistoryPayrollPhase(ArchiveResult archived, byte[] content, String fileName,
-                                      String period, Long operatorId, Long deptId) {
+    public Long importHistoryPayroll(ImportSourceType sourceType, byte[] content,
+                                     String fileName, String period, Long operatorId, Long deptId) {
+        List<com.panjia.importdomain.domain.ImportTemplate> templates =
+            templateBridge.listActive(sourceType.getCode());
+        if (templates.isEmpty()) {
+            throw new IllegalStateException("未找到激活模板: sourceType=" + sourceType.getCode());
+        }
+        // 多模板解析（每模板独立流：fesod 读完即关）
+        List<HistorySheetParse> parsed = new ArrayList<>();
+        for (com.panjia.importdomain.domain.ImportTemplate entity : templates) {
+            ImportTemplate tool = templateBridge.toToolModel(entity);
+            ParsedSheet sheet;
+            try (ByteArrayInputStream in = new ByteArrayInputStream(content)) {
+                sheet = parserFactory.parse(in, tool, fileName);
+            } catch (Exception e) {
+                // sheet 缺失（无总监/无店长的门店文件）容忍跳过；模板结构性错误
+                // （表头不匹配/行数超限）由 validateSheetShape 与解析器自行拦截
+                log.warn("[历史工资] sheet 解析失败跳过: template={}, file={}",
+                    entity.getTemplateCode(), fileName, e);
+                continue;
+            }
+            if (sheet.getRows().isEmpty()) {
+                log.info("[历史工资] sheet 无数据行跳过: template={}", entity.getTemplateCode());
+                continue;
+            }
+            validateSheetShape(sheet, tool);
+            parsed.add(new HistorySheetParse(sheet, entity.getTemplateCode(),
+                basicValidator.validate(sheet, tool)));
+        }
+        if (parsed.isEmpty()) {
+            throw new IllegalArgumentException("文件中没有可导入的数据行，请确认上传的是天街工资表");
+        }
+
+        // 原始文件归档（审计锚点）
+        ArchiveResult archived = fileArchiver.archive(content, fileName, "import");
+
+        // 事务 A：建 1 个批次 + 全部 RawData + PARSE issue
+        ImportBatch batch = self.doHistoryParsePhase(sourceType, parsed, fileName, period,
+            operatorId, deptId, archived);
+
+        // 事务 B：归一化（姓名匹配 + 口径分流 + 反折算）
+        try {
+            self.doNormalizePhase(batch.getId(), sourceType, period);
+        } catch (Exception e) {
+            log.error("归一化失败 batchId={}", batch.getId(), e);
+            markFailed(batch.getId());
+            throw e;
+        }
+        return batch.getId();
+    }
+
+    /**
+     * 历史工资事务 A：建一个批次，循环各 sheet 产物转 RawData 分流落库，
+     * PARSE issue 一并入库，行数/问题数汇总后进入 NORMALIZING。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ImportBatch doHistoryParsePhase(ImportSourceType sourceType, List<HistorySheetParse> sheets,
+                                           String fileName, String period, Long operatorId, Long deptId,
+                                           ArchiveResult archived) {
         ImportBatch batch = new ImportBatch();
-        batch.setSourceType(ImportSourceType.HISTORY_PAYROLL);
-        batch.setTemplateVersion("HIST_V1");
+        batch.setSourceType(sourceType);
+        batch.setTemplateVersion(HIST_TEMPLATE_VERSION);
         batch.setFileName(fileName);
         batch.setOriginalFileName(fileName);
         batch.setStoragePath(archived.getStoragePath());
         batch.setPeriod(period);
-        // 旁路无解析阶段，直接以 NORMALIZING 建批次，finishNormalize 走 NORMALIZING→ARCHIVED/PENDING_CONFIRM
-        batch.setStatus(ImportBatchStatus.NORMALIZING);
+        batch.setStatus(ImportBatchStatus.PARSING);
         batch.setOperatorId(operatorId);
         batch.setDeptId(deptId);
-        batch.setBatchNo(generateBatchNo(ImportSourceType.HISTORY_PAYROLL, period));
+        batch.setBatchNo(generateBatchNo(sourceType, period));
         batchMapper.insert(batch);
-        try {
-            HistoryPayrollImportPort.HistoryPayrollImportResult result =
-                historyPayrollImportPort.importAll(batch.getId(), period, content, fileName);
-            if (!result.success()) {
-                throw new IllegalStateException(result.summary());
+
+        DataSource ds = findDataSource(sourceType);
+        int totalRows = 0;
+        int issueCount = 0;
+        for (HistorySheetParse sp : sheets) {
+            ImportContext ctx = new ImportContext(batch.getId(), batch.getBatchNo(), period,
+                HIST_TEMPLATE_VERSION, sp.templateCode());
+            ParseResult parseResult = ds.parse(sp.sheet(), ctx);
+            batchInsertRawData(sourceType, parseResult.getRows());
+            for (FieldError fe : sp.errors()) {
+                issueMapper.insert(toIssue(batch.getId(), fe));
             }
-            // 告警行（员工未匹配等）→ 批次问题清单
-            for (String w : result.warnings()) {
-                ImportIssue issue = buildIssue(null,
-                    w.contains("未匹配") ? ImportIssueType.EMPLOYEE_NOT_MATCH : ImportIssueType.COLUMN_TYPE_ERR,
-                    null, null, truncate(w, 1000));
+            for (ImportIssue issue : parseResult.getIssues()) {
                 issue.setBatchId(batch.getId());
                 issueMapper.insert(issue);
             }
-            // 批次状态收口 + 归档事件（emit 为 MANDATORY，须在小事务内与状态更新原子提交）
-            self.finalizeHistoryBatch(batch, result);
-            return batch.getId();
-        } catch (Exception e) {
-            try {
-                markFailed(batch.getId());
-            } catch (Exception markEx) {
-                log.error("[历史工资] 批次置 FAILED 失败（不影响原始异常抛出）：batchId={}", batch.getId(), markEx);
-            }
-            throw e;
+            totalRows += sp.sheet().getTotalRows();
+            issueCount += sp.errors().size() + parseResult.getIssues().size();
         }
+
+        batch.setTotalRows(totalRows);
+        batch.setFailedRows(issueCount);
+        batch.setSuccessRows(Math.max(0, totalRows - issueCount));
+        batch.setStatus(ImportBatchStatus.NORMALIZING);
+        batchMapper.updateById(batch);
+        return batch;
     }
 
     /**
-     * 历史工资批次状态收口（小事务）：finishNormalize → supersede → 归档事件 → 批次更新，
-     * 保证 emit 的 Outbox INSERT 与批次终态原子提交。
+     * 历史工资归一化：按姓名批量匹配员工（重名视为歧义不匹配 → issue），
+     * 按 RawData 运行时类型 + raw_json 口径标记定 recordType 并填充口径字段。
+     * 空姓名行为合并单元格/透视残留，静默跳过（与老导入器「仅取有姓名行」一致）。
      */
-    @Transactional(rollbackFor = Exception.class)
-    public void finalizeHistoryBatch(ImportBatch batch, HistoryPayrollImportPort.HistoryPayrollImportResult result) {
-        batch.setRemark(truncate(result.summary(), 500));
-        batch.setFailedRows(result.warnings().size());
-        batch.setSuccessRows(result.warnings().isEmpty() ? 1 : 0);
-        batch.finishNormalize(!result.warnings().isEmpty());
-        if (ImportBatchStatus.ARCHIVED.equals(batch.getStatus())) {
-            supersedeIfDuplicate(batch);
-            emitArchivedEvent(batch);
+    private void normalizeHistory(Long batchId, String period, List<ImportIssue> issues) {
+        List<RawData> rawRows = new ArrayList<>();
+        rawRows.addAll(rawSignedMapper.selectList(byBatch(RawSigned::getBatchId, batchId)));
+        rawRows.addAll(rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId)));
+        rawRows.addAll(rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId)));
+        rawRows.addAll(rawPayrollMapper.selectList(byBatch(RawPayroll::getBatchId, batchId)));
+
+        // 姓名批量富化（一次查询防 N+1；findEmployeeRefsByNames 重名不返回）
+        Set<String> names = rawRows.stream()
+            .map(r -> str(parseRawJson(r.getRawJson()), "employeeName"))
+            .filter(n -> n != null && !n.isEmpty())
+            .collect(Collectors.toSet());
+        Map<String, com.panjia.contracts.dto.EmployeeRef> refs = names.isEmpty()
+            ? Map.of()
+            : peopleQueryPort.findEmployeeRefsByNames(names);
+
+        for (RawData raw : rawRows) {
+            Map<String, Object> json = parseRawJson(raw.getRawJson());
+            String name = str(json, "employeeName");
+            if (name == null || name.isEmpty()) {
+                continue;
+            }
+            com.panjia.contracts.dto.EmployeeRef ref = refs.get(name);
+            if (ref == null) {
+                issues.add(buildIssue(raw.getRowNo(), ImportIssueType.EMPLOYEE_NOT_MATCH,
+                    "employeeName", truncate(name, 500), "员工未匹配(重名或不存在): " + name));
+                continue;
+            }
+
+            NormalizedRecord nr = new NormalizedRecord();
+            nr.setBatchId(batchId);
+            nr.setRecordType(historyRecordType(raw, json));
+            nr.setPeriod(period);
+            nr.setRawDataId(raw.getId());
+            nr.setEmployeeId(ref.employeeId());
+            nr.setEmployeeExternalCode(ref.employeeCode());
+            nr.setSourceKey(historySourceKey(raw, nr.getRecordType(), json, ref.employeeCode()));
+            fillHistoryFields(nr, json);
+            nr.setValidationStatus(1);
+            normalizedRecordMapper.insert(nr);
         }
-        batchMapper.updateById(batch);
+    }
+
+    /** RawData 运行时类型 + raw_json 口径标记 → 归一化记录类型 */
+    private NormalizedRecordType historyRecordType(RawData raw, Map<String, Object> json) {
+        if (raw instanceof RawSigned) {
+            return "HIST_REAL".equals(str(json, "recordType"))
+                ? NormalizedRecordType.HIST_REAL
+                : NormalizedRecordType.HIST_EXPECT;
+        }
+        if (raw instanceof RawAttendance) {
+            return NormalizedRecordType.ATTENDANCE;
+        }
+        if (raw instanceof RawPoints) {
+            return NormalizedRecordType.POINTS;
+        }
+        return NormalizedRecordType.PAYROLL_WAGE;
+    }
+
+    /**
+     * 历史行 sourceKey（批次内唯一，uk_norm_source_key）：
+     * 业绩行=前缀|合同号|工号|行号（同合同同人可能多行，行号兜底；
+     * 合同号空回退 ROW行号，老导入器同语义）；考勤/积分行=前缀|工号（月度一人一行）；
+     * 工资族行=sheetKind|工号|行号。
+     */
+    private String historySourceKey(RawData raw, NormalizedRecordType type,
+                                    Map<String, Object> json, String code) {
+        String contractNo = str(json, "contractNo");
+        String contractKey = contractNo == null || contractNo.isEmpty()
+            ? "ROW" + raw.getRowNo() : contractNo;
+        return switch (type) {
+            case HIST_EXPECT -> "EXP|" + contractKey + "|" + code + "|" + raw.getRowNo();
+            case HIST_REAL -> "REAL|" + contractKey + "|" + code + "|" + raw.getRowNo();
+            case ATTENDANCE -> "ATT|" + code;
+            case POINTS -> "PTS|" + code;
+            default -> str(json, "sheetKind") + "|" + code + "|" + raw.getRowNo();
+        };
+    }
+
+    /**
+     * 历史行口径填充。
+     * <ul>
+     *   <li>业绩行（HIST_EXPECT/HIST_REAL）：「85后」为折算后金额，÷ bizType 折算因子
+     *       还原原始金额（pj_perf_fact.performance_amount 存原始口径，与贝壳行一致）；
+     *       orderNo 以合同号充当（业绩汇总仅按订单号聚合，历史行无订单号）；</li>
+     *   <li>考勤/积分行：月度总量口径（与日报行区分，聚合器走 HISTORY_PAYROLL 分支）；</li>
+     *   <li>工资族行（PAYROLL_WAGE）：全字段进 extraJson，payroll 域按员工合并。</li>
+     * </ul>
+     */
+    private void fillHistoryFields(NormalizedRecord nr, Map<String, Object> json) {
+        switch (nr.getRecordType()) {
+            case HIST_EXPECT, HIST_REAL -> {
+                String contractNo = str(json, "contractNo");
+                nr.setContractNo(contractNo);
+                nr.setOrderNo(contractNo);
+                String bizType = str(json, "bizType");
+                nr.setBizType(bizType);
+                nr.setPropertyAddress(str(json, "propertyAddress"));
+                nr.setSignDate(str(json, "signDate"));
+                nr.setShareRatio(decimal(json, "shareRatio"));
+                nr.setRoleType(truncate(str(json, "roleType"), 30, "roleType", "HIST_" + nr.getRecordType()));
+                nr.setRoleName(str(json, "employeeName"));
+                BigDecimal converted = reverseConvert(bizType, decimal(json, "amount85"));
+                if (nr.getRecordType() == NormalizedRecordType.HIST_EXPECT) {
+                    nr.setReceivableAmount(converted);
+                } else {
+                    nr.setReceivedAmount(converted);
+                }
+                Map<String, Object> extra = new LinkedHashMap<>();
+                extra.put("storeGroup", str(json, "storeGroup"));
+                extra.put("storeName", str(json, "storeName"));
+                extra.put("settledFlag", str(json, "settledFlag"));
+                extra.put("settleDate", str(json, "settleDate"));
+                extra.put("amount85", str(json, "amount85"));
+                nr.setExtraJson(toJson(extra));
+            }
+            case ATTENDANCE -> {
+                nr.setReceivableAmount(decimal(json, "leaveAmount"));
+                Map<String, Object> extra = new LinkedHashMap<>();
+                extra.put("lateCount", intVal(json, "lateCount"));
+                extra.put("attendDays", decimal(json, "attendDays"));
+                extra.put("attendanceDetail", str(json, "attendanceDetail"));
+                nr.setExtraJson(toJson(extra));
+            }
+            case POINTS -> {
+                nr.setReceivableAmount(decimal(json, "score"));
+                Map<String, Object> extra = new LinkedHashMap<>();
+                extra.put("attendDays", intVal(json, "attendDays"));
+                nr.setExtraJson(toJson(extra));
+            }
+            default -> nr.setExtraJson(toJson(json));
+        }
+    }
+
+    /** 折算后金额 → 原始金额（÷ bizType 折算因子；因子缺省 1 时原样返回） */
+    private BigDecimal reverseConvert(String bizType, BigDecimal amount) {
+        if (amount == null) {
+            return null;
+        }
+        BigDecimal factor = conversionFactorPort.factorOf(bizType);
+        if (factor == null || factor.compareTo(BigDecimal.ONE) == 0) {
+            return amount;
+        }
+        return amount.divide(factor, 2, RoundingMode.HALF_UP);
     }
 
     // ==================== 事务 A：解析落库 ====================
@@ -279,7 +490,8 @@ public class ImportEngine {
 
         // 选 DataSource 转 RawData
         DataSource ds = findDataSource(sourceType);
-        ImportContext ctx = new ImportContext(batch.getId(), batch.getBatchNo(), period, template.getTemplateVersion());
+        ImportContext ctx = new ImportContext(batch.getId(), batch.getBatchNo(), period,
+            template.getTemplateVersion(), template.getTemplateCode());
         ParseResult parseResult = ds.parse(sheet, ctx);
 
         // 批量落 RawData
@@ -345,9 +557,13 @@ public class ImportEngine {
             issueMapper.insert(issue);
         }
 
-        // 更新批次状态：归一化 issue（员工未匹配等可修复问题）→ PENDING_CONFIRM 人工处理；
+        // 更新批次状态：仅 blocking issue（格式/结构错误）→ PENDING_CONFIRM 人工处理；
+        // 非 blocking issue（员工未匹配等富化失败）不阻塞归档，问题清单照常可见，下游跳过该行；
         // 无任何 issue → ARCHIVED 自动对外可见。
-        batch.finishNormalize(!issues.isEmpty());
+        boolean hasBlocking = issues.stream().anyMatch(i -> i.getIssueType() != null && i.getIssueType().isBlocking());
+        batch.finishNormalize(hasBlocking);
+        // failedRows 仍按 issue 总数计（含非阻塞），问题清单可见；successRows 按总 issue 扣减
+        // （非阻塞 issue 的行虽然归一化了，但下游因缺 employeeCode 跳过，与"失败"语义一致）
         batch.setFailedRows(issues.size());
         batch.setSuccessRows(Math.max(0, batch.getTotalRows() - issues.size()));
 
@@ -418,6 +634,11 @@ public class ImportEngine {
 
     private void normalizePerformance(Long batchId, ImportSourceType sourceType,
                                      String period, List<ImportIssue> issues) {
+        // 历史工资：多模板混装（4 张 raw 表、按姓名匹配、口径分流），独立分支
+        if (sourceType == ImportSourceType.HISTORY_PAYROLL) {
+            normalizeHistory(batchId, period, issues);
+            return;
+        }
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
@@ -581,7 +802,22 @@ public class ImportEngine {
                     rawManualMapper.insert((RawManual) r);
                 }
             }
-            case HISTORY_PAYROLL -> throw new IllegalStateException("历史工资批次不走 raw 管线");
+            case HISTORY_PAYROLL -> {
+                // 多模板混装：同一批 RawData 按 runtime 类型分流 4 张 raw 表
+                for (RawData r : rows) {
+                    if (r instanceof RawSigned s) {
+                        rawSignedMapper.insert(s);
+                    } else if (r instanceof RawAttendance a) {
+                        rawAttendanceMapper.insert(a);
+                    } else if (r instanceof RawPoints p) {
+                        rawPointsMapper.insert(p);
+                    } else if (r instanceof RawPayroll w) {
+                        rawPayrollMapper.insert(w);
+                    } else {
+                        throw new IllegalStateException("历史工资行类型未知: " + r.getClass().getName());
+                    }
+                }
+            }
         }
     }
 
@@ -591,7 +827,14 @@ public class ImportEngine {
             case ATTENDANCE -> rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId));
             case POINTS -> rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId));
             case OTHERS -> rawManualMapper.selectList(byBatch(RawManual::getBatchId, batchId));
-            case HISTORY_PAYROLL -> List.of();
+            case HISTORY_PAYROLL -> {
+                List<RawData> all = new ArrayList<>();
+                all.addAll(rawSignedMapper.selectList(byBatch(RawSigned::getBatchId, batchId)));
+                all.addAll(rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId)));
+                all.addAll(rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId)));
+                all.addAll(rawPayrollMapper.selectList(byBatch(RawPayroll::getBatchId, batchId)));
+                yield all;
+            }
         };
     }
 
@@ -638,9 +881,8 @@ public class ImportEngine {
                 nr.setTotalReceivableAmount(decimal(json, "totalReceivable"));
                 nr.setTotalReceivedAmount(decimal(json, "totalReceived"));
                 nr.setShareRatio(decimal(json, "shareRatio"));
-                nr.setRoleType(str(json, "roleType"));
+                nr.setRoleType(truncate(str(json, "roleType"), 30, "roleType", "KE_SIGNED"));
                 nr.setRoleName(str(json, "roleName"));
-                // 合同维度冗余字段：业绩域快照到 pj_perf_fact，消除关联查询
                 nr.setOrderNo(str(json, "orderNo"));
                 nr.setContractNo(str(json, "contractNo"));
                 nr.setPropertyAddress(str(json, "propertyAddress"));
@@ -710,10 +952,11 @@ public class ImportEngine {
      * @param template 激活模板
      */
     private void validateSheetShape(ParsedSheet sheet, ImportTemplate template) {
+        // occurrence 列（「姓名@2」）比对时剥后缀——文件表头是裸「姓名」
         Set<String> templateHeaders = template.getColumns().stream()
             .map(ColumnDef::getColName)
             .filter(h -> h != null && !h.isBlank())
-            .map(String::trim)
+            .map(h -> com.panjia.importutil.template.HeaderNames.baseName(h.trim()))
             .collect(Collectors.toSet());
         long matchedHeaders = sheet.getHeaders().stream()
             .filter(h -> h != null && templateHeaders.contains(h.trim()))
@@ -749,6 +992,28 @@ public class ImportEngine {
     private String str(Map<String, Object> map, String key) {
         Object v = map.get(key);
         return v == null ? null : v.toString().trim();
+    }
+
+    /**
+     * 截断字符串到指定长度，超长时打 WARN 日志（帮助定位模板列映射/原始数据脏值问题）。
+     * 归一化层兜底：DB 字段有长度约束（如 role_type VARCHAR(30)），透传原始值会 INSERT 炸。
+     *
+     * @param value 原始值（null 返回 null）
+     * @param max   最大长度
+     * @param field 字段名（日志用）
+     * @param ctx   上下文（sourceType / recordType / sheetKind 等，日志用）
+     * @return 截断后的值；null 入参 → null；原长 ≤ max → 原值
+     */
+    private String truncate(String value, int max, String field, String ctx) {
+        if (value == null) {
+            return null;
+        }
+        if (value.length() > max) {
+            log.warn("[归一化截断] 字段超长已截断：ctx={}, field={}, originalLen={}, max={}, head={}",
+                ctx, field, value.length(), max, value.substring(0, Math.min(max, 100)));
+            return value.substring(0, max);
+        }
+        return value;
     }
 
     private BigDecimal decimal(Map<String, Object> map, String key) {

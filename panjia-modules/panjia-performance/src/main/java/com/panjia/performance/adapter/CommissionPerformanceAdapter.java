@@ -14,6 +14,7 @@ import com.panjia.performance.service.ReceivedAlignmentService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
+import org.dromara.common.core.utils.StringUtils;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -118,6 +119,74 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     @Override
     public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
         return receivedAlignmentService.align(period, contractNo, operatorId);
+    }
+
+    // ==================== 历史工资导入（HISTORY_PAYROLL）结佣建单支撑 ====================
+
+    @Override
+    public List<com.panjia.contracts.dto.HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId) {
+        if (period == null || period.isBlank() || batchId == null) {
+            return Collections.emptyList();
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(PerformanceFact::getPeriod, period)
+            .eq(PerformanceFact::getBatchId, batchId)
+            .eq(PerformanceFact::getFactType, FactType.PERF_REAL)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .orderByAsc(PerformanceFact::getId);
+        List<PerformanceFact> facts = factMapper.selectList(wrapper);
+        List<com.panjia.contracts.dto.HistoryRealFactDTO> list = new ArrayList<>(facts.size());
+        for (PerformanceFact f : facts) {
+            com.panjia.contracts.dto.HistoryRealFactDTO dto = new com.panjia.contracts.dto.HistoryRealFactDTO();
+            dto.setFactId(f.getId());
+            dto.setOrderNo(f.getOrderNo());
+            dto.setContractNo(f.getContractNo());
+            dto.setSourceKey(f.getSourceKey());
+            dto.setPropertyAddress(f.getPropertyAddress());
+            dto.setBusinessDate(f.getBusinessDate());
+            dto.setBizType(f.getBizType());
+            dto.setDeptId(f.getDeptId());
+            dto.setEmployeeId(f.getEmployeeId());
+            dto.setRoleType(f.getRoleType());
+            dto.setFeeItem(f.getFeeItem());
+            dto.setAmount(f.getPerformanceAmount());
+            list.add(dto);
+        }
+        return list;
+    }
+
+    @Override
+    public Map<String, BigDecimal> sumExpectAmountsByKeys(String period, java.util.Collection<String> bizKeys) {
+        if (period == null || period.isBlank() || bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(PerformanceFact::getPeriod, period)
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE);
+        List<PerformanceFact> facts = factMapper.selectList(wrapper);
+        java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (PerformanceFact f : facts) {
+            String key = bizKeyOf(f);
+            if (key == null || !wanted.contains(key)) {
+                continue;
+            }
+            result.merge(key, f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount(),
+                BigDecimal::add);
+        }
+        return result;
+    }
+
+    /** 业务键：订单号优先，空回退合同号，再回退 sourceKey（同老导入器 bizKeyOf） */
+    private String bizKeyOf(PerformanceFact f) {
+        if (StringUtils.isNotBlank(f.getOrderNo())) {
+            return f.getOrderNo();
+        }
+        if (StringUtils.isNotBlank(f.getContractNo())) {
+            return f.getContractNo();
+        }
+        return f.getSourceKey();
     }
 
     private List<PerformanceFactSummaryDTO> toSummaries(List<PerformanceFact> facts) {

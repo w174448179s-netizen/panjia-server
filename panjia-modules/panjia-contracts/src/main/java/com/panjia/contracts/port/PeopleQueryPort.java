@@ -31,6 +31,18 @@ public interface PeopleQueryPort {
     Map<String, Long> findEmployeeIdsByCodes(Collection<String> codes);
 
     /**
+     * 按员工姓名批量查员工引用（ID + 工号）。
+     * <p>
+     * 历史工资导入归一化用：天街历史表无工号列，只能按姓名匹配员工。
+     * 重名（同名命中多行）视为歧义不返回——调用方记 EMPLOYEE_NOT_MATCH issue，
+     * 与老导入器「唯一匹配才取，重名跳过」语义一致。含离职员工（历史工资补录）。
+     *
+     * @param names 姓名集合
+     * @return 姓名 → 员工引用（仅含唯一匹配项）
+     */
+    Map<String, com.panjia.contracts.dto.EmployeeRef> findEmployeeRefsByNames(Collection<String> names);
+
+    /**
      * 取单个员工指定月份的算薪事实快照。
      *
      * @param employeeId   员工 ID

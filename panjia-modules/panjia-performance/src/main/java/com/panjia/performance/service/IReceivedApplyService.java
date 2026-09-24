@@ -26,6 +26,34 @@ public interface IReceivedApplyService {
     int autoCreateForBatch(Long batchId, String period, Long operatorId);
 
     /**
+     * 从 PERF_REAL 事实列表按订单号分组建实收审批单并提交（公共建单段）。
+     * <p>两条路径共用：① 导入 autoCreateForBatch（先按 batchId 查事实再调此方法）；
+     * ② 手工提交实收（造 PERF_REAL 后直接调此方法）。
+     * <p>幂等：同订单号当月已有 DRAFT/SUBMITTED 审批单时合并；已有 APPROVED 时跳过（防绕过审批）。
+     *
+     * @param realFacts  PERF_REAL 事实列表（已 ACTIVE、已造好，按 orderNo 分组建单）
+     * @param period     归属期间
+     * @param operatorId 操作人 ID（为空时兜底取登录用户）
+     * @param batchId    关联批次（可 null，手工提交场景不传）
+     * @return 新建审批单数量（合并不计）
+     */
+    int createApplyForRealFacts(List<com.panjia.performance.domain.PerformanceFact> realFacts,
+                                String period, Long operatorId, Long batchId);
+
+    /**
+     * 历史工资导入批次实收审批单直建（APPROVED 终态，不走工作流）。
+     * <p>语义同老导入器第 8 段：按订单号分组建 APPROVED 单并回填 received_apply_id；
+     * 无流程实例（current_node/process_instance_id 为空），不影响列表查询（均按 status 过滤）。
+     * <p>幂等：同订单号当月已有活跃审批单（DRAFT/SUBMITTED/APPROVED）时跳过。
+     *
+     * @param batchId    导入批次 ID
+     * @param period     归属期间
+     * @param operatorId 操作人 ID（为空时兜底取登录用户，再兜底 1L）
+     * @return 新建审批单数量
+     */
+    int autoCreateApprovedForBatch(Long batchId, String period, Long operatorId);
+
+    /**
      * 手工提交（店长/财务/总监，§2.2 发起人路由）：无单则按合同实收事实自动建单并提交；
      * 财务发起直达总监；总监发起直接通过；店长发起走 财务→总监。
      *

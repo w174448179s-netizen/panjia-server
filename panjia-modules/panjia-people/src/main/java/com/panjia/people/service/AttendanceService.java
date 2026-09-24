@@ -1,5 +1,6 @@
 package com.panjia.people.service;
 
+import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.port.PeopleAttendanceSyncPort;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -8,6 +9,7 @@ import com.panjia.people.dto.AttendanceSaveDTO;
 import com.panjia.people.dto.AttendanceVO;
 
 import java.util.Collection;
+import java.util.List;
 
 /**
  * 月考勤汇总服务（一员工一月一行，对齐钉钉月度汇总，服务薪酬扣款）。
@@ -16,6 +18,22 @@ import java.util.Collection;
  * 同时实现 {@link PeopleAttendanceSyncPort}：考勤导入归档后自动 upsert 本表。
  */
 public interface AttendanceService extends PeopleAttendanceSyncPort {
+
+    /**
+     * 历史工资导入：考勤汇总 upsert（data_source=IMPORT，批次撤销时按此标记清理），
+     * 同步成功后该期间考勤审批单直接置 APPROVED 终态（无流程实例）。
+     *
+     * @param period    归属期间（YYYY-MM）
+     * @param summaries 考勤月度汇总
+     */
+    void syncHistorySummaries(String period, List<AttendanceSummarySyncDTO> summaries);
+
+    /**
+     * 历史工资导入批次撤销：删除该月 data_source=IMPORT 的考勤行 + 历史审批单。
+     *
+     * @param period 归属期间（YYYY-MM）
+     */
+    void revokeHistoryImport(String period);
 
     /**
      * 管理端分页查询（员工/部门/结果/日期区间）。

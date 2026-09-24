@@ -30,8 +30,9 @@ public enum ImportSourceType {
 
     /**
      * 历史工资 Excel（天街工资表 7 个 sheet）。
-     * 不走 raw→归一化 管线：引擎旁路归档建批次后委托 HistoryPayrollImportPort
-     * 由薪酬域直写各域表，告警行回填为批次问题清单。
+     * 走标准管线多模板变体：同 sourceType 共存多套激活模板（HIST_MULTI_V1），
+     * 一模板一 sheet 循环解析共建一个批次，RawData 按运行时类型分流 4 张 raw 表；
+     * 归档后各域（performance/people/payroll/commission）消费自己的归一化数据。
      */
     HISTORY_PAYROLL("历史工资");
 

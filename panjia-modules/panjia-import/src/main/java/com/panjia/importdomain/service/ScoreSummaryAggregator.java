@@ -1,13 +1,19 @@
 package com.panjia.importdomain.service;
 
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
+import com.panjia.importdomain.domain.NormalizedRecord;
+import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawPoints;
+import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -42,16 +48,26 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class ScoreSummaryAggregator {
 
+    private static final JsonMapper JSON = JsonMapper.builder().build();
+
+    /** 晚提交扣款单价：积分扣款金额 ÷ 5 = 晚提交次数（老导入器口径） */
+    private static final BigDecimal LATE_FEE_UNIT = new BigDecimal("5");
+
     private final RawPointsMapper rawPointsMapper;
+    private final NormalizedRecordMapper normalizedRecordMapper;
 
     /**
      * 聚合批次的积分月度汇总（非积分类型/无数据返回空列表）。
      *
      * @param batchId    已归档批次 ID
-     * @param sourceType 批次来源类型代码（POINTS/ATTENDANCE/...）
+     * @param sourceType 批次来源类型代码（POINTS/ATTENDANCE/HISTORY_PAYROLL/...）
      * @param period     归属期间（YYYY-MM）
      */
     public List<ScoreSummarySyncDTO> aggregateIfPoints(Long batchId, String sourceType, String period) {
+        // 历史工资：月度总量行（日报窗口/去重逻辑不适用），从归一化记录聚合
+        if ("HISTORY_PAYROLL".equals(sourceType)) {
+            return aggregateHistory(batchId, period);
+        }
         if (!"POINTS".equals(sourceType)) {
             return List.of();
         }
@@ -129,6 +145,104 @@ public class ScoreSummaryAggregator {
             byCode.get(e.getKey()).setAttendDays(e.getValue().size());
         }
         return new ArrayList<>(byCode.values());
+    }
+
+    /**
+     * 历史工资批次积分汇总：recordType=POINTS 归一化记录（总积分/出勤天数为月度
+     * 总量，工号在归一化期匹配）+ 工资族 WAGE 行「积分扣款」÷5 折算晚提交次数
+     * （老导入器口径，金额为负先取绝对值，HALF_UP 取整）。
+     */
+    private List<ScoreSummarySyncDTO> aggregateHistory(Long batchId, String period) {
+        LocalDate scoreMonth = parseMonthStart(period);
+        if (scoreMonth == null) {
+            log.warn("[积分聚合] 期间 {} 非法，跳过 batchId={}", period, batchId);
+            return List.of();
+        }
+        List<NormalizedRecord> pointRecords = normalizedRecordMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<NormalizedRecord>()
+                .eq(NormalizedRecord::getBatchId, batchId)
+                .eq(NormalizedRecord::getRecordType, NormalizedRecordType.POINTS));
+        if (pointRecords.isEmpty()) {
+            return List.of();
+        }
+        // 工资表积分扣款 → 晚提交次数（工号 → 累计扣款额）
+        Map<String, BigDecimal> lateFeeByCode = new LinkedHashMap<>();
+        List<NormalizedRecord> wageRecords = normalizedRecordMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<NormalizedRecord>()
+                .eq(NormalizedRecord::getBatchId, batchId)
+                .eq(NormalizedRecord::getRecordType, NormalizedRecordType.PAYROLL_WAGE));
+        for (NormalizedRecord wage : wageRecords) {
+            JsonNode extra = readJson(wage.getExtraJson());
+            if (!"WAGE".equals(text(extra, "sheetKind"))) {
+                continue;
+            }
+            BigDecimal fee = dec(extra, "pointsFee");
+            if (fee != null && wage.getEmployeeExternalCode() != null) {
+                lateFeeByCode.merge(wage.getEmployeeExternalCode(), fee.abs(), BigDecimal::add);
+            }
+        }
+
+        List<ScoreSummarySyncDTO> out = new ArrayList<>();
+        for (NormalizedRecord rec : pointRecords) {
+            String code = rec.getEmployeeExternalCode() == null
+                ? null : rec.getEmployeeExternalCode().trim();
+            if (code == null || code.isEmpty()) {
+                continue;
+            }
+            ScoreSummarySyncDTO dto = new ScoreSummarySyncDTO();
+            dto.setEmployeeCode(code);
+            dto.setScoreMonth(scoreMonth);
+            dto.setTotalPoints(rec.getReceivableAmount() == null ? BigDecimal.ZERO : rec.getReceivableAmount());
+            JsonNode extra = readJson(rec.getExtraJson());
+            Integer attendDays = intOf(extra, "attendDays");
+            dto.setAttendDays(attendDays == null ? 0 : attendDays);
+            BigDecimal lateFee = lateFeeByCode.get(code);
+            dto.setLateSubmitCount(lateFee == null ? 0
+                : lateFee.divide(LATE_FEE_UNIT, 0, RoundingMode.HALF_UP).intValue());
+            out.add(dto);
+        }
+        return out;
+    }
+
+    private JsonNode readJson(String text) {
+        if (text == null || text.isBlank()) {
+            return JSON.nullNode();
+        }
+        try {
+            return JSON.readTree(text);
+        } catch (Exception e) {
+            return JSON.nullNode();
+        }
+    }
+
+    /** JSON 数值字段（Excel 解析器统一序列化为字符串，数值/文本节点均需兼容） */
+    private BigDecimal dec(JsonNode node, String field) {
+        JsonNode v = node.path(field);
+        if (v.isMissingNode() || v.isNull()) {
+            return null;
+        }
+        String text = v.isNumber() ? v.asText() : (v.isTextual() ? v.asText().trim() : null);
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+        try {
+            return new BigDecimal(text);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Integer intOf(JsonNode node, String field) {
+        BigDecimal value = dec(node, field);
+        return value == null ? null : value.intValue();
+    }
+
+    private String text(JsonNode node, String field) {
+        JsonNode v = node.path(field);
+        if (v.isMissingNode() || v.isNull()) {
+            return null;
+        }
+        return v.isTextual() ? v.asText().trim() : v.asText();
     }
 
     /** 归属月（YYYY-MM）→ 当月 1 日；非法返回 null */

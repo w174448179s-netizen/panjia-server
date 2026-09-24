@@ -163,6 +163,46 @@ public class ImportController {
     }
 
     /**
+     * 下载多模板工作簿（历史工资导入：全部激活模板各渲染一个 Sheet）。
+     * <p>同 sourceType 多套激活模板共存时使用（如 HISTORY_PAYROLL 的 10 套 sheet 模板）；
+     * 仅一套激活模板时等价于单个模板下载。
+     *
+     * @param sourceType 数据源类型 code
+     * @param response   HTTP 响应
+     */
+    @SaCheckPermission("import:batch:upload")
+    @GetMapping("/template/{sourceType}/workbook")
+    public void downloadTemplateWorkbook(@PathVariable String sourceType,
+                                         HttpServletResponse response) {
+        ImportSourceType type = ImportSourceType.fromCode(sourceType);
+        if (type == null) {
+            try {
+                response.sendError(400, "未知数据源类型: " + sourceType);
+            } catch (IOException ignored) {
+            }
+            return;
+        }
+        java.util.List<com.panjia.importutil.template.model.ImportTemplate> templates =
+            templateBridge.listActive(sourceType).stream()
+                .map(t -> templateBridge.toToolModel(t))
+                .toList();
+        byte[] excel = com.panjia.importutil.export.TemplateExporter.toWorkbook(templates);
+        String fileName = URLEncoder.encode(type.name() + "-导入模板.xlsx", StandardCharsets.UTF_8);
+        response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+        response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setContentLength(excel.length);
+        try (OutputStream out = response.getOutputStream()) {
+            out.write(excel);
+            out.flush();
+        } catch (IOException e) {
+            log.warn("模板工作簿下载写入失败", e);
+        }
+    }
+
+    /**
      * 批次详情。
      */
     @SaCheckPermission("import:batch:list")

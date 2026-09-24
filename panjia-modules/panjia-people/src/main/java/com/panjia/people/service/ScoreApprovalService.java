@@ -42,6 +42,18 @@ public interface ScoreApprovalService extends PeopleScoreApprovalQueryPort {
     void invalidateOnDataChange(String period);
 
     /**
+     * 历史工资导入：审批单直接置 APPROVED 终态（一期一审；不存在则插入，
+     * 存在非 APPROVED 则收敛），无流程实例/操作人（历史补录语义）。
+     */
+    void approveForHistory(String period);
+
+    /**
+     * 历史工资导入批次撤销：删除本期间历史导入产生的审批单
+     * （APPROVED 且无流程实例）；有流程实例的正常单据不动。
+     */
+    void deleteHistoryApproval(String period);
+
+    /**
      * 期间是否锁定（审批 SUBMITTED/APPROVED）：导入同步走 invalidateOnDataChange
      * 失效重提路径，不受此限制。
      *

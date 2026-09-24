@@ -102,9 +102,12 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         if (record == null || record.getRawDataId() == null) {
             return null;
         }
-        // 业绩记录统一路由到 SIGNED 原始行表（贝壳业绩明细表，唯一业绩来源）
+        // 业绩记录统一路由到 SIGNED 原始行表（贝壳业绩明细表，唯一业绩来源）；
+        // 历史新签/结佣业绩行（HIST_EXPECT/HIST_REAL）原始行同样落在 RawSigned 表（recordType 存 rawJson）
         NormalizedRecordType type = record.getRecordType();
-        if (type == NormalizedRecordType.SIGNED) {
+        if (type == NormalizedRecordType.SIGNED
+            || type == NormalizedRecordType.HIST_EXPECT
+            || type == NormalizedRecordType.HIST_REAL) {
             RawSigned raw = rawSignedMapper.selectById(record.getRawDataId());
             return raw == null ? null : raw.getRawJson();
         }

@@ -200,6 +200,56 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         }
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void approveForHistory(String period) {
+        if (StringUtils.isBlank(period)) {
+            return;
+        }
+        String p = period.trim();
+        ScoreApproval entity = selectByPeriod(p);
+        if (entity == null) {
+            entity = new ScoreApproval();
+            entity.setPeriod(p);
+            entity.setStatus(ScoreApproval.STATUS_APPROVED);
+            entity.setSubmitTime(LocalDateTime.now());
+            entity.setApproveTime(LocalDateTime.now());
+            approvalMapper.insert(entity);
+            // 快照在拿到单据 ID 后补写（历史补录无流程实例/操作人）
+            entity.setSnapshot(buildSnapshotJson(YearMonth.parse(p), entity.getId()));
+            if (approvalMapper.updateById(entity) == 0) {
+                log.warn("[积分审批] 历史审批单快照补写失败（并发修改）：period={}", p);
+            }
+            log.info("[积分审批] 历史导入新增 APPROVED 审批单：period={}", p);
+            return;
+        }
+        if (ScoreApproval.STATUS_APPROVED.equals(entity.getStatus())) {
+            log.info("[积分审批] 历史导入审批单已为 APPROVED，跳过：period={}", p);
+            return;
+        }
+        entity.setStatus(ScoreApproval.STATUS_APPROVED);
+        entity.setApproveTime(LocalDateTime.now());
+        entity.setSnapshot(buildSnapshotJson(YearMonth.parse(p), entity.getId()));
+        if (approvalMapper.updateById(entity) == 0) {
+            log.warn("[积分审批] 历史审批单收敛失败（并发修改）：period={}", p);
+            return;
+        }
+        log.info("[积分审批] 历史导入审批单收敛为 APPROVED：period={}，原状态={}", p, entity.getStatus());
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteHistoryApproval(String period) {
+        if (StringUtils.isBlank(period)) {
+            return;
+        }
+        int deleted = approvalMapper.delete(new LambdaQueryWrapper<ScoreApproval>()
+            .eq(ScoreApproval::getPeriod, period.trim())
+            .eq(ScoreApproval::getStatus, ScoreApproval.STATUS_APPROVED)
+            .isNull(ScoreApproval::getProcessInstanceId));
+        log.info("[积分审批] 历史导入审批单清理：period={}, 删除 {} 张", period, deleted);
+    }
+
     // ==================== 算薪卡点查询（PeopleScoreApprovalQueryPort） ====================
 
     @Override

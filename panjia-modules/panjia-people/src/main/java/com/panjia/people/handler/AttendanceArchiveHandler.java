@@ -44,6 +44,18 @@ public class AttendanceArchiveHandler implements DomainEventHandler {
             return;
         }
 
+        // 历史工资导入：考勤汇总 upsert（data_source=IMPORT）+ 审批单 APPROVED 直建
+        if ("HISTORY_PAYROLL".equals(event.getSourceType())) {
+            List<AttendanceSummarySyncDTO> history = event.getAttendanceSummaries();
+            if (history == null || history.isEmpty()) {
+                return;
+            }
+            attendanceService.syncHistorySummaries(event.getPeriod(), history);
+            log.info("[考勤消费] 历史导入考勤同步完成：batchId={}, period={}, 人数={}",
+                event.getBatchId(), event.getPeriod(), history.size());
+            return;
+        }
+
         if (!"ATTENDANCE".equals(event.getSourceType())) {
             return;
         }

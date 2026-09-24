@@ -68,13 +68,81 @@ public final class TemplateExporter {
         if (template == null || template.getColumns() == null || template.getColumns().isEmpty()) {
             throw new IllegalArgumentException("模板列定义为空，无法生成 Excel");
         }
-        List<ColumnDef> columns = template.getColumns();
         try (XSSFWorkbook wb = new XSSFWorkbook();
              ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            writeSheet(wb, template, 0);
+            wb.write(baos);
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Excel 模板导出失败", e);
+        }
+    }
 
-            XSSFSheet sheet = wb.createSheet(
-                (template.getSheetName() != null && !template.getSheetName().isBlank())
-                    ? template.getSheetName() : "导入模板");
+    /**
+     * 生成多 Sheet 工作簿模板字节（历史工资导入等多模板场景）。
+     * <p>每个模板渲染一个 Sheet（表头 + 示例行 + 必填校验 + 表头冻结），
+     * Sheet 名取 {@code sheetName} 并做去重；模板表头行号 &gt; 1 时在其前补空行
+     * （保持与原始文件行号语义一致，如店长工资 R1 为标题行）。
+     * 列名展示剥离 {@code @N} 出现序后缀（如「姓名@2」→「姓名」）。
+     *
+     * @param templates 模板列表（顺序即 Sheet 顺序）
+     * @return XLSX 字节数组
+     */
+    public static byte[] toWorkbook(List<ImportTemplate> templates) {
+        if (templates == null || templates.isEmpty()) {
+            throw new IllegalArgumentException("模板列表为空，无法生成工作簿");
+        }
+        try (XSSFWorkbook wb = new XSSFWorkbook();
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+            java.util.Set<String> usedNames = new java.util.HashSet<>();
+            int idx = 0;
+            for (ImportTemplate template : templates) {
+                if (template.getColumns() == null || template.getColumns().isEmpty()) {
+                    continue;
+                }
+                String base = (template.getSheetName() != null && !template.getSheetName().isBlank())
+                    ? template.getSheetName()
+                    : (template.getTemplateCode() != null ? template.getTemplateCode() : "Sheet" + (idx + 1));
+                // Excel sheet 名 31 字符上限 + 去重
+                String name = base.length() > 31 ? base.substring(0, 31) : base;
+                String unique = name;
+                int seq = 2;
+                while (!usedNames.add(unique)) {
+                    String suffix = "-" + seq++;
+                    unique = (name.length() + suffix.length() > 31
+                        ? name.substring(0, 31 - suffix.length()) : name) + suffix;
+                }
+                writeSheet(wb, template, idx, unique);
+                idx++;
+            }
+            wb.write(baos);
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Excel 模板工作簿导出失败", e);
+        }
+    }
+
+    /**
+     * 向工作簿写入一个模板 Sheet。
+     *
+     * @param wb        工作簿
+     * @param template  模板定义
+     * @param sheetIdx  Sheet 序号（单模板场景传 0）
+     * @param sheetName 多模板场景的 Sheet 名（单模板传 null 用模板自带名）
+     */
+    private static void writeSheet(XSSFWorkbook wb, ImportTemplate template, int sheetIdx, String... sheetName) {
+        List<ColumnDef> columns = template.getColumns();
+        String name = (sheetName != null && sheetName.length > 0 && sheetName[0] != null)
+            ? sheetName[0]
+            : ((template.getSheetName() != null && !template.getSheetName().isBlank())
+                ? template.getSheetName() : "导入模板");
+        XSSFSheet sheet = wb.createSheet(name);
+
+        // 表头行偏移：模板 header_row > 1 时在其前补空行（保持与原始文件行号语义一致）
+        int offset = template.getHeaderRow() > 1 ? template.getHeaderRow() - 1 : 0;
+        for (int r = 0; r < offset; r++) {
+            sheet.createRow(r);
+        }
 
             // ===== 样式：必填列表头（红字加粗） + 普通表头（加粗） =====
             CellStyle requiredHeaderStyle = wb.createCellStyle();
@@ -88,13 +156,15 @@ public final class TemplateExporter {
             boldFont.setBold(true);
             optionalHeaderStyle.setFont(boldFont);
 
-            // ===== 第 0 行：表头 =====
-            Row headerRow = sheet.createRow(0);
+            // ===== 表头行（header_row 偏移后）=====
+            Row headerRow = sheet.createRow(offset);
             DataValidationHelper dvh = sheet.getDataValidationHelper();
             for (int i = 0; i < columns.size(); i++) {
                 ColumnDef col = columns.get(i);
                 Cell cell = headerRow.createCell(i);
-                String colName = col.getColName() != null ? col.getColName() : col.getField();
+                // 展示名剥离 @N 出现序后缀（「姓名@2」→「姓名」），普通列名无变化
+                String colName = com.panjia.importutil.template.HeaderNames.baseName(
+                    col.getColName() != null ? col.getColName() : col.getField());
                 if (col.isRequired()) {
                     // ★ 必填列：显示名 + " *" 后缀
                     cell.setCellValue(colName + REQUIRED_SUFFIX);
@@ -109,13 +179,11 @@ public final class TemplateExporter {
                 sheet.setColumnWidth(i, width);
 
                 // ★ 必填列加 Excel Data Validation：文本长度 ≥ 1 = 非空
-                // V6.0.1 起说明行删除，用户填数据从第 2 行（行号 1）开始，
-                // Validation 范围从 (2,1000) 调整为 (1,1000)
                 if (col.isRequired()) {
                     DataValidationConstraint constraint = dvh.createTextLengthConstraint(
                         DataValidationConstraint.OperatorType.BETWEEN, "1", "1048576");
                     CellRangeAddressList regions = new CellRangeAddressList(
-                        1, VALIDATION_MAX_ROW, i, i);
+                        offset + 1, VALIDATION_MAX_ROW, i, i);
                     DataValidation validation = dvh.createValidation(constraint, regions);
                     validation.setErrorStyle(DataValidation.ErrorStyle.STOP);
                     String prompt = (colName == null ? "必填列" : colName) + " 不能为空";
@@ -129,23 +197,15 @@ public final class TemplateExporter {
                 }
             }
 
-            // ===== 第 1 行：示例数据（用户填表参考，可整行删除） =====
-            // V6.0.1 起保留示例行作为格式提示（按 type 给合理默认值：INT=1、DATE=2026-01-01 ...）。
-            // 用户填数据从第 2 行（行号 1）起。
-            Row sampleRow = sheet.createRow(1);
+            // ===== 示例数据行（表头下一行，用户填表参考，可整行删除） =====
+            Row sampleRow = sheet.createRow(offset + 1);
             for (int i = 0; i < columns.size(); i++) {
                 Cell cell = sampleRow.createCell(i);
                 cell.setCellValue(sampleValue(columns.get(i)));
             }
 
-            // ★ 表头行冻结：第一行（用户滚动时始终可见）
-            sheet.createFreezePane(0, 1);
-
-            wb.write(baos);
-            return baos.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException("Excel 模板导出失败", e);
-        }
+            // ★ 表头行冻结：表头及其上方空行（用户滚动时始终可见）
+            sheet.createFreezePane(0, offset + 1);
     }
 
     /**

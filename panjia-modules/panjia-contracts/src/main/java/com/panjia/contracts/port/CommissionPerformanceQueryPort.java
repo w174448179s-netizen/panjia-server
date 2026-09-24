@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
@@ -157,4 +158,29 @@ public interface CommissionPerformanceQueryPort {
      * @return 新事实 ID
      */
     Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId);
+
+    /**
+     * 历史工资导入批次实收事实明细（历史 LOCKED 结佣建单用）。
+     * <p>
+     * 返回指定批次下 factType=PERF_REAL 且 ACTIVE 的事实行（含订单号/合同号/
+     * 房源地址/费用项等建单字段）。是否已绑定结佣明细的过滤由结佣域自行处理
+     * （查自身 pj_commission_item.performance_fact_id）。
+     *
+     * @param period  归属期间 YYYY-MM
+     * @param batchId 导入批次 ID
+     * @return 实收事实明细（按事实 ID 升序）；无数据返回空列表
+     */
+    List<HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId);
+
+    /**
+     * 按业务键汇总期间应收事实金额（历史 LOCKED 建单 expected_amount 用）。
+     * <p>
+     * 口径：factType=PERF_EXPECT 且 ACTIVE，业务键 = 订单号优先，空回退合同号，
+     * 再回退 sourceKey（与事实生成侧 buildSourceKeyPrefix 的业务键约定一致）。
+     *
+     * @param period  归属期间 YYYY-MM
+     * @param bizKeys 业务键集合（不可为空）
+     * @return bizKey → 应收合计；无事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumExpectAmountsByKeys(String period, Collection<String> bizKeys);
 }

@@ -1,7 +1,10 @@
 package com.panjia.importdomain.service;
 
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
+import com.panjia.importdomain.domain.NormalizedRecord;
+import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
+import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -36,15 +39,20 @@ public class AttendanceSummaryAggregator {
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private final RawAttendanceMapper rawAttendanceMapper;
+    private final NormalizedRecordMapper normalizedRecordMapper;
 
     /**
      * 聚合批次的考勤月度汇总（非考勤类型/无数据返回空列表）。
      *
      * @param batchId    已归档批次 ID
-     * @param sourceType 批次来源类型代码（KE_SIGNED/ATTENDANCE/...）
+     * @param sourceType 批次来源类型代码（KE_SIGNED/ATTENDANCE/HISTORY_PAYROLL/...）
      * @param period     归属期间（YYYY-MM）
      */
     public List<AttendanceSummarySyncDTO> aggregateIfAttendance(Long batchId, String sourceType, String period) {
+        // 历史工资：月度汇总行，归一化期才完成姓名匹配（raw 行无工号），从归一化记录聚合
+        if ("HISTORY_PAYROLL".equals(sourceType)) {
+            return aggregateFromNormalized(batchId, period);
+        }
         if (!"ATTENDANCE".equals(sourceType)) {
             return List.of();
         }
@@ -83,6 +91,44 @@ public class AttendanceSummaryAggregator {
             dto.setLeaveDays(firstNonNull(dto.getLeaveDays(), raw.getLeaveDays()));
         }
         return new ArrayList<>(byCode.values());
+    }
+
+    /**
+     * 历史工资批次考勤汇总：从归一化记录读取（recordType=ATTENDANCE，一人一行
+     * 月度总量）。员工匹配在归一化期完成，工号取 employeeExternalCode；
+     * 出勤天数/迟到次数等月度指标在 extraJson（fillHistoryFields 填充）。
+     */
+    private List<AttendanceSummarySyncDTO> aggregateFromNormalized(Long batchId, String period) {
+        LocalDate attendMonth = parseMonthStart(period);
+        if (attendMonth == null) {
+            log.warn("[考勤聚合] 期间 {} 非法，跳过 batchId={}", period, batchId);
+            return List.of();
+        }
+        List<NormalizedRecord> records = normalizedRecordMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<NormalizedRecord>()
+                .eq(NormalizedRecord::getBatchId, batchId)
+                .eq(NormalizedRecord::getRecordType, NormalizedRecordType.ATTENDANCE));
+        if (records.isEmpty()) {
+            return List.of();
+        }
+        List<AttendanceSummarySyncDTO> out = new ArrayList<>();
+        for (NormalizedRecord rec : records) {
+            String code = rec.getEmployeeExternalCode() == null
+                ? null : rec.getEmployeeExternalCode().trim();
+            if (code == null || code.isEmpty()) {
+                continue;
+            }
+            AttendanceSummarySyncDTO dto = new AttendanceSummarySyncDTO();
+            dto.setEmployeeCode(code);
+            dto.setAttendMonth(attendMonth);
+            JsonNode extra = readJson(rec.getExtraJson());
+            dto.setAttendDays(dec(extra, "attendDays"));
+            dto.setLateCount(intOf(extra, "lateCount"));
+            dto.setAbsentDays(dec(extra, "absentDays"));
+            dto.setLeaveDays(dec(extra, "leaveDays"));
+            out.add(dto);
+        }
+        return out;
     }
 
     /** 归属月（YYYY-MM）→ 当月 1 日；非法返回 null */

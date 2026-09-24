@@ -14,6 +14,7 @@ import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportSourceType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
 import com.panjia.importdomain.domain.raw.RawManual;
+import com.panjia.importdomain.domain.raw.RawPayroll;
 import com.panjia.importdomain.domain.raw.RawPoints;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
@@ -21,6 +22,7 @@ import com.panjia.importdomain.mapper.ImportIssueMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
+import com.panjia.importdomain.mapper.RawPayrollMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.service.ImportBatchService;
@@ -50,6 +52,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
+    private final RawPayrollMapper rawPayrollMapper;
     private final ObjectProvider<BatchConsumptionQueryPort> consumptionQueryPortProvider;
     private final FileArchiver fileArchiver;
     private final EventPort eventPort;
@@ -336,6 +339,20 @@ public class ImportBatchServiceImpl implements ImportBatchService {
                 count = rawManualMapper.delete(new LambdaQueryWrapper<RawManual>()
                     .eq(RawManual::getBatchId, batchId));
                 log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=OTHERS, count={}", batchId, count);
+                break;
+            case HISTORY_PAYROLL:
+                // 多模板混装：4 张 raw 表逐一清理（外键都指向批次）
+                long signed = rawSignedMapper.delete(new LambdaQueryWrapper<RawSigned>()
+                    .eq(RawSigned::getBatchId, batchId));
+                long attendance = rawAttendanceMapper.delete(new LambdaQueryWrapper<RawAttendance>()
+                    .eq(RawAttendance::getBatchId, batchId));
+                long points = rawPointsMapper.delete(new LambdaQueryWrapper<RawPoints>()
+                    .eq(RawPoints::getBatchId, batchId));
+                count = rawPayrollMapper.delete(new LambdaQueryWrapper<RawPayroll>()
+                    .eq(RawPayroll::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=HISTORY_PAYROLL, "
+                    + "signed={}, attendance={}, points={}, payroll={}",
+                    batchId, signed, attendance, points, count);
                 break;
             default:
                 log.warn("[导入撤销] 未知来源类型，跳过 raw 数据删除：batchId={}, sourceType={}", batchId, sourceType);

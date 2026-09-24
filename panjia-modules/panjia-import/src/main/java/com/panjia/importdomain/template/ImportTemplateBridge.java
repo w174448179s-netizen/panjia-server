@@ -68,6 +68,27 @@ public class ImportTemplateBridge implements TemplateResolver {
     }
 
     /**
+     * 取某来源类型全部激活模板（按 ID 升序，结果稳定）。
+     * <p>
+     * 历史工资多模板管线用：同 source_type 10 套模板共存（一模板一 sheet），
+     * 引擎循环全部模板逐 sheet 解析，建一个批次。
+     */
+    public List<ImportTemplate> listActive(String sourceType) {
+        return templateMapper.selectList(
+            new LambdaQueryWrapper<ImportTemplate>()
+                .eq(ImportTemplate::getSourceType, sourceType)
+                .eq(ImportTemplate::getIsActive, true)
+                .orderByAsc(ImportTemplate::getId));
+    }
+
+    /**
+     * 模板实体 → 工具层内存模型（多模板管线逐模板转换用）。
+     */
+    public com.panjia.importutil.template.model.ImportTemplate toToolModel(ImportTemplate entity) {
+        return toToolTemplate(entity);
+    }
+
+    /**
      * 按模板 code 取激活模板（模板下载等需要精确指定模板的场景）。
      */
     public ImportTemplate getActiveByCode(String templateCode) {

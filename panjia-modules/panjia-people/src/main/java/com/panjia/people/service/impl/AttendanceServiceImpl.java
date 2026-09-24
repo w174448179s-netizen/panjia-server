@@ -56,6 +56,9 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
     /** 数据来源：钉钉《月度汇总》导入同步 */
     private static final String DATA_SOURCE_DINGTALK = "DINGTALK";
 
+    /** 数据来源：历史工资导入（批次撤销时按此标记清理） */
+    private static final String DATA_SOURCE_IMPORT = "IMPORT";
+
     private final AttendanceRecordMapper attendanceMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
@@ -233,8 +236,41 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void syncAttendanceSummaries(String period, List<AttendanceSummarySyncDTO> summaries) {
-        if (summaries == null || summaries.isEmpty()) {
+        int synced = doSyncSummaries(period, summaries, DATA_SOURCE_DINGTALK);
+        if (synced > 0) {
+            // 数据被导入覆盖，已提交/已通过的审批单失效回待提交，防止按旧审批算薪
+            approvalService.invalidateOnDataChange(period);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncHistorySummaries(String period, List<AttendanceSummarySyncDTO> summaries) {
+        int synced = doSyncSummaries(period, summaries, DATA_SOURCE_IMPORT);
+        if (synced > 0) {
+            // 历史补录：审批单直接置 APPROVED 终态（无流程实例），不做失效打回
+            approvalService.approveForHistory(period);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void revokeHistoryImport(String period) {
+        LocalDate monthStart = parseMonth(period);
+        if (monthStart == null) {
             return;
+        }
+        int rows = attendanceMapper.delete(new LambdaQueryWrapper<AttendanceRecord>()
+            .eq(AttendanceRecord::getAttendMonth, monthStart)
+            .eq(AttendanceRecord::getDataSource, DATA_SOURCE_IMPORT));
+        approvalService.deleteHistoryApproval(period);
+        log.info("[考勤撤销] 历史导入数据已清理：period={}, 删除考勤 {} 条", period, rows);
+    }
+
+    /** 汇总 upsert 公共段：按工号匹配员工后逐条覆盖写入，返回成功条数。 */
+    private int doSyncSummaries(String period, List<AttendanceSummarySyncDTO> summaries, String dataSource) {
+        if (summaries == null || summaries.isEmpty()) {
+            return 0;
         }
         List<String> codes = summaries.stream()
             .map(AttendanceSummarySyncDTO::getEmployeeCode)
@@ -244,7 +280,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
             .toList();
         if (codes.isEmpty()) {
             log.warn("[考勤同步] 期间 {} 无有效工号，跳过同步", period);
-            return;
+            return 0;
         }
         Map<String, Long> codeToEmployeeId = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
                 .in(Employee::getEmployeeCode, codes)
@@ -262,18 +298,15 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
                 log.warn("[考勤同步] 工号 {} 未匹配员工档案或缺考勤月份，跳过（期间 {}）", code, period);
                 continue;
             }
-            upsertFromImport(employeeId, summary);
+            upsertFromImport(employeeId, summary, dataSource);
             synced++;
         }
         log.info("[考勤同步] 期间 {} 同步完成：成功 {} 条，跳过 {} 条", period, synced, skipped);
-        if (synced > 0) {
-            // 数据被导入覆盖，已提交/已通过的审批单失效回待提交，防止按旧审批算薪
-            approvalService.invalidateOnDataChange(period);
-        }
+        return synced;
     }
 
-    /** 导入行 upsert：同员工同月存在则覆盖更新（保留人工备注），否则新增，data_source=DINGTALK */
-    private void upsertFromImport(Long employeeId, AttendanceSummarySyncDTO summary) {
+    /** 导入行 upsert：同员工同月存在则覆盖更新（保留人工备注），否则新增 */
+    private void upsertFromImport(Long employeeId, AttendanceSummarySyncDTO summary, String dataSource) {
         AttendanceRecord existing = attendanceMapper.selectOne(new LambdaQueryWrapper<AttendanceRecord>()
             .eq(AttendanceRecord::getEmployeeId, employeeId)
             .eq(AttendanceRecord::getAttendMonth, summary.getAttendMonth()));
@@ -282,7 +315,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
             record.setEmployeeId(employeeId);
             record.setAttendMonth(summary.getAttendMonth());
             applyImportMetrics(record, summary);
-            record.setDataSource(DATA_SOURCE_DINGTALK);
+            record.setDataSource(dataSource);
             try {
                 attendanceMapper.insert(record);
             } catch (DuplicateKeyException e) {
@@ -292,14 +325,14 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
                     .eq(AttendanceRecord::getAttendMonth, summary.getAttendMonth()));
                 if (winner != null) {
                     applyImportMetrics(winner, summary);
-                    winner.setDataSource(DATA_SOURCE_DINGTALK);
+                    winner.setDataSource(dataSource);
                     attendanceMapper.updateById(winner);
                 }
             }
             return;
         }
         applyImportMetrics(existing, summary);
-        existing.setDataSource(DATA_SOURCE_DINGTALK);
+        existing.setDataSource(dataSource);
         if (attendanceMapper.updateById(existing) == 0) {
             // 乐观锁冲突：他人正在编辑该月记录，导入不覆盖，留待下次导入或人工处理
             log.warn("[考勤同步] 员工 {} {} 月记录正被并发修改，本次未覆盖", employeeId, summary.getAttendMonth());

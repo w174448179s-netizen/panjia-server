@@ -532,6 +532,29 @@ public class EmployeeServiceImpl implements EmployeeService {
         return map;
     }
 
+    @Override
+    public Map<String, com.panjia.contracts.dto.EmployeeRef> findEmployeeRefsByNames(Collection<String> names) {
+        if (names == null || names.isEmpty()) {
+            return Map.of();
+        }
+        List<Employee> list = employeeMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Employee>()
+                .in(Employee::getEmployeeName, names));
+        // 重名（同名命中多行）视为歧义不返回，调用方按未匹配处理（含离职员工，历史工资补录）
+        Map<String, List<Employee>> byName = new java.util.LinkedHashMap<>();
+        for (Employee e : list) {
+            byName.computeIfAbsent(e.getEmployeeName(), k -> new java.util.ArrayList<>()).add(e);
+        }
+        Map<String, com.panjia.contracts.dto.EmployeeRef> map = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<Employee>> entry : byName.entrySet()) {
+            if (entry.getValue().size() == 1) {
+                Employee e = entry.getValue().get(0);
+                map.put(entry.getKey(), new com.panjia.contracts.dto.EmployeeRef(e.getEmployeeId(), e.getEmployeeCode()));
+            }
+        }
+        return map;
+    }
+
     // ==================== 内部方法 ====================
 
     /**

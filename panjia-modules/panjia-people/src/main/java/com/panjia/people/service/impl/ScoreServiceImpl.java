@@ -64,8 +64,41 @@ public class ScoreServiceImpl implements ScoreService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void syncScoreSummaries(String period, List<ScoreSummarySyncDTO> summaries) {
-        if (summaries == null || summaries.isEmpty()) {
+        int synced = doSyncSummaries(period, summaries);
+        if (synced > 0) {
+            // 数据被导入覆盖，已提交/已通过的审批单失效回待提交，防止按旧审批算薪
+            approvalService.invalidateOnDataChange(period);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncHistorySummaries(String period, List<ScoreSummarySyncDTO> summaries) {
+        int synced = doSyncSummaries(period, summaries);
+        if (synced > 0) {
+            // 历史补录：审批单直接置 APPROVED 终态（无流程实例），不做失效打回
+            approvalService.approveForHistory(period);
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void revokeHistoryImport(String period) {
+        LocalDate monthStart = parseMonth(period);
+        if (monthStart == null) {
             return;
+        }
+        int rows = scoreMapper.delete(new LambdaQueryWrapper<PerformanceScore>()
+            .eq(PerformanceScore::getScoreMonth, monthStart)
+            .eq(PerformanceScore::getDataSource, DATA_SOURCE_IMPORT));
+        approvalService.deleteHistoryApproval(period);
+        log.info("[积分撤销] 历史导入数据已清理：period={}, 删除积分 {} 条", period, rows);
+    }
+
+    /** 汇总 upsert 公共段：按工号匹配员工后逐条覆盖写入，返回成功条数。 */
+    private int doSyncSummaries(String period, List<ScoreSummarySyncDTO> summaries) {
+        if (summaries == null || summaries.isEmpty()) {
+            return 0;
         }
         List<String> codes = summaries.stream()
             .map(ScoreSummarySyncDTO::getEmployeeCode)
@@ -75,7 +108,7 @@ public class ScoreServiceImpl implements ScoreService {
             .toList();
         if (codes.isEmpty()) {
             log.warn("[积分同步] 期间 {} 无有效工号，跳过同步", period);
-            return;
+            return 0;
         }
         Map<String, Long> codeToEmployeeId = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
                 .in(Employee::getEmployeeCode, codes)
@@ -97,10 +130,7 @@ public class ScoreServiceImpl implements ScoreService {
             synced++;
         }
         log.info("[积分同步] 期间 {} 同步完成：成功 {} 条，跳过 {} 条", period, synced, skipped);
-        if (synced > 0) {
-            // 数据被导入覆盖，已提交/已通过的审批单失效回待提交，防止按旧审批算薪
-            approvalService.invalidateOnDataChange(period);
-        }
+        return synced;
     }
 
     /** 导入行 upsert：同员工同月存在则覆盖更新，否则新增，data_source=IMPORT */

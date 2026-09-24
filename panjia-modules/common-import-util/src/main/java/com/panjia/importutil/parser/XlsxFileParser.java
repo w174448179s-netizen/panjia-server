@@ -45,11 +45,21 @@ public class XlsxFileParser implements FileParser {
 
     @Override
     public ParsedSheet parse(InputStream in, ImportTemplate template, String originalFilename) {
-        // 表头文本 → 列定义（归一化后匹配：trim + 兼容下载模板必填列 " *" 后缀）
+        // 表头文本 → 列定义（归一化后匹配：trim + 兼容下载模板必填列 " *" 后缀）。
+        // occurrence 语法（「姓名@2」）：同文件重复列表头按第 N 次出现精确匹配，
+        // 与普通列分索引存储；普通列保持既有语义（同名表头多处出现时值后者覆盖）。
         Map<String, ColumnDef> headerIndex = new LinkedHashMap<>();
+        Map<String, java.util.TreeMap<Integer, ColumnDef>> occurrenceIndex = new LinkedHashMap<>();
         for (ColumnDef col : template.getColumns()) {
             if (col.getColName() != null && !col.getColName().isBlank()) {
-                headerIndex.put(com.panjia.importutil.template.HeaderNames.normalize(col.getColName()), col);
+                Integer occ = com.panjia.importutil.template.HeaderNames.occurrence(col.getColName());
+                String normalized = com.panjia.importutil.template.HeaderNames.normalize(
+                    com.panjia.importutil.template.HeaderNames.baseName(col.getColName()));
+                if (occ != null) {
+                    occurrenceIndex.computeIfAbsent(normalized, k -> new java.util.TreeMap<>()).put(occ, col);
+                } else {
+                    headerIndex.put(normalized, col);
+                }
             }
         }
 
@@ -66,6 +76,7 @@ public class XlsxFileParser implements FileParser {
 
         AnalysisEventListener<Map<Integer, String>> listener = new AnalysisEventListener<>() {
             private final List<String> headers = new ArrayList<>();
+            private final Map<String, Integer> occurrenceCounters = new java.util.HashMap<>();
             private int dataSeq = 0;
 
             /**
@@ -113,8 +124,16 @@ public class XlsxFileParser implements FileParser {
                     if (header == null || header.isBlank()) {
                         continue;
                     }
-                    ColumnDef col = headerIndex.get(
-                        com.panjia.importutil.template.HeaderNames.normalize(header));
+                    String normalized = com.panjia.importutil.template.HeaderNames.normalize(header);
+                    // occurrence 计数：同名表头第 N 次出现（occurrence 列定义仅在 N 命中时生效）
+                    int occurrence = occurrenceCounters.merge(normalized, 1, Integer::sum);
+                    ColumnDef col = headerIndex.get(normalized);
+                    if (col == null) {
+                        java.util.TreeMap<Integer, ColumnDef> occDefs = occurrenceIndex.get(normalized);
+                        if (occDefs != null) {
+                            col = occDefs.get(occurrence);
+                        }
+                    }
                     if (col == null) {
                         continue;
                     }

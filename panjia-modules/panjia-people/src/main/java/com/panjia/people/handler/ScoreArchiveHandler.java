@@ -44,6 +44,18 @@ public class ScoreArchiveHandler implements DomainEventHandler {
             return;
         }
 
+        // 历史工资导入：积分汇总 upsert + 审批单 APPROVED 直建
+        if ("HISTORY_PAYROLL".equals(event.getSourceType())) {
+            List<ScoreSummarySyncDTO> history = event.getScoreSummaries();
+            if (history == null || history.isEmpty()) {
+                return;
+            }
+            scoreService.syncHistorySummaries(event.getPeriod(), history);
+            log.info("[积分消费] 历史导入积分同步完成：batchId={}, period={}, 人数={}",
+                event.getBatchId(), event.getPeriod(), history.size());
+            return;
+        }
+
         if (!"POINTS".equals(event.getSourceType())) {
             return;
         }

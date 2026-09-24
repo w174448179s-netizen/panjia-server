@@ -33,8 +33,12 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ImportBatchArchivedHandler implements DomainEventHandler {
 
-    /** 唯一业绩来源：贝壳·经纪人业绩明细表（KE_SIGNED，一行双口径） */
-    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED");
+    /** 业绩来源：贝壳·经纪人业绩明细表（KE_SIGNED，一行双口径）+ 历史工资导入（HISTORY_PAYROLL，单口径行） */
+    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES =
+        java.util.Set.of("KE_SIGNED", "HISTORY_PAYROLL");
+
+    /** 历史工资导入来源标识：业绩事实生成后实收审批单走 APPROVED 直建，不走工作流 */
+    private static final String SOURCE_TYPE_HISTORY_PAYROLL = "HISTORY_PAYROLL";
 
     private final PerformanceEngine performanceEngine;
     private final IReceivedApplyService receivedApplyService;
@@ -78,9 +82,13 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
                 event.getPeriod());
 
             // §2.1 业绩事实生成后，有实收的合同自动生成实收审批单并提交（按未绑定事实幂等）
+            // 历史工资导入批次实收审批单走 APPROVED 直建（无工作流，语义同老导入器）
             String period = event.getPeriod() != null ? event.getPeriod() : consumeLog.getPeriod();
-            int created = receivedApplyService.autoCreateForBatch(event.getBatchId(), period, event.getOperatorId());
-            log.info("[业绩消费] 归档批次消费完成：batchId={}, 实收审批单新建={}", event.getBatchId(), created);
+            int created = SOURCE_TYPE_HISTORY_PAYROLL.equals(event.getSourceType())
+                ? receivedApplyService.autoCreateApprovedForBatch(event.getBatchId(), period, event.getOperatorId())
+                : receivedApplyService.autoCreateForBatch(event.getBatchId(), period, event.getOperatorId());
+            log.info("[业绩消费] 归档批次消费完成：batchId={}, sourceType={}, 实收审批单新建={}",
+                event.getBatchId(), event.getSourceType(), created);
         } catch (Exception e) {
             log.error("[业绩消费] 归档事件处理失败：batchId={}, eventId={}",
                 event.getBatchId(), eventId, e);
