@@ -15,6 +15,7 @@ import com.panjia.people.domain.PeopleImportIssue;
 import com.panjia.people.dto.ChangeLogVO;
 import com.panjia.people.dto.DeptNode;
 import com.panjia.people.dto.EmployeeCreateDTO;
+import com.panjia.people.dto.EmployeeImportQuery;
 import com.panjia.people.dto.EmployeeQuery;
 import com.panjia.people.dto.EmployeeUpdateDTO;
 import com.panjia.people.dto.EmployeeVO;
@@ -148,22 +149,28 @@ public class EmployeeController extends BaseController {
     }
 
     /**
-     * 员工导入（V6.0 回迁本域）：上传 Excel/CSV，两阶段执行。
+     * 员工导入（V6.0 回迁本域）：上传 Excel/CSV，两阶段执行（multipart/form-data）。
      * <p>
      * 阶段 A 诊断（落批次/原始行/问题清单）；诊断通过后阶段 B 单一大事务落地，
      * 任一行失败整批回滚。成功或失败均返回批次 ID，问题清单走
      * {@code GET /people/employee/import/{batchId}/issues} 查询。
+     * <p>
+     * 已有工号走覆盖更新：算薪数据列切换基准默认当前时间，可通过 effectiveDate 指定。
      *
-     * @param file 导入文件（XLSX/CSV）
+     * @param query 导入请求（file 必填；effectiveDate 可选生效时间）
      * @return 导入批次 ID
      */
     @SaCheckPermission("people:employee:import")
     @Log(title = "员工导入", businessType = BusinessType.IMPORT)
     @PostMapping("/import")
-    public R<Long> importEmployees(@RequestParam("file") MultipartFile file) {
+    public R<Long> importEmployees(EmployeeImportQuery query) {
         try {
+            MultipartFile file = query.getFile();
+            if (file == null || file.isEmpty()) {
+                return R.fail("导入文件不能为空");
+            }
             Long batchId = employeeImportService.importEmployees(
-                file.getBytes(), file.getOriginalFilename(), LoginHelper.getUserId());
+                file.getBytes(), file.getOriginalFilename(), LoginHelper.getUserId(), query.getEffectiveDate());
             return R.ok("导入已提交，正在后台处理", batchId);
         } catch (Exception e) {
             log.error("员工导入失败", e);

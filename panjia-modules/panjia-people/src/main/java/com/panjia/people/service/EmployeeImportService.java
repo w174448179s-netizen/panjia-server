@@ -3,6 +3,7 @@ package com.panjia.people.service;
 import com.panjia.people.domain.PeopleImportBatch;
 import com.panjia.people.domain.PeopleImportIssue;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -17,13 +18,17 @@ public interface EmployeeImportService {
 
     /**
      * 从文件字节执行员工导入。
+     * <p>
+     * 新员工走创建（算薪事实生效日=入职日）；已有工号走覆盖更新，
+     * 算薪数据列经 changeFact 时间线切换（旧事实结束日期、新事实生效日均置为生效时间）。
      *
-     * @param content    文件字节内容（XLSX/CSV）
-     * @param fileName   原始文件名
-     * @param operatorId 操作人 ID
+     * @param content      文件字节内容（XLSX/CSV）
+     * @param fileName     原始文件名
+     * @param operatorId   操作人 ID
+     * @param effectiveDate 覆盖导入的生效时间（可选，默认当前时间）
      * @return 导入批次 ID（成功或失败均返回，问题清单可查）
      */
-    Long importEmployees(byte[] content, String fileName, Long operatorId);
+    Long importEmployees(byte[] content, String fileName, Long operatorId, LocalDate effectiveDate);
 
     /**
      * 员工导入批次列表（按创建时间倒序）。

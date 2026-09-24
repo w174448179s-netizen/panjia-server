@@ -120,7 +120,7 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     }
 
     @Override
-    public Long importEmployees(byte[] content, String fileName, Long operatorId) {
+    public Long importEmployees(byte[] content, String fileName, Long operatorId, LocalDate effectiveDate) {
         // 1. 解析启用模板（工具层内存模型）
         ImportTemplate template = templateBridge.resolve(TEMPLATE_CODE_EMPLOYEE);
 
@@ -155,7 +155,7 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         // 6. 阶段 B：异步提交到线程池（不阻塞 HTTP 请求）
         ParsedSheet sheetRef = sheet;
         List<ColumnDef> deptColsRef = deptCols;
-        taskExecutor.execute(() -> doImportAsync(batchId, sheetRef, operatorId, deptColsRef));
+        taskExecutor.execute(() -> doImportAsync(batchId, sheetRef, operatorId, deptColsRef, effectiveDate));
 
         return batchId;
     }
@@ -303,11 +303,12 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
      * 异步落地入口（线程池调度）：设置 IMPORTING → 主事务执行 → SUCCESS/FAILED。
      * 状态变更通过 REQUIRES_NEW 事务独立提交，主事务只做员工数据写入。
      */
-    private void doImportAsync(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
+    private void doImportAsync(Long batchId, ParsedSheet sheet, Long operatorId,
+                               List<ColumnDef> deptCols, LocalDate effectiveDate) {
         updateBatchStatus(batchId, PeopleImportBatchStatus.IMPORTING, 0, 0, null);
         try {
             txTemplate.executeWithoutResult(status ->
-                doImportEmployees(batchId, sheet, operatorId, deptCols));
+                doImportEmployees(batchId, sheet, operatorId, deptCols, effectiveDate));
             updateBatchStatus(batchId, PeopleImportBatchStatus.SUCCESS,
                 sheet.getTotalRows(), 0, null);
             log.info("[员工导入] 异步落地成功：batchId={}, totalRows={}",
@@ -327,11 +328,12 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
      * 不存在 → {@link EmployeeService#createEmployee} 新建。
      * 每 {@value #PROGRESS_INTERVAL} 行通过 REQUIRES_NEW 事务更新进度。
      */
-    private void doImportEmployees(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
+    private void doImportEmployees(Long batchId, ParsedSheet sheet, Long operatorId,
+                                   List<ColumnDef> deptCols, LocalDate effectiveDate) {
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
         Map<String, Long> deptIdCache = new HashMap<>();
-        // 导入日：覆盖更新的事实切换基准（旧区间终点 = 新区间起点）
-        LocalDate effectDate = LocalDate.now();
+        // 生效时间：覆盖更新的事实切换基准（旧区间终点 = 新区间起点）；未指定默认当前时间
+        LocalDate effectDate = effectiveDate != null ? effectiveDate : LocalDate.now();
         // 预载库内已存在的工号 → 员工 ID（相同编码走覆盖更新）
         Set<String> codes = sheet.getRows().stream()
             .map(r -> str(r, "employee_code"))
