@@ -690,13 +690,10 @@ public class SalaryCalculationEngine {
             finalRate = bd(rateOverride.path("rate").asText());
         }
 
-        // 未参保自动扣点
-        if (!Boolean.TRUE.equals(emp.getIsPartTime()) && !Boolean.TRUE.equals(emp.getSocialInsured())) {
-            BigDecimal noSocialDeduct = bd(snap.policy().path("noSocialDeduct").asText("0"));
-            finalRate = finalRate.add(noSocialDeduct);
-        }
+        // 未参保自动扣点：主循环构造 adjustItems 时已加入 NO_SOCIAL 自动项，
+        // 随 manualAdjust 累加即已生效，此处不可重复叠加（否则未参保扣点被扣两次）
 
-        // 人工调整
+        // 人工调整（含未参保自动项）
         BigDecimal manualAdjust = BigDecimal.ZERO;
         for (RateAdjustItem it : adjustItems) {
             if (it.getRate() != null) {
