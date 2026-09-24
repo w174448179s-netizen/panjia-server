@@ -4,6 +4,7 @@ import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
+import com.panjia.contracts.port.HistoryPayrollImportPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
@@ -92,6 +93,7 @@ public class ImportEngine {
     private final AttendanceSummaryAggregator attendanceSummaryAggregator;
     private final ScoreSummaryAggregator scoreSummaryAggregator;
     private final BatchSupersedeService batchSupersedeService;
+    private final HistoryPayrollImportPort historyPayrollImportPort;
 
     /**
      * 自身代理引用（绕过同类内部方法调用的代理拦截问题）。
@@ -131,6 +133,11 @@ public class ImportEngine {
      */
     public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
+        // 历史工资旁路：多 sheet 跨域直写（薪酬域），不走模板解析/归一化管线
+        if (sourceType == ImportSourceType.HISTORY_PAYROLL) {
+            ArchiveResult archived = fileArchiver.archive(content, fileName, "import");
+            return self.doHistoryPayrollPhase(archived, content, fileName, period, operatorId, deptId);
+        }
         // 1. 嗅探文件表头 → 多激活模板时按表头自动匹配（原始文件/简版模板共存）
         List<List<String>> headerRows;
         try (ByteArrayInputStream probe = new ByteArrayInputStream(content)) {
@@ -176,6 +183,77 @@ public class ImportEngine {
             throw e;
         }
         return batch.getId();
+    }
+
+    // ==================== 历史工资旁路 ====================
+
+    /**
+     * 历史工资导入（HISTORY_PAYROLL 旁路）：归档已完成，本方法建批次 → 委托
+     * {@link HistoryPayrollImportPort}（薪酬域）直写各域表 → 告警回填问题清单 →
+     * 小事务收口批次状态（有告警 PENDING_CONFIRM / 无告警 ARCHIVED，自动 supersede 同维度旧批次并发归档事件）。
+     * <p>
+     * <b>刻意不包大事务</b>：导入器逐行 catch-continue 的容错语义只在逐条自动提交下成立
+     * （PG 事务内任一语句失败即整个事务 aborted，后续语句全部 25P02）；且导入按分段幂等设计，
+     * 失败重跑即为恢复手段，与 CLI 兜底路径语义一致。失败时批次置 FAILED 并抛出原始异常
+     * （markFailed 自身失败不掩盖根因）。
+     */
+    public Long doHistoryPayrollPhase(ArchiveResult archived, byte[] content, String fileName,
+                                      String period, Long operatorId, Long deptId) {
+        ImportBatch batch = new ImportBatch();
+        batch.setSourceType(ImportSourceType.HISTORY_PAYROLL);
+        batch.setTemplateVersion("HIST_V1");
+        batch.setFileName(fileName);
+        batch.setOriginalFileName(fileName);
+        batch.setStoragePath(archived.getStoragePath());
+        batch.setPeriod(period);
+        // 旁路无解析阶段，直接以 NORMALIZING 建批次，finishNormalize 走 NORMALIZING→ARCHIVED/PENDING_CONFIRM
+        batch.setStatus(ImportBatchStatus.NORMALIZING);
+        batch.setOperatorId(operatorId);
+        batch.setDeptId(deptId);
+        batch.setBatchNo(generateBatchNo(ImportSourceType.HISTORY_PAYROLL, period));
+        batchMapper.insert(batch);
+        try {
+            HistoryPayrollImportPort.HistoryPayrollImportResult result =
+                historyPayrollImportPort.importAll(batch.getId(), period, content, fileName);
+            if (!result.success()) {
+                throw new IllegalStateException(result.summary());
+            }
+            // 告警行（员工未匹配等）→ 批次问题清单
+            for (String w : result.warnings()) {
+                ImportIssue issue = buildIssue(null,
+                    w.contains("未匹配") ? ImportIssueType.EMPLOYEE_NOT_MATCH : ImportIssueType.COLUMN_TYPE_ERR,
+                    null, null, truncate(w, 1000));
+                issue.setBatchId(batch.getId());
+                issueMapper.insert(issue);
+            }
+            // 批次状态收口 + 归档事件（emit 为 MANDATORY，须在小事务内与状态更新原子提交）
+            self.finalizeHistoryBatch(batch, result);
+            return batch.getId();
+        } catch (Exception e) {
+            try {
+                markFailed(batch.getId());
+            } catch (Exception markEx) {
+                log.error("[历史工资] 批次置 FAILED 失败（不影响原始异常抛出）：batchId={}", batch.getId(), markEx);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * 历史工资批次状态收口（小事务）：finishNormalize → supersede → 归档事件 → 批次更新，
+     * 保证 emit 的 Outbox INSERT 与批次终态原子提交。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void finalizeHistoryBatch(ImportBatch batch, HistoryPayrollImportPort.HistoryPayrollImportResult result) {
+        batch.setRemark(truncate(result.summary(), 500));
+        batch.setFailedRows(result.warnings().size());
+        batch.setSuccessRows(result.warnings().isEmpty() ? 1 : 0);
+        batch.finishNormalize(!result.warnings().isEmpty());
+        if (ImportBatchStatus.ARCHIVED.equals(batch.getStatus())) {
+            supersedeIfDuplicate(batch);
+            emitArchivedEvent(batch);
+        }
+        batchMapper.updateById(batch);
     }
 
     // ==================== 事务 A：解析落库 ====================
@@ -503,6 +581,7 @@ public class ImportEngine {
                     rawManualMapper.insert((RawManual) r);
                 }
             }
+            case HISTORY_PAYROLL -> throw new IllegalStateException("历史工资批次不走 raw 管线");
         }
     }
 
@@ -512,6 +591,7 @@ public class ImportEngine {
             case ATTENDANCE -> rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId));
             case POINTS -> rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId));
             case OTHERS -> rawManualMapper.selectList(byBatch(RawManual::getBatchId, batchId));
+            case HISTORY_PAYROLL -> List.of();
         };
     }
 
@@ -603,6 +683,7 @@ public class ImportEngine {
             case ATTENDANCE -> NormalizedRecordType.ATTENDANCE;
             case POINTS -> NormalizedRecordType.POINTS;
             case OTHERS -> NormalizedRecordType.MANUAL;
+            case HISTORY_PAYROLL -> NormalizedRecordType.SIGNED;
         };
     }
 

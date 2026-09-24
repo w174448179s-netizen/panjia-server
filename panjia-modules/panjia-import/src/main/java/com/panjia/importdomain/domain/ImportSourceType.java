@@ -26,7 +26,14 @@ public enum ImportSourceType {
     POINTS("积分"),
 
     /** 手工录入/其他费用 */
-    OTHERS("手工录入");
+    OTHERS("手工录入"),
+
+    /**
+     * 历史工资 Excel（天街工资表 7 个 sheet）。
+     * 不走 raw→归一化 管线：引擎旁路归档建批次后委托 HistoryPayrollImportPort
+     * 由薪酬域直写各域表，告警行回填为批次问题清单。
+     */
+    HISTORY_PAYROLL("历史工资");
 
     @EnumValue
     private final String code;

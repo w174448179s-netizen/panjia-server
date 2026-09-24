@@ -86,19 +86,44 @@ public class HistoryPayrollImporter {
     /** 工资表 sheet 处理后回填，供总监 sheet 新建明细时使用。 */
     private Long currentBatchId;
 
+    /** 本次运行的告警收集（员工未匹配/日期解析失败等跳过行），入口处重置。 */
+    private List<String> warnings = new ArrayList<>();
+
     // ==================== 入口 ====================
+
+    /** 导入结果（摘要 + 告警清单 + 是否成功），供导入域批次记录问题清单与状态。 */
+    public record ImportOutcome(String summary, List<String> warnings, boolean success) {
+    }
+
+    /**
+     * 兼容旧调用（CLI 兜底入口）：自带批次、告警仅落日志。
+     */
+    public String importFromStream(String period, InputStream excelStream) {
+        List<String> warnings = new ArrayList<>();
+        ImportOutcome outcome = importFromStream(period, excelStream, null, warnings);
+        for (String w : warnings) {
+            log.warn("[历史工资导入][告警] {}", w);
+        }
+        return outcome.summary();
+    }
 
     /**
      * 从上传的 Excel 文件流导入历史工资数据。
-     * @param period 工资归属月（如 2026-07）
-     * @param excelStream xlsx 文件输入流
-     * @return 导入结果摘要
+     *
+     * @param period          工资归属月（如 2026-07）
+     * @param excelStream     xlsx 文件输入流
+     * @param externalBatchId 导入域批次 ID（经 /import/upload 上传时传入，业绩事实/归一化记录/实收单挂该批次；
+     *                        null 时走 CLI 兜底自建 HIST-PAYROLL 批次）
+     * @param warningSink     告警收集器（员工未匹配/日期解析失败等跳过行），由调用方传入
      */
-    public String importFromStream(String period, InputStream excelStream) {
+    public ImportOutcome importFromStream(String period, InputStream excelStream,
+                                          Long externalBatchId, List<String> warningSink) {
+        this.warnings = warningSink != null ? warningSink : new ArrayList<>();
+        this.warnings.clear();
         if (period == null || period.isBlank()) {
-            return "失败：period 不能为空";
+            return new ImportOutcome("失败：period 不能为空", this.warnings, false);
         }
-        log.info("[历史工资导入] 开始：period={}", period);
+        log.info("[历史工资导入] 开始：period={}, importBatchId={}", period, externalBatchId);
         try (XSSFWorkbook wb = new XSSFWorkbook(excelStream)) {
             // 幂等（分段）：工资段按 period 是否已有批次判断，业绩段按是否已有 source='IMPORT' 事实判断。
             // 场景：首次导入在业绩段失败（如 SQL 异常）后，重试只需补写业绩段，不重复写工资段。
@@ -118,7 +143,7 @@ public class HistoryPayrollImporter {
                 PayrollBatch batch = processPayrollSheet(period, wb.getSheet("工资表"));
                 if (batch == null) {
                     log.error("[历史工资导入] 工资表处理失败或无有效数据，终止");
-                    return "失败：工资表处理失败或无有效数据";
+                    return new ImportOutcome("失败：工资表处理失败或无有效数据", this.warnings, false);
                 }
                 payrollBatchId = batch.getId();
                 this.currentBatchId = batch.getId();
@@ -165,7 +190,22 @@ public class HistoryPayrollImporter {
                 Integer.class, period);
             int newsign = 0;
             int real = 0;
-            long importBatchId = ensureImportBatch(period);
+            // 导入域批次：直接挂引擎批次，并把此前 CLI 批次（HIST-PAYROLL-*）写入的数据迁绑过来，
+            // 保证导入域撤销按新批次级联生效；CLI 兜底路径保持自建批次
+            long importBatchId;
+            if (externalBatchId != null) {
+                importBatchId = externalBatchId;
+                List<Long> histBatchIds = jdbc.queryForList(
+                    "SELECT id FROM pj_import_batch WHERE batch_no = ?", Long.class, "HIST-PAYROLL-" + period);
+                if (!histBatchIds.isEmpty() && histBatchIds.get(0) != externalBatchId) {
+                    Long oldBatchId = histBatchIds.get(0);
+                    jdbc.update("UPDATE pj_perf_fact SET batch_id = ? WHERE batch_id = ?", externalBatchId, oldBatchId);
+                    jdbc.update("UPDATE pj_normalized_record SET batch_id = ? WHERE batch_id = ?", externalBatchId, oldBatchId);
+                    jdbc.update("UPDATE pj_perf_received_apply SET batch_id = ? WHERE batch_id = ?", externalBatchId, oldBatchId);
+                }
+            } else {
+                importBatchId = ensureImportBatch(period);
+            }
             if (factCount != null && factCount > 0) {
                 log.warn("[历史工资导入] period={} 已存在导入业绩事实 {} 条，跳过业绩段", period, factCount);
             } else {
@@ -184,10 +224,10 @@ public class HistoryPayrollImporter {
                 period, payrollBatchId, payrollDone ? "已存在跳过" : "本次新建", newsign, real,
                 receivedApplies, commissionApplies);
             log.info("[历史工资导入] {}", summary);
-            return summary;
+            return new ImportOutcome(summary, this.warnings, true);
         } catch (Exception e) {
             log.error("[历史工资导入] 异常：period={}", period, e);
-            return "异常：" + e.getMessage();
+            return new ImportOutcome("异常：" + e.getMessage(), this.warnings, false);
         }
     }
 
@@ -1126,12 +1166,14 @@ public class HistoryPayrollImporter {
             EmpMatch emp = findEmployee(signer);
             if (emp == null) {
                 skip++;
+                warnings.add("[业绩] 员工未匹配，整行跳过：" + signer + "（" + factType + " 第" + (r + 1) + "行）");
                 continue;
             }
             LocalDate businessDate = parseDate(cell(row, 0));
             if (businessDate == null) {
                 log.warn("[{}] 第 {} 行 日期解析失败跳过：{}", factType, r + 1, signer);
                 skip++;
+                warnings.add("[业绩] 日期解析失败，整行跳过：" + signer + "（" + factType + " 第" + (r + 1) + "行）");
                 continue;
             }
             String contract = str(cell(row, 1));          // 合同号
