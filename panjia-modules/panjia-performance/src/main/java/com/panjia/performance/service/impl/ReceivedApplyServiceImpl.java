@@ -231,9 +231,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
                                            Long applicantId, int itemCount, BigDecimal realSum,
                                            BigDecimal expectedAmount, Long uniqueDeptId) {
         ReceivedApply apply = new ReceivedApply();
+        apply.setApplyNo("RCV" + LocalDateTime.now().format(APPLY_NO_FORMATTER));
         apply.setPeriod(period);
         apply.setBatchId(batchId);
         apply.setApplicantId(applicantId);
+        apply.setStatus(ReceivedApplyStatus.DRAFT);
         apply.setOrderNo(first.getOrderNo());
         apply.setContractNo(first.getContractNo());
         apply.setPropertyAddress(first.getPropertyAddress());
@@ -353,38 +355,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
         return deptIds.size() == 1 ? deptIds.iterator().next() : null;
     }
 
-    // ==================== 手工提交（§2.2 发起人路由） ====================
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public ReceivedApply manualSubmit(String period, String contractNo) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
-            throw new ServiceException("结算月与合同号不能为空");
-        }
-        Long operatorId = LoginHelper.getUserId();
-        Set<String> roles = currentRoles();
-
-        ReceivedApply apply = findActiveApply(period, contractNo);
-        if (apply == null) {
-            apply = newApplyFromContractFacts(period, contractNo, operatorId);
-            if (apply.getItemCount() == 0) {
-                throw new ServiceException("合同 " + contractNo + " " + period + " 月无可提交的实收业绩");
-            }
-            insertApply(apply);
-            bindAllContractFacts(apply);
-            refreshTotals(apply);
-            applyMapper.updateById(apply);
-        } else if (apply.getStatus() == ReceivedApplyStatus.APPROVED) {
-            throw new ServiceException("合同 " + contractNo + " 实收业绩已审批通过，如需追加请走调整流程或解封后重发");
-        } else if (apply.getStatus() == ReceivedApplyStatus.SUBMITTED) {
-            throw new ServiceException("合同 " + contractNo + " 实收业绩审批中，请勿重复提交");
-        }
-
-        apply.setApplicantId(operatorId);
-        applyMapper.updateById(apply);
-        startWorkflow(apply, operatorId, roles);
-        return apply;
-    }
+    // ==================== 驳回重提 ====================
 
     @Override
     @Transactional(rollbackFor = Exception.class)

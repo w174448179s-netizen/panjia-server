@@ -6,14 +6,17 @@ import com.panjia.performance.domain.bo.ReceivedBatchApproveBo;
 import com.panjia.performance.domain.vo.BatchApproveResultVo;
 import com.panjia.performance.domain.bo.ReceivedApplyBo;
 import com.panjia.performance.service.IReceivedApplyService;
+import com.panjia.performance.service.PerformanceEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.web.core.BaseController;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -39,6 +43,7 @@ import java.util.concurrent.CompletableFuture;
 public class ReceivedApplyController extends BaseController {
 
     private final IReceivedApplyService receivedApplyService;
+    private final PerformanceEngine performanceEngine;
 
     /** 分页查询实收审批单 */
     @SaCheckPermission("perf:received:list")
@@ -61,18 +66,6 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(Map.of("instanceId", receivedApplyService.getInstanceId(id)));
     }
 
-    /**
-     * 手工提交（无单自动建单）：按发起人角色路由。
-     * Body: {"period":"2026-08","contractNo":"..."}
-     */
-    @SaCheckPermission("perf:received:submit")
-    @Log(title = "实收业绩审批提交", businessType = BusinessType.UPDATE)
-    @PostMapping("/submit")
-    public R<Long> submit(@RequestBody Map<String, String> body) {
-        ReceivedApply apply = receivedApplyService.manualSubmit(body.get("period"), body.get("contractNo"));
-        return R.ok("提交成功", apply.getId());
-    }
-
     /** 驳回后重新提交 */
     @SaCheckPermission("perf:received:submit")
     @Log(title = "实收业绩审批重新提交", businessType = BusinessType.UPDATE)
@@ -80,6 +73,29 @@ public class ReceivedApplyController extends BaseController {
     public R<Void> resubmit(@PathVariable Long id) {
         receivedApplyService.resubmit(id);
         return R.ok();
+    }
+
+    /**
+     * 手工批量提交实收：选合同 → 后端查 PERF_EXPECT → 镜像造 PERF_REAL → 按订单号分组建审批单。
+     * Body: {"period":"2026-08", "bizKeys":["合同号1","合同号2"]}
+     */
+    @SaCheckPermission("perf:received:submit")
+    @Log(title = "实收业绩手工批量提交", businessType = BusinessType.INSERT)
+    @PostMapping("/manual-batch-submit")
+    public R<Map<String, Object>> manualBatchSubmit(@RequestBody Map<String, Object> body) {
+        String period = (String) body.get("period");
+        @SuppressWarnings("unchecked")
+        List<String> bizKeys = (List<String>) body.get("bizKeys");
+        if (StringUtils.isBlank(period) || bizKeys == null || bizKeys.isEmpty()) {
+            return R.fail("period 与 bizKeys 必填");
+        }
+        PerformanceEngine.ManualSubmitResult result = performanceEngine.submitManualReceived(
+            bizKeys, period, LoginHelper.getUserId());
+        Map<String, Object> resp = new java.util.LinkedHashMap<>();
+        resp.put("createdRealCount", result.createdRealCount);
+        resp.put("createdApplyCount", result.createdApplyCount);
+        resp.put("skipped", result.skippedReasons);
+        return R.ok("提交完成", resp);
     }
 
     /** 作废 */

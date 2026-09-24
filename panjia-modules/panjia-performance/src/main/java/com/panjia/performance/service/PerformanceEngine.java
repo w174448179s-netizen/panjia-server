@@ -878,16 +878,19 @@ public class PerformanceEngine {
             real.setBusinessDate(expect.getBusinessDate());
             real.setBatchId(null);
             real.setNormalizedRecordId(null);
-            real.setSourceKey(expect.getSourceKey()); // 复用！unique index 靠 fact_type 区分
+            real.setSourceKey(expect.getSourceKey());
             real.setOrderNo(expect.getOrderNo());
             real.setContractNo(expect.getContractNo());
             real.setPropertyAddress(expect.getPropertyAddress());
             real.setBizType(expect.getBizType());
             real.setFeeItem(expect.getFeeItem());
+            real.setEmployeeId(expect.getEmployeeId());
+            real.setEmployeeExternalCode(expect.getEmployeeExternalCode());
+            real.setDeptId(expect.getDeptId());
             real.setRoleType(truncate(expect.getRoleType(), 30));
             real.setRoleName(expect.getRoleName());
             real.setShareRatio(expect.getShareRatio());
-            real.setPerformanceAmount(expect.getPerformanceAmount()); // 金额=PERF_EXPECT 默认值（前端弹窗可让用户改）
+            real.setPerformanceAmount(expect.getPerformanceAmount());
             real.setEffectiveDate(expect.getEffectiveDate());
             real.setFactStatus(FactStatus.ACTIVE);
             real.setSource(PerformanceSource.MANUAL);
@@ -903,23 +906,42 @@ public class PerformanceEngine {
     }
 
     /**
-     * 手工提交实收的完整入口：造 PERF_REAL + 按订单号分组建审批单 + 走审批流。
+     * 手工提交实收的完整入口：按合同号/订单号查 PERF_EXPECT → 镜像造 PERF_REAL → 按订单号分组建审批单 + 走审批流。
      * <p>
-     * 两步同一事务内执行：
-     * ① 从 PERF_EXPECT 镜像造 PERF_REAL（预检 + 幂等阻断）；
-     * ② 刚造好的 PERF_REAL 委托 {@link IReceivedApplyService#createApplyForRealFacts}
-     *    按订单号分组建 ReceivedApply + startWorkflow。
+     * 不需要前端传 factIds——后端直接按 bizKeys + period 查 PERF_EXPECT ACTIVE 事实，
+     * 镜像生成 PERF_REAL（source=MANUAL），再委托建审批单。
      *
-     * @param expectFactIds 选 PERF_EXPECT 事实 ID 列表（支持合同维度多选）
-     * @param period        归属月
-     * @param operatorId    操作人
-     * @return 提交结果（新建 PERF_REAL 数 + 跳过事实 + 新建审批单数）
+     * @param bizKeys   合同号/订单号列表（前端选中的合同行）
+     * @param period     归属月
+     * @param operatorId 操作人
+     * @return 提交结果（新建 PERF_REAL 数 + 跳过 + 新建审批单数）
      */
     @Transactional(rollbackFor = Exception.class)
-    public ManualSubmitResult submitManualReceived(List<Long> expectFactIds, String period, Long operatorId) {
+    public ManualSubmitResult submitManualReceived(List<String> bizKeys, String period, Long operatorId) {
         ManualSubmitResult result = new ManualSubmitResult();
+        if (bizKeys == null || bizKeys.isEmpty() || StringUtils.isBlank(period)) {
+            return result;
+        }
+        // 查 PERF_EXPECT ACTIVE 事实（按订单号/合同号 + 期间）
+        List<PerformanceFact> expects = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getPeriod, period)
+            .in(PerformanceFact::getOrderNo, bizKeys));
+        if (expects.isEmpty()) {
+            // 合同号在 order_no 列没匹配上，可能是只有 contract_no 的场景
+            expects = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+                .eq(PerformanceFact::getPeriod, period)
+                .in(PerformanceFact::getContractNo, bizKeys));
+        }
+        if (expects.isEmpty()) {
+            return result;
+        }
         // ① 镜像造 PERF_REAL
-        ManualReceivedResult mirror = createManualRealFromExpect(expectFactIds, operatorId);
+        ManualReceivedResult mirror = createManualRealFromExpect(
+            expects.stream().map(PerformanceFact::getId).toList(), operatorId);
         result.createdRealCount = mirror.getCreatedCount();
         result.skippedReasons.putAll(mirror.getSkipped());
         if (mirror.getCreated().isEmpty()) {

@@ -54,16 +54,6 @@ public interface IReceivedApplyService {
     int autoCreateApprovedForBatch(Long batchId, String period, Long operatorId);
 
     /**
-     * 手工提交（店长/财务/总监，§2.2 发起人路由）：无单则按合同实收事实自动建单并提交；
-     * 财务发起直达总监；总监发起直接通过；店长发起走 财务→总监。
-     *
-     * @param period     结算月
-     * @param contractNo 合同号
-     * @return 审批单
-     */
-    ReceivedApply manualSubmit(String period, String contractNo);
-
-    /**
      * 已驳回/草稿单重新提交。
      *
      * @param id 审批单 ID
