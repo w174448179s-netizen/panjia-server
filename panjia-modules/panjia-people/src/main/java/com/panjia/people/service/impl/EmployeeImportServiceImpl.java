@@ -19,6 +19,7 @@ import com.panjia.people.domain.PeopleImportIssueStatus;
 import com.panjia.people.domain.PeopleImportIssueType;
 import com.panjia.people.domain.PeopleImportRaw;
 import com.panjia.people.dto.EmployeeCreateDTO;
+import com.panjia.people.dto.EmployeeUpdateDTO;
 import com.panjia.people.mapper.PeopleImportBatchMapper;
 import com.panjia.people.mapper.PeopleImportIssueMapper;
 import com.panjia.people.mapper.PeopleImportRawMapper;
@@ -59,10 +60,13 @@ import java.util.stream.Collectors;
  * 文件解析/归档/基础格式校验由 common-import-util 提供；本服务只做：
  * <ul>
  *   <li>阶段 A（同步，独立小事务）：落批次 PARSING + 原始行 raw_json（insert-only）+
- *       基础格式 issue + 业务校验 issue（工号唯一/部门路径/师傅存在）；
+ *       基础格式 issue + 业务校验 issue（文件内工号唯一/部门路径/师傅存在）；
  *       存在任一阻断 issue → 批次 FAILED（issue 保留供排查）；</li>
  *   <li>阶段 B（异步，单一大原子事务）：提交到线程池后台执行，
- *       逐行 deptPort.ensureDept 自动建树 → 复用 {@link EmployeeService#createEmployee}；
+ *       逐行 deptPort.ensureDept 自动建树 → 工号已存在则覆盖更新
+ *       （{@link EmployeeService#updateEmployee}：算薪数据列经 changeFact 时间线切换，
+ *       旧事实结束日期=导入日、新事实生效日=导入日），不存在则
+ *       {@link EmployeeService#createEmployee} 新建；
  *       每 {@value #PROGRESS_INTERVAL} 行用 REQUIRES_NEW 事务更新批次进度（前端可轮询）；
  *       任一行失败整批回滚 → FAILED。</li>
  * </ul>
@@ -231,15 +235,17 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     }
 
     /**
-     * 业务校验（工号唯一 / 部门层级路径 / 师傅存在）。
+     * 业务校验（文件内工号唯一 / 部门层级路径 / 师傅存在）。
+     * <p>
+     * 工号在库内已存在不再阻断——落地阶段按「覆盖更新」处理（算薪数据列走
+     * changeFact 时间线：旧事实结束日期=导入日，新事实生效日=导入日）。
      */
     private List<PeopleImportIssue> businessValidate(Long batchId, ParsedSheet sheet, List<ColumnDef> deptCols) {
         List<PeopleImportIssue> issues = new ArrayList<>();
 
-        // 工号：文件内首次出现行号 + 全量收集
+        // 工号：文件内首次出现行号 + 本文件工号集合
         Map<String, Integer> codeFirstRow = new LinkedHashMap<>();
         Set<String> fileCodes = new HashSet<>();
-        List<String> allCodes = new ArrayList<>();
         for (ParsedRow row : sheet.getRows()) {
             String code = str(row, "employee_code");
             if (StringUtils.isBlank(code)) {
@@ -247,7 +253,6 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             }
             codeFirstRow.putIfAbsent(code, row.getRowNo());
             fileCodes.add(code);
-            allCodes.add(code);
 
             // 部门层级路径：按 deptLevel 升序拼接；任一必填级缺失或跳级则记录 issue
             String deptPath = tryAssembleDeptPath(row, deptCols);
@@ -268,16 +273,6 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             if (!seen.add(code)) {
                 issues.add(buildIssue(batchId, row.getRowNo(), PeopleImportIssueType.DUPLICATE_CODE,
                     "employee_code", code, "工号在文件内重复（首次出现于第 " + codeFirstRow.get(code) + " 行）: " + code));
-            }
-        }
-
-        // 工号重复：库内已存在
-        Map<String, Long> existingCodes = employeeService.findEmployeeIdsByCodes(allCodes);
-        for (ParsedRow row : sheet.getRows()) {
-            String code = str(row, "employee_code");
-            if (StringUtils.isNotBlank(code) && existingCodes.containsKey(code)) {
-                issues.add(buildIssue(batchId, row.getRowNo(), PeopleImportIssueType.DUPLICATE_CODE,
-                    "employee_code", code, "工号在系统中已存在: " + code));
             }
         }
 
@@ -325,16 +320,34 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     }
 
     /**
-     * 逐行创建员工（在主事务内执行，不更新批次行避免锁竞争）。
+     * 逐行落地员工（在主事务内执行，不更新批次行避免锁竞争）。
+     * <p>
+     * 工号已存在 → 覆盖更新（{@link EmployeeService#updateEmployee} 统一 diff：
+     * 算薪数据列经 changeFact 时间线切换，旧事实结束日期=导入日、新事实生效日=导入日）；
+     * 不存在 → {@link EmployeeService#createEmployee} 新建。
      * 每 {@value #PROGRESS_INTERVAL} 行通过 REQUIRES_NEW 事务更新进度。
      */
     private void doImportEmployees(Long batchId, ParsedSheet sheet, Long operatorId, List<ColumnDef> deptCols) {
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
         Map<String, Long> deptIdCache = new HashMap<>();
+        // 导入日：覆盖更新的事实切换基准（旧区间终点 = 新区间起点）
+        LocalDate effectDate = LocalDate.now();
+        // 预载库内已存在的工号 → 员工 ID（相同编码走覆盖更新）
+        Set<String> codes = sheet.getRows().stream()
+            .map(r -> str(r, "employee_code"))
+            .filter(StringUtils::isNotBlank)
+            .collect(Collectors.toSet());
+        Map<String, Long> existingIds = employeeService.findEmployeeIdsByCodes(codes);
         int processed = 0;
         for (ParsedRow row : sheet.getRows()) {
-            EmployeeCreateDTO dto = toCreateDTO(row, deptCols, deptIdCache);
-            employeeService.createEmployee(dto, operator);
+            String code = str(row, "employee_code");
+            Long existingId = code != null ? existingIds.get(code) : null;
+            if (existingId != null) {
+                employeeService.updateEmployee(existingId,
+                    toUpdateDTO(row, deptCols, deptIdCache, effectDate), operator);
+            } else {
+                employeeService.createEmployee(toCreateDTO(row, deptCols, deptIdCache), operator);
+            }
             processed++;
             if (processed % PROGRESS_INTERVAL == 0) {
                 updateProgress(batchId, processed);
@@ -415,6 +428,52 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             ? EmployeeStatus.PARTTIME.getCode()
             : EmployeeStatus.ACTIVE.getCode());
         return dto;
+    }
+
+    /**
+     * 解析行 → 覆盖更新 DTO（工号已存在时复用 {@link EmployeeService#updateEmployee} 统一 diff）。
+     * <p>
+     * 覆盖语义：文件提供的值覆盖旧值，空白单元格保留原值不修改（岗位列除外，防止误清登录岗位）；
+     * 算薪数据列（职级/社保/公积金/商保/宿舍/兼职）经 changeFact 切换时间线，
+     * 生效日 = 导入日（旧事实结束日期、新事实生效日均置为导入日）；
+     * 状态（含离职）不随导入变更，由员工管理界面维护。
+     */
+    private EmployeeUpdateDTO toUpdateDTO(ParsedRow row, List<ColumnDef> deptCols,
+                                          Map<String, Long> deptIdCache, LocalDate effectDate) {
+        String deptFull = assembleDeptPath(row, deptCols);
+        Long deptId = deptIdCache.computeIfAbsent(deptFull, deptPort::ensureDept);
+
+        EmployeeUpdateDTO dto = new EmployeeUpdateDTO();
+        dto.setDeptId(deptId);
+        dto.setEmployeeName(blankToNull(str(row, "employee_name")));
+        // 岗位列空白不参与 diff（保留现有岗位/角色，避免整批误清）
+        if (StringUtils.isNotBlank(str(row, "post_names"))) {
+            dto.setPostNames(splitPosts(str(row, "post_names")));
+        }
+        // updateEmployee 内部跳过空白职级
+        dto.setLevelCode(str(row, "level"));
+        dto.setPhone(blankToNull(str(row, "phone")));
+        dto.setIdCard(blankToNull(str(row, "id_card")));
+        dto.setReportDate(date(row, "report_date"));
+        dto.setHireDate(date(row, "hire_date"));
+        dto.setSocialInsured(bool(row, "social"));
+        dto.setHousingInsured(bool(row, "housing"));
+        dto.setCommercialInsured(bool(row, "commercial"));
+        dto.setDormitory(bool(row, "dormitory"));
+        dto.setParttime(bool(row, "parttime"));
+        // 师傅列空白 = 解除师傅关系（与新建语义一致）
+        dto.setMentorCode(str(row, "mentor_code"));
+        dto.setSocialFee(decimal(row, "social_fee"));
+        dto.setCommercialFee(decimal(row, "commercial_fee"));
+        dto.setHousingFund(decimal(row, "housing_fund"));
+        dto.setDormitoryFee(decimal(row, "dormitory_fee"));
+        dto.setEffectiveDate(effectDate);
+        return dto;
+    }
+
+    /** 空白字符串 → null（覆盖更新时空白=保留原值） */
+    private String blankToNull(String s) {
+        return StringUtils.isBlank(s) ? null : s;
     }
 
     // ==================== 辅助方法 ====================
