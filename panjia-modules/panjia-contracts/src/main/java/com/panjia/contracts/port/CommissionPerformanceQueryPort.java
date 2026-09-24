@@ -27,6 +27,16 @@ import java.util.Map;
 public interface CommissionPerformanceQueryPort {
 
     /**
+     * 按期间 + 合同号/订单号模糊匹配，返回关联的员工 ID 集合。
+     * 用于工资明细按合同号过滤（工资明细无合同号字段，需跨域查业绩事实）。
+     *
+     * @param period     归属期间 YYYY-MM
+     * @param contractNo 合同号/订单号（模糊匹配 contract_no 或 order_no）
+     * @return 匹配的 employeeId 集合（空集表示无匹配）
+     */
+    java.util.Set<Long> findEmployeeIdsByContractOrOrder(String period, String contractNo);
+
+    /**
      * 按期间 + 门店查 ACTIVE 业绩事实。
      *
      * @param period   归属期间 YYYY-MM

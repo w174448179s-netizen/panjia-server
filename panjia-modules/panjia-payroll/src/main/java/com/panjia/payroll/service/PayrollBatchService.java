@@ -5,6 +5,7 @@ import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
+import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.PeopleAttendanceApprovalQueryPort;
@@ -33,6 +34,7 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.system.api.ConfigService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -81,6 +83,8 @@ public class PayrollBatchService {
     private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
     private final PeopleScoreQueryPort scoreQueryPort;
     private final IRateAdjustService rateAdjustService;
+    private final CommissionPerformanceQueryPort performanceQueryPort;
+    private final ConfigService configService;
 
     // ==================== 创建 ====================
 
@@ -250,6 +254,50 @@ public class PayrollBatchService {
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = employees;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
+
+        // ====== 多期间规则快照构建（结佣提成按 bizType 分流取规则） ======
+        // 读配置：按结算月取规则的 bizType 集合（金融/家装荐客等）
+        String settlementBizTypesConf = configService.getConfigValue(
+            "panjia.payroll.commission.settlement-rate-biz-types");
+        Set<String> settlementRateBizTypes = new HashSet<>();
+        if (settlementBizTypesConf != null && !settlementBizTypesConf.isBlank()) {
+            for (String t : settlementBizTypesConf.split(",")) {
+                String trimmed = t.trim();
+                if (!trimmed.isBlank()) settlementRateBizTypes.add(trimmed);
+            }
+        }
+        input.settlementRateBizTypes = settlementRateBizTypes;
+
+        // 扫描结佣明细，收集需要的规则期间集合
+        Set<String> requiredPeriods = new HashSet<>();
+        for (CommissionItemDTO it : lockedItems) {
+            if (it.getBizType() != null && settlementRateBizTypes.contains(it.getBizType())) {
+                // 金融/家装 → 结算月
+                if (it.getApprovedMonth() != null && !it.getApprovedMonth().isBlank()) {
+                    requiredPeriods.add(it.getApprovedMonth());
+                }
+            } else {
+                // 其他 → 签约月
+                if (it.getBusinessDate() != null) {
+                    requiredPeriods.add(YearMonth.from(it.getBusinessDate()).toString());
+                }
+            }
+        }
+        // 算薪期间本身也加入（主快照兜底）
+        requiredPeriods.add(period);
+
+        // 批量构建多期快照（每个期间取该月首日作为规则生效参考日期）
+        Map<String, RuleService.ParsedSnapshot> periodSnapshots = new HashMap<>();
+        for (String rp : requiredPeriods) {
+            try {
+                LocalDate refDate = YearMonth.parse(rp).atDay(1);
+                periodSnapshots.put(rp, ruleService.buildSnapshotForDate(refDate));
+            } catch (Exception e) {
+                log.warn("[薪酬] 构建规则快照失败：period={}，回退主快照", rp, e);
+            }
+        }
+        input.periodSnapshots = periodSnapshots;
+        // ====== 多期间规则快照构建 end ======
 
         // 结佣按员工分组
         input.lockedByEmp = lockedItems.stream()
@@ -609,6 +657,35 @@ public class PayrollBatchService {
 
     public List<PayrollDetail> listDetails(Long batchId) {
         return detailMapper.selectByBatchId(batchId);
+    }
+
+    /**
+     * 按合同号/订单号过滤工资明细（可选，前端不传时返回全量）。
+     * <p>
+     * 工资明细是按员工聚合的一人一行，没有合同号字段。过滤逻辑：
+     * 先查该期间业绩事实中匹配合同号/订单号的 employeeId 集合，
+     * 再用集合过滤工资明细行。
+     *
+     * @param batchId    工资批次 ID
+     * @param contractNo 合同号/订单号（模糊匹配）
+     * @return 过滤后的工资明细
+     */
+    public List<PayrollDetail> listDetails(Long batchId, String contractNo) {
+        if (contractNo == null || contractNo.isBlank()) {
+            return detailMapper.selectByBatchId(batchId);
+        }
+        // 从批次取 period
+        PayrollBatch batch = batchMapper.selectById(batchId);
+        if (batch == null || batch.getPeriod() == null) {
+            return List.of();
+        }
+        // 查该期间匹配合同号/订单号的业绩事实 → employeeId 集合
+        Set<Long> matchedEmployeeIds = performanceQueryPort.findEmployeeIdsByContractOrOrder(
+            batch.getPeriod(), contractNo.trim());
+        if (matchedEmployeeIds.isEmpty()) {
+            return List.of();
+        }
+        return detailMapper.selectByBatchIdAndEmployeeIds(batchId, matchedEmployeeIds);
     }
 
     // ==================== 本人工资查询（数据范围强制为登录人本人） ====================

@@ -39,8 +39,14 @@ public class CommissionItemDTO implements Serializable {
     /** 员工工号（业绩事实透传时携带） */
     private String employeeCode;
 
+    /** 员工姓名（门店业绩查询时富化填充） */
+    private String employeeName;
+
     /** 归属门店 ID */
     private Long deptId;
+
+    /** 归属门店名称（门店业绩查询时富化填充） */
+    private String deptName;
 
     /** 合同号（冻结快照 / 业绩事实透传） */
     private String contractNo;

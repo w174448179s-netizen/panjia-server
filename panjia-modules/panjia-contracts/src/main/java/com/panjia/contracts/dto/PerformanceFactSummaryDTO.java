@@ -43,8 +43,14 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 员工工号 */
     private String employeeCode;
 
+    /** 员工姓名（门店业绩查询时富化填充） */
+    private String employeeName;
+
     /** 归属部门 ID（门店） */
     private Long deptId;
+
+    /** 归属门店名称（门店业绩查询时富化填充） */
+    private String deptName;
 
     /** 业务类型 */
     private String bizType;

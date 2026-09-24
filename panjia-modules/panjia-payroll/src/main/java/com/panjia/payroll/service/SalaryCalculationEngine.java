@@ -14,10 +14,13 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 算薪引擎（纯计算、无副作用）。
@@ -45,8 +48,24 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> deptNewSignTotal;
         /** deptId -> 门店社保业绩扣款（门店全员公司承担社保合计，店长/总监提成计薪基数扣减项） */
         public Map<Long, BigDecimal> deptEmployerSocialTotal;
-        /** 规则快照 */
+        /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
+        /**
+         * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。
+         * <p>
+         * 结佣提成按业务类型分流取规则：金融/家装用结算月（approvedMonth）的快照，
+         * 其他用签约月（businessDate 所在月）的快照。本 Map 由 PayrollBatchService 在算薪前
+         * 扫描结佣明细预先构建，engine 按期间精确命中；key 缺失时回退到主 snapshot。
+         */
+        public Map<String, RuleService.ParsedSnapshot> periodSnapshots = Map.of();
+        /**
+         * 按结算月取规则的 bizType 集合（金融/家装荐客等）。
+         * <p>
+         * 集合内的 bizType 结佣明细 → 用 approvedMonth 对应规则；
+         * 集合外的 bizType → 用 businessDate 所在月对应规则。
+         * 由 PayrollBatchService 从 sys_config 参数 panjia.payroll.commission.settlement-rate-biz-types 读取注入。
+         */
+        public Set<String> settlementRateBizTypes = Set.of();
         /** employeeId -> 手工收入（奖金+其他收入） */
         public Map<Long, BigDecimal> manualIncome;
         /** employeeId -> 手工支出 */
@@ -162,18 +181,64 @@ public class SalaryCalculationEngine {
             d.setTotalDeduct(MoneyUtil.round6(perfDeduct.add(manualAdjust)));
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
-            // 结佣业绩（折算后）：按 bizType 应用折算因子（一手房 ×0.9024、其他 ×0.96），
-            // 与新签同口径，提成基于折算后金额计算。
-            BigDecimal commissionPerf = applyConversion(input.lockedByEmp.get(emp.getEmployeeId()), snap);
-            BigDecimal commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
+            // 结佣提成：按业务类型分流取规则期间
+            // 金融/家装等（settlementRateBizTypes）→ 用结算月（approvedMonth）规则
+            // 其他 → 用签约月（businessDate 所在月）规则
+            // 不同期间规则（职级提点/绩效扣点）可能不同，需逐期间分别折算+算提成后汇总。
+            BigDecimal commissionPerf;
+            BigDecimal commissionIncome;
+            BigDecimal finalRateForCommission = finalRate; // 经纪人/总监默认用 baseRate 口径
+
+            if (role == EmployeeRole.MANAGER) {
+                // 店长用 personalRate 口径
+                BigDecimal personalRate = bd(rank.path("personalRate").asText("0.70"));
+                finalRateForCommission = personalRate.add(perfDeduct).add(mentorAdd).add(manualAdjust);
+                if (finalRateForCommission.compareTo(BigDecimal.ZERO) < 0) {
+                    finalRateForCommission = BigDecimal.ZERO;
+                }
+                d.setFinalRate(MoneyUtil.round6(finalRateForCommission));
+            }
+
+            // 结佣明细按规则期间分组计算
+            List<CommissionItemDTO> lockedItems = input.lockedByEmp.get(emp.getEmployeeId());
+            if (lockedItems != null && !lockedItems.isEmpty()) {
+                // 按规则期间分组
+                Map<String, List<CommissionItemDTO>> byRulePeriod = new HashMap<>();
+                for (CommissionItemDTO it : lockedItems) {
+                    String rulePeriod = resolveCommissionRulePeriod(it, input.settlementRateBizTypes);
+                    byRulePeriod.computeIfAbsent(rulePeriod, k -> new ArrayList<>()).add(it);
+                }
+                commissionPerf = BigDecimal.ZERO;
+                commissionIncome = BigDecimal.ZERO;
+                // 逐期间分别用对应规则快照算提成
+                for (Map.Entry<String, List<CommissionItemDTO>> entry : byRulePeriod.entrySet()) {
+                    String rulePeriod = entry.getKey();
+                    List<CommissionItemDTO> periodItems = entry.getValue();
+                    RuleService.ParsedSnapshot periodSnap = input.periodSnapshots.getOrDefault(rulePeriod, snap);
+
+                    // 用该期间快照重新计算 finalRate（职级规则/绩效扣点可能不同）
+                    BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, level, emp,
+                        scoreFacts, adjustItems, rc, mentorAdd, role);
+
+                    // 用该期间快照折算业绩
+                    BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
+                    BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
+                    commissionPerf = commissionPerf.add(periodPerf);
+                    commissionIncome = commissionIncome.add(periodIncome);
+                }
+            } else {
+                commissionPerf = BigDecimal.ZERO;
+                commissionIncome = BigDecimal.ZERO;
+            }
+
             d.setCommissionIncome(commissionIncome);
-            // 落地结佣业绩（折算后，导出展示，避免前端反推误差）
             d.setCommissionPerformance(MoneyUtil.round2(commissionPerf));
 
             // 落地：当月新签业绩（折算后）+ 新签提成比例（baseRate，所有角色通用）
             BigDecimal personalNewsignPerfCommon = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
             d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerfCommon));
-            d.setNewSignRate(baseRate);
+            d.setNewSignRate(role == EmployeeRole.MANAGER
+                ? bd(rank.path("personalRate").asText("0.70")) : baseRate);
 
             // 招聘奖励（店长/总监 = 徒弟结佣 × 2%）
             BigDecimal mentorBonus = BigDecimal.ZERO;
@@ -192,17 +257,7 @@ public class SalaryCalculationEngine {
             BigDecimal guaranteeFill = BigDecimal.ZERO;
 
             if (role == EmployeeRole.MANAGER) {
-                // 店长结佣提成使用 personalRate（70%），而非 baseRate（30%）
-                BigDecimal personalRate = bd(rank.path("personalRate").asText("0.70"));
-                finalRate = personalRate.add(perfDeduct).add(mentorAdd).add(manualAdjust);
-                if (finalRate.compareTo(BigDecimal.ZERO) < 0) {
-                    finalRate = BigDecimal.ZERO;
-                }
-                d.setFinalRate(MoneyUtil.round6(finalRate));
-                d.setNewSignRate(personalRate);
-                // 重算结佣提成（用 personalRate 口径的 finalRate）
-                commissionIncome = MoneyUtil.round2(commissionPerf.multiply(finalRate));
-                d.setCommissionIncome(commissionIncome);
+                // finalRate 已在上方用 personalRate 口径计算，这里只保留非提成的逻辑
 
                 // 团队提成 = (门店新签合计 - 门店社保业绩扣款) × teamRate
                 // 社保业绩扣款 = 门店全员公司承担社保合计（对齐天街工资表 2026.08 列结构）
@@ -215,8 +270,9 @@ public class SalaryCalculationEngine {
                 d.setTeamIncome(teamIncome);
 
                 // 个人新签提成 = 个人新签业绩（折算后）× 职级 personalRate → 递延
+                BigDecimal personalRateVal = bd(rank.path("personalRate").asText("0.70"));
                 BigDecimal personalNewsignPerf = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
-                personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(personalRate));
+                personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(personalRateVal));
                 d.setPersonalNewsignIncome(personalNewsign);
                 // 落地：当月新签业绩（折算后）
                 d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerf));
@@ -561,6 +617,98 @@ public class SalaryCalculationEngine {
         BigDecimal penaltyFee = bd(snap.policy().path("points").path("penaltyFee").asText("5"));
         return penaltyFee.multiply(BigDecimal.valueOf(facts.getLateSubmitCount()))
             .setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 解析结佣明细对应的规则期间。
+     * <p>
+     * 分流逻辑：
+     * <ul>
+     *   <li>bizType ∈ settlementRateBizTypes（金融/家装荐客等） → 结算月 approvedMonth；</li>
+     *   <li>其他 → 签约月（businessDate 所在月）；</li>
+     *   <li>缺失字段时兜底返回算薪期间（period 字段）。</li>
+     * </ul>
+     *
+     * @param item                     结佣明细
+     * @param settlementRateBizTypes   按结算月取规则的 bizType 集合
+     * @return 规则期间（YYYY-MM）
+     */
+    private String resolveCommissionRulePeriod(CommissionItemDTO item, Set<String> settlementRateBizTypes) {
+        String bizType = item.getBizType();
+        if (bizType != null && settlementRateBizTypes.contains(bizType)) {
+            // 金融/家装 → 用结算月
+            if (item.getApprovedMonth() != null && !item.getApprovedMonth().isBlank()) {
+                return item.getApprovedMonth();
+            }
+        }
+        // 其他 → 用签约月
+        LocalDate bizDate = item.getBusinessDate();
+        if (bizDate != null) {
+            return YearMonth.from(bizDate).toString();
+        }
+        // 兜底：用业绩归属月
+        if (item.getPeriod() != null && !item.getPeriod().isBlank()) {
+            return item.getPeriod();
+        }
+        // 最终兜底：空字符串（会被 periodSnapshots.getOrDefault 回退到主快照）
+        return "";
+    }
+
+    /**
+     * 用指定规则快照计算结佣提成的 finalRate。
+     * <p>
+     * 与 calculate 主循环中对主快照算 finalRate 逻辑完全一致，但：
+     * <ul>
+     *   <li>入参传入指定的 ParsedSnapshot（可能是签约月/结算月的规则快照）；</li>
+     *   <li>店长角色用 personalRate 口径，其他角色用 baseRate 口径；</li>
+     *   <li>用于按规则期间分组计算结佣提成时逐期间调用。</li>
+     * </ul>
+     */
+    private BigDecimal computeFinalRateForCommission(RuleService.ParsedSnapshot snap, String level,
+                                                     EmployeeSnapshot emp, ScoreFactsDTO scoreFacts,
+                                                     List<RateAdjustItem> adjustItems, JsonNode rc,
+                                                     BigDecimal mentorAdd, EmployeeRole role) {
+        JsonNode rank = snap.rank(level);
+
+        // 基础提点：店长用 personalRate（70%），其他角色用 baseRate
+        BigDecimal baseRate;
+        if (role == EmployeeRole.MANAGER) {
+            baseRate = bd(rank.path("personalRate").asText("0.70"));
+        } else {
+            baseRate = bd(rank.path("baseRate").asText("0"));
+        }
+
+        // 绩效扣点（用该期间快照的积分阈值/扣点规则）
+        String grade = resolveGrade(snap, scoreFacts);
+        BigDecimal perfDeduct = resolvePerfDeduct(snap, grade);
+
+        BigDecimal finalRate = baseRate.add(perfDeduct).add(mentorAdd);
+
+        // EMPLOYEE 级提点覆盖
+        JsonNode rateOverride = snap.employeeOverride(emp.getEmployeeCode());
+        if (rateOverride != null && rateOverride.has("rate")) {
+            finalRate = bd(rateOverride.path("rate").asText());
+        }
+
+        // 未参保自动扣点
+        if (!Boolean.TRUE.equals(emp.getIsPartTime()) && !Boolean.TRUE.equals(emp.getSocialInsured())) {
+            BigDecimal noSocialDeduct = bd(snap.policy().path("noSocialDeduct").asText("0"));
+            finalRate = finalRate.add(noSocialDeduct);
+        }
+
+        // 人工调整
+        BigDecimal manualAdjust = BigDecimal.ZERO;
+        for (RateAdjustItem it : adjustItems) {
+            if (it.getRate() != null) {
+                manualAdjust = manualAdjust.add(it.getRate());
+            }
+        }
+        finalRate = finalRate.add(manualAdjust);
+
+        if (finalRate.compareTo(BigDecimal.ZERO) < 0) {
+            finalRate = BigDecimal.ZERO;
+        }
+        return finalRate;
     }
 
     private BigDecimal calcTax(EmployeeSnapshot emp, BigDecimal netBeforeTax, CalcInput input, RuleService.ParsedSnapshot snap) {

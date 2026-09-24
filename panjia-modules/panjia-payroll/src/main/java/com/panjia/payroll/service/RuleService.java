@@ -136,17 +136,50 @@ public class RuleService {
      */
     public RuleSnapshot freezeSnapshot(Long batchId, String period) {
         LocalDate today = LocalDate.now();
+        ObjectNode root = buildSnapshotRoot(today);
+
+        RuleSnapshot snapshot = new RuleSnapshot();
+        snapshot.setBatchId(batchId);
+        snapshot.setPeriod(period);
+        snapshot.setSnapshotContent(root.toString());
+        // 重复算薪时先删旧快照（batch_id 唯一约束）
+        ruleSnapshotMapper.delete(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<RuleSnapshot>()
+            .eq(RuleSnapshot::getBatchId, batchId));
+        ruleSnapshotMapper.insert(snapshot);
+        return snapshot;
+    }
+
+    /**
+     * 按指定参考日期构建规则快照（不持久化，供算薪时多期间规则加载使用）。
+     * <p>
+     * 与 freezeSnapshot 逻辑相同，但用 refDate 代替 LocalDate.now() 过滤生效规则，
+     * 且不写入 RuleSnapshot 表。
+     *
+     * @param refDate 规则生效的参考日期（如结算月首日 / 签约月首日）
+     * @return 解析后的规则快照
+     */
+    public ParsedSnapshot buildSnapshotForDate(LocalDate refDate) {
+        ObjectNode root = buildSnapshotRoot(refDate);
+        return new ParsedSnapshot(root);
+    }
+
+    /**
+     * 构建规则 JSON 根节点（rank + policy + conversion）。
+     *
+     * @param refDate 规则生效参考日期
+     */
+    private ObjectNode buildSnapshotRoot(LocalDate refDate) {
         List<RankRule> ranks = rankRuleMapper.selectList(null);
         List<PolicyRule> policies = policyRuleMapper.selectList(null);
         List<ConversionRule> conversions = conversionRuleMapper.selectList(null);
 
         ObjectNode root = objectMapper.createObjectNode();
-        root.put("snapshotVersion", today.toString());
+        root.put("snapshotVersion", refDate.toString());
 
         // rank: levelCode -> {baseSalary, baseRate, minSalary, teamRate, personalRate, ruleContent}
         ObjectNode rankNode = root.putObject("rank");
         for (RankRule r : ranks) {
-            if (r.getEffectiveFrom().isAfter(today) || r.getEffectiveTo().isBefore(today)) {
+            if (r.getEffectiveFrom().isAfter(refDate) || r.getEffectiveTo().isBefore(refDate)) {
                 continue;
             }
             ObjectNode rn = rankNode.putObject(r.getLevelCode());
@@ -197,15 +230,7 @@ public class RuleService {
             convNode.put(c.getBizType(), c.getFactor().toString());
         }
 
-        RuleSnapshot snapshot = new RuleSnapshot();
-        snapshot.setBatchId(batchId);
-        snapshot.setPeriod(period);
-        snapshot.setSnapshotContent(root.toString());
-        // 重复算薪时先删旧快照（batch_id 唯一约束）
-        ruleSnapshotMapper.delete(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<RuleSnapshot>()
-            .eq(RuleSnapshot::getBatchId, batchId));
-        ruleSnapshotMapper.insert(snapshot);
-        return snapshot;
+        return root;
     }
 
     public RuleSnapshot getSnapshot(Long batchId) {

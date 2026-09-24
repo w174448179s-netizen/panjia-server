@@ -80,11 +80,12 @@ public class PayrollController {
         return R.ok(batchService.get(id));
     }
 
-    /** 工资明细 */
+    /** 工资明细（可选 contractNo 过滤：按合同号/订单号模糊匹配关联员工） */
     @SaCheckPermission("payroll:detail:list")
     @GetMapping("/{id}/details")
-    public R<List<PayrollDetail>> details(@PathVariable Long id) {
-        return R.ok(batchService.listDetails(id));
+    public R<List<PayrollDetail>> details(@PathVariable Long id,
+                                          @RequestParam(required = false) String contractNo) {
+        return R.ok(batchService.listDetails(id, contractNo));
     }
 
     /** 规则快照 */

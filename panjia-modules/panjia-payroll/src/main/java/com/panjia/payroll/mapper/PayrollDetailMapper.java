@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
+import java.util.Collection;
 import java.util.List;
 
 @Mapper
@@ -14,6 +15,16 @@ public interface PayrollDetailMapper extends BaseMapperPlus<PayrollDetail, Payro
 
     @Select("SELECT * FROM pj_payroll_detail WHERE batch_id = #{batchId} ORDER BY dept_id, employee_id")
     List<PayrollDetail> selectByBatchId(@Param("batchId") Long batchId);
+
+    /**
+     * 按批次 + 员工 ID 集合查工资明细（合同号过滤用：先查业绩事实匹配员工集合再过滤）。
+     */
+    @Select("<script>SELECT * FROM pj_payroll_detail WHERE batch_id = #{batchId} " +
+        "AND employee_id IN " +
+        "<foreach collection='employeeIds' item='id' open='(' separator=',' close=')'>#{id}</foreach> " +
+        "ORDER BY dept_id, employee_id</script>")
+    List<PayrollDetail> selectByBatchIdAndEmployeeIds(@Param("batchId") Long batchId,
+                                                      @Param("employeeIds") Collection<Long> employeeIds);
 
     /**
      * 按员工查全部工资明细（本人工资查询用），按期间、批次倒序。

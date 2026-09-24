@@ -407,6 +407,8 @@ public class CommissionApplicationService {
      * 通过 SpringUtils.getBean 走代理调 apply，确保 @Transactional 生效。
      * 调用前已由 {@link #runWithOperatorToken} 安装操作人 Sa-Token Mock 上下文，
      * 流程发起、总监自动审批、监听器等行为与 HTTP 线程单个发起一致。
+     * <p>
+     * 多线程分片：合同之间无交集，按 50 个一组分片并行发起。
      *
      * @param ctx 批量上下文（预加载的应收/事实/申请单），null 时走单合同路径逐单查
      */
@@ -419,9 +421,42 @@ public class CommissionApplicationService {
         if (ctx != null) {
             loadApplicationsBatch(period, contractNos, ctx);
         }
+        List<String> contractList = new ArrayList<>(contractNos);
+        // 按 50 个一组分片并行
+        int chunkSize = 50;
+        List<List<String>> chunks = new ArrayList<>();
+        for (int i = 0; i < contractList.size(); i += chunkSize) {
+            chunks.add(contractList.subList(i, Math.min(i + chunkSize, contractList.size())));
+        }
+        List<CompletableFuture<CommissionBatchResultVo>> futures = chunks.stream()
+            .map(chunk -> CompletableFuture.supplyAsync(
+                () -> doBatchApplyChunk(period, chunk, operatorId, ctx, self), taskExecutor))
+            .toList();
+        for (CompletableFuture<CommissionBatchResultVo> f : futures) {
+            try {
+                CommissionBatchResultVo chunkResult = f.join();
+                result.getSuccessContracts().addAll(chunkResult.getSuccessContracts());
+                result.getSkippedContracts().addAll(chunkResult.getSkippedContracts());
+                result.getFailedContracts().addAll(chunkResult.getFailedContracts());
+            } catch (Exception e) {
+                log.error("[结佣-批量发起] 分片处理异常", e);
+            }
+        }
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[结佣-批量发起] period={}, 分片={}, 成功={}, 跳过={}, 失败={}",
+            period, chunks.size(), result.getSuccess(), result.getSkipped(), result.getFailed());
+        return result;
+    }
+
+    /** 单分片发起 */
+    private CommissionBatchResultVo doBatchApplyChunk(String period, List<String> contractNos,
+                                                       Long operatorId, BatchApplyContext ctx,
+                                                       CommissionApplicationService self) {
+        CommissionBatchResultVo result = new CommissionBatchResultVo();
         for (String contractNo : contractNos) {
             try {
-                // 从预加载 Map 取值，避免逐单查库（ctx=null 时走 findActiveApplication）
                 CommissionApplication existing = ctx != null
                     ? ctx.activeApps.get(contractNo)
                     : findActiveApplication(period, contractNo);
@@ -429,7 +464,6 @@ public class CommissionApplicationService {
                     result.getSkippedContracts().add(contractNo);
                     continue;
                 }
-                // 门店权限已在批量入口的 HTTP 线程同步阶段校验，异步线程跳过
                 self.apply(period, contractNo, operatorId, true, ctx);
                 result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
@@ -437,11 +471,6 @@ public class CommissionApplicationService {
                 log.warn("[结佣-批量发起] 合同 {} 发起失败：{}", contractNo, e.getMessage());
             }
         }
-        result.setSuccess(result.getSuccessContracts().size());
-        result.setSkipped(result.getSkippedContracts().size());
-        result.setFailed(result.getFailedContracts().size());
-        log.info("[结佣-批量发起] period={}, 成功={}, 跳过={}, 失败={}",
-            period, result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 
@@ -862,9 +891,48 @@ public class CommissionApplicationService {
      * 用 completeTaskAsSys 按 taskId 办理（ignore=true），权限已在预检阶段闭合。
      * 预检后任务若被他人抢先办理，引擎抛异常计入失败（并发安全）。
      */
+    /**
+     * 逐单审批（线程池执行）。
+     * <p>
+     * 多线程分片：合同之间无交集，按 50 个一组分片并行办理。
+     */
     private CommissionBatchResultVo doBatchApprove(String period, List<BatchApproveItem> items) {
         CommissionBatchResultVo result = new CommissionBatchResultVo();
         result.setTotal(items.size());
+        if (items.isEmpty()) {
+            return result;
+        }
+        // 按 50 个一组分片并行
+        int chunkSize = 50;
+        List<List<BatchApproveItem>> chunks = new ArrayList<>();
+        for (int i = 0; i < items.size(); i += chunkSize) {
+            chunks.add(items.subList(i, Math.min(i + chunkSize, items.size())));
+        }
+        List<CompletableFuture<CommissionBatchResultVo>> futures = chunks.stream()
+            .map(chunk -> CompletableFuture.supplyAsync(
+                () -> doBatchApproveChunk(chunk), taskExecutor))
+            .toList();
+        for (CompletableFuture<CommissionBatchResultVo> f : futures) {
+            try {
+                CommissionBatchResultVo chunkResult = f.join();
+                result.getSuccessContracts().addAll(chunkResult.getSuccessContracts());
+                result.getSkippedContracts().addAll(chunkResult.getSkippedContracts());
+                result.getFailedContracts().addAll(chunkResult.getFailedContracts());
+            } catch (Exception e) {
+                log.error("[结佣-批量审批] 分片处理异常", e);
+            }
+        }
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[结佣-批量审批] period={}, 分片={}, 成功={}, 跳过={}, 失败={}",
+            period, chunks.size(), result.getSuccess(), result.getSkipped(), result.getFailed());
+        return result;
+    }
+
+    /** 单分片审批 */
+    private CommissionBatchResultVo doBatchApproveChunk(List<BatchApproveItem> items) {
+        CommissionBatchResultVo result = new CommissionBatchResultVo();
         for (BatchApproveItem item : items) {
             String contractNo = item.contractNo;
             try {
@@ -878,7 +946,6 @@ public class CommissionApplicationService {
                 }
                 String defaultComment = NODE_DIRECTOR.equals(node) ? "总监审批通过" : "财务审批通过";
                 approvalPort.completeTaskAsSys(item.task.getTaskId(), "批量审批：" + defaultComment);
-                // 办理后节点已流转（总监→财务 或 结束），按最新节点回写 current_node（必要查询）
                 refreshCurrentNode(item.application);
                 result.getSuccessContracts().add(contractNo);
             } catch (Exception e) {
@@ -886,11 +953,6 @@ public class CommissionApplicationService {
                 log.warn("[结佣-批量审批] 合同 {} 审批失败：{}", contractNo, e.getMessage());
             }
         }
-        result.setSuccess(result.getSuccessContracts().size());
-        result.setSkipped(result.getSkippedContracts().size());
-        result.setFailed(result.getFailedContracts().size());
-        log.info("[结佣-批量审批] period={}, 成功={}, 跳过={}, 失败={}",
-            period, result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 

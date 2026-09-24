@@ -531,11 +531,50 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
      * 审批单与当前待办任务均由同步阶段预检透传，异步不再查审批单/当前任务；
      * 用 completeTaskAsSys 按 taskId 办理。预检后任务若被他人抢先办理，
      * 引擎抛异常计入失败（并发安全）。单据失败不中断整批。
+     * <p>
+     * 多线程分片：合同之间无交集，按 50 个一组分片，每片一个线程并行办理。
      */
     private BatchApproveResultVo doBatchApprove(List<RcvApproveItem> items,
                                                   Long operatorId, String operatorName) {
         BatchApproveResultVo result = new BatchApproveResultVo();
         result.setTotal(items.size());
+        if (items.isEmpty()) {
+            return result;
+        }
+        // 按 50 个一组分片
+        int chunkSize = 50;
+        int chunkCount = (items.size() + chunkSize - 1) / chunkSize;
+        List<List<RcvApproveItem>> chunks = new ArrayList<>(chunkCount);
+        for (int i = 0; i < items.size(); i += chunkSize) {
+            chunks.add(items.subList(i, Math.min(i + chunkSize, items.size())));
+        }
+        // 并行处理各分片，收集结果
+        List<CompletableFuture<BatchApproveResultVo>> futures = chunks.stream()
+            .map(chunk -> CompletableFuture.supplyAsync(
+                () -> doBatchApproveChunk(chunk, operatorId, operatorName), taskExecutor))
+            .toList();
+        // 合并各分片结果
+        for (CompletableFuture<BatchApproveResultVo> f : futures) {
+            try {
+                BatchApproveResultVo chunkResult = f.join();
+                result.getSuccessContracts().addAll(chunkResult.getSuccessContracts());
+                result.getFailedContracts().addAll(chunkResult.getFailedContracts());
+            } catch (Exception e) {
+                log.error("[实收审批] 分片处理异常", e);
+            }
+        }
+        result.setSuccess(result.getSuccessContracts().size());
+        result.setSkipped(result.getSkippedContracts().size());
+        result.setFailed(result.getFailedContracts().size());
+        log.info("[实收审批] 批量审批完成：分片={}, 成功={}, 跳过={}, 失败={}",
+            chunkCount, result.getSuccess(), result.getSkipped(), result.getFailed());
+        return result;
+    }
+
+    /** 单分片处理（一个线程内逐单办理） */
+    private BatchApproveResultVo doBatchApproveChunk(List<RcvApproveItem> items,
+                                                     Long operatorId, String operatorName) {
+        BatchApproveResultVo result = new BatchApproveResultVo();
         for (RcvApproveItem item : items) {
             try {
                 String approver = operatorName != null ? operatorName : String.valueOf(operatorId);
@@ -548,11 +587,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService {
                     item.contractNo(), e.getMessage());
             }
         }
-        result.setSuccess(result.getSuccessContracts().size());
-        result.setSkipped(result.getSkippedContracts().size());
-        result.setFailed(result.getFailedContracts().size());
-        log.info("[实收审批] 批量审批完成：成功={}, 跳过={}, 失败={}",
-            result.getSuccess(), result.getSkipped(), result.getFailed());
         return result;
     }
 

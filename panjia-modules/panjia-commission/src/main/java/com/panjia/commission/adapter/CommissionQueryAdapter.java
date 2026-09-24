@@ -157,7 +157,9 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setPeriod(fact.getPeriod());
         dto.setEmployeeId(fact.getEmployeeId());
         dto.setEmployeeCode(fact.getEmployeeCode());
+        dto.setEmployeeName(fact.getEmployeeName());
         dto.setDeptId(fact.getDeptId());
+        dto.setDeptName(fact.getDeptName());
         dto.setContractNo(fact.getContractNo());
         dto.setOrderNo(fact.getOrderNo());
         dto.setBusinessDate(fact.getBusinessDate());
