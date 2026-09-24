@@ -83,7 +83,6 @@ public class PayrollBatchService {
     private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
     private final PeopleScoreQueryPort scoreQueryPort;
     private final IRateAdjustService rateAdjustService;
-    private final CommissionPerformanceQueryPort performanceQueryPort;
     private final ConfigService configService;
 
     // ==================== 创建 ====================
@@ -657,35 +656,6 @@ public class PayrollBatchService {
 
     public List<PayrollDetail> listDetails(Long batchId) {
         return detailMapper.selectByBatchId(batchId);
-    }
-
-    /**
-     * 按合同号/订单号过滤工资明细（可选，前端不传时返回全量）。
-     * <p>
-     * 工资明细是按员工聚合的一人一行，没有合同号字段。过滤逻辑：
-     * 先查该期间业绩事实中匹配合同号/订单号的 employeeId 集合，
-     * 再用集合过滤工资明细行。
-     *
-     * @param batchId    工资批次 ID
-     * @param contractNo 合同号/订单号（模糊匹配）
-     * @return 过滤后的工资明细
-     */
-    public List<PayrollDetail> listDetails(Long batchId, String contractNo) {
-        if (contractNo == null || contractNo.isBlank()) {
-            return detailMapper.selectByBatchId(batchId);
-        }
-        // 从批次取 period
-        PayrollBatch batch = batchMapper.selectById(batchId);
-        if (batch == null || batch.getPeriod() == null) {
-            return List.of();
-        }
-        // 查该期间匹配合同号/订单号的业绩事实 → employeeId 集合
-        Set<Long> matchedEmployeeIds = performanceQueryPort.findEmployeeIdsByContractOrOrder(
-            batch.getPeriod(), contractNo.trim());
-        if (matchedEmployeeIds.isEmpty()) {
-            return List.of();
-        }
-        return detailMapper.selectByBatchIdAndEmployeeIds(batchId, matchedEmployeeIds);
     }
 
     // ==================== 本人工资查询（数据范围强制为登录人本人） ====================

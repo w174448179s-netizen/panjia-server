@@ -46,6 +46,7 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
 
     private final CommissionItemMapper itemMapper;
     private final CommissionPerformanceQueryPort performanceQueryPort;
+    private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     @Override
     public List<CommissionItemDTO> findLocked(String period, Long deptId) {
@@ -119,7 +120,7 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         return dto;
     }
 
-    /** 批量 enrich 结佣明细 with 业绩事实的合同/房源/比例信息 */
+    /** 批量 enrich 结佣明细 with 业绩事实的合同/房源/比例信息 + 员工主数据姓名/门店/工号 */
     private List<CommissionItemDTO> enrichWithFacts(List<CommissionItem> items) {
         if (items.isEmpty()) return Collections.emptyList();
         List<Long> factIds = items.stream()
@@ -132,6 +133,14 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
             factMap = performanceQueryPort.findActiveByFacts(factIds).stream()
                 .collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, Function.identity(), (a, b) -> a));
         }
+        // 批量查员工主数据，填充 employeeName/deptName/employeeCode（导出与列表展示用，避免 N+1）
+        java.util.Set<Long> empIds = items.stream()
+            .map(CommissionItem::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, com.panjia.contracts.dto.EmployeeMainDataDTO> empMap = empIds.isEmpty()
+            ? Collections.emptyMap()
+            : employeeMainDataQueryPort.listByIds(empIds);
         List<CommissionItemDTO> result = new ArrayList<>(items.size());
         for (CommissionItem item : items) {
             CommissionItemDTO dto = toDTO(item);
@@ -143,6 +152,13 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
                 dto.setPropertyAddress(fact.getPropertyAddress());
                 dto.setShareRatio(fact.getShareRatio());
                 if (dto.getContractNo() == null) dto.setContractNo(fact.getContractNo());
+            }
+            com.panjia.contracts.dto.EmployeeMainDataDTO emp =
+                item.getEmployeeId() == null ? null : empMap.get(item.getEmployeeId());
+            if (emp != null) {
+                dto.setEmployeeCode(emp.getEmployeeCode());
+                dto.setEmployeeName(emp.getEmployeeName());
+                dto.setDeptName(emp.getDeptName());
             }
             result.add(dto);
         }

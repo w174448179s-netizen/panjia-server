@@ -47,23 +47,6 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     @Override
-    public java.util.Set<Long> findEmployeeIdsByContractOrOrder(String period, String contractNo) {
-        if (period == null || contractNo == null || contractNo.isBlank()) {
-            return java.util.Collections.emptySet();
-        }
-        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(PerformanceFact::getPeriod, period)
-            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
-            .and(w -> w.like(PerformanceFact::getContractNo, contractNo)
-                .or().like(PerformanceFact::getOrderNo, contractNo))
-            .select(PerformanceFact::getEmployeeId);
-        return factMapper.selectList(wrapper).stream()
-            .map(PerformanceFact::getEmployeeId)
-            .filter(java.util.Objects::nonNull)
-            .collect(java.util.stream.Collectors.toSet());
-    }
-
-    @Override
     public List<PerformanceFactSummaryDTO> findActiveByDept(String period, Long deptId, String factType) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getPeriod, period)
@@ -97,6 +80,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
                 active.add(dto);
             }
         }
+        enrichWithEmployeeData(active);
         return active;
     }
 
@@ -106,12 +90,18 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             return null;
         }
         List<PerformanceFactSummaryDTO> list = factMapper.selectFactSummariesByIds(Collections.singletonList(factId));
-        return list.isEmpty() ? null : list.get(0);
+        if (list.isEmpty()) {
+            return null;
+        }
+        enrichWithEmployeeData(list);
+        return list.get(0);
     }
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType) {
-        return factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
+        List<PerformanceFactSummaryDTO> list = factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
+        enrichWithEmployeeData(list);
+        return list;
     }
 
     @Override
@@ -211,26 +201,39 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     private List<PerformanceFactSummaryDTO> toSummaries(List<PerformanceFact> facts) {
         if (facts.isEmpty()) return Collections.emptyList();
-        // 批量查员工主数据，填充 employeeName/deptName（避免 N+1）
-        Set<Long> empIds = new HashSet<>();
-        for (PerformanceFact f : facts) {
-            if (f.getEmployeeId() != null) empIds.add(f.getEmployeeId());
-        }
-        Map<Long, com.panjia.contracts.dto.EmployeeMainDataDTO> empMap = empIds.isEmpty()
-            ? Collections.emptyMap()
-            : employeeMainDataQueryPort.listByIds(empIds);
         List<PerformanceFactSummaryDTO> list = new ArrayList<>(facts.size());
         for (PerformanceFact fact : facts) {
-            PerformanceFactSummaryDTO dto = toSummary(fact);
+            list.add(toSummary(fact));
+        }
+        enrichWithEmployeeData(list);
+        return list;
+    }
+
+    /**
+     * 批量填充 employeeName/deptName（员工主数据批量查询，避免 N+1）。
+     * <p>
+     * employeeCode 由事实表 employee_external_code 直接映射（见 toSummary），
+     * 姓名/部门名不在事实表中，统一经 {@link EmployeeMainDataQueryPort} 批量补充。
+     * 供 findActiveByFacts / getByFactId / findActiveByContract / toSummaries 共用，
+     * 保证导出与列表 tab 同口径。
+     */
+    private void enrichWithEmployeeData(List<PerformanceFactSummaryDTO> list) {
+        if (list == null || list.isEmpty()) return;
+        Set<Long> empIds = new HashSet<>();
+        for (PerformanceFactSummaryDTO dto : list) {
+            if (dto.getEmployeeId() != null) empIds.add(dto.getEmployeeId());
+        }
+        if (empIds.isEmpty()) return;
+        Map<Long, com.panjia.contracts.dto.EmployeeMainDataDTO> empMap =
+            employeeMainDataQueryPort.listByIds(empIds);
+        for (PerformanceFactSummaryDTO dto : list) {
             com.panjia.contracts.dto.EmployeeMainDataDTO emp =
-                fact.getEmployeeId() == null ? null : empMap.get(fact.getEmployeeId());
+                dto.getEmployeeId() == null ? null : empMap.get(dto.getEmployeeId());
             if (emp != null) {
                 dto.setEmployeeName(emp.getEmployeeName());
                 dto.setDeptName(emp.getDeptName());
             }
-            list.add(dto);
         }
-        return list;
     }
 
     private PerformanceFactSummaryDTO toSummary(PerformanceFact fact) {
