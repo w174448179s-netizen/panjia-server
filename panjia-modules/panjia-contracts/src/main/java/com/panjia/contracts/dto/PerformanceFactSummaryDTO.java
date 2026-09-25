@@ -34,9 +34,6 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 业务发生日 */
     private LocalDate businessDate;
 
-    /** 签约/认购时间（raw_json.signDate 原始时间戳字符串，含时分秒；缺失时为 null） */
-    private String signDate;
-
     /** 员工 ID */
     private Long employeeId;
 

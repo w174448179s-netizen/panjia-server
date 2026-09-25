@@ -193,7 +193,9 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
      * 解析签约(成销)时间为 LocalDate。
      * <p>
      * 贝壳 Excel 中签约时间格式不统一（yyyy-MM-dd / yyyy/MM/dd / yyyy.MM.dd 等），
-     * 逐一尝试常见格式；全部解析失败时回退归属月初，保证 pj_perf_fact.business_date 非空。
+     * 且常带时分秒后缀（yyyy-MM-dd HH:mm:ss），逐一尝试常见格式：
+     * 先截取日期部分按补零/非补零解析，再按纯数字 yyyyMMdd 解析；
+     * 全部解析失败时才回退归属月初，保证 pj_perf_fact.business_date 非空。
      *
      * @param signDate 原始签约时间字符串
      * @param period   归属期间（回退用）
@@ -202,21 +204,34 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     private java.time.LocalDate parseSignDate(String signDate, String period) {
         if (signDate != null && !signDate.isBlank()) {
             String s = signDate.trim();
-            // 统一分隔符为 "-"
+            // 统一分隔符为 "-"；含时分秒的原始串截取日期部分
             String normalized = s.replace('/', '-').replace('.', '-');
+            String datePart = normalized.length() > 10 ? normalized.substring(0, 10).trim() : normalized;
+            // 1) 补零 ISO "yyyy-MM-dd"
             try {
-                return java.time.LocalDate.parse(normalized);
+                return java.time.LocalDate.parse(datePart);
             } catch (Exception ignored) {
-                // 尝试 yyyyMMdd
+            }
+            // 2) 非补零 "yyyy-M-d"
+            String[] parts = datePart.split("-");
+            if (parts.length == 3) {
                 try {
-                    String compact = normalized.replace("-", "");
-                    if (compact.length() == 8) {
-                        return java.time.LocalDate.of(
-                            Integer.parseInt(compact.substring(0, 4)),
-                            Integer.parseInt(compact.substring(4, 6)),
-                            Integer.parseInt(compact.substring(6, 8)));
-                    }
-                } catch (Exception ignored2) {
+                    return java.time.LocalDate.of(
+                        Integer.parseInt(parts[0]),
+                        Integer.parseInt(parts[1]),
+                        Integer.parseInt(parts[2]));
+                } catch (Exception ignored) {
+                }
+            }
+            // 3) 纯数字 yyyyMMdd（含时间的纯数字串取前 8 位）
+            String digits = normalized.replaceAll("\\D", "");
+            if (digits.length() >= 8) {
+                try {
+                    return java.time.LocalDate.of(
+                        Integer.parseInt(digits.substring(0, 4)),
+                        Integer.parseInt(digits.substring(4, 6)),
+                        Integer.parseInt(digits.substring(6, 8)));
+                } catch (Exception ignored) {
                 }
             }
         }

@@ -147,7 +147,6 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
             PerformanceFactSummaryDTO fact = factMap.get(item.getPerformanceFactId());
             if (fact != null) {
                 dto.setBusinessDate(fact.getBusinessDate());
-                dto.setSignDate(fact.getSignDate());
                 dto.setOrderNo(fact.getOrderNo());
                 dto.setPropertyAddress(fact.getPropertyAddress());
                 dto.setShareRatio(fact.getShareRatio());
@@ -179,7 +178,6 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setContractNo(fact.getContractNo());
         dto.setOrderNo(fact.getOrderNo());
         dto.setBusinessDate(fact.getBusinessDate());
-        dto.setSignDate(fact.getSignDate());
         dto.setPropertyAddress(fact.getPropertyAddress());
         dto.setShareRatio(fact.getShareRatio());
         dto.setBizType(fact.getBizType());

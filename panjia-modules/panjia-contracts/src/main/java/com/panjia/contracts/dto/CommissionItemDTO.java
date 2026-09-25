@@ -57,9 +57,6 @@ public class CommissionItemDTO implements Serializable {
     /** 签约/认购日期（业绩事实透传） */
     private LocalDate businessDate;
 
-    /** 签约/认购时间戳（raw_json.signDate 原始值，含时分秒） */
-    private String signDate;
-
     /** 房源地址（业绩事实透传） */
     private String propertyAddress;
 
