@@ -139,7 +139,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         dto.setId(r.getId());
         dto.setBatchId(r.getBatchId());
         dto.setSourceType(sourceType);
-        dto.setBusinessDate(parseSignDate(r.getSignDate(), r.getPeriod()));
+        dto.setBusinessDate(parseSignDateTime(r.getSignDate(), r.getPeriod()));
         dto.setPeriod(r.getPeriod());
         dto.setEmployeeCode(r.getEmployeeExternalCode());
 
@@ -197,51 +197,105 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     }
 
     /**
-     * 解析签约(成销)时间为 LocalDate。
+     * 解析签约(成销)时间为 LocalDateTime（保留时分秒）。
      * <p>
      * 贝壳 Excel 中签约时间格式不统一（yyyy-MM-dd / yyyy/MM/dd / yyyy.MM.dd 等），
      * 且常带时分秒后缀（yyyy-MM-dd HH:mm:ss），逐一尝试常见格式：
-     * 先截取日期部分按补零/非补零解析，再按纯数字 yyyyMMdd 解析；
-     * 全部解析失败时才回退归属月初，保证 pj_perf_fact.business_date 非空。
+     * 先拆日期/时间两段，日期按补零/非补零解析并拼接时间部分，再按纯数字
+     * yyyyMMddHHmmss / yyyyMMddHHmm / yyyyMMdd 解析；
+     * 全部解析失败时才回退归属月初（00:00:00），保证 pj_perf_fact.business_date 非空。
      *
      * @param signDate 原始签约时间字符串
      * @param period   归属期间（回退用）
-     * @return 签约日期；解析失败且 period 非法时返回 null
+     * @return 签约日期时间；解析失败且 period 非法时返回 null
      */
-    private java.time.LocalDate parseSignDate(String signDate, String period) {
+    private java.time.LocalDateTime parseSignDateTime(String signDate, String period) {
         if (signDate != null && !signDate.isBlank()) {
-            String s = signDate.trim();
-            // 统一分隔符为 "-"；含时分秒的原始串截取日期部分
+            String s = signDate.trim().replace('T', ' ');
+            // 统一日期分隔符为 "-"，拆出日期与时间两段
             String normalized = s.replace('/', '-').replace('.', '-');
-            String datePart = normalized.length() > 10 ? normalized.substring(0, 10).trim() : normalized;
-            // 1) 补零 ISO "yyyy-MM-dd"
-            try {
-                return java.time.LocalDate.parse(datePart);
-            } catch (Exception ignored) {
+            String datePart = normalized;
+            String timePart = null;
+            int sp = normalized.indexOf(' ');
+            if (sp >= 0) {
+                datePart = normalized.substring(0, sp).trim();
+                timePart = normalized.substring(sp + 1).trim();
             }
-            // 2) 非补零 "yyyy-M-d"
-            String[] parts = datePart.split("-");
-            if (parts.length == 3) {
-                try {
-                    return java.time.LocalDate.of(
-                        Integer.parseInt(parts[0]),
-                        Integer.parseInt(parts[1]),
-                        Integer.parseInt(parts[2]));
-                } catch (Exception ignored) {
+            java.time.LocalDate date = parseDatePart(datePart);
+            if (date == null) {
+                // 纯数字串：yyyyMMddHHmmss(14) / yyyyMMddHHmm(12) / yyyyMMdd(8)
+                String digits = normalized.replaceAll("\\D", "");
+                date = parseDateDigits(digits);
+                if (date != null && digits.length() > 8) {
+                    return ofDigits(digits, date);
                 }
             }
-            // 3) 纯数字 yyyyMMdd（含时间的纯数字串取前 8 位）
-            String digits = normalized.replaceAll("\\D", "");
-            if (digits.length() >= 8) {
-                try {
-                    return java.time.LocalDate.of(
-                        Integer.parseInt(digits.substring(0, 4)),
-                        Integer.parseInt(digits.substring(4, 6)),
-                        Integer.parseInt(digits.substring(6, 8)));
-                } catch (Exception ignored) {
-                }
+            if (date != null) {
+                return java.time.LocalDateTime.of(date, parseTimePart(timePart));
             }
         }
-        return periodStartDate(period);
+        java.time.LocalDate fallback = periodStartDate(period);
+        return fallback != null ? fallback.atStartOfDay() : null;
+    }
+
+    /** 解析日期段：优先补零 ISO，其次非补零 yyyy-M-d；失败返回 null */
+    private java.time.LocalDate parseDatePart(String datePart) {
+        if (datePart == null || datePart.isBlank()) {
+            return null;
+        }
+        try {
+            return java.time.LocalDate.parse(datePart);
+        } catch (Exception ignored) {
+        }
+        String[] parts = datePart.split("-");
+        if (parts.length == 3) {
+            try {
+                return java.time.LocalDate.of(
+                    Integer.parseInt(parts[0]),
+                    Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2]));
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** 纯数字串取前 8 位按 yyyyMMdd 解析；不足 8 位返回 null */
+    private java.time.LocalDate parseDateDigits(String digits) {
+        if (digits == null || digits.length() < 8) {
+            return null;
+        }
+        try {
+            return java.time.LocalDate.of(
+                Integer.parseInt(digits.substring(0, 4)),
+                Integer.parseInt(digits.substring(4, 6)),
+                Integer.parseInt(digits.substring(6, 8)));
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    /** 纯数字串拼接时分秒：yyyyMMddHHmmss / yyyyMMddHHmm / yyyyMMdd（无时间） */
+    private java.time.LocalDateTime ofDigits(String digits, java.time.LocalDate date) {
+        int hour = digits.length() >= 10 ? Integer.parseInt(digits.substring(8, 10)) : 0;
+        int minute = digits.length() >= 12 ? Integer.parseInt(digits.substring(10, 12)) : 0;
+        int second = digits.length() >= 14 ? Integer.parseInt(digits.substring(12, 14)) : 0;
+        return java.time.LocalDateTime.of(date, java.time.LocalTime.of(hour, minute, second));
+    }
+
+    /** 解析时间段 HH:mm:ss / HH:mm / 为空；非法按 00:00:00 */
+    private java.time.LocalTime parseTimePart(String timePart) {
+        if (timePart == null || timePart.isBlank()) {
+            return java.time.LocalTime.MIN;
+        }
+        String[] t = timePart.split(":");
+        try {
+            int hour = Integer.parseInt(t[0]);
+            int minute = t.length >= 2 ? Integer.parseInt(t[1]) : 0;
+            int second = t.length >= 3 ? Integer.parseInt(t[2]) : 0;
+            return java.time.LocalTime.of(hour, minute, second);
+        } catch (Exception ignored) {
+            return java.time.LocalTime.MIN;
+        }
     }
 }

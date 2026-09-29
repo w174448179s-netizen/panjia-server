@@ -621,7 +621,7 @@ public class SalaryCalculationEngine {
      */
     private String resolveCommissionRulePeriod(CommissionItemDTO item) {
         // 签约月
-        LocalDate bizDate = item.getBusinessDate();
+        java.time.LocalDateTime bizDate = item.getBusinessDate();
         if (bizDate != null) {
             return YearMonth.from(bizDate).toString();
         }

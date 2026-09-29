@@ -5,7 +5,7 @@ import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 业绩事实摘要 DTO（跨域契约，panjia-contracts 叶子模块）。
@@ -31,8 +31,8 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 归属期间 YYYY-MM */
     private String period;
 
-    /** 业务发生日 */
-    private LocalDate businessDate;
+    /** 业务发生时间（签约/成销时间，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 员工 ID */
     private Long employeeId;

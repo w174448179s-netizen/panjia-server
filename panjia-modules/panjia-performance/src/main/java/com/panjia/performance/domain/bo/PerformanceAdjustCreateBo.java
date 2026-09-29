@@ -66,8 +66,11 @@ public class PerformanceAdjustCreateBo {
     /** 新角色人角色类型（如"合作人"，自由文本） */
     private String newRoleType;
 
-    /** 新角色人业绩金额（>0 且 ≤ 合同当前业绩合计） */
+    /** 新角色人业绩金额（>0；总额不变场景下须 ≤ 合同当前业绩合计） */
     private BigDecimal newAmount;
+
+    /** 新角色人业绩比例/角色占比（可空=不设置；>0，不强制各角色合计=100%） */
+    private BigDecimal newShareRatio;
 
     /** 新角色人业绩归属部门（默认取员工档案部门，可改） */
     private Long newDeptId;

@@ -5,7 +5,7 @@ import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 结佣明细 DTO（跨域契约，panjia-contracts 叶子模块）。
@@ -54,8 +54,8 @@ public class CommissionItemDTO implements Serializable {
     /** 订单号（业绩事实透传时携带，结佣明细无） */
     private String orderNo;
 
-    /** 签约/认购日期（业绩事实透传） */
-    private LocalDate businessDate;
+    /** 签约/认购时间（业绩事实透传，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 房源地址（业绩事实透传） */
     private String propertyAddress;

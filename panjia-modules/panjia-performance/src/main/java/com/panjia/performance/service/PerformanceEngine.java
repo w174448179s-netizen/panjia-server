@@ -36,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -209,7 +210,7 @@ public class PerformanceEngine {
             if (pageResult != null && pageResult.getRows() != null) {
                 for (NormalizedRecordDTO record : pageResult.getRows()) {
                     if (derivedPeriod == null && record.getBusinessDate() != null) {
-                        derivedPeriod = derivePeriod(record.getBusinessDate());
+                        derivedPeriod = derivePeriod(record.getBusinessDate().toLocalDate());
                     } else if (derivedPeriod == null && record.getPeriod() != null) {
                         derivedPeriod = record.getPeriod();
                     }
@@ -490,7 +491,7 @@ public class PerformanceEngine {
 
         // ========== 4. 构建并保存业绩事实 ==========
         // NOT NULL 防线：businessDate/period 由 adapter 以归属月初保证；缺失即脏数据，fail fast
-        LocalDate businessDate = record.getBusinessDate();
+        LocalDateTime businessDate = record.getBusinessDate();
         if (businessDate == null || record.getPeriod() == null) {
             throw new IllegalStateException(
                 "归一化记录缺少业务日期/归属月，拒绝构建业绩事实：recordId=" + record.getId());
@@ -527,8 +528,8 @@ public class PerformanceEngine {
         fact.setShareRatio(record.getShareRatio()); // 分摊比例仅展示用，不参与计算
         fact.setPerformanceAmount(performanceAmount);
 
-        // 生效日期默认为业务发生日
-        fact.setEffectiveDate(record.getBusinessDate());
+        // 生效日期默认为业务发生日（effective_date 为 date 列，仅取日期部分）
+        fact.setEffectiveDate(record.getBusinessDate().toLocalDate());
         // expireDate 为空表示长期有效（被冲销时才会设置）
 
         fact.setFactStatus(FactStatus.ACTIVE);
@@ -586,7 +587,7 @@ public class PerformanceEngine {
             return existingFact;
         }
 
-        LocalDate businessDate = record.getBusinessDate();
+        LocalDateTime businessDate = record.getBusinessDate();
         if (businessDate == null || record.getPeriod() == null) {
             throw new IllegalStateException(
                 "退单红冲记录缺少业务日期/归属月，拒绝构建事实：recordId=" + record.getId());
@@ -642,7 +643,7 @@ public class PerformanceEngine {
         // ★ 分摊比例镜像原事实冻结值（仅展示用，不参与计算）
         fact.setShareRatio(original.getShareRatio());
         fact.setPerformanceAmount(redinkPerformance);
-        fact.setEffectiveDate(businessDate);
+        fact.setEffectiveDate(businessDate.toLocalDate());
         fact.setFactStatus(FactStatus.ACTIVE);
         fact.setSource(PerformanceSource.IMPORT);
         fact.setReversalType(ReversalType.REDINK_REFUND);
@@ -792,7 +793,7 @@ public class PerformanceEngine {
         fact.setDeptId(resolveContractDeptId(record));
         fact.setShareRatio(record.getShareRatio());
         fact.setPerformanceAmount(amount);
-        fact.setEffectiveDate(record.getBusinessDate());
+        fact.setEffectiveDate(record.getBusinessDate().toLocalDate());
         fact.setFactStatus(FactStatus.ACTIVE);
         fact.setSource(PerformanceSource.IMPORT);
         fact.setOperatorId(operatorId);

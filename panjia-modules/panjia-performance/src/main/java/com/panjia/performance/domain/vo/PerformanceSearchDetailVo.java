@@ -71,4 +71,10 @@ public class PerformanceSearchDetailVo {
 
     /** 结算日期 */
     private LocalDateTime settleDate;
+
+    /**
+     * 是否为「增加角色人」调整（ADD_MEMBER）产生的新签行：
+     * 来源 MANUAL 且 source_key 带 MANUAL-调整单号标记，前端据此展示「新签调整」标记。
+     */
+    private Boolean manualAdjust;
 }

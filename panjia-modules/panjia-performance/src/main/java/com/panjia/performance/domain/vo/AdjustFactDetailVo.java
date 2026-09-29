@@ -45,6 +45,9 @@ public class AdjustFactDetailVo implements Serializable {
     /** 应收金额 */
     private BigDecimal expectedAmount;
 
+    /** 来源业务单号（幂等锚点；ADD_MEMBER 执行后按 source_key 关联被替代的旧事实） */
+    private String sourceKey;
+
     /** 当前金额（调整前的 performance_amount） */
     private BigDecimal amount;
 

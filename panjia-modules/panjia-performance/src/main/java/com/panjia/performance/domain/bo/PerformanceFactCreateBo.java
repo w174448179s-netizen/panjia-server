@@ -4,7 +4,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 手工录入业绩事实请求。
@@ -21,8 +21,8 @@ public class PerformanceFactCreateBo {
     /** 归属期间 YYYY-MM */
     private String period;
 
-    /** 业务发生日 */
-    private LocalDate businessDate;
+    /** 业务发生时间（签约/成销时间，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 员工 ID */
     private Long employeeId;

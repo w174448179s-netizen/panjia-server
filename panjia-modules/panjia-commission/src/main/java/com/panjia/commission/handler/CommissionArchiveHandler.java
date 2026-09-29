@@ -231,7 +231,7 @@ public class CommissionArchiveHandler implements DomainEventHandler {
         LocalDateTime max = null;
         for (HistoryRealFactDTO f : rows) {
             if (f.getBusinessDate() != null) {
-                LocalDateTime dt = f.getBusinessDate().atStartOfDay();
+                LocalDateTime dt = f.getBusinessDate();
                 if (max == null || dt.isAfter(max)) {
                     max = dt;
                 }

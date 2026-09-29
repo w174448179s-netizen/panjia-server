@@ -27,6 +27,7 @@ import com.panjia.performance.service.IPeriodCloseService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.ConversionFactorPort;
@@ -55,6 +56,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -132,6 +134,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         fillDisplayNames(records);
         // 批量回填折算后金额
         fillConvertedAmounts(records);
+        // ADD_MEMBER 回填调整后合同总额（混合金额调整时与原总额不等）
+        fillAddMemberAfterTotal(records);
         return PageResult.build(records, page.getTotal());
     }
 
@@ -217,6 +221,28 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
     }
 
+    /**
+     * 回填 ADD_MEMBER 单据的「调整后合同业绩合计」：解析 payload.afterTotal；
+     * 旧快照无该字段时回退原合同总额（2026-09-29 前单据均为总额不变）。
+     */
+    private void fillAddMemberAfterTotal(List<PerformanceAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        for (PerformanceAdjust r : records) {
+            if (r.getAdjustType() != AdjustType.ADD_MEMBER) {
+                continue;
+            }
+            BigDecimal afterTotal = null;
+            AddMemberPayload payload = parseAddMemberPayload(r.getPayloadJson());
+            if (payload != null) {
+                afterTotal = payload.getAfterTotal();
+            }
+            r.setAfterTotalAmount(afterTotal != null ? MoneyUtil.round2(afterTotal)
+                : (r.getOriginalAmount() != null ? MoneyUtil.round2(r.getOriginalAmount()) : null));
+        }
+    }
+
     @Override
     public PerformanceAdjust getAdjust(Long id) {
         PerformanceAdjust adjust = adjustMapper.selectById(id);
@@ -225,6 +251,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             adjust = syncStatusWithWorkflow(adjust);
             fillDisplayNames(List.of(adjust));
             fillConvertedAmounts(List.of(adjust));
+            fillAddMemberAfterTotal(List.of(adjust));
         }
         return adjust;
     }
@@ -1195,17 +1222,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 增加角色人创建准备：校验 + 分摊预演快照 + payload 构建。
      * <p>
      * 语义：给合同手工多加一个人分业绩——新人金额 X，优先从指定行（deductions）精确扣除，
-     * 剩余由未指定行按业绩占比等比分摊，合同总额不变。执行见 {@link #executeAddMemberAdjust}。
+     * 剩余由未指定行按业绩占比等比分摊，默认合同总额不变。执行见 {@link #executeAddMemberAdjust}。
      * <p>
      * 支持指定值模式（2026-09-28 可编辑表格）：dto.detailTargets 非空时，既有行按指定
-     * 「调整后金额/占比」精确指定（Σtargets + 未指定行 + 新人金额 = 合同总额），跳过
-     * deductions/等比分摊逻辑，payload 以 detailTargets 为执行权威依据。
+     * 「调整后金额/占比」精确指定，跳过 deductions/等比分摊逻辑，payload 以 detailTargets
+     * 为执行权威依据。自 2026-09-29 起允许同时调整合同总额（afterTotal ≠ contractTotal，
+     * 前端提交前二次确认），不再强制 Σtargets + 新人金额 = 原合同总额。
      * <p>
      * 本方法除构建 payload 外，还会回填 dto 的 employeeId/deptId（=新角色人）、
      * targetAmount（=新人金额，供后续统一构建调整单使用）、originalPeriod（强制置空，
      * ADD_MEMBER 的新事实必然挂到合同既有事实所在期间，跨月无意义）。
      *
-     * @param dto 创建请求（含 newEmployeeId/newRoleType/newAmount/newDeptId/deductions/detailTargets）
+     * @param dto 创建请求（含 newEmployeeId/newRoleType/newAmount/newShareRatio/newDeptId/deductions/detailTargets）
      * @return payloadJson（新角色人快照 + 指定扣除/明细指定值 + 分摊预演）
      */
     private String prepareAddMember(PerformanceAdjustCreateBo dto) {
@@ -1218,6 +1246,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         BigDecimal newX = dto.getNewAmount();
         if (newX == null || newX.signum() <= 0) {
             throw new ServiceException("增加角色人缺少业绩金额或金额不大于 0");
+        }
+        if (dto.getNewShareRatio() != null && dto.getNewShareRatio().signum() <= 0) {
+            throw new ServiceException("新角色人业绩比例必须大于 0");
         }
 
         List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
@@ -1234,19 +1265,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         BigDecimal total = facts.stream()
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (newX.compareTo(total) > 0) {
-            throw new ServiceException("新角色人业绩金额({})超过合同当前业绩合计({})，会导致其他明细为负",
-                MoneyUtil.round2(newX), MoneyUtil.round2(total));
-        }
 
         Map<Long, PerformanceFact> factById = facts.stream()
             .collect(Collectors.toMap(PerformanceFact::getId, f -> f));
 
-        // 指定值模式（可编辑表格，2026-09-28）：既有行按「调整后金额/占比」精确指定，合同总额不变；
-        // 非空时跳过 deductions 指定扣除与等比分摊逻辑
+        // 指定值模式（可编辑表格，2026-09-28）：既有行按「调整后金额/占比」精确指定；
+        // 非空时跳过 deductions 指定扣除与等比分摊逻辑。
+        // 2026-09-29 起允许同时调整合同总额：afterTotal（=Σ指定行目标+未指定行现值+新人金额）
+        // 可与 total 不等，前端提交前已二次确认；执行时以 afterTotal 做完整性校验。
         boolean hasTargets = dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty();
         List<AdjustDetailTargetBo> validTargets = new ArrayList<>();
         Map<Long, BigDecimal> targetAmountByFact = new HashMap<>();
+        BigDecimal afterTotal;
         if (hasTargets) {
             BigDecimal coveredSum = BigDecimal.ZERO;
             Set<Long> coveredIds = new HashSet<>();
@@ -1269,10 +1299,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 .filter(f -> !coveredIds.contains(f.getId()))
                 .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            BigDecimal afterTotal = MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newX));
-            if (afterTotal.compareTo(MoneyUtil.round2(total)) != 0) {
-                throw new ServiceException("调整后明细合计({})与合同业绩合计({})不一致，增加角色人须保持合同总额不变",
-                    afterTotal, MoneyUtil.round2(total));
+            afterTotal = MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newX));
+        } else {
+            // 旧模式（deductions 指定扣除 + 等比分摊）合同总额必不变，新人金额不得超过原合计
+            afterTotal = MoneyUtil.round2(total);
+            if (newX.compareTo(total) > 0) {
+                throw new ServiceException("新角色人业绩金额({})超过合同当前业绩合计({})，会导致其他明细为负",
+                    MoneyUtil.round2(newX), MoneyUtil.round2(total));
             }
         }
 
@@ -1387,7 +1420,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         payload.setDeptId(dto.getNewDeptId());
         payload.setRoleType(StringUtils.defaultIfBlank(dto.getNewRoleType(), "合作人"));
         payload.setAmount(MoneyUtil.round2(newX));
+        payload.setNewShareRatio(dto.getNewShareRatio() == null
+            ? null : MoneyUtil.round6(dto.getNewShareRatio()));
         payload.setContractTotal(MoneyUtil.round2(total));
+        payload.setAfterTotal(afterTotal);
         if (hasTargets) {
             payload.setDetailTargets(validTargets);
         } else {
@@ -1431,22 +1467,54 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         boolean isExpectType = FACT_TYPE_EXPECT.equals(
             StringUtils.isNotBlank(adjust.getFactType()) ? adjust.getFactType() : FACT_TYPE_EXPECT);
 
+        // 快照 factId → 事实摘要（未执行时是当前 ACTIVE 行；已执行时旧事实已 REVERSED、
+        // 当前行是同 source_key 的新事实），统一经 source_key 关联当前明细行
         Map<Long, AddMemberPayload.Alloc> allocByFact = new HashMap<>();
         Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
+        Map<String, AddMemberPayload.Alloc> allocBySourceKey = new HashMap<>();
+        Map<String, AddMemberPayload.Alloc> allocByEmpRole = new HashMap<>();
         if (payload != null && payload.getAllocations() != null) {
+            Set<Long> allocFactIds = payload.getAllocations().stream()
+                .map(AddMemberPayload.Alloc::getFactId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+            Map<Long, PerformanceFactSummaryDTO> allocFactById = new HashMap<>();
+            if (!allocFactIds.isEmpty()) {
+                for (PerformanceFactSummaryDTO f : factMapper.selectFactSummariesByIds(allocFactIds)) {
+                    allocFactById.put(f.getFactId(), f);
+                }
+            }
             for (AddMemberPayload.Alloc a : payload.getAllocations()) {
                 if (a.getFactId() != null) {
                     allocByFact.put(a.getFactId(), a);
+                    PerformanceFactSummaryDTO snap = allocFactById.get(a.getFactId());
+                    if (snap != null) {
+                        if (StringUtils.isNotBlank(snap.getSourceKey())) {
+                            allocBySourceKey.put(snap.getSourceKey(), a);
+                        }
+                        if (snap.getEmployeeId() != null && StringUtils.isNotBlank(snap.getRoleType())) {
+                            allocByEmpRole.putIfAbsent(snap.getEmployeeId() + "|" + snap.getRoleType(), a);
+                        }
+                    }
                 }
                 if (a.getEmployeeId() != null) {
-                    allocByEmployee.put(a.getEmployeeId(), a);
+                    allocByEmployee.putIfAbsent(a.getEmployeeId(), a);
                 }
             }
         }
 
         // 既有行：未执行=预演分摊（amount+delta=after）；已执行=反转语义（amount=before，after=当前值）
         for (AdjustFactDetailVo d : details) {
-            AddMemberPayload.Alloc alloc = d.getFactId() != null ? allocByFact.get(d.getFactId()) : null;
+            AddMemberPayload.Alloc alloc = null;
+            if (StringUtils.isNotBlank(d.getSourceKey())) {
+                alloc = allocBySourceKey.get(d.getSourceKey());
+            }
+            if (alloc == null && d.getFactId() != null) {
+                alloc = allocByFact.get(d.getFactId());
+            }
+            if (alloc == null && d.getEmployeeId() != null && StringUtils.isNotBlank(d.getRoleType())) {
+                alloc = allocByEmpRole.get(d.getEmployeeId() + "|" + d.getRoleType());
+            }
             if (alloc == null && d.getEmployeeId() != null) {
                 alloc = allocByEmployee.get(d.getEmployeeId());
             }
@@ -1472,12 +1540,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
 
-        // 新角色人行：已执行=SQL 已查出其事实行，按 employeeId 标记反转口径；
+        // 新角色人行：已执行=SQL 已查出其事实行，按 员工+角色 标记反转口径（原值 0）；
         // 未执行=合同里还没有此人，追加虚拟行展示
         if (alreadyExecuted) {
             for (AdjustFactDetailVo d : details) {
                 if (payload != null && payload.getNewEmployeeId() != null
-                    && payload.getNewEmployeeId().equals(d.getEmployeeId())) {
+                    && payload.getNewEmployeeId().equals(d.getEmployeeId())
+                    && (StringUtils.isBlank(payload.getRoleType())
+                        || payload.getRoleType().equals(d.getRoleType()))) {
                     d.setAmount(BigDecimal.ZERO);
                     BigDecimal after = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
                     d.setDeltaAmount(MoneyUtil.round2(after));
@@ -1492,7 +1562,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             member.setDeptPath(payload.getDeptName());
             member.setRoleType(payload.getRoleType());
             member.setRoleName(payload.getRoleType());
-            member.setShareRatio(null);
+            member.setShareRatio(payload.getNewShareRatio());
             member.setExpectedAmount(null);
             member.setAmount(null);
             member.setAfterAmount(adjust.getTargetAmount());
@@ -1537,7 +1607,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     /**
      * 执行增加角色人（ADD_MEMBER，合同级）：指定行精确扣除 + 剩余等比扣除 + 插入新事实。
      * <p>
-     * 不变量：执行后合同业绩合计 = 执行前（新事实 +X，既有事实合计 -X）。
+     * 默认不变量：执行后合同业绩合计 = 执行前（新事实 +X，既有事实合计 -X）；
+     * 指定值模式允许混合金额调整（payload.afterTotal ≠ 执行前合计），以快照 afterTotal 为准。
      * 指定扣除以 payloadJson 为权威依据（按 factId supersede，执行时按当前事实重校验）；
      * 等比部分按执行时当前金额重新分摊（发起后合同可能又发生其他调整），
      * 基准行=未被指定扣除的事实（按调整后的事实集合），全部行被指定时按全部行兜底。
@@ -1557,7 +1628,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         BigDecimal total = facts.stream()
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (newAmount.compareTo(total) > 0) {
+        // 总额不变场景新人金额不得超过合同合计（否则既有行必出现负数）；
+        // 混合金额调整（payload.afterTotal ≠ 执行时合计）时不受此限，完整性由指定值执行分支按快照校验
+        boolean totalChanged = payload != null && payload.getAfterTotal() != null
+            && MoneyUtil.round2(payload.getAfterTotal()).compareTo(MoneyUtil.round2(total)) != 0;
+        if (!totalChanged && newAmount.compareTo(total) > 0) {
             throw new ServiceException("新角色人业绩金额超过合同当前业绩合计，会导致负数：adjustId={}, newAmount={}, total={}",
                 adjust.getId(), newAmount, total);
         }
@@ -1668,12 +1743,17 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .filter(f -> !coveredIds.contains(f.getId()))
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newAmount))
-            .compareTo(MoneyUtil.round2(total)) != 0) {
+        // 完整性校验：执行时 Σ指定行目标 + 未指定行现值 + 新人金额 必须等于发起时快照的调整后总额
+        // （payload.afterTotal；2026-09-29 前旧单该字段为空，回退为执行时合计=总额不变语义）。
+        // 执行时合同被其他调整单抢先改动会导致等式不成立，拒绝执行并留痕，避免金额错乱。
+        BigDecimal expectedAfterTotal = payload.getAfterTotal() != null
+            ? MoneyUtil.round2(payload.getAfterTotal()) : MoneyUtil.round2(total);
+        BigDecimal actualAfterTotal = MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newAmount));
+        if (actualAfterTotal.compareTo(expectedAfterTotal) != 0) {
             throw new ServiceException("执行失败：执行时合同业绩合计已变化（既有行指定值{} + 未指定行{} + 新人{} "
-                    + "≠ 执行时合计{}），为避免金额错乱终止执行：adjustId={}",
+                    + "≠ 发起时调整后总额{}），为避免金额错乱终止执行：adjustId={}",
                 MoneyUtil.round2(coveredSum), MoneyUtil.round2(uncoveredSum), MoneyUtil.round2(newAmount),
-                MoneyUtil.round2(total), adjust.getId());
+                expectedAfterTotal, adjust.getId());
         }
 
         for (AdjustDetailTargetBo t : payload.getDetailTargets()) {
@@ -1719,8 +1799,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (payload.getDeptId() != null) {
                 newFact.setDeptId(payload.getDeptId());
             }
+            // 新角色人业绩比例：发起时显式指定则落库，未指定保持 null（不设置占比）
+            if (payload.getNewShareRatio() != null) {
+                newFact.setShareRatio(payload.getNewShareRatio());
+            }
         }
-        newFact.setShareRatio(null);
         newFact.setPerformanceAmount(MoneyUtil.round2(adjust.getTargetAmount()));
         newFact.setSource(PerformanceSource.MANUAL);
         newFact.setBatchId(null);
@@ -1742,7 +1825,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         PerformanceFact newFact = copyFactBase(oldFact);
         LocalDate firstDay = YearMonth.parse(targetPeriod).atDay(1);
         newFact.setPeriod(targetPeriod);
-        newFact.setBusinessDate(firstDay);
+        newFact.setBusinessDate(firstDay.atStartOfDay());
         newFact.setEffectiveDate(firstDay);
         newFact.setPerformanceAmount(MoneyUtil.round2(performanceDelta));
         newFact.setAdjustId(adjustId);
@@ -1868,7 +1951,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         newFact.setShareRatio(oldFact.getShareRatio());
         newFact.setPerformanceAmount(oldFact.getPerformanceAmount());
         newFact.setEffectiveDate(oldFact.getEffectiveDate() != null
-            ? oldFact.getEffectiveDate() : oldFact.getBusinessDate());
+            ? oldFact.getEffectiveDate() : oldFact.getBusinessDate().toLocalDate());
         newFact.setFactStatus(FactStatus.ACTIVE);
         newFact.setSource(oldFact.getSource());
         return newFact;

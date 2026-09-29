@@ -940,6 +940,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                  ORDER BY pe.id
                  LIMIT 1) AS "expectedAmount",
                f.performance_amount AS "amount",
+               f.source_key AS "sourceKey",
                f.fact_status AS "factStatus"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
@@ -1208,14 +1209,18 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.share_ratio AS "shareRatio",
                f.business_date AS "businessDate",
                f.performance_amount AS "expectAmount",
-               COALESCE(
-                 (SELECT pf.performance_amount FROM pj_perf_fact pf
-                  WHERE pf.source_key = f.source_key
-                    AND pf.fact_type = 'PERF_EXPECT'
-                    AND pf.fact_status = 'REVERSED'
-                  ORDER BY pf.id ASC LIMIT 1),
-                 f.performance_amount
-               ) AS "originalExpectAmount",
+               CASE
+                 -- 增加角色人（ADD_MEMBER）执行后插入的新人事实：来源 MANUAL 且 source_key 带 MANUAL-调整单号标记，
+                 -- 无 REVERSED 前序事实，调整前业绩按 0 展示（0 → X）
+                 WHEN f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%' THEN 0
+                 ELSE COALESCE(
+                   (SELECT pf.performance_amount FROM pj_perf_fact pf
+                    WHERE pf.source_key = f.source_key
+                      AND pf.fact_type = 'PERF_EXPECT'
+                      AND pf.fact_status = 'REVERSED'
+                    ORDER BY pf.id ASC LIMIT 1),
+                   f.performance_amount)
+               END AS "originalExpectAmount",
                COALESCE(
                  (SELECT pr.performance_amount FROM pj_perf_fact pr
                   WHERE pr.source_key = f.source_key
@@ -1225,7 +1230,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                  0
                ) AS "realAmount",
                (ci.id IS NOT NULL) AS "settled",
-               ca.lock_time AS "settleDate"
+               ca.lock_time AS "settleDate",
+               (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id

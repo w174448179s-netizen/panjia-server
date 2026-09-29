@@ -4,7 +4,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 归一化记录 DTO（跨域契约，panjia-contracts 叶子模块）。
@@ -12,9 +12,6 @@ import java.time.LocalDate;
  * 用于跨域读取 import 域归一化后的业务记录，是业绩事实生成的数据来源（§4.1 ⑤）。
  * <p>
  * payload 约束：基础类型 / Long / String / BigDecimal，禁止持有 @Entity。
- * <p>
- * 注：V2.0 归一化暂未存 {@code businessDate}（签约日），DTO 字段保留为可空，
- * 业绩域快照按 {@code period}（结算月）取数；V2.1 归一化落签约日后再补齐该字段。
  */
 @Data
 @NoArgsConstructor
@@ -36,8 +33,8 @@ public class NormalizedRecordDTO {
      */
     private String recordType;
 
-    /** 业务发生日（签约日；V2.0 暂为 null） */
-    private LocalDate businessDate;
+    /** 业务发生时间（签约(成销)时间，含时分秒；由 import 域 signDate 解析） */
+    private LocalDateTime businessDate;
 
     /** 归属期间（结算月 YYYY-MM） */
     private String period;

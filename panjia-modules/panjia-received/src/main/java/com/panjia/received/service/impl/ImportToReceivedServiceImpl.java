@@ -148,9 +148,9 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         c.setContractNo(r.getContractNo());
         c.setBizType(r.getBizType());
         c.setPeriod(period);
-        // business_date 用归一化的 sign_date → 或 businessDate（LocalDate → LocalDateTime）
+        // business_date 直接用归一化的签约(成销)时间（LocalDateTime，已含时分秒）
         if (r.getBusinessDate() != null) {
-            c.setBusinessDate(java.time.LocalDateTime.of(r.getBusinessDate(), java.time.LocalTime.MIN));
+            c.setBusinessDate(r.getBusinessDate());
         } else {
             c.setBusinessDate(java.time.LocalDateTime.now());
         }
@@ -177,7 +177,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         d.setPerformanceAmount(amount);
         d.setFeeItem(r.getFeeItem());
         d.setPeriod(period);
-        d.setEffectiveDate(r.getBusinessDate() != null ? r.getBusinessDate() : LocalDate.now());
+        d.setEffectiveDate(r.getBusinessDate() != null ? r.getBusinessDate().toLocalDate() : LocalDate.now());
         d.setSourceKey(sourceKey);
         d.setSourceBatchId(r.getBatchId());
         d.setNormalizedRecordId(r.getId());

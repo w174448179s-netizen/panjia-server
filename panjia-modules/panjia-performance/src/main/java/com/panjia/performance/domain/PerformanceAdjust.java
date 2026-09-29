@@ -139,4 +139,11 @@ public class PerformanceAdjust implements Serializable {
     /** 折算后原始金额（originalAmount × conversionFactor，展示用） */
     @TableField(exist = false)
     private BigDecimal convertedOriginalAmount;
+
+    /**
+     * ADD_MEMBER 调整后合同业绩合计（展示用，由 payload.afterTotal 回填）。
+     * 为空视为与 originalAmount 相等（2026-09-29 前的旧单据均为总额不变）。
+     */
+    @TableField(exist = false)
+    private BigDecimal afterTotalAmount;
 }

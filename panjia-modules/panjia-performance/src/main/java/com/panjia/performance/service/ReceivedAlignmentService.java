@@ -126,7 +126,7 @@ public class ReceivedAlignmentService {
         n.setShareRatio(expect.getShareRatio());
         n.setPerformanceAmount(expect.getPerformanceAmount());
         n.setEffectiveDate(realFact.getEffectiveDate() != null ? realFact.getEffectiveDate()
-            : realFact.getBusinessDate());
+            : realFact.getBusinessDate().toLocalDate());
         n.setFactStatus(FactStatus.ACTIVE);
         n.setSource(realFact.getSource());
         n.setReceivedApplyId(realFact.getReceivedApplyId());

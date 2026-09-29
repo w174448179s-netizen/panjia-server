@@ -162,7 +162,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             f.setEffectiveDate(d.getEffectiveDate());
             f.setFactType(FactType.PERF_REAL);
             f.setFactStatus(com.panjia.performance.domain.FactStatus.ACTIVE);
-            f.setBusinessDate(c.getBusinessDate() != null ? c.getBusinessDate().toLocalDate() : null);
+            f.setBusinessDate(c.getBusinessDate());
             f.setSourceKey(d.getSourceKey());
             result.add(f);
         }
@@ -292,8 +292,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         apply.setContractNo(first.getContractNo());
         apply.setPropertyAddress(first.getPropertyAddress());
         apply.setBizType(first.getBizType());
-        apply.setBusinessDate(first.getBusinessDate() == null ? null
-            : first.getBusinessDate().atStartOfDay());
+        apply.setBusinessDate(first.getBusinessDate());
         apply.setItemCount(itemCount);
         apply.setReceivedAmount(realSum);
         apply.setExpectedAmount(expectedAmount);
@@ -1283,8 +1282,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.setOrderNo(snap.getOrderNo());
                 apply.setPropertyAddress(snap.getPropertyAddress());
             }
-            apply.setBusinessDate(first.getBusinessDate() == null ? null
-                : first.getBusinessDate().atStartOfDay());
+            apply.setBusinessDate(first.getBusinessDate());
             apply.setBatchId(first.getBatchId());
             Set<Long> deptIds = new java.util.HashSet<>();
             for (PerformanceFact f : nonZero) {

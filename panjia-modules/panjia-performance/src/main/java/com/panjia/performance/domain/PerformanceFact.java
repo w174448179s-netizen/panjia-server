@@ -38,8 +38,8 @@ public class PerformanceFact implements Serializable {
     /** 归属期间 YYYY-MM */
     private String period;
 
-    /** 业务发生日 */
-    private LocalDate businessDate;
+    /** 业务发生时间（签约/成销时间，含时分秒；对应 DB timestamp 列） */
+    private LocalDateTime businessDate;
 
     /** 来源导入批次 ID */
     private Long batchId;

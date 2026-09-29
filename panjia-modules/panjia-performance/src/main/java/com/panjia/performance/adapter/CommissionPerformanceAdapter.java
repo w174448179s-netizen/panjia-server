@@ -425,7 +425,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         newFact.setShareRatio(oldFact.getShareRatio());
         newFact.setPerformanceAmount(oldFact.getPerformanceAmount());
         newFact.setEffectiveDate(oldFact.getEffectiveDate() != null
-            ? oldFact.getEffectiveDate() : oldFact.getBusinessDate());
+            ? oldFact.getEffectiveDate() : oldFact.getBusinessDate().toLocalDate());
         newFact.setFactStatus(FactStatus.ACTIVE);
         newFact.setSource(oldFact.getSource());
         return newFact;

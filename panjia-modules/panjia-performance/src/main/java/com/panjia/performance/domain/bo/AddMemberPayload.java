@@ -13,11 +13,13 @@ import java.util.List;
  * <p>
  * ADD_MEMBER：新角色人信息 + 指定扣除清单（执行权威依据）+ 完整分摊预演快照（展示用）。
  * 执行时以 deductions 为准精确扣除，剩余部分按执行时当前金额重新等比分摊，
- * 保证合同总额不变（Σ执行后 = Σ执行前）。
+ * 默认保证合同总额不变（Σ执行后 = Σ执行前）。
  * <p>
  * 指定值模式（2026-09-28 可编辑表格交互）：{@link #detailTargets} 非空时，
  * 既有行按指定「调整后金额/角色占比」精确落库，AMOUNT 模式不再等比分摊；
- * ADD_MEMBER 模式下 Σtargets + 新人金额 = 合同总额（不变）。
+ * ADD_MEMBER 模式下默认 Σtargets + 新人金额 = 合同总额（不变），
+ * 自 2026-09-29 起允许同时调整合同总额（{@link #afterTotal} ≠ {@link #contractTotal}），
+ * 审批前由前端二次确认。
  */
 @Data
 @NoArgsConstructor
@@ -47,8 +49,14 @@ public class AddMemberPayload implements Serializable {
     /** 新角色人业绩金额 X */
     private BigDecimal amount;
 
-    /** 发起时合同业绩合计快照 */
+    /** 新角色人业绩比例（角色占比；可空=不设置占比；>0，不强制合计=100%） */
+    private BigDecimal newShareRatio;
+
+    /** 发起时合同业绩合计快照（调整前） */
     private BigDecimal contractTotal;
+
+    /** 调整后合同业绩合计（= Σ既有行目标金额 + 新人金额；等于 contractTotal 时即总额不变） */
+    private BigDecimal afterTotal;
 
     /** 指定扣除清单：优先从指定既有角色人身上精确扣除（执行权威依据） */
     private List<AdjustDeductionBo> deductions;

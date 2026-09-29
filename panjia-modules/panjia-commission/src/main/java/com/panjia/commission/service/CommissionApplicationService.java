@@ -523,7 +523,7 @@ public class CommissionApplicationService {
         PerformanceFactSummaryDTO first = nonZeroFacts.get(0);
         String orderNo = null;
         String propertyAddress = null;
-        LocalDate businessDate = null;
+        LocalDateTime businessDate = null;
         Set<Long> deptIds = new HashSet<>();
         for (PerformanceFactSummaryDTO f : nonZeroFacts) {
             if (orderNo == null) {
@@ -548,7 +548,7 @@ public class CommissionApplicationService {
         application.setContractNo(first.getContractNo() != null ? first.getContractNo() : contractNo);
         application.setOrderNo(orderNo);
         application.setPropertyAddress(propertyAddress);
-        application.setBusinessDate(businessDate != null ? businessDate.atStartOfDay() : null);
+        application.setBusinessDate(businessDate);
         application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
         application.setStatus(ApplicationStatus.DRAFT);
         application.setApplicantId(operatorId);

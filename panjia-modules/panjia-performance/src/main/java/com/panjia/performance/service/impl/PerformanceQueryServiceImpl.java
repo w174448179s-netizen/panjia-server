@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.performance.domain.FactStatus;
@@ -12,6 +13,7 @@ import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformancePeriodClose;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
+import com.panjia.performance.domain.bo.AddMemberPayload;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
@@ -37,6 +39,7 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.DeptService;
 import org.springframework.stereotype.Service;
@@ -655,7 +658,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         }
         Map<String, Object> pending = contractPendings.get(0);
         Object type = pending.get("adjustType");
-        if (!"AMOUNT".equals(type == null ? null : type.toString())) {
+        String adjustType = type == null ? null : type.toString();
+        // 增加角色人（ADD_MEMBER）：合同总额不变，按发起时 payload 快照逐人预演（含新人 0→X 虚拟行）
+        if ("ADD_MEMBER".equals(adjustType)) {
+            applyPendingAddMember(rows, period, factType, pending);
+            return;
+        }
+        if (!"AMOUNT".equals(adjustType)) {
             return;
         }
         Object targetObj = pending.get("targetAmount");
@@ -679,6 +688,95 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             row.setAdjustPendingType("AMOUNT");
             row.setAdjustPendingDelta(parts[i]);
             row.setAdjustPendingAmount(MoneyUtil.round2(amt.add(parts[i])));
+        }
+    }
+
+    /**
+     * 合同管理明细：在途「增加角色人」单（SUBMITTED/APPROVED）逐行预演。
+     * <p>
+     * 执行前既有事实未被替代，payload.allocations.factId 可直接命中当前 ACTIVE 行
+     * （兜底按员工匹配）：回填每人 adjustPendingDelta / adjustPendingAmount；
+     * 新角色人此时尚无事实行，按 payload 合成虚拟行（amount=null，0 → X，审批中标记）。
+     */
+    private void applyPendingAddMember(List<PerformanceManageVo> rows, String period, String factType,
+                                       Map<String, Object> pending) {
+        AddMemberPayload payload = parseAddMemberPayload(pending.get("payloadJson"));
+        if (payload == null || payload.getAllocations() == null || payload.getNewEmployeeId() == null) {
+            return;
+        }
+        Map<Long, AddMemberPayload.Alloc> allocByFact = new HashMap<>();
+        Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
+        for (AddMemberPayload.Alloc a : payload.getAllocations()) {
+            if (a.getFactId() != null) {
+                allocByFact.put(a.getFactId(), a);
+            }
+            if (a.getEmployeeId() != null) {
+                allocByEmployee.putIfAbsent(a.getEmployeeId(), a);
+            }
+        }
+        for (PerformanceManageVo row : rows) {
+            if (Boolean.TRUE.equals(row.getAdjustPending())) {
+                continue; // 明细级优先，不叠加
+            }
+            AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
+            if (alloc == null && row.getEmployeeId() != null) {
+                alloc = allocByEmployee.get(row.getEmployeeId());
+            }
+            if (alloc == null) {
+                continue;
+            }
+            BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
+            BigDecimal delta = alloc.getDelta() != null ? alloc.getDelta() : BigDecimal.ZERO;
+            row.setAdjustPending(true);
+            row.setAdjustPendingType("ADD_MEMBER");
+            row.setAdjustPendingDelta(delta);
+            row.setAdjustPendingAmount(MoneyUtil.round2(amt.add(delta)));
+        }
+        // 新角色人虚拟行：合同字段从既有行复制，保证后续折算填充（按 bizType）口径一致
+        PerformanceManageVo sample = rows.get(0);
+        BigDecimal newAmount = payload.getAmount() != null
+            ? payload.getAmount()
+            : (pending.get("targetAmount") != null
+                ? new BigDecimal(pending.get("targetAmount").toString()) : BigDecimal.ZERO);
+        PerformanceManageVo member = new PerformanceManageVo();
+        member.setFactType(factType);
+        member.setPeriod(period);
+        member.setFactStatus("ACTIVE");
+        member.setOrderNo(sample.getOrderNo());
+        member.setContractNo(sample.getContractNo());
+        member.setBizType(sample.getBizType());
+        member.setFeeItem(sample.getFeeItem());
+        member.setPropertyAddress(sample.getPropertyAddress());
+        member.setBusinessDate(sample.getBusinessDate());
+        member.setEmployeeId(payload.getNewEmployeeId());
+        member.setEmployeeCode(payload.getEmployeeCode());
+        member.setEmployeeName(payload.getEmployeeName());
+        member.setDeptPath(payload.getDeptName());
+        member.setRoleType(payload.getRoleType());
+        member.setRoleName(payload.getRoleType());
+        member.setShareRatio(payload.getNewShareRatio());
+        member.setAmount(null);
+        member.setOriginalAmount(null);
+        member.setAdjustPending(true);
+        member.setAdjustPendingType("ADD_MEMBER");
+        member.setAdjustPendingAmount(MoneyUtil.round2(newAmount));
+        member.setAdjustPendingDelta(MoneyUtil.round2(newAmount));
+        member.setSettled(false);
+        rows.add(member);
+    }
+
+    /**
+     * 解析增加角色人快照（payload_json），解析失败返回 null（跳过逐行预演/还原，不影响主流程）。
+     */
+    private AddMemberPayload parseAddMemberPayload(Object payloadJson) {
+        if (payloadJson == null || StringUtils.isBlank(payloadJson.toString())) {
+            return null;
+        }
+        try {
+            return JsonUtils.parseObject(payloadJson.toString(), AddMemberPayload.class);
+        } catch (Exception e) {
+            log.warn("[业绩查询] 增加角色人快照解析失败，跳过逐行还原：payload={}", payloadJson, e);
+            return null;
         }
     }
 
@@ -762,16 +860,40 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
                 }
             }
         }
-        // 2. 合同级已执行调整：调整单无 fact_id 痕迹，从当前金额逆向分摊还原
-        //    （等比分摊在「分摊基数 = 调整后金额」时结果不变，故用当前金额逆推与执行时按
-        //    原始金额分摊的结果一致；多单链式调整按 id 倒序逐单回退）
+        // 2. 合同级已执行调整（多单链式调整按 id 倒序逐单逆向回退）：
+        //    AMOUNT：无 fact_id 痕迹，按等比不变性用当前金额逆向分摊（与执行时按原始金额分摊结果一致）；
+        //    ADD_MEMBER：合同总额不变，按 payload 快照逐人反转——既有行加回扣减额（935→835 还原为 935），
+        //    新角色人行归零（0→100 的原口径为 0）。执行后既有事实已被替代（新 id、同 source_key），
+        //    故 payload.factId 不能与当前行等值，须经旧事实 source_key / 员工+角色 映射。
         if (contractNos == null || contractNos.size() != 1) {
             return; // 多合同混合场景键无法区分，不做还原（明细弹窗为单合同）
         }
         List<Map<String, Object>> executed =
-            adjustMapper.doSelectExecutedContractAmounts(period, factType, contractNos);
+            adjustMapper.doSelectExecutedContractAdjusts(period, factType, contractNos);
         if (executed.isEmpty()) {
             return;
+        }
+        // 预取各 ADD_MEMBER 快照中的旧事实（执行后多为 REVERSED）：factId → sourceKey/员工/角色
+        Set<Long> payloadFactIds = new HashSet<>();
+        for (Map<String, Object> adj : executed) {
+            if (!"ADD_MEMBER".equals(String.valueOf(adj.get("adjustType")))) {
+                continue;
+            }
+            AddMemberPayload payload = parseAddMemberPayload(adj.get("payloadJson"));
+            if (payload == null || payload.getAllocations() == null) {
+                continue;
+            }
+            for (AddMemberPayload.Alloc a : payload.getAllocations()) {
+                if (a.getFactId() != null) {
+                    payloadFactIds.add(a.getFactId());
+                }
+            }
+        }
+        Map<Long, PerformanceFactSummaryDTO> oldFactById = new HashMap<>();
+        if (!payloadFactIds.isEmpty()) {
+            for (PerformanceFactSummaryDTO f : factMapper.selectFactSummariesByIds(payloadFactIds)) {
+                oldFactById.put(f.getFactId(), f);
+            }
         }
         int n = rows.size();
         BigDecimal[] working = new BigDecimal[n];
@@ -780,16 +902,21 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             working[i] = amt != null ? amt : BigDecimal.ZERO;
         }
         for (Map<String, Object> adj : executed) {
-            Object targetObj = adj.get("targetAmount");
-            Object originalObj = adj.get("originalAmount");
-            if (targetObj == null || originalObj == null) {
-                continue;
-            }
-            BigDecimal delta = MoneyUtil.round2(
-                new BigDecimal(targetObj.toString()).subtract(new BigDecimal(originalObj.toString())));
-            BigDecimal[] parts = MoneyUtil.allocateByAmount(java.util.Arrays.asList(working), delta);
-            for (int i = 0; i < n; i++) {
-                working[i] = MoneyUtil.round2(working[i].subtract(parts[i]));
+            String adjustType = String.valueOf(adj.get("adjustType"));
+            if ("AMOUNT".equals(adjustType)) {
+                Object targetObj = adj.get("targetAmount");
+                Object originalObj = adj.get("originalAmount");
+                if (targetObj == null || originalObj == null) {
+                    continue;
+                }
+                BigDecimal delta = MoneyUtil.round2(
+                    new BigDecimal(targetObj.toString()).subtract(new BigDecimal(originalObj.toString())));
+                BigDecimal[] parts = MoneyUtil.allocateByAmount(java.util.Arrays.asList(working), delta);
+                for (int i = 0; i < n; i++) {
+                    working[i] = MoneyUtil.round2(working[i].subtract(parts[i]));
+                }
+            } else if ("ADD_MEMBER".equals(adjustType)) {
+                reverseAddMemberAdjust(rows, working, parseAddMemberPayload(adj.get("payloadJson")), oldFactById);
             }
         }
         for (int i = 0; i < n; i++) {
@@ -801,6 +928,61 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             BigDecimal changed = MoneyUtil.round2(amt.subtract(working[i]));
             if (changed.signum() != 0) {
                 row.setAdjustDelta(changed);
+            }
+        }
+    }
+
+    /**
+     * 逆向回退一单已执行的「增加角色人」调整（工作数组原地修改）：
+     * <ul>
+     *   <li>新角色人行（员工 + 角色命中 payload）：调整前不存在，工作值置 0；</li>
+     *   <li>既有行：按 source_key（首选；执行后事实 id 已变但 source_key 沿用）
+     *       或员工+角色 / 员工（兜底）命中快照分摊，工作值回加 −delta（扣减额被加回）。</li>
+     * </ul>
+     */
+    private void reverseAddMemberAdjust(List<PerformanceManageVo> rows, BigDecimal[] working,
+                                        AddMemberPayload payload,
+                                        Map<Long, PerformanceFactSummaryDTO> oldFactById) {
+        if (payload == null || payload.getAllocations() == null) {
+            return;
+        }
+        Map<String, AddMemberPayload.Alloc> allocBySourceKey = new HashMap<>();
+        Map<String, AddMemberPayload.Alloc> allocByEmpRole = new HashMap<>();
+        Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
+        for (AddMemberPayload.Alloc a : payload.getAllocations()) {
+            PerformanceFactSummaryDTO oldFact = a.getFactId() != null ? oldFactById.get(a.getFactId()) : null;
+            if (oldFact != null && StringUtils.isNotBlank(oldFact.getSourceKey())) {
+                allocBySourceKey.put(oldFact.getSourceKey(), a);
+            }
+            Long employeeId = oldFact != null ? oldFact.getEmployeeId() : a.getEmployeeId();
+            if (employeeId != null) {
+                allocByEmployee.putIfAbsent(employeeId, a);
+                if (oldFact != null && StringUtils.isNotBlank(oldFact.getRoleType())) {
+                    allocByEmpRole.putIfAbsent(employeeId + "|" + oldFact.getRoleType(), a);
+                }
+            }
+        }
+        for (int i = 0; i < rows.size(); i++) {
+            PerformanceManageVo row = rows.get(i);
+            // 新角色人行：还原为 0（0 → X 的调整前口径）
+            if (payload.getNewEmployeeId() != null
+                && payload.getNewEmployeeId().equals(row.getEmployeeId())
+                && (StringUtils.isBlank(payload.getRoleType()) || payload.getRoleType().equals(row.getRoleType()))) {
+                working[i] = BigDecimal.ZERO;
+                continue;
+            }
+            AddMemberPayload.Alloc alloc = null;
+            if (StringUtils.isNotBlank(row.getSourceKey())) {
+                alloc = allocBySourceKey.get(row.getSourceKey());
+            }
+            if (alloc == null && row.getEmployeeId() != null && StringUtils.isNotBlank(row.getRoleType())) {
+                alloc = allocByEmpRole.get(row.getEmployeeId() + "|" + row.getRoleType());
+            }
+            if (alloc == null && row.getEmployeeId() != null) {
+                alloc = allocByEmployee.get(row.getEmployeeId());
+            }
+            if (alloc != null && alloc.getDelta() != null) {
+                working[i] = MoneyUtil.round2(working[i].subtract(alloc.getDelta()));
             }
         }
     }

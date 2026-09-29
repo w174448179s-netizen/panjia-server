@@ -5,7 +5,7 @@ import lombok.Data;
 import java.io.Serial;
 import java.io.Serializable;
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 /**
  * 历史导入批次实收事实明细（结佣域 LOCKED 建单用）。
@@ -35,8 +35,8 @@ public class HistoryRealFactDTO implements Serializable {
     /** 物业地址 */
     private String propertyAddress;
 
-    /** 业务日期（签约/成销日） */
-    private LocalDate businessDate;
+    /** 业务时间（签约/成销时间，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 业务类型 */
     private String bizType;

@@ -4,7 +4,6 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 /**
@@ -25,8 +24,8 @@ public class PerformanceFactVo {
     /** 归属期间 */
     private String period;
 
-    /** 业务发生日 */
-    private LocalDate businessDate;
+    /** 业务发生时间（签约/成销时间，含时分秒） */
+    private LocalDateTime businessDate;
 
     /** 员工ID */
     private Long employeeId;
