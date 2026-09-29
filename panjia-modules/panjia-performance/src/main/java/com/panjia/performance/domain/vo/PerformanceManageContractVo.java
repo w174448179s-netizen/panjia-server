@@ -57,4 +57,16 @@ public class PerformanceManageContractVo {
 
     /** 折算后原始金额合计（originalAmount × conversionFactor） */
     private BigDecimal originalConvertedAmount;
+
+    /** 本行折算系数（按 bizType；调整弹窗录入业绩后前端自动算折算金额用） */
+    private BigDecimal conversionFactor;
+
+    /** 是否存在审批中的调整单（SUBMITTED/APPROVED，执行前金额未变） */
+    private Boolean adjustPending;
+
+    /** 审批中调整单类型（AMOUNT/VOID/TRANSFER/ADD_MEMBER，展示目标金额时用） */
+    private String adjustPendingType;
+
+    /** 审批中调整单的目标金额（仅 AMOUNT 类型有值，即调整后合同业绩合计） */
+    private BigDecimal adjustPendingAmount;
 }

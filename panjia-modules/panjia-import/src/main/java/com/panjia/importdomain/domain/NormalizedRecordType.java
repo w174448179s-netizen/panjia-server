@@ -17,6 +17,9 @@ public enum NormalizedRecordType {
     POINTS("积分"),
     MANUAL("手工"),
 
+    /** 贝壳实收导入（单发 PERF_REAL，金额=角色人当月到账金额，可为负） */
+    KE_RECEIVED("贝壳实收明细"),
+
     /** 历史工资·新签业绩（单发 PERF_EXPECT，金额=85后÷折算因子） */
     HIST_EXPECT("历史新签业绩"),
 

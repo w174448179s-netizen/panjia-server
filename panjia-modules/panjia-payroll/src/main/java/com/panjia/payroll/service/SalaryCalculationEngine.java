@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 算薪引擎（纯计算、无副作用）。
@@ -53,19 +52,11 @@ public class SalaryCalculationEngine {
         /**
          * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。
          * <p>
-         * 结佣提成按业务类型分流取规则：金融/家装用结算月（approvedMonth）的快照，
-         * 其他用签约月（businessDate 所在月）的快照。本 Map 由 PayrollBatchService 在算薪前
+         * 结佣提成统一按签约月（businessDate 所在月）取规则快照（2026-09-28 取消
+         * settlement-rate-biz-types 按结算月分流）。本 Map 由 PayrollBatchService 在算薪前
          * 扫描结佣明细预先构建，engine 按期间精确命中；key 缺失时回退到主 snapshot。
          */
         public Map<String, RuleService.ParsedSnapshot> periodSnapshots = Map.of();
-        /**
-         * 按结算月取规则的 bizType 集合（金融/家装荐客等）。
-         * <p>
-         * 集合内的 bizType 结佣明细 → 用 approvedMonth 对应规则；
-         * 集合外的 bizType → 用 businessDate 所在月对应规则。
-         * 由 PayrollBatchService 从 sys_config 参数 panjia.payroll.commission.settlement-rate-biz-types 读取注入。
-         */
-        public Set<String> settlementRateBizTypes = Set.of();
         /** employeeId -> 手工收入（奖金+其他收入） */
         public Map<Long, BigDecimal> manualIncome;
         /** employeeId -> 手工支出 */
@@ -181,10 +172,9 @@ public class SalaryCalculationEngine {
             d.setTotalDeduct(MoneyUtil.round6(perfDeduct.add(manualAdjust)));
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
-            // 结佣提成：按业务类型分流取规则期间
-            // 金融/家装等（settlementRateBizTypes）→ 用结算月（approvedMonth）规则
-            // 其他 → 用签约月（businessDate 所在月）规则
-            // 不同期间规则（职级提点/绩效扣点）可能不同，需逐期间分别折算+算提成后汇总。
+            // 结佣提成：统一按签约月（businessDate 所在月）取规则（2026-09-28 取消
+            // settlement-rate-biz-types 按结算月分流，全部业务类型同口径）
+            // 不同签约月规则（职级提点/绩效扣点）可能不同，需逐期间分别折算+算提成后汇总。
             BigDecimal commissionPerf;
             BigDecimal commissionIncome;
             BigDecimal finalRateForCommission = finalRate; // 经纪人/总监默认用 baseRate 口径
@@ -205,7 +195,7 @@ public class SalaryCalculationEngine {
                 // 按规则期间分组
                 Map<String, List<CommissionItemDTO>> byRulePeriod = new HashMap<>();
                 for (CommissionItemDTO it : lockedItems) {
-                    String rulePeriod = resolveCommissionRulePeriod(it, input.settlementRateBizTypes);
+                    String rulePeriod = resolveCommissionRulePeriod(it);
                     byRulePeriod.computeIfAbsent(rulePeriod, k -> new ArrayList<>()).add(it);
                 }
                 commissionPerf = BigDecimal.ZERO;
@@ -620,28 +610,17 @@ public class SalaryCalculationEngine {
     }
 
     /**
-     * 解析结佣明细对应的规则期间。
-     * <p>
-     * 分流逻辑：
+     * 解析结佣明细对应的规则期间（2026-09-28 起统一按签约月，取消按结算月分流）。
      * <ul>
-     *   <li>bizType ∈ settlementRateBizTypes（金融/家装荐客等） → 结算月 approvedMonth；</li>
-     *   <li>其他 → 签约月（businessDate 所在月）；</li>
+     *   <li>签约月（businessDate 所在月）；</li>
      *   <li>缺失字段时兜底返回算薪期间（period 字段）。</li>
      * </ul>
      *
-     * @param item                     结佣明细
-     * @param settlementRateBizTypes   按结算月取规则的 bizType 集合
+     * @param item 结佣明细
      * @return 规则期间（YYYY-MM）
      */
-    private String resolveCommissionRulePeriod(CommissionItemDTO item, Set<String> settlementRateBizTypes) {
-        String bizType = item.getBizType();
-        if (bizType != null && settlementRateBizTypes.contains(bizType)) {
-            // 金融/家装 → 用结算月
-            if (item.getApprovedMonth() != null && !item.getApprovedMonth().isBlank()) {
-                return item.getApprovedMonth();
-            }
-        }
-        // 其他 → 用签约月
+    private String resolveCommissionRulePeriod(CommissionItemDTO item) {
+        // 签约月
         LocalDate bizDate = item.getBusinessDate();
         if (bizDate != null) {
             return YearMonth.from(bizDate).toString();

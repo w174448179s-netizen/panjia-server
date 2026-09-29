@@ -16,6 +16,7 @@ import com.panjia.importdomain.domain.raw.RawAttendance;
 import com.panjia.importdomain.domain.raw.RawManual;
 import com.panjia.importdomain.domain.raw.RawPayroll;
 import com.panjia.importdomain.domain.raw.RawPoints;
+import com.panjia.importdomain.domain.raw.RawReceived;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.ImportIssueMapper;
@@ -24,6 +25,7 @@ import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
 import com.panjia.importdomain.mapper.RawPayrollMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
+import com.panjia.importdomain.mapper.RawReceivedMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.service.ImportBatchService;
 import com.panjia.importdomain.service.ImportEngine;
@@ -49,6 +51,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     private final ImportIssueMapper issueMapper;
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final RawSignedMapper rawSignedMapper;
+    private final RawReceivedMapper rawReceivedMapper;
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
@@ -324,6 +327,11 @@ public class ImportBatchServiceImpl implements ImportBatchService {
                 count = rawSignedMapper.delete(new LambdaQueryWrapper<RawSigned>()
                     .eq(RawSigned::getBatchId, batchId));
                 log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=KE_SIGNED, count={}", batchId, count);
+                break;
+            case KE_RECEIVED:
+                count = rawReceivedMapper.delete(new LambdaQueryWrapper<RawReceived>()
+                    .eq(RawReceived::getBatchId, batchId));
+                log.info("[导入撤销] 原始解析数据已删除：batchId={}, type=KE_RECEIVED, count={}", batchId, count);
                 break;
             case ATTENDANCE:
                 count = rawAttendanceMapper.delete(new LambdaQueryWrapper<RawAttendance>()

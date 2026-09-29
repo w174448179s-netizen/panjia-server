@@ -139,6 +139,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-performance</artifactId>
         </dependency>
+        <!-- 实收域（实收审批单 Service/Controller，Entity/Mapper 在 performance 域） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-received</artifactId>
+        </dependency>
         <!-- 结佣域（结佣申请单/结佣明细/调整单/冲销联动） -->
         <dependency>
             <groupId>com.panjia</groupId>

@@ -1,15 +1,13 @@
 -- ============================================================
--- 业绩域 V1.0 核心表结构
--- 段位：V140002（2026-09-11 由 V100020 重命名）
--- 包含：pj_perf_fact（业绩事实）+ pj_perf_adjust（调整单）+ pj_perf_consume_log（消费日志）+ pj_perf_period_close（期间封账）
--- 说明：
---   1) 主键用 BIGINT（雪花 ID，应用层 ASSIGN_ID 生成），非 BIGSERIAL；
---   2) 金额用 NUMERIC(18,2)；
---   3) 时间用 TIMESTAMP DEFAULT CURRENT_TIMESTAMP；
---      ★ 禁用 TIMESTAMP WITH TIME ZONE：与 RuoYi 基线（sys_user 等，TIMESTAMP 不带时区）保持一致，
---        PG JDBC 42.7+ 对 timestamptz → LocalDateTime 的 getObject 直接抛
---        "Cannot convert the column of type TIMESTAMPTZ"（有歧义转换），查询页会炸；
---   4) 所有表/列均加 COMMENT。
+-- 业绩域核心表结构最终态（清库重建一次性执行版）
+-- 合并自：V140002,V140006,V140007,V140008,V140009,V140010,V140013,V140014
+-- 折叠说明：
+--   1) V140002 五表（fact/adjust/consume_log/period_close/received_apply）+ V140006 view_log 表；
+--   2) V140009 received_apply 加 biz_type、V140010 fact 加合同冗余字段且 business_date 改 TIMESTAMP、
+--      V140014 role_type 加宽 VARCHAR(50)，均已折叠进最终 CREATE TABLE；
+--   3) V140007/V140008/V140010/V140013 索引全部并入各表最终索引清单；
+--   4) sys_config 参数与 perf_adjust/perf_received 审批流配置移至 V140004__pj_perf_config.sql；
+--   5) V170003（business_date 历史数据回填）清库后无意义，已废弃不吸收。
 -- ============================================================
 
 BEGIN;
@@ -19,7 +17,7 @@ CREATE TABLE pj_perf_fact (
     id                      BIGINT                 PRIMARY KEY,
     fact_type               VARCHAR(20)            NOT NULL,
     period                  VARCHAR(7)             NOT NULL,
-    business_date           DATE                   NOT NULL,
+    business_date           TIMESTAMP              NOT NULL,
     batch_id                BIGINT,
     normalized_record_id    BIGINT,
     source_key              VARCHAR(200)           NOT NULL,
@@ -27,7 +25,8 @@ CREATE TABLE pj_perf_fact (
     employee_id             BIGINT,
     employee_external_code  VARCHAR(50),
     dept_id                 BIGINT,
-    role_type               VARCHAR(30),
+    role_type               VARCHAR(50),
+    role_name               VARCHAR(64),
     share_ratio             NUMERIC(10,6)          NOT NULL DEFAULT 1.000000,
     performance_amount      NUMERIC(18,2)          NOT NULL DEFAULT 0,
     effective_date          DATE                   NOT NULL,
@@ -39,6 +38,10 @@ CREATE TABLE pj_perf_fact (
     reversal_type           VARCHAR(20),
     refund_of_fact_id       BIGINT,
     received_apply_id       BIGINT,
+    order_no                VARCHAR(64),
+    contract_no             VARCHAR(100),
+    property_address        VARCHAR(255),
+    fee_item                VARCHAR(100),
     operator_id             BIGINT,
     version                 INT                    NOT NULL DEFAULT 0,
     create_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -59,10 +62,18 @@ CREATE INDEX idx_pfact_batch   ON pj_perf_fact(batch_id);
 CREATE INDEX idx_pfact_period  ON pj_perf_fact(period, fact_type);
 CREATE INDEX idx_pfact_refund  ON pj_perf_fact(refund_of_fact_id);
 
+-- /perf/fact/search 性能优化索引：REVERSED 事实按 source_key 回查（部分唯一索引无法服务）
+CREATE INDEX idx_pfact_source_key_status
+    ON pj_perf_fact(source_key, fact_type, fact_status, id);
+
+-- 合同维度冗余字段常用查询索引
+CREATE INDEX idx_pfact_contract  ON pj_perf_fact(contract_no, period, fact_type);
+CREATE INDEX idx_pfact_order     ON pj_perf_fact(order_no, period, fact_type);
+
 COMMENT ON TABLE  pj_perf_fact IS '业绩事实表';
 COMMENT ON COLUMN pj_perf_fact.fact_type IS '事实口径 PERF_REAL=结佣业绩(实收) PERF_EXPECT=新签业绩(应收)';
 COMMENT ON COLUMN pj_perf_fact.period IS '归属期间 YYYY-MM';
-COMMENT ON COLUMN pj_perf_fact.business_date IS '业务发生日';
+COMMENT ON COLUMN pj_perf_fact.business_date IS '业务发生日(实际签约/成销时间)';
 COMMENT ON COLUMN pj_perf_fact.batch_id IS '来源导入批次ID';
 COMMENT ON COLUMN pj_perf_fact.normalized_record_id IS '归一化记录ID';
 COMMENT ON COLUMN pj_perf_fact.source_key IS '来源业务单号(幂等锚点)';
@@ -70,7 +81,8 @@ COMMENT ON COLUMN pj_perf_fact.biz_type IS '业务类型(产品/险种等)';
 COMMENT ON COLUMN pj_perf_fact.employee_id IS '员工ID';
 COMMENT ON COLUMN pj_perf_fact.employee_external_code IS '员工外部编码(工号)';
 COMMENT ON COLUMN pj_perf_fact.dept_id IS '归属部门ID';
-COMMENT ON COLUMN pj_perf_fact.role_type IS '角色类型(主筹/跟筹等)';
+COMMENT ON COLUMN pj_perf_fact.role_type IS '角色类型(主筹/跟筹/协办人等)，VARCHAR(50)，归一化层已截断到 30，DB 放大兜底原始脏值';
+COMMENT ON COLUMN pj_perf_fact.role_name IS '角色人姓名(冗余自归一化记录，消除关联 raw_signed)';
 COMMENT ON COLUMN pj_perf_fact.share_ratio IS '分摊比例';
 COMMENT ON COLUMN pj_perf_fact.performance_amount IS '业绩金额(=原始金额×分摊比例×折算系数)';
 COMMENT ON COLUMN pj_perf_fact.effective_date IS '生效起始日(闭区间)';
@@ -82,6 +94,10 @@ COMMENT ON COLUMN pj_perf_fact.reversed_reason IS '冲销原因 SUPERSEDE=替换
 COMMENT ON COLUMN pj_perf_fact.reversal_type IS '红冲类型 NULL=正常事实 REDINK_REFUND=退单红冲负事实(按原事实冻结口径镜像，归属退单月)';
 COMMENT ON COLUMN pj_perf_fact.refund_of_fact_id IS '红冲镜像的原正数事实ID(溯源链：退单负事实→成交月原事实)';
 COMMENT ON COLUMN pj_perf_fact.received_apply_id IS '实收业绩审批单ID(PERF_REAL 事实归属的实收审批单；审批通过后该事实方可用于发起结佣)';
+COMMENT ON COLUMN pj_perf_fact.order_no IS '订单号(冗余自归一化记录，消除关联 raw_signed)';
+COMMENT ON COLUMN pj_perf_fact.contract_no IS '合同号(冗余自归一化记录，消除关联 raw_signed)';
+COMMENT ON COLUMN pj_perf_fact.property_address IS '物业地址(冗余自归一化记录，消除关联 raw_signed)';
+COMMENT ON COLUMN pj_perf_fact.fee_item IS '费用项(冗余自归一化记录，消除关联 raw_signed)';
 COMMENT ON COLUMN pj_perf_fact.operator_id IS '操作人ID';
 COMMENT ON COLUMN pj_perf_fact.version IS '乐观锁版本号';
 COMMENT ON COLUMN pj_perf_fact.create_time IS '创建时间';
@@ -120,6 +136,8 @@ CREATE UNIQUE INDEX uk_padj_no ON pj_perf_adjust(adjust_no);
 CREATE INDEX idx_padj_period   ON pj_perf_adjust(period, adjust_type, status);
 CREATE INDEX idx_padj_employee ON pj_perf_adjust(employee_id, period);
 CREATE INDEX idx_padj_fact     ON pj_perf_adjust(fact_id);
+-- 合同维度聚合按 (contract_no, period) 取最新单据
+CREATE INDEX idx_padj_contract_period ON pj_perf_adjust(contract_no, period, id);
 
 COMMENT ON TABLE  pj_perf_adjust IS '业绩调整单';
 COMMENT ON COLUMN pj_perf_adjust.adjust_no IS '调整单号';
@@ -212,147 +230,34 @@ COMMENT ON COLUMN pj_perf_period_close.close_time IS '封账时间';
 COMMENT ON COLUMN pj_perf_period_close.create_time IS '创建时间';
 COMMENT ON COLUMN pj_perf_period_close.update_time IS '更新时间';
 
--- ---------- 五、实收业绩审批单（合同维度） ----------
--- 业务流程（需求文档 §2）：
---   贝壳导入后若有实收，按「合同+结算月」自动生成并自动提交，流转 财务 → 总监；
---   店长/店助发起同此链路；财务发起直达总监；总监发起直接落点（审批通过）。
---   审批通过后，单内 PERF_REAL 事实方可用于发起结佣。
-CREATE TABLE pj_perf_received_apply (
-    id                      BIGINT                 PRIMARY KEY,
-    apply_no                VARCHAR(32)            NOT NULL,
-    period                  VARCHAR(7)             NOT NULL,
-    contract_no             VARCHAR(64)            NOT NULL,
-    order_no                VARCHAR(64),
-    property_address        VARCHAR(255),
-    business_date           TIMESTAMP,
-    dept_id                 BIGINT,
-    batch_id                BIGINT,
-    received_amount         NUMERIC(18,2)          NOT NULL DEFAULT 0,
-    expected_amount         NUMERIC(18,2)          NOT NULL DEFAULT 0,
-    item_count              INT                    NOT NULL DEFAULT 0,
-    status                  VARCHAR(16)            NOT NULL,
-    current_node            VARCHAR(16),
-    process_instance_id     VARCHAR(64),
-    applicant_id            BIGINT,
-    approver_id             BIGINT,
-    approve_time            TIMESTAMP,
-    version                 INT                    NOT NULL DEFAULT 0,
-    create_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    update_time             TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- ---------- 五、实收业绩审批单（已迁入实收域 V170001） ----------
+-- pj_perf_received_apply 表 DDL 已迁移到 panjia-received 模块的 V170001__pj_received_init.sql，
+-- 本文件不再包含。清库重建场景由 V170001 统一建实收域三张表（合同主表 + 明细 + 审批单）。
+
+-- ---------- 六、查看留痕表 ----------
+-- 设计文档 §3.6 / §5.5：经纪人每次打开含他人业绩的合同必须留痕，
+-- 用于防批量爬业绩 + 争议时有据可查。
+-- 仅经纪人记、仅记含他人业绩的打开；店长/总监/算薪属职权查看不记。
+CREATE TABLE pj_perf_view_log (
+    id                  BIGINT       PRIMARY KEY,
+    contract_id         BIGINT,
+    contract_no         VARCHAR(64),
+    viewer_employee_id  BIGINT       NOT NULL,
+    viewed_employee_ids VARCHAR(512),
+    view_time           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source              VARCHAR(32)
 );
 
--- 同一 (period, contract_no) 只允许一张未完结实收审批单（CANCELLED 后可重新发起）
-CREATE UNIQUE INDEX uk_rapp_period_contract
-    ON pj_perf_received_apply(period, contract_no)
-    WHERE status IN ('DRAFT','SUBMITTED','APPROVED');
-CREATE INDEX idx_rapp_status ON pj_perf_received_apply(period, status);
-CREATE INDEX idx_rapp_batch  ON pj_perf_received_apply(batch_id);
+COMMENT ON TABLE  pj_perf_view_log IS '业绩查看留痕（经纪人打开含他人业绩的合同）';
+COMMENT ON COLUMN pj_perf_view_log.id IS '雪花 ID';
+COMMENT ON COLUMN pj_perf_view_log.contract_id IS '被查看合同 ID（若有合同域实体）';
+COMMENT ON COLUMN pj_perf_view_log.contract_no IS '被查看合同号（冗余，便于检索）';
+COMMENT ON COLUMN pj_perf_view_log.viewer_employee_id IS '查看人员工 ID（仅经纪人记）';
+COMMENT ON COLUMN pj_perf_view_log.viewed_employee_ids IS '本次被查看的角色人集合（他人）';
+COMMENT ON COLUMN pj_perf_view_log.view_time IS '查看时间';
+COMMENT ON COLUMN pj_perf_view_log.source IS '进入来源（如 MY_PERF_DRILLDOWN 我的业绩下钻）';
 
-COMMENT ON TABLE  pj_perf_received_apply IS '实收业绩审批单(合同+结算月粒度)';
-COMMENT ON COLUMN pj_perf_received_apply.apply_no IS '审批单号 RCV+yyyyMMddHHmmssSSS';
-COMMENT ON COLUMN pj_perf_received_apply.period IS '结算月 YYYY-MM';
-COMMENT ON COLUMN pj_perf_received_apply.contract_no IS '合同号';
-COMMENT ON COLUMN pj_perf_received_apply.order_no IS '订单号(快照)';
-COMMENT ON COLUMN pj_perf_received_apply.property_address IS '物业地址(快照)';
-COMMENT ON COLUMN pj_perf_received_apply.business_date IS '签约/业务时间(快照，取合同内最大)';
-COMMENT ON COLUMN pj_perf_received_apply.dept_id IS '归属门店ID(跨门店合作单为空)';
-COMMENT ON COLUMN pj_perf_received_apply.batch_id IS '首次生成该单的导入批次ID';
-COMMENT ON COLUMN pj_perf_received_apply.received_amount IS '实收业绩合计(合同当月全部PERF_REAL事实净额)';
-COMMENT ON COLUMN pj_perf_received_apply.expected_amount IS '应收业绩合计(合同当月全部PERF_EXPECT事实净额，展示实收/应收差异用)';
-COMMENT ON COLUMN pj_perf_received_apply.item_count IS '实收新签明细条数';
-COMMENT ON COLUMN pj_perf_received_apply.status IS '状态 DRAFT=草稿 SUBMITTED=审批中 APPROVED=已通过 REJECTED=已驳回 CANCELLED=已作废';
-COMMENT ON COLUMN pj_perf_received_apply.current_node IS '当前审批节点 FINANCE=财务审批 DIRECTOR=总监审批';
-COMMENT ON COLUMN pj_perf_received_apply.process_instance_id IS 'Warm-Flow 流程实例ID';
-COMMENT ON COLUMN pj_perf_received_apply.applicant_id IS '发起人ID(自动发起时为空/系统)';
-COMMENT ON COLUMN pj_perf_received_apply.approver_id IS '终审人ID';
-COMMENT ON COLUMN pj_perf_received_apply.approve_time IS '终审通过时间';
-
--- ---------- 六、审批流程参数（需求文档 §5） ----------
-INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
-VALUES (1761600000000000001, '是否跳过财务审批节点', 'panjia.flow.skip_finance', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(),
-        'true=实收/结佣审批均跳过财务节点；false=按标准链路流转')
-ON CONFLICT (config_id) DO NOTHING;
-INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
-VALUES (1761600000000000002, '总监审批自动通过超时(小时)', 'panjia.flow.director_timeout_hours', '0', 'Y', 1761000000000000100, 1761100000000000001, now(),
-        '总监节点任务超过该小时数未办理则系统自动审批通过；0=关闭')
-ON CONFLICT (config_id) DO NOTHING;
-
--- ============================================================
--- 新签调整审批流程（perf_adjust）
--- 链路：开始 → 申请人(${initiator}) → 总监审批(role:1761300000000000010) → 结束
--- 审批通过后由 AdjustWorkflowListener 自动执行业绩调整
--- ============================================================
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000801, 'perf_adjust', '新签调整审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000810, 0, 1762400000000000801, 'perf_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000811, 1, 1762400000000000801, 'perf_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000812, 1, 1762400000000000801, 'perf_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000813, 2, 1762400000000000801, 'perf_end', '结束', NULL, '0.000', '720,200|720,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000820, 1762400000000000801, 'perf_start', 0, 'perf_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000821, 1762400000000000801, 'perf_applicant', 1, 'perf_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000823, 1762400000000000801, 'perf_director', 1, 'perf_end', 2, NULL, 'PASS', NULL, '590,200;700,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000824, 1762400000000000801, 'perf_director', 1, 'perf_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 实收业绩审批流程（perf_received）
--- 链路（需求文档 §2.1/§2.2）：
---   开始 → 申请人(${initiator}) → 财务审批(role:finance) → 总监审批(role:director) → 结束
---   导入自动提交 / 店长发起：走完整链路（自动提交时申请人节点由系统完成）
---   财务发起：后端自动完成财务节点，直达总监
---   总监发起：后端连续完成财务+总监节点，直接落点
---   panjia.flow.skip_finance=true 时财务节点由系统自动完成
--- 审批结果由 ReceivedWorkflowListener 回调：finish→APPROVED，back→REJECTED
--- ============================================================
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000901, 'perf_received', '实收业绩审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000910, 0, 1762400000000000901, 'rcv_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000911, 1, 1762400000000000901, 'rcv_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000912, 1, 1762400000000000901, 'rcv_finance', '财务审批', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000913, 1, 1762400000000000901, 'rcv_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000914, 2, 1762400000000000901, 'rcv_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000920, 1762400000000000901, 'rcv_start', 0, 'rcv_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000921, 1762400000000000901, 'rcv_applicant', 1, 'rcv_finance', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000922, 1762400000000000901, 'rcv_finance', 1, 'rcv_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000923, 1762400000000000901, 'rcv_director', 1, 'rcv_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000924, 1762400000000000901, 'rcv_finance', 1, 'rcv_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000925, 1762400000000000901, 'rcv_director', 1, 'rcv_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
+CREATE INDEX idx_pview_contract ON pj_perf_view_log(contract_id, view_time);
+CREATE INDEX idx_pview_viewer  ON pj_perf_view_log(viewer_employee_id, view_time);
 
 COMMIT;

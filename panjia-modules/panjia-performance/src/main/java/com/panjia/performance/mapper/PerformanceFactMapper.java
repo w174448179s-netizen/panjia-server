@@ -13,6 +13,7 @@ import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
 import java.util.Collection;
@@ -24,6 +25,19 @@ import java.util.Map;
  */
 @Mapper
 public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, PerformanceFact> {
+
+    /**
+     * 导入批次撤销：软删该批次事实（fact_status→REVERSED）。
+     * <p>物理删会断结佣/调整 FK，软删保留历史痕迹。
+     *
+     * @param batchId 撤销的导入批次 ID
+     * @param factType 事实口径（PERF_EXPECT / PERF_REAL）
+     * @param reason 撤销原因（写入 reversed_reason）
+     * @return 被撤销的事实条数
+     */
+    @Update("UPDATE pj_perf_fact SET fact_status = 'REVERSED', reversed_reason = #{reason}, update_time = NOW() " +
+            "WHERE batch_id = #{batchId} AND fact_type = #{factType} AND fact_status = 'ACTIVE'")
+    int markBatchRevoked(@Param("batchId") Long batchId, @Param("factType") String factType, @Param("reason") String reason);
 
     /**
      * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、金额合计。
@@ -259,7 +273,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * <p>
      * 单表查询 pj_perf_fact，employeeName/employeeCode/deptPath/originalAmount/settled/settleDate
      * 由 Service 层批量补充查询填充，避免 CTE + 5 个 JOIN 的复杂执行计划。
-     * 键口径与 {@link #selectManagePageContracts} 一致。
+     * <p>
+     * 匹配口径：传入键命中 {@code order_no} 或 {@code contract_no} 任一即可（二者在贝壳原始行中 1:1）。
+     * 列表分组维度 {@link #selectManagePageContracts} 用 COALESCE(order_no, contract_no)，
+     * 但本处传入的展示键可能是合同号也可能是订单号（取决于前端 resolveBizNo），故必须用 OR 双列匹配，
+     * 不能用 COALESCE IN ——否则传入合同号而该行 order_no 非空时 COALESCE 取 order_no 导致漏命中。
      *
      * @param contractNos 业务键集合（不能为空；列表行展示的合同号/订单号）
      */
@@ -285,10 +303,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           AND f.period = #{period}
           AND f.fact_type = #{factType}
-          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(f.order_no, f.contract_no)
-                   ELSE COALESCE(f.contract_no, f.order_no) END IN
+          AND (f.order_no IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
+              OR f.contract_no IN
+          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>)
         ORDER BY f.contract_no, f.employee_id, businessDate, f.role_type
         </script>
         """)
@@ -361,7 +379,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE vf.fact_status = 'VOIDED'
           AND vf.period = mf.period
           AND vf.fact_type = mf.fact_type
-          AND COALESCE(vf.contract_no, vf.order_no) = COALESCE(mf.contract_no, mf.order_no)
+          AND COALESCE(vf.order_no, vf.contract_no) = COALESCE(mf.order_no, mf.contract_no)
         """)
     long countVoidedSiblingsByFactId(@Param("factId") Long factId);
 
@@ -691,9 +709,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    FROM pj_perf_fact e
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      AND e.period = #{period}
-                     AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客')
-                               THEN COALESCE(e.order_no, e.contract_no)
-                               ELSE COALESCE(e.contract_no, e.order_no) END) = s.biz_key
+                     AND (COALESCE(e.order_no, e.contract_no)) = s.biz_key
                ), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
@@ -704,9 +720,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COUNT(DISTINCT s.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount"
         FROM (
-            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(f.order_no, f.contract_no)
-                        ELSE COALESCE(f.contract_no, f.order_no) END AS biz_key,
+            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
                    f.order_no,
                    f.biz_type,
                    f.property_address,
@@ -720,9 +734,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             WHERE f.fact_status = 'ACTIVE'
               AND f.period = #{period}
               AND f.fact_type = #{factType}
-              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(f.order_no, f.contract_no)
-                       ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
+              AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
             <if test="deptId != null">
               AND (f.dept_id = #{deptId}
                    OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -876,7 +888,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
-        SELECT COALESCE(f.contract_no, MAX(f.order_no)) AS "contractNo",
+        SELECT COALESCE(MAX(f.contract_no),MAX(f.order_no)) AS "contractNo",
                MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(f.property_address) AS "propertyAddress",
@@ -885,7 +897,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.period = #{period}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
-        GROUP BY f.contract_no
         """)
     java.util.Map<String, Object> selectContractInfoByContractNo(
         @Param("period") String period, @Param("contractNo") String contractNo);
@@ -973,15 +984,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         WITH contract_period AS (
-            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                        THEN COALESCE(f.order_no, f.contract_no)
-                        ELSE COALESCE(f.contract_no, f.order_no) END AS biz_key,
+            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
                    MAX(f.period) AS max_period
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
-              AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                       THEN COALESCE(f.order_no, f.contract_no)
-                       ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
+              AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
             <if test="period != null and period != ''">
               AND f.period = #{period}
             </if>
@@ -1031,9 +1038,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
             JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
-                AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                         THEN COALESCE(f.order_no, f.contract_no)
-                         ELSE COALESCE(f.contract_no, f.order_no) END = cp.biz_key
+                AND COALESCE(f.order_no, f.contract_no) = cp.biz_key
             LEFT JOIN reversed_expect re ON re.source_key = f.source_key
             <if test="employeeId != null">
               WHERE f.employee_id = #{employeeId}
@@ -1105,14 +1110,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                                    THEN COALESCE(f.order_no, f.contract_no)
-                                    ELSE COALESCE(f.contract_no, f.order_no) END)
+        SELECT COUNT(DISTINCT COALESCE(f.order_no, f.contract_no))
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
-          AND CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客')
-                   THEN COALESCE(f.order_no, f.contract_no)
-                   ELSE COALESCE(f.contract_no, f.order_no) END IS NOT NULL
+          AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
           <if test="period != null and period != ''">
             AND f.period = #{period}
           </if>

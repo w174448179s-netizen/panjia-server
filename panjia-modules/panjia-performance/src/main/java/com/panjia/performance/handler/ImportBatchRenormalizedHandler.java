@@ -17,7 +17,7 @@ import java.util.Collections;
  * <p>
  * 处理流程（业绩域详细设计 §4.3）：
  * <ol>
- *   <li>按 sourceType 过滤（仅唯一业绩来源 KE_SIGNED 进业绩）</li>
+ *   <li>按 sourceType 过滤（仅贝壳新签 KE_SIGNED / 贝壳实收 KE_RECEIVED 进业绩）</li>
  *   <li>先调用 ReverseService.reverseByReNormalize 冲销本批次的全部 ACTIVE 事实
  *       （reversed_reason = RENORMALIZE）</li>
  *   <li>调用 PerformanceEngine.buildFromBatch 重新生成本批次事实</li>
@@ -31,8 +31,9 @@ import java.util.Collections;
 @RequiredArgsConstructor
 public class ImportBatchRenormalizedHandler implements DomainEventHandler {
 
-    /** 与 ImportBatchArchivedHandler 保持一致：仅唯一业绩来源 KE_SIGNED 进业绩 */
-    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES = java.util.Set.of("KE_SIGNED");
+    /** 与 ImportBatchArchivedHandler 保持一致：贝壳新签（KE_SIGNED）/贝壳实收（KE_RECEIVED）进业绩 */
+    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES =
+        java.util.Set.of("KE_SIGNED", "KE_RECEIVED");
 
     private final PerformanceEngine performanceEngine;
     private final ReverseService reverseService;

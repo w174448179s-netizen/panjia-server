@@ -17,7 +17,10 @@ public enum AdjustType {
     VOID("业绩冲销"),
 
     /** 部门划转 */
-    TRANSFER("部门划转");
+    TRANSFER("部门划转"),
+
+    /** 增加角色人（合同级）：手工多一个人分业绩，合同总额不变（2026-09-28） */
+    ADD_MEMBER("增加角色人");
 
     /** 调整类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

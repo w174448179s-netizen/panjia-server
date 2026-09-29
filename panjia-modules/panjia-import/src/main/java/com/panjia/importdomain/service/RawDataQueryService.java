@@ -7,6 +7,7 @@ import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
+import com.panjia.importdomain.mapper.RawReceivedMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.PageResult;
@@ -27,6 +28,7 @@ import java.util.Collections;
 public class RawDataQueryService {
 
     private final RawSignedMapper rawSignedMapper;
+    private final RawReceivedMapper rawReceivedMapper;
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
@@ -52,6 +54,14 @@ public class RawDataQueryService {
                     .orderByAsc(com.panjia.importdomain.domain.raw.RawSigned::getRowNo);
                 Page<com.panjia.importdomain.domain.raw.RawSigned> p = rawSignedMapper.selectPage(
                     new Page<com.panjia.importdomain.domain.raw.RawSigned>(pageNum, pageSize), w);
+                return PageResult.build((Collection) p.getRecords(), p.getTotal());
+            }
+            case KE_RECEIVED -> {
+                LambdaQueryWrapper<com.panjia.importdomain.domain.raw.RawReceived> w = new LambdaQueryWrapper<>();
+                w.eq(com.panjia.importdomain.domain.raw.RawReceived::getBatchId, batchId)
+                    .orderByAsc(com.panjia.importdomain.domain.raw.RawReceived::getRowNo);
+                Page<com.panjia.importdomain.domain.raw.RawReceived> p = rawReceivedMapper.selectPage(
+                    new Page<com.panjia.importdomain.domain.raw.RawReceived>(pageNum, pageSize), w);
                 return PageResult.build((Collection) p.getRecords(), p.getTotal());
             }
             case ATTENDANCE -> {

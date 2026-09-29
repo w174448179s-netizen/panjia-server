@@ -34,7 +34,6 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.core.exception.ServiceException;
-import org.dromara.system.api.ConfigService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -83,7 +82,6 @@ public class PayrollBatchService {
     private final PeopleScoreApprovalQueryPort scoreApprovalQueryPort;
     private final PeopleScoreQueryPort scoreQueryPort;
     private final IRateAdjustService rateAdjustService;
-    private final ConfigService configService;
 
     // ==================== 创建 ====================
 
@@ -254,32 +252,16 @@ public class PayrollBatchService {
         input.employees = employees;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
 
-        // ====== 多期间规则快照构建（结佣提成按 bizType 分流取规则） ======
-        // 读配置：按结算月取规则的 bizType 集合（金融/家装荐客等）
-        String settlementBizTypesConf = configService.getConfigValue(
-            "panjia.payroll.commission.settlement-rate-biz-types");
-        Set<String> settlementRateBizTypes = new HashSet<>();
-        if (settlementBizTypesConf != null && !settlementBizTypesConf.isBlank()) {
-            for (String t : settlementBizTypesConf.split(",")) {
-                String trimmed = t.trim();
-                if (!trimmed.isBlank()) settlementRateBizTypes.add(trimmed);
-            }
-        }
-        input.settlementRateBizTypes = settlementRateBizTypes;
-
-        // 扫描结佣明细，收集需要的规则期间集合
+        // ====== 多期间规则快照构建（结佣提成统一按签约月取规则，2026-09-28 取消
+        // settlement-rate-biz-types 按结算月分流） ======
+        // 扫描结佣明细，收集需要的规则期间集合（与 engine.resolveCommissionRulePeriod 口径一致：
+        // 签约月 → 业绩归属月兜底）
         Set<String> requiredPeriods = new HashSet<>();
         for (CommissionItemDTO it : lockedItems) {
-            if (it.getBizType() != null && settlementRateBizTypes.contains(it.getBizType())) {
-                // 金融/家装 → 结算月
-                if (it.getApprovedMonth() != null && !it.getApprovedMonth().isBlank()) {
-                    requiredPeriods.add(it.getApprovedMonth());
-                }
-            } else {
-                // 其他 → 签约月
-                if (it.getBusinessDate() != null) {
-                    requiredPeriods.add(YearMonth.from(it.getBusinessDate()).toString());
-                }
+            if (it.getBusinessDate() != null) {
+                requiredPeriods.add(YearMonth.from(it.getBusinessDate()).toString());
+            } else if (it.getPeriod() != null && !it.getPeriod().isBlank()) {
+                requiredPeriods.add(it.getPeriod());
             }
         }
         // 算薪期间本身也加入（主快照兜底）

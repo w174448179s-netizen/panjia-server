@@ -9,22 +9,23 @@
 
 ## 一、段位分配总表（10 = 盘家业务；20-29 预留扩展；30-69 长期预留）
 
-| 段位                  | 业务域 | 归属模块 | 当前脚本 | 职责 |
-|---------------------|--------|----------|----------|------|
-| `V1`                | 基线 | `ruoyi-admin` | `V1__ruoyi_baseline.sql` | 官方 PostgreSQL 全量脚本（**不可变**） |
-| `V10xxxx`           | **盘家全业务种子** | `ruoyi-admin` | `V100001__panjia_menu_seed.sql` | 盘家业务菜单 + 角色 + 工作流定义 + 系统参数 |
-| `V11xxxx`           | **people 域** | `panjia-modules/panjia-people` | `V110002`-`V110005` | 员工主数据 / 算薪事实 / 字典 / 员工导入回迁 |
-| `V12xxxx`           | **import 域** | `panjia-modules/panjia-import` | `V120002`-`V120006` | 导入模板 / 批次表 / 模板管理菜单 |
-| `V13xxxx`           | **outbox 域** | `panjia-modules/panjia-outbox` | `V130001`-`V130002` | 事件 outbox + 幂等键 |
-| `V14xxxx`           | **performance 域** | `panjia-modules/panjia-performance` | `V140002`-`V140003` | 业绩事实表 + 业绩域菜单 |
-| `V15xxxx`           | **commission 域** | `panjia-modules/panjia-commission` | （即将新建）| 结佣申请 / 审批 / 锁定 |
-| `V16xxxx`           | **payroll 域** | `panjia-modules/panjia-payroll` | （即将新建）| 薪酬结算：算薪引擎 / 工资批次 / 状态机 |
-| `V17xxxx`           | **ledger 域** | `panjia-modules/panjia-ledger` | （即将新建）| 经营结算：收入 / 支出 / 部门台账 / 利润 |
-| `V18xxxx`           | **rules 域** | `panjia-modules/panjia-rules` | （即将新建）| 规则引擎（条件 / 动作 / 评分 / 触发器）|
-| `V20xxxx`-`V29xxxx` | 预留扩展 | TBD | — | 第 2 代盘家业务域（10 个域位备用） |
-| `V30xxxx`-`V69xxxx` | 长期预留 | TBD | — | 第 3/4 代业务（40 个域位）|
-| `V70xxxx`-`V89xxxx` | 系统 / 横切域 | TBD | — | license / backup / monitor / log 等基础设施 |
-| `V90xxxx`-`V99xxxx` | auth / cross-cutting | TBD | — | 鉴权 / 跨切关注点 |
+| 段位                  | 业务域                  | 归属模块                                | 当前脚本 | 职责                                     |
+|---------------------|----------------------|-------------------------------------|----------|----------------------------------------|
+| `V1`                | 基线                   | `ruoyi-admin`                       | `V1__ruoyi_baseline.sql` | 官方 PostgreSQL 全量脚本（**不可变**）            |
+| `V10xxxx`           | **盘家全业务种子**          | `ruoyi-admin`                       | `V100001__panjia_menu_seed.sql` | 盘家业务菜单 + 角色 + 工作流定义 + 系统参数             |
+| `V11xxxx`           | **people 域**         | `panjia-modules/panjia-people`      | `V110002`-`V110005` | 员工主数据 / 算薪事实 / 字典 / 员工导入回迁             |
+| `V12xxxx`           | **import 域**         | `panjia-modules/panjia-import`      | `V120002`-`V120006` | 导入模板 / 批次表 / 模板管理菜单                    |
+| `V13xxxx`           | **outbox 域**         | `panjia-modules/panjia-outbox`      | `V130001`-`V130002` | 事件 outbox + 幂等键                        |
+| `V14xxxx`           | **performance 域**    | `panjia-modules/panjia-performance` | `V140002`-`V140003` | 业绩事实表 + 业绩域菜单                          |
+| `V15xxxx`           | **commission 域**     | `panjia-modules/panjia-commission`  | （即将新建）| 结佣申请 / 审批 / 锁定                         |
+| `V16xxxx`           | **payroll 域**        | `panjia-modules/panjia-payroll`     | （即将新建）| 薪酬结算：算薪引擎 / 工资批次 / 状态机                 |
+| `V17xxxx`           | **received 域**       | `panjia-modules/panjia-received`    | （即将新建）| 实收                                     |
+| `V18xxxx`           | **ledger 域**         | `panjia-modules/panjia-ledger`      | （即将新建）| 经营结算：收入 / 支出 / 部门台账 / 利润               |
+| `V19xxxx`           | **rules 域**          | `panjia-modules/panjia-rules`       | （即将新建）| 规则引擎（条件 / 动作 / 评分 / 触发器）               |
+| `V20xxxx`-`V29xxxx` | 预留扩展                 | TBD                                 | — | 第 2 代盘家业务域（10 个域位备用）                   |
+| `V30xxxx`-`V69xxxx` | 长期预留                 | TBD                                 | — | 第 3/4 代业务（40 个域位）                      |
+| `V70xxxx`-`V89xxxx` | 系统 / 横切域             | TBD                                 | — | license / backup / monitor / log 等基础设施 |
+| `V90xxxx`-`V99xxxx` | auth / cross-cutting | TBD                                 | — | 鉴权 / 跨切关注点                             |
 
 **段位纪律**：
 - **新域申请流程**：在 PR 标题里写 `[seg-apply]` + 拟用段位 → 维护者确认后写入本表 + 同步 `scripts/migration-check.sh` 的 `SEGMENT_OWNER_FILE` → 自动纳入 CI 校验。

@@ -43,6 +43,7 @@ public class ImportController {
     private final ImportBatchService importBatchService;
     private final ImportTemplateBridge templateBridge;
     private final RawDataQueryService rawDataQueryService;
+    private final com.panjia.contracts.port.PerformanceExpectCheckPort expectCheckPort;
 
     /**
      * 文件上传导入。
@@ -65,15 +66,26 @@ public class ImportController {
         if (period == null || period.isBlank()) {
             return R.fail("归属月不能为空，请选择导入归属月后再上传");
         }
+        // 实收导入前置校验：无新签应收事实（PERF_EXPECT）时拒绝导入，
+        // 避免"先实收后新签"导致 expected_amount=0、分流误判全部 APPROVED 直建
+        if (type == ImportSourceType.KE_RECEIVED || type == ImportSourceType.HISTORY_PAYROLL) {
+            if (!expectCheckPort.hasAnyExpectFacts()) {
+                return R.fail("导入实收前请先导入当月（或之前月份）的新签业绩——当前系统中没有新签应收数据，实收无法匹配合同");
+            }
+        }
         try {
             Long batchId = importBatchService.importFromFile(type, file.getBytes(),
                 file.getOriginalFilename(), period, LoginHelper.getUserId(), LoginHelper.getDeptId());
             return R.ok(batchId);
         } catch (DataIntegrityViolationException e) {
-            // 唯一索引冲突：通常出现在手工绕过 SUPERSEDED 流程的并发或脏数据场景。
-            // 业务文案：避免把 PSQLException 整段塞给前端。
-            log.warn("导入冲突 (sourceType={}, period={}): {}", sourceType, period, e.getMostSpecificCause().getMessage());
-            return R.fail("该归属月已存在归档批次，本次导入未能完成。请刷新批次列表确认状态，或联系管理员处理");
+            // 精准区分约束类型，避免所有 DataIntegrityViolation 都报"归档批次"
+            String causeMsg = e.getMostSpecificCause() != null ? e.getMostSpecificCause().getMessage() : "";
+            log.warn("导入约束冲突 (sourceType={}, period={}): {}", sourceType, period, causeMsg);
+            if (causeMsg.contains("uk_import_batch_type_period_dept")) {
+                return R.fail("该归属月已存在归档批次，请先撤销旧批次或切换归属月后再导入");
+            }
+            // 其他约束冲突（NOT NULL / FK / 其他唯一索引）→ 把根因透给前端
+            return R.fail("导入失败：数据约束冲突，" + causeMsg);
         } catch (Exception e) {
             log.error("导入失败", e);
             return R.fail("导入失败: " + e.getMessage());

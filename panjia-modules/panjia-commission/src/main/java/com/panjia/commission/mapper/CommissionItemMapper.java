@@ -29,8 +29,9 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
      * 应收同时给出 originalExpectedAmount（调整前：同 sourceKey 最早一条 REVERSED 的
      * PERF_EXPECT，无则回退当前 ACTIVE 值）与 expectedAdjusted 标记，
      * 与「实收明细详情」同口径，供前端展示「原值 → 调整后值」。
-     * 结佣（PERF_REAL）同口径给出 originalAmount / receivedAdjusted（结佣调整 supersede
-     * 事实保留 sourceKey；无关联事实的历史差额行回退 ci.amount 且不置调整标记）。
+     * 2026-09-27 定稿：明细绑定期望事实（新签口径），originalAmount/receivedAdjusted
+     * 按期望链（PERF_EXPECT reversed→active）取值；reversed_real 链保留作历史单
+     * （明细绑实收事实）兜底；无关联事实的历史差额行回退 ci.amount 且不置调整标记。
      *
      * @param applicationId 申请单 ID
      * @return 明细详情列表
@@ -91,8 +92,9 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
                (re.source_key IS NOT NULL) AS "expectedAdjusted",
                ci.amount AS "amount",
-               COALESCE(rr.performance_amount, f.performance_amount, ci.amount) AS "originalAmount",
-               (rr.source_key IS NOT NULL) AS "receivedAdjusted",
+               COALESCE(re.performance_amount, rr.performance_amount,
+                        ae.performance_amount, f.performance_amount, ci.amount) AS "originalAmount",
+               (re.source_key IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
                ci.status AS "status"
         FROM pj_commission_item ci

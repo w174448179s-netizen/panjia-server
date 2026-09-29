@@ -2,9 +2,10 @@ package com.panjia.performance.handler;
 
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
+import com.panjia.contracts.port.ImportToReceivedPort;
+import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.performance.domain.PerformanceConsumeLog;
 import com.panjia.performance.service.PerformanceEngine;
-import com.panjia.performance.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -17,31 +18,32 @@ import java.util.List;
 /**
  * 导入批次归档事件处理器（DomainEventHandler，panjia-contracts Port 实现）。
  * <p>
- * 由 panjia-outbox 的 OutboxDispatcher 按 {@link #eventType()} 路由调用，
- * 本类不再依赖 Spring ApplicationEvent / @EventListener（避免进程内同步阻塞）。
- * <p>
- * 处理逻辑对应业绩域详细设计 §4.1 ①~⑦：
+ * 拆表后三路分发：
  * <ul>
- *   <li>① sourceType 过滤（EMPLOYEE / ATTENDANCE / POINTS / OTHERS 忽略）</li>
- *   <li>②~③ 由 PerformanceEngine.buildFromBatch 内部幂等与期间封账校验</li>
- *   <li>④ supersededBatchIds 非空时按 SUPERSEDE reason 冲销旧批次（CR-1）</li>
- *   <li>⑤~⑥ 由 PerformanceEngine.buildFromBatch 分页拉 NormalizedRecord 逐行生成事实</li>
+ *   <li>KE_SIGNED（贝壳新签）→ PerformanceEngine.buildFromBatch()，只建 PERF_EXPECT 新签事实</li>
+ *   <li>KE_RECEIVED（贝壳实收）→ ImportToReceivedPort.consumeBatch()，直接写实收表</li>
+ *   <li>HISTORY_PAYROLL（历史工资）→ ImportToReceivedPort.consumeBatch()，直接写实收表 + 实收审批直建</li>
  * </ul>
+ * EMPLOYEE / ATTENDANCE / POINTS / OTHERS 等来源直接忽略。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class ImportBatchArchivedHandler implements DomainEventHandler {
 
-    /** 业绩来源：贝壳·经纪人业绩明细表（KE_SIGNED，一行双口径）+ 历史工资导入（HISTORY_PAYROLL，单口径行） */
-    private static final java.util.Set<String> PERFORMANCE_SOURCE_TYPES =
-        java.util.Set.of("KE_SIGNED", "HISTORY_PAYROLL");
-
-    /** 历史工资导入来源标识：业绩事实生成后实收审批单走 APPROVED 直建，不走工作流 */
+    /** 贝壳新签导入：走 PerformanceEngine 建 PERF_EXPECT */
+    private static final String SOURCE_TYPE_KE_SIGNED = "KE_SIGNED";
+    /** 贝壳实收导入：走 ImportToReceivedPort 写实收表 */
+    private static final String SOURCE_TYPE_KE_RECEIVED = "KE_RECEIVED";
+    /** 历史工资导入：走 ImportToReceivedPort 写实收表 + 实收审批直建 */
     private static final String SOURCE_TYPE_HISTORY_PAYROLL = "HISTORY_PAYROLL";
+    /** 需要处理的来源类型集合 */
+    private static final java.util.Set<String> HANDLED_SOURCE_TYPES =
+        java.util.Set.of(SOURCE_TYPE_KE_SIGNED, SOURCE_TYPE_KE_RECEIVED, SOURCE_TYPE_HISTORY_PAYROLL);
 
     private final PerformanceEngine performanceEngine;
-    private final IReceivedApplyService receivedApplyService;
+    private final ImportToReceivedPort importToReceivedPort;
+    private final ReceivedApplyPort receivedApplyPort;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -55,66 +57,67 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
         try {
             event = objectMapper.readValue(payloadJson, ImportBatchArchivedEvent.class);
         } catch (JacksonException e) {
-            log.error("[业绩消费] 归档事件反序列化失败：eventId={}", eventId, e);
+            log.error("[导入归档] 事件反序列化失败：eventId={}", eventId, e);
             return;
         }
 
-        // §4.1 ① sourceType 过滤
-        if (event.getSourceType() == null || !PERFORMANCE_SOURCE_TYPES.contains(event.getSourceType())) {
-            log.info("[业绩消费] 归档事件忽略：batchId={}, sourceType={} (非业绩类源)",
+        // sourceType 过滤
+        if (event.getSourceType() == null || !HANDLED_SOURCE_TYPES.contains(event.getSourceType())) {
+            log.info("[导入归档] 忽略：batchId={}, sourceType={} (非业绩/实收类源)",
                 event.getBatchId(), event.getSourceType());
             return;
         }
 
+        String period = event.getPeriod();
         try {
-            log.info("[业绩消费] 收到归档事件：batchId={}, sourceType={}, period={}, supersededBatchIds={}",
-                event.getBatchId(), event.getSourceType(), event.getPeriod(), event.getSupersededBatchIds());
+            log.info("[导入归档] 收到：batchId={}, sourceType={}, period={}",
+                event.getBatchId(), event.getSourceType(), period);
 
-            List<Long> supersededIds = convertSupersededIds(event.getSupersededBatchIds());
-
-            PerformanceConsumeLog consumeLog = performanceEngine.buildFromBatch(
-                event.getBatchId(),
-                eventId,
-                "IMPORT_BATCH_ARCHIVED",
-                event.getOperatorId(),
-                supersededIds,
-                event.getSourceType(),
-                event.getPeriod());
-
-            // §2.1 业绩事实生成后，有实收的合同自动生成实收审批单并提交（按未绑定事实幂等）
-            // 历史工资导入批次实收审批单走 APPROVED 直建（无工作流，语义同老导入器）
-            String period = event.getPeriod() != null ? event.getPeriod() : consumeLog.getPeriod();
-            int created = SOURCE_TYPE_HISTORY_PAYROLL.equals(event.getSourceType())
-                ? receivedApplyService.autoCreateApprovedForBatch(event.getBatchId(), period, event.getOperatorId())
-                : receivedApplyService.autoCreateForBatch(event.getBatchId(), period, event.getOperatorId());
-            log.info("[业绩消费] 归档批次消费完成：batchId={}, sourceType={}, 实收审批单新建={}",
-                event.getBatchId(), event.getSourceType(), created);
+            if (SOURCE_TYPE_KE_SIGNED.equals(event.getSourceType())) {
+                handleSigned(event, eventId);
+            } else {
+                handleReceived(event, period);
+            }
         } catch (Exception e) {
-            log.error("[业绩消费] 归档事件处理失败：batchId={}, eventId={}",
-                event.getBatchId(), eventId, e);
-            // 原事务已回滚（RUNNING 日志行不复存在），在事务外补记一条 FAILED 审计日志，
-            // message 为根因摘要；随后 rethrow 交 OutboxDispatcher 退避重试
-            performanceEngine.markConsumeFailed(event.getBatchId(), eventId, "IMPORT_BATCH_ARCHIVED",
-                event.getSourceType(), event.getPeriod(), null, e);
+            log.error("[导入归档] 处理失败：batchId={}, eventId={}", event.getBatchId(), eventId, e);
             throw e;
         }
     }
 
-    /**
-     * supersededBatchIds 字段在事件 payload 中是 List&lt;String&gt;（JSON 序列化兼容性），
-     * PerformanceEngine.buildFromBatch 接收 List&lt;Long&gt;，此处做转换。
-     */
-    private List<Long> convertSupersededIds(List<String> ids) {
-        if (ids == null || ids.isEmpty()) {
-            return Collections.emptyList();
+    /** KE_SIGNED → PerformanceEngine 只建 PERF_EXPECT */
+    private void handleSigned(ImportBatchArchivedEvent event, String eventId) {
+        List<Long> supersededIds = convertSupersededIds(event.getSupersededBatchIds());
+        PerformanceConsumeLog consumeLog = performanceEngine.buildFromBatch(
+            event.getBatchId(), eventId, "IMPORT_BATCH_ARCHIVED",
+            event.getOperatorId(), supersededIds, event.getSourceType(), event.getPeriod());
+        log.info("[导入归档] KE_SIGNED 消费完成：batchId={}, period={}",
+            event.getBatchId(), consumeLog.getPeriod());
+    }
+
+    /** KE_RECEIVED / HISTORY_PAYROLL → ImportToReceivedPort 写实收表 + 建审批单 */
+    private void handleReceived(ImportBatchArchivedEvent event, String period) {
+        // 重复导入冲销：先作废旧批次 ACTIVE 实收明细，释放 source_key 唯一锚点，避免新批次全被幂等跳过
+        importToReceivedPort.supersedeBatches(convertSupersededIds(event.getSupersededBatchIds()));
+        ImportToReceivedPort.ImportToReceivedResult result = importToReceivedPort
+            .consumeBatch(event.getBatchId(), period, event.getSourceType(), event.getOperatorId());
+        log.info("[导入归档] 实收表写入完成：batchId={}, sourceType={}, contracts={}, details={}",
+            event.getBatchId(), event.getSourceType(), result.newContracts(), result.newDetails());
+
+        // 实收审批单
+        int created;
+        if (SOURCE_TYPE_HISTORY_PAYROLL.equals(event.getSourceType())) {
+            created = receivedApplyPort.autoCreateApprovedForBatch(event.getBatchId(), period, event.getOperatorId());
+        } else {
+            created = receivedApplyPort.autoCreateForReceivedBatch(event.getBatchId(), period, event.getOperatorId());
         }
+        log.info("[导入归档] 实收审批单新建：batchId={}, created={}", event.getBatchId(), created);
+    }
+
+    private List<Long> convertSupersededIds(List<String> ids) {
+        if (ids == null || ids.isEmpty()) return Collections.emptyList();
         java.util.List<Long> result = new java.util.ArrayList<>(ids.size());
         for (String id : ids) {
-            try {
-                result.add(Long.valueOf(id));
-            } catch (NumberFormatException e) {
-                log.warn("[业绩消费] supersededBatchIds 含非法 ID：{}", id);
-            }
+            try { result.add(Long.valueOf(id)); } catch (NumberFormatException ignore) {}
         }
         return result;
     }

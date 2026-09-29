@@ -62,4 +62,15 @@ public interface DeptPort {
      * @return 部门树节点
      */
     List<DeptNode> listDeptTree();
+
+    /**
+     * 按部门类别编码批量取正常状态部门 ID（2026-09-28 虚拟人挂靠用）。
+     * <p>贝壳新签行经纪人为空时按行上店组编码匹配 sys_dept.dept_category
+     * 找到门店部门，再挂到该部门的虚拟角色人上（工号 = 店组编码）。
+     *
+     * @param categories 部门类别编码集合
+     * @return 类别编码 → dept_id；同一编码命中多个部门取第一个（dept_id 升序）；
+     *         未配置/无正常状态部门的编码不在结果中；入参为空返回空 Map
+     */
+    Map<String, Long> findActiveDeptIdsByCategories(Collection<String> categories);
 }

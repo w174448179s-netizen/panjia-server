@@ -73,6 +73,18 @@ public interface CommissionPerformanceQueryPort {
     List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType);
 
     /**
+     * 按业务键集合（订单号/合同号）查 ACTIVE 业绩事实（<b>不限归属期间，跨月</b>）。
+     * <p>
+     * 用途：新签可能早于到账月（如 7 月新签、8 月到账），结佣明细金额须取该人该合同
+     * 的新签金额（跨月查找）；order_no 或 contract_no 命中键集合即返回。
+     *
+     * @param bizKeys  订单号或合同号集合（不可为空）
+     * @param factType 事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return 事实摘要列表（含 amount = 0 的行，过滤留给消费方）
+     */
+    List<PerformanceFactSummaryDTO> findActiveByBizKeys(Collection<String> bizKeys, String factType);
+
+    /**
      * 按期间查「合同」维度业绩汇总（结佣申请列表与合同申请单合并展示用）。
      *
      * @param period   归属期间 YYYY-MM
@@ -183,4 +195,15 @@ public interface CommissionPerformanceQueryPort {
      * @return bizKey → 应收合计；无事实的键不在结果中
      */
     Map<String, BigDecimal> sumExpectAmountsByKeys(String period, Collection<String> bizKeys);
+
+    /**
+     * 按业务键集合（订单号/合同号）<b>跨期间</b>汇总 ACTIVE PERF_EXPECT 应收金额。
+     * <p>
+     * 用途：结佣申请单 expectedAmount 与跨月到账判定同口径（该订单/合同全部月份新签合计）。
+     * 同一事实同时计入其订单号键与合同号键（均非空时），调用方按输入键取值。
+     *
+     * @param bizKeys 订单号或合同号集合（不可为空）
+     * @return bizKey → 应收合计；无事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriod(Collection<String> bizKeys);
 }

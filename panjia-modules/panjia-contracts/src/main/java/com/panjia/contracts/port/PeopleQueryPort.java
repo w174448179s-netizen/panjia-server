@@ -120,4 +120,15 @@ public interface PeopleQueryPort {
      * @return deptId → 部门名；入参为空返回空 Map
      */
     Map<Long, String> findDeptNames(Collection<Long> deptIds);
+
+    /**
+     * 按店组编码批量解析门店虚拟人（工号 = 店组编码，2026-09-28）。
+     * <p>新签导入经纪人为空的行挂靠用：店组编码 = sys_dept.dept_category
+     * （部门类别编码），虚拟人 = 该部门下 employee_code = 店组编码 的员工。
+     * 未配置店组/部门或部门下无虚拟人 → 结果不含该店组键（调用方按匹配失败处理）。
+     *
+     * @param storeGroups 店组编码集合
+     * @return 店组编码 → 虚拟人主数据（employeeId/employeeCode/employeeName）；入参为空返回空 Map
+     */
+    Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findVirtualEmployeesByStoreGroups(Collection<String> storeGroups);
 }

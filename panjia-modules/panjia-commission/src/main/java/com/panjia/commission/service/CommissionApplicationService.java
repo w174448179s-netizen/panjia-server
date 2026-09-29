@@ -20,7 +20,6 @@ import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
-import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
@@ -31,7 +30,6 @@ import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
-import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.MyTaskBrief;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
@@ -119,7 +117,6 @@ public class CommissionApplicationService {
     private final ConversionFactorPort conversionFactorPort;
     private final CommissionPerformanceQueryPort performanceQueryPort;
     private final PeriodCloseQueryPort periodCloseQueryPort;
-    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EventPort eventPort;
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
@@ -127,11 +124,11 @@ public class CommissionApplicationService {
     private final TaskExecutor taskExecutor;
 
     /**
-     * 批量发起上下文：承载在批量入口预加载的数据，贯穿 doBatchApply → apply → doApply 调用链，
-     * 避免逐合同重复查询（N 次全表/单行查询→1 次批量查询）。
+     * 批量发起上下文：承载在批量入口预加载的数据，贯穿 doBatchApply → apply →
+     * createApplicationWithItems 调用链，避免逐合同重复查询（N 次全表/单行查询→1 次批量查询）。
      * <ul>
-     *   <li>{@code factsMap}：同步阶段已查的实收事实，doApply 直接复用</li>
-     *   <li>{@code expectedAmounts}：全期间合同汇总一次性加载，doApply 按 contractNo 取值</li>
+     *   <li>{@code factsMap}：同步阶段已查的实收事实，建单直接复用</li>
+     *   <li>{@code expectedAmounts}：全期间合同汇总一次性加载，建单按 contractNo 取值</li>
      *   <li>{@code activeApps} / {@code rejectedApps}：一条 IN 查询取所有合同当月申请单</li>
      * </ul>
      * 单合同发起路径 ctx=null，走原有逐单查询逻辑。
@@ -297,7 +294,7 @@ public class CommissionApplicationService {
             submit(rejected.getId(), operatorId);
             return rejected;
         }
-        CommissionApplication application = doApply(period, contractNo, operatorId, ctx);
+        CommissionApplication application = createApplicationWithItems(period, contractNo, operatorId, ctx);
         submit(application.getId(), operatorId);
         return application;
     }
@@ -475,12 +472,17 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 发起核心逻辑（不含封账校验，由公共入口保证）。
+     * 构建结佣申请单 + 明细（不含封账校验与提交，由调用方保证/决定；人工发起与
+     * 实收审批通过自动建单共用）。幂等：已有活跃单抛 ServiceException（调用方自行吞掉跳过）。
+     * <p>
+     * 明细口径（2026-09-27 定稿）：明细源 = 该合同跨月 ACTIVE 新签事实逐行，
+     * 金额 = 事实当前值（调整后），绑新签事实 ID；实收事实仅用于 §3.2 审批校验与合同快照。
      *
      * @param ctx 批量上下文，非 null 时复用预加载的活跃单/事实/应收金额，跳过逐单查
      */
-    private CommissionApplication doApply(String period, String contractNo, Long operatorId,
-                                         BatchApplyContext ctx) {
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionApplication createApplicationWithItems(String period, String contractNo, Long operatorId,
+                                                            BatchApplyContext ctx) {
         // 幂等检查：从 ctx 取预加载的活跃单，避免逐单查（P1）
         CommissionApplication existing = ctx != null
             ? ctx.activeApps.get(contractNo)
@@ -515,8 +517,7 @@ public class CommissionApplicationService {
                 + "不能发起结佣；未通过明细：" + unapproved);
         }
 
-        // 员工归属兜底：明细 employee_id NOT NULL，按工号补齐
-        resolveEmployeeIds(nonZeroFacts);
+        // 员工归属：明细数据源为跨月新签事实（导入未匹配即拦截，必有人），无需兜底补齐
 
         // 合同快照（订单号/房源/签约时间取事实聚合值；跨门店合作单 dept_id 留空）
         PerformanceFactSummaryDTO first = nonZeroFacts.get(0);
@@ -551,9 +552,19 @@ public class CommissionApplicationService {
         application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
         application.setStatus(ApplicationStatus.DRAFT);
         application.setApplicantId(operatorId);
-        application.setItemCount(nonZeroFacts.size());
-        application.setTotalAmount(sumAmounts(nonZeroFacts));
-        // 应收金额：从 ctx 取预加载值，避免逐单全表查（P0）
+        // 结佣金额口径（2026-09-27 定稿）：明细源 = 该合同跨月 ACTIVE 新签事实逐行，
+        // 金额 = 事实当前值（调整后），不再按到账占比分摊；实收事实仅用于 §3.2 审批校验与合同快照
+        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts);
+        if (itemFacts.isEmpty()) {
+            throw new ServiceException(
+                "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
+        }
+        application.setItemCount(itemFacts.size());
+        // 结佣金额合计 = Σ明细金额（新签口径，与 expectedAmount 同基数；
+        // 到账是否覆盖新签已由实收域按合同维度判定，此处到账金额不参与计算）
+        application.setTotalAmount(sumAmounts(itemFacts));
+        // 应收金额：跨月口径（该合同/订单全部月份新签合计），与建单分流判定基数一致；
+        // 从 ctx 取预加载值，避免逐单全表查（P0）
         application.setExpectedAmount(ctx != null
             ? ctx.expectedAmounts.getOrDefault(contractNo, BigDecimal.ZERO)
             : resolveExpectedAmount(period, contractNo));
@@ -566,13 +577,11 @@ public class CommissionApplicationService {
         }
 
         // 批量插入明细：insertBatch 替代逐条 insert（P1：N×K→1 次 round-trip）
-        List<CommissionItem> items = new ArrayList<>(nonZeroFacts.size());
-        for (PerformanceFactSummaryDTO fact : nonZeroFacts) {
-            items.add(buildItem(application, fact, null));
+        List<CommissionItem> items = new ArrayList<>(itemFacts.size());
+        for (PerformanceFactSummaryDTO fact : itemFacts) {
+            items.add(buildItem(application, fact, fact.getAmount(), null));
         }
-        if (!items.isEmpty()) {
-            itemMapper.insertBatch(items);
-        }
+        itemMapper.insertBatch(items);
 
         log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, received={}, expected={}",
             application.getApplyNo(), period, contractNo, application.getItemCount(),
@@ -580,28 +589,68 @@ public class CommissionApplicationService {
         return application;
     }
 
-    /** 应收合计：取业绩域合同汇总的应收列（PERF_EXPECT 合计）。 */
-    private BigDecimal resolveExpectedAmount(String period, String contractNo) {
-        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
-            .filter(c -> contractNo.equals(c.getContractNo()))
-            .findFirst()
-            .map(PerformanceContractSummaryDTO::getExpectedAmount)
-            .orElse(BigDecimal.ZERO);
+    /**
+     * 结佣明细源（2026-09-27 定稿新签口径）：按合同/订单双键跨月取 ACTIVE 新签事实
+     * （PERF_EXPECT，每条事实一行，金额=事实当前值即调整后值）。
+     * <ul>
+     *   <li>金额为 0 的新签行不生成明细（结佣明细不存在 0 金额行）；</li>
+     *   <li>空经纪人实收行天然不在此列（实收明细仅展示，不参与任何计算）。</li>
+     * </ul>
+     */
+    private List<PerformanceFactSummaryDTO> loadExpectItemFacts(List<PerformanceFactSummaryDTO> realFacts) {
+        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
+        for (PerformanceFactSummaryDTO f : realFacts) {
+            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
+            // findActiveByBizKeys 内部仍会对 contract_no 列做 OR 匹配兜底
+            if (f.getOrderNo() != null && !f.getOrderNo().isBlank()) {
+                bizKeys.add(f.getOrderNo());
+            }
+        }
+        List<PerformanceFactSummaryDTO> expects =
+            performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
+        List<PerformanceFactSummaryDTO> itemFacts = new ArrayList<>(expects.size());
+        for (PerformanceFactSummaryDTO e : expects) {
+            // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
+            if (e.getEmployeeId() == null) {
+                continue;
+            }
+            if (e.getAmount() == null || e.getAmount().signum() == 0) {
+                continue;
+            }
+            itemFacts.add(e);
+        }
+        return itemFacts;
     }
 
     /**
-     * 批量加载全期间合同应收金额 Map（P0 优化）。
+     * 应收合计：跨月口径（该合同/订单全部月份 ACTIVE PERF_EXPECT 合计，与建单分流判定基数一致）。
+     * 查询按「订单号 OR 合同号」双列匹配，用户输入订单号或合同号均可命中。
+     */
+    private BigDecimal resolveExpectedAmount(String period, String contractNo) {
+        return performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(java.util.List.of(contractNo))
+            .getOrDefault(contractNo, BigDecimal.ZERO);
+    }
+
+    /**
+     * 批量加载合同应收金额 Map（P0 优化，跨月口径）。
      * <p>
-     * 单次调用 {@link CommissionPerformanceQueryPort#listContractSummaries} 取全期间汇总，
-     * 按 contractNo 建 Map，doApply 直接取值，避免逐合同全表查（N 次→1 次）。
+     * 以期间内实收合同清单为锚（listContractSummaries），单次调用
+     * {@link CommissionPerformanceQueryPort#sumExpectAmountsByKeysCrossPeriod}
+     * 跨月合计其应收（新签可能早于到账月），同时返回合同号与订单号双键，
+     * doApply 用用户输入（合同号或订单号）直接取值，避免逐合同全表查（N 次→1 次）。
      */
     private Map<String, BigDecimal> loadExpectedAmountMap(String period) {
-        return performanceQueryPort.listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
-            .collect(Collectors.toMap(
-                PerformanceContractSummaryDTO::getContractNo,
-                c -> c.getExpectedAmount() == null ? BigDecimal.ZERO : c.getExpectedAmount(),
-                (a, b) -> a,
-                HashMap::new));
+        List<PerformanceContractSummaryDTO> contracts = performanceQueryPort
+            .listContractSummaries(period, null, FACT_TYPE_REAL, null);
+        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
+        for (PerformanceContractSummaryDTO c : contracts) {
+            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
+            // sumExpectAmountsByKeysCrossPeriod 内部仍会对 contract_no 列做 OR 匹配兜底
+            if (c.getOrderNo() != null && !c.getOrderNo().isBlank()) {
+                bizKeys.add(c.getOrderNo());
+            }
+        }
+        return performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(bizKeys);
     }
 
     /**
@@ -1826,54 +1875,25 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 员工归属兜底（就地修改 fact.employeeId）：事实 employee_id 为空时按工号批量补齐，
-     * 仍无法归属的整体拒绝，fail fast（明细 employee_id NOT NULL）。
+     * 由事实构建结佣明细（不折算；冻结 contractNo/employee/dept/bizType/roleType）。
+     * <p>
+     * period 强制 = 申请单期间：薪资域 findLocked 按 {@code CommissionItem.period} 取数，
+     * 明细绑定的可能是早于申请单月份的新签事实（跨月），明细期间必须与申请单一致。
+     *
+     * @param commissionAmount 结佣金额 = 绑定新签事实当前金额（调整后）
      */
-    private void resolveEmployeeIds(List<PerformanceFactSummaryDTO> facts) {
-        Set<String> missingCodes = new HashSet<>();
-        for (PerformanceFactSummaryDTO fact : facts) {
-            if (fact.getEmployeeId() == null && StringUtils.isNotBlank(fact.getEmployeeCode())) {
-                missingCodes.add(fact.getEmployeeCode());
-            }
-        }
-        if (missingCodes.isEmpty()) {
-            return;
-        }
-        Map<String, EmployeeMainDataDTO> mainMap = employeeMainDataQueryPort.listByCodes(missingCodes);
-        List<String> unresolved = new ArrayList<>();
-        for (PerformanceFactSummaryDTO fact : facts) {
-            if (fact.getEmployeeId() != null) {
-                continue;
-            }
-            EmployeeMainDataDTO main = mainMap.get(fact.getEmployeeCode());
-            if (main != null && main.getEmployeeId() != null) {
-                fact.setEmployeeId(main.getEmployeeId());
-                if (fact.getDeptId() == null) {
-                    fact.setDeptId(main.getDeptId());
-                }
-            } else {
-                unresolved.add(fact.getEmployeeCode());
-            }
-        }
-        if (!unresolved.isEmpty()) {
-            throw new ServiceException("以下工号无法归属员工（请先在员工域补齐主数据）：" + unresolved);
-        }
-    }
-
-    /**
-     * 由事实构建结佣明细（amount 原样透传，不折算；冻结 contractNo/employee/dept/bizType/roleType）。
-     */
-    private CommissionItem buildItem(CommissionApplication application, PerformanceFactSummaryDTO fact, Long adjustId) {
+    private CommissionItem buildItem(CommissionApplication application, PerformanceFactSummaryDTO fact,
+                                     BigDecimal commissionAmount, Long adjustId) {
         CommissionItem item = new CommissionItem();
         item.setApplicationId(application.getId());
         item.setPerformanceFactId(fact.getFactId());
         item.setContractNo(application.getContractNo());
-        item.setPeriod(fact.getPeriod());
+        item.setPeriod(application.getPeriod());
         item.setEmployeeId(fact.getEmployeeId());
         item.setDeptId(fact.getDeptId());
         item.setBizType(fact.getBizType());
         item.setRoleType(fact.getRoleType());
-        item.setAmount(fact.getAmount());
+        item.setAmount(commissionAmount);
         item.setStatus(ItemStatus.DRAFT);
         item.setOriginReversed(false);
         item.setAdjustId(adjustId);

@@ -1,34 +1,30 @@
--- ============================================================
--- 盘家智管 · 全业务菜单与角色种子数据（生产上线版）
--- 段位：V100001（2026-09-11 由 panjia-people 模块迁回 ruoyi-admin）
--- 依据：docs/盘家智管_薪酬与收支_菜单设计_生产上线版.md
--- 说明：
---   1) sys_menu：28 条（5 个业务一级目录 + 子菜单 + F 按钮权限 + 系统管理追加项）
---   2) sys_role：5 个业务角色（总监/店长/财务/人事/经纪人）
---   3) sys_role_menu：依据设计文档第三章角色功能矩阵绑定
---   4) 超级管理员 userId=1 由 SysMenuServiceImpl#selectMenuTreeByUserId
---      走 selectMenuTreeAll 直接见全部菜单，无需 role_menu 绑定
---   5) sys_menu 无 data_scope 列（数据权限在 sys_role 上，
---      由 @DataPermission 注解实现门店维度拦截）
---   6) 菜单 ID 采用 19 位雪花段，与基线不冲突
---   7) F 按钮按 RuoYi 惯例挂在所属 C 菜单下（算薪批次）
---
--- 段位历史（2026-09-11 段位重整）：
---   V100001 原位于 panjia-people 模块，2026-09-11 段位重整后迁回 ruoyi-admin 模块，
---   段位重新定义为「盘家全业务种子」（10xxxx 段位归属 ruoyi-admin）。
---   10xxxx 段位的旧定义「panjia-salary 业务表」作废（panjia-salary 空模块已删除）。
--- ============================================================
-
-BEGIN;
+-- ============================================================================
+-- V100001 盘家智管 sys_menu 最终态种子（清库重建合并版）
+-- 全部业务菜单（基础档案/数据导入/业绩管理/薪酬计算/部门收支/综合查询）+ F 按钮，
+-- 以及对 V1 基线菜单的清理（系统工具/AI/客户端）与排序调整。
+-- 排序/改名/挂载修复链均已折叠为最终值：
+--   · 我的任务(11618) order=1（V100004→5、V100006/V100007→1）
+--   · 结佣调整(2203) order=4（V100008）
+--   · 业绩查询(2650) 挂综合查询(2700) order=1（V100018）
+--   · 考勤明细→考勤管理（V100029）、绩效积分→积分管理（V100030）
+--   · 提成点调整最终 ID=2320/2321/2322（V100027 建 2311~2313 与 V160003 撞号，
+--     V100028 修复，2311/2312 恢复为算薪批次按钮 payroll:batch:add/submit）
+--   · 空壳顶级目录「数据管理」(2530) 删除链（V100003/V100006/V100007/V170001）
+--     最终态=不创建，本文件无其 INSERT
+-- 合并自：V100001,V100002,V100004,V100006,V100007,V100008,V100012,V100014,
+--         V100017,V100018,V100021,V100025,V100026,V100027,V100028,V100029,
+--         V100030,V100031,V100033（V100003/V170001 仅含 2530 删除链，净效果为零）
+-- ============================================================================
 
 -- ============================================================
--- 一、sys_menu 菜单数据（28 条）
+-- 一、一级目录与业务菜单（折叠后的最终行）
 -- ============================================================
 
 -- ---------- 一级目录：基础档案 (people 域) ----------
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002000, '基础档案', 0, 10, 'people', NULL, NULL, 'N', 'Y', 'M', '0', '0', NULL, 'peoples', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '基础档案目录（people 域）');
 
+-- 注：panjia-people V110003 会将本菜单改名为「员工管理」并增删 F 按钮（跨模块链，此处保留 V100001 原始行）
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002001, '员工档案', 1761400000000002000, 1, 'employee', 'people/employee/index', NULL, 'N', 'Y', 'C', '0', '0', 'people:employee:list', 'user', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '员工档案菜单（工号/入职/离职/兼职）');
 
@@ -37,6 +33,30 @@ VALUES (1761400000000002002, '职级与社保模板', 1761400000000002000, 2, 'l
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002003, '师徒关系', 1761400000000002000, 3, 'mentor', 'people/mentor/index', NULL, 'N', 'Y', 'C', '0', '0', 'people:mentor:list', 'tree', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '师徒关系菜单（推荐人-徒弟绑定）');
+
+-- ---------- 考勤明细（V100025）→ 改名「考勤管理」（V100029，已折叠） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002010, '考勤管理', 1761400000000002000, 4, 'attendance', 'people/attendance/index', NULL, 'N', 'Y', 'C', '0', '0', 'people:attendance:list', 'date', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '考勤明细菜单（人事/总监登记与维护员工日考勤）');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002011, '考勤新增', 1761400000000002010, 1, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'people:attendance:add', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '考勤明细-新增按钮');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002012, '考勤修改', 1761400000000002010, 2, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'people:attendance:edit', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '考勤明细-修改按钮');
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002013, '考勤删除', 1761400000000002010, 3, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'people:attendance:remove', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '考勤明细-删除按钮');
+
+-- ---------- 绩效积分（V100026）→ 改名「积分管理」（V100030，已折叠） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002020, '积分管理', 1761400000000002000, 5, 'score', 'people/score/index', NULL, 'N', 'Y', 'C', '0', '0', 'people:score:list', 'star', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '绩效积分明细（人事/总监查询积分汇总、提交月度审批）');
+
+-- ---------- 积分新增/删除按钮（V100031） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES
+(1761400000000002021, '积分新增', 1761400000000002020, 1, '', NULL, NULL, 'N', 'N', 'F', '0', '0', 'people:score:add', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '手工新增积分记录（补录/修正）'),
+(1761400000000002022, '积分删除', 1761400000000002020, 2, '', NULL, NULL, 'N', 'N', 'F', '0', '0', 'people:score:remove', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '删除积分记录（期间锁定后不可删）')
+ON CONFLICT (menu_id) DO NOTHING;
 
 -- ---------- 一级目录：数据导入 (import 域) ----------
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
@@ -58,15 +78,18 @@ VALUES (1761400000000002104, '导入批次查询', 1761400000000002100, 4, 'batc
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002200, '业绩管理', 0, 30, 'performance', NULL, NULL, 'N', 'Y', 'M', '0', '0', NULL, 'chart', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '业绩管理目录（performance / commission 域）');
 
--- 注：原 2201「新签明细」残留已删除（perms=performance:fact:* 后端不存在）。
---     唯一「新签明细」菜单为 V140003 的 2610（perms=perf:fact:*，与 PerformanceFactController 对齐），
---     业务角色的新签明细授权在下方 sys_role_menu 段直接绑 2610/2611。
-
+-- 注：唯一「新签明细」菜单为 2610（perms=perf:fact:*，由 panjia-performance V140003 提供）
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002202, '结佣明细', 1761400000000002200, 3, 'apply', 'commission/apply/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:apply:list', 'form', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣明细菜单（待审批/已审批/驳回）');
 
+-- 结佣调整：order_num 折叠 V100008（3 → 4）
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761400000000002203, '结佣调整', 1761400000000002200, 3, 'adjust', 'commission/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:adjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣调整菜单（漏算补录，新增记录不改原始）');
+VALUES (1761400000000002203, '结佣调整', 1761400000000002200, 4, 'adjust', 'commission/adjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'commission:adjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣调整菜单（漏算补录，新增记录不改原始）');
+
+-- ---------- 发起调整按钮（V100033，commission:adjust:add，财务/总监专用） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002204, '发起调整', 1761400000000002203, 1, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'commission:adjust:add', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '结佣调整-发起调整按钮（财务/总监）')
+ON CONFLICT (menu_id) DO NOTHING;
 
 -- ---------- 一级目录：薪酬计算 (payroll 域) ----------
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
@@ -91,11 +114,38 @@ VALUES (1761400000000002305, '调整与补发', 1761400000000002300, 5, 'adjust'
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002306, '发起计算', 1761400000000002301, 1, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'payroll:batch:calculate', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '算薪批次-发起计算按钮');
 
+-- 注：2307「锁定批次」在 V100001 建立；panjia-payroll V160004 会将其下线（审批收敛「我的待办」），跨模块链此处保留原始行
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002307, '锁定批次', 1761400000000002301, 2, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'payroll:batch:lock', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '算薪批次-锁定批次按钮');
 
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002308, '发放工资', 1761400000000002301, 3, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'payroll:batch:release', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '算薪批次-发放工资按钮');
+
+-- ---------- 薪酬规则配置（V100002） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002310, '薪酬规则配置', 1761400000000002300, 6, 'rule', 'payroll/rule/index', NULL, 'N', 'Y', 'C', '0', '0', 'payroll:rule:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '薪酬规则配置菜单（职级/底薪/提点/社保/公积金/折算规则，只影响新算月份）');
+
+-- ---------- 算薪批次 新建/提交按钮（V100028 恢复 V160003 定义，修复与提成点调整的 ID 撞号） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES
+(1761400000000002311, '新建批次', 1761400000000002301, 4, '', NULL, NULL,
+ 'N', 'Y', 'F', '0', '0', 'payroll:batch:add', '#', '', '',
+ 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '新建算薪批次'),
+(1761400000000002312, '提交审核', 1761400000000002301, 5, '', NULL, NULL,
+ 'N', 'Y', 'F', '0', '0', 'payroll:batch:submit', '#', '', '',
+ 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '提交批次进入总监审核')
+ON CONFLICT (menu_id) DO NOTHING;
+
+-- ---------- 提成点调整（V100027 建 2311~2313 撞号，V100028 迁移到最终 ID 2320/2321/2322） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002320, '提成点调整', 1761400000000002300, 7, 'rateadjust', 'payroll/rateadjust/index', NULL, 'N', 'Y', 'C', '0', '0', 'payroll:rateadjust:list', 'edit', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '提成点调整菜单（财务登记业绩扣点调整，总监审批通过后按生效区间扣点）')
+ON CONFLICT (menu_id) DO NOTHING;
+
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES
+(1761400000000002321, '登记调整', 1761400000000002320, 1, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'payroll:rateadjust:add', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '提成点调整-登记/修改/删除/提交按钮'),
+(1761400000000002322, '撤销调整', 1761400000000002320, 2, '', '', NULL, 'N', 'Y', 'F', '0', '0', 'payroll:rateadjust:cancel', '#', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '提成点调整-撤销按钮（撤回在途流程/作废生效中调整）')
+ON CONFLICT (menu_id) DO NOTHING;
 
 -- ---------- 一级目录：部门收支 (ledger 域) ----------
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
@@ -117,265 +167,46 @@ VALUES (1761400000000002500, '授权管理', 1761400000000000001, 90, 'license',
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
 VALUES (1761400000000002501, '备份恢复', 1761400000000000001, 95, 'backup', 'system/backup/index', NULL, 'N', 'Y', 'C', '0', '0', 'system:backup:list', 'database', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '备份恢复菜单（算薪前自动备份，手动/策略恢复）');
 
--- ====================== 初始化岗位 sys_post ======================
--- 规则：post_name 严格与 sys_role.role_name 完全一致；post_code 和 role_key 保持一致
--- 归属根部门 dept_id = 1761000000000000100
--- post_id 使用独立号段 17612xxxxxxx，区分dept(17610)、user(17611)、post(17612)、role(17613)
+-- ---------- 业绩作废/恢复按钮（V100012；V100017 幂等补齐已折叠） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002613, '业绩作废/恢复', 1761400000000002610, 3, NULL, NULL, NULL, 'N', 'Y', 'F', '0', '0', 'perf:fact:void', '#', '', '', 176100000000000100, 1761100000000000001, now(), NULL, NULL, '总监作废/恢复业绩事实（不参与算薪/落入当月）')
+ON CONFLICT (menu_id) DO NOTHING;
 
--- 总监岗位，对齐【总监】角色
-INSERT INTO sys_post(post_id, dept_id, post_code, post_category, post_name, post_sort, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761200000000000010, 1761000000000000100, 'director', null, '总监', 10, '0', '0', 1761000000000000100, 1761100000000000001, now(), null, null, '总监岗位，与角色【总监】对齐，拥有全量数据权限');
+-- ---------- 一级目录：综合查询（V100018，order 35 介于业绩管理30与薪酬计算40之间） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002700, '综合查询', 0, 35, 'comprehensive', NULL, NULL, 'N', 'Y', 'M', '0', '0', NULL, 'search', '', '', 176100000000000100, 1761100000000000001, now(), NULL, NULL, '综合查询目录（业绩查询 + 工资查询）')
+ON CONFLICT (menu_id) DO NOTHING;
 
--- 店长岗位，对齐【店长】角色
-INSERT INTO sys_post(post_id, dept_id, post_code, post_category, post_name, post_sort, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761200000000000011, 1761000000000000100, 'manager', null, '店长', 11, '0', '0', 1761000000000000100, 1761100000000000001, now(), null, null, '店长岗位，与角色【店长】对齐，本部门数据权限');
+-- ---------- 工资查询（V100018） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002701, '工资查询', 1761400000000002700, 2, 'my-salary', 'payroll/my/index', NULL, 'N', 'Y', 'C', '0', '0', 'payroll:my:query', 'money', '', '', 176100000000000100, 1761100000000000001, now(), NULL, NULL, '工资查询（本人视角：经纪人/店长/总监/财务仅查自己工资，可追溯结佣）')
+ON CONFLICT (menu_id) DO NOTHING;
 
--- 财务岗位，对齐【财务】角色
-INSERT INTO sys_post(post_id, dept_id, post_code, post_category, post_name, post_sort, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761200000000000012, 1761000000000000100, 'payroll_clerk', null, '财务', 12, '0', '0', 1761000000000000100, 1761100000000000001, now(), null, null, '财务岗位，与角色【财务】对齐，全量薪酬经营数据权限');
+-- ---------- 业绩查询（V100014 建，V100018 迁入综合查询：parent/order 已折叠为最终值） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002650, '业绩查询', 1761400000000002700, 1, 'search', 'performance/search/index', NULL, 'N', 'Y', 'C', '0', '0', 'perf:fact:list', 'search', '', '', 176100000000000100, 1761100000000000001, now(), NULL, NULL, '完整业绩查询（合同维度：新签/实收/调整/实收审批/结佣状态）')
+ON CONFLICT (menu_id) DO NOTHING;
 
--- 人事岗位，对齐【人事】角色
-INSERT INTO sys_post(post_id, dept_id, post_code, post_category, post_name, post_sort, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761200000000000013, 1761000000000000100, 'hr', null, '人事', 13, '0', '0', 1761000000000000100, 1761100000000000001, now(), null, null, '人事岗位，与角色【人事】对齐，本部门人事档案、考勤导入权限');
+-- ---------- 考勤查询（V100025，全员仅查本人） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, query_param, is_frame, is_cache, menu_type, visible, status, perms, icon, active_menu, ext, create_dept, create_by, create_time, update_by, update_time, remark)
+VALUES (1761400000000002702, '考勤查询', 1761400000000002700, 3, 'my-attendance', 'people/attendance/my', NULL, 'N', 'Y', 'C', '0', '0', 'people:attendance:my:query', 'date', '', '', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '考勤查询（全员仅查本人日考勤记录）')
+ON CONFLICT (menu_id) DO NOTHING;
 
--- 经纪人岗位，对齐【经纪人】角色
-INSERT INTO sys_post(post_id, dept_id, post_code, post_category, post_name, post_sort, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761200000000000014, 1761000000000000100, 'agent', null, '经纪人', 14, '0', '0', 1761000000000000100, 1761100000000000001, now(), null, null, '经纪人岗位，与角色【经纪人】对齐，仅本人业绩工资查看权限');
-
-
--- ============================================================
--- 二、sys_role 业务角色（5 个）
--- data_scope: 1=全部 2=自定义 3=本部门 4=本部门及以下 5=仅本人
--- ============================================================
-
--- 总监（全量数据权限）
-INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000010, '总监', 'director', 10, '1', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '总监角色（全量数据，发起/审批/锁定/发放）');
-
--- 店长（本部门数据权限）
-INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000011, '店长', 'manager', 11, '3', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '店长角色（本店数据，发起本店）');
-
--- 财务（全量数据权限）
-INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000012, '财务', 'finance', 12, '1', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '财务角色（全量数据，全部操作）');
-
--- 人事（本部门数据权限）
-INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000013, '人事', 'hr', 13, '3', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '人事角色（本店数据，考勤/积分导入与档案编辑）');
-
--- 经纪人（仅本人数据权限）
-INSERT INTO sys_role (role_id, role_name, role_key, role_sort, data_scope, menu_check_strictly, dept_check_strictly, status, del_flag, create_dept, create_by, create_time, update_by, update_time, remark)
-VALUES (1761300000000000014, '经纪人', 'agent', 14, '5', true, true, '0', '0', 1761000000000000100, 1761100000000000001, now(), NULL, NULL, '经纪人角色（仅本人数据，查看本人业绩/工资/发起调整申请）');
+-- ---------- 员工姓名解析按钮（V100021，工作流详情弹窗专用，不挂侧边栏） ----------
+INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component,
+                      query_param, is_frame, is_cache, menu_type, visible, status,
+                      perms, icon, create_dept, create_by, create_time, remark)
+VALUES (1761400000000011840, '员工姓名解析', 1761400000000002001, 99, '', NULL,
+        NULL, 'N', 'Y', 'F', '0', '0',
+        'people:employee:list', '#', 1761000000000000100, 1761100000000000001, now(),
+        '工作流详情弹窗员工ID→姓名解析（useEmployeeMap）专用授权，不挂侧边栏入口')
+ON CONFLICT (menu_id) DO NOTHING;
 
 -- ============================================================
--- 三、sys_role_menu 角色菜单绑定
--- 依据设计文档第三章「按角色的功能矩阵」
+-- 二、V1 基线菜单清理（V100001：删除非生产所需菜单）
+-- （基线建这些菜单在先，故删除语句保留；对应 sys_role_menu 清理见 V100002，
+--   基线未插入任何角色绑定，删除绑定语句为空操作已省略）
 -- ============================================================
-
--- ---------- 总监（role_id=1761300000000000010）----------
--- 基础档案（查看）、业绩管理（全量/发起/审批）、薪酬计算（发起/审批/锁定/发放/调整）、
--- 部门收支（全量/科目/成本）、授权管理（运维）、备份恢复（运维）
--- 注：不含其他收支录入（矩阵为"—"）
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000010, 1761400000000002000),  -- 基础档案目录
-(1761300000000000010, 1761400000000002001),  -- 员工档案
-(1761300000000000010, 1761400000000002002),  -- 职级与社保模板
-(1761300000000000010, 1761400000000002003),  -- 师徒关系
-(1761300000000000010, 1761400000000002200),  -- 业绩管理目录
-(1761300000000000010, 1761400000000002610),  -- 新签明细（全量；菜单由 V140003 提供）
-(1761300000000000010, 1761400000000002611),  -- 新签明细-查询按钮
-(1761300000000000010, 1761400000000002202),  -- 结佣申请（发起/审批）
-(1761300000000000010, 1761400000000002203),  -- 结佣调整（审批）
-(1761300000000000010, 1761400000000002300),  -- 薪酬计算目录
-(1761300000000000010, 1761400000000002301),  -- 算薪批次（发起/审批/锁定）
-(1761300000000000010, 1761400000000002302),  -- 工资明细（全量）
-(1761300000000000010, 1761400000000002303),  -- 奖金录入（审批）
-(1761300000000000010, 1761400000000002305),  -- 调整与补发（审批）
-(1761300000000000010, 1761400000000002306),  -- 发起计算（F）
-(1761300000000000010, 1761400000000002307),  -- 锁定批次（F）
-(1761300000000000010, 1761400000000002308),  -- 发放工资（F）
-(1761300000000000010, 1761400000000002400),  -- 部门收支目录
-(1761300000000000010, 1761400000000002401),  -- 部门收支表（全量）
-(1761300000000000010, 1761400000000002402),  -- 收支科目配置
-(1761300000000000010, 1761400000000002403),  -- 门店成本录入
-(1761300000000000010, 1761400000000002500),  -- 授权管理（运维）
-(1761300000000000010, 1761400000000002501),  -- 备份恢复（运维）
--- 系统管理基础功能（总监需管理用户/角色/部门/岗位）
-(1761300000000000010, 1761400000000000001),  -- 系统管理目录
-(1761300000000000010, 1761400000000000100),  -- 用户管理
-(1761300000000000010, 1761400000000001001),  -- 用户查询（F）
-(1761300000000000010, 1761400000000001002),  -- 用户新增（F）
-(1761300000000000010, 1761400000000001003),  -- 用户修改（F）
-(1761300000000000010, 1761400000000001004),  -- 用户删除（F）
-(1761300000000000010, 1761400000000001005),  -- 用户导出（F）
-(1761300000000000010, 1761400000000001006),  -- 用户导入（F）
-(1761300000000000010, 1761400000000001007),  -- 重置密码（F）
-(1761300000000000010, 1761400000000000131),  -- 分配角色
-(1761300000000000010, 1761400000000000101),  -- 角色管理
-(1761300000000000010, 1761400000000001008),  -- 角色查询（F）
-(1761300000000000010, 1761400000000001009),  -- 角色新增（F）
-(1761300000000000010, 1761400000000001010),  -- 角色修改（F）
-(1761300000000000010, 1761400000000001011),  -- 角色删除（F）
-(1761300000000000010, 1761400000000001012),  -- 角色导出（F）
-(1761300000000000010, 1761400000000000130),  -- 分配用户
-(1761300000000000010, 1761400000000000103),  -- 部门管理（门店=部门）
-(1761300000000000010, 1761400000000000104),  -- 岗位管理
-(1761300000000000010, 1761400000000000106),  -- 参数设置（社保基数/迟到单价等）
-(1761300000000000010, 1761400000000000105),  -- 字典管理
-(1761300000000000010, 1761400000000000108),  -- 日志管理
-(1761300000000000010, 1761400000000000118);  -- 文件管理
-
--- ---------- 店长（role_id=1761300000000000011）----------
--- 业绩管理（本店/发起）、薪酬计算（发起本店/奖金/调整）
--- 注：无基础档案、数据导入、其他收支、部门收支、授权/备份
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000011, 1761400000000002200),  -- 业绩管理目录
-(1761300000000000011, 1761400000000002610),  -- 新签明细（本店；菜单由 V140003 提供）
-(1761300000000000011, 1761400000000002611),  -- 新签明细-查询按钮
-(1761300000000000011, 1761400000000002202),  -- 结佣申请（发起）
-(1761300000000000011, 1761400000000002203),  -- 结佣调整（发起）
-(1761300000000000011, 1761400000000002300),  -- 薪酬计算目录
-(1761300000000000011, 1761400000000002301),  -- 算薪批次（发起本店）
-(1761300000000000011, 1761400000000002302),  -- 工资明细（本店）
-(1761300000000000011, 1761400000000002303),  -- 奖金录入（发起）
-(1761300000000000011, 1761400000000002305),  -- 调整与补发（发起）
-(1761300000000000011, 1761400000000002306);  -- 发起计算（F）
-
--- ---------- 财务（role_id=1761300000000000012）----------
--- 基础档案（查看）、数据导入（全部）、业绩管理（全量/处理）、
--- 薪酬计算（全部操作含其他收支/调整）、部门收支-门店成本
--- 注：无奖金录入（矩阵为"—"）、无部门收支表/科目配置、无授权/备份
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000012, 1761400000000002000),  -- 基础档案目录
-(1761300000000000012, 1761400000000002001),  -- 员工档案（查看）
-(1761300000000000012, 1761400000000002002),  -- 职级与社保模板（查看）
-(1761300000000000012, 1761400000000002003),  -- 师徒关系（查看）
-(1761300000000000012, 1761400000000002100),  -- 数据导入目录
-(1761300000000000012, 1761400000000002101),  -- 贝壳业绩导入
-(1761300000000000012, 1761400000000002102),  -- 考勤数据导入
-(1761300000000000012, 1761400000000002103),  -- 积分数据导入
-(1761300000000000012, 1761400000000002104),  -- 导入批次查询
-(1761300000000000012, 1761400000000002200),  -- 业绩管理目录
-(1761300000000000012, 1761400000000002610),  -- 新签明细（全量；菜单由 V140003 提供）
-(1761300000000000012, 1761400000000002611),  -- 新签明细-查询按钮
-(1761300000000000012, 1761400000000002202),  -- 结佣申请（处理）
-(1761300000000000012, 1761400000000002203),  -- 结佣调整（处理）
-(1761300000000000012, 1761400000000002300),  -- 薪酬计算目录
-(1761300000000000012, 1761400000000002301),  -- 算薪批次（全部操作）
-(1761300000000000012, 1761400000000002302),  -- 工资明细（全量）
-(1761300000000000012, 1761400000000002304),  -- 其他收支录入
-(1761300000000000012, 1761400000000002305),  -- 调整与补发（处理）
-(1761300000000000012, 1761400000000002306),  -- 发起计算（F）
-(1761300000000000012, 1761400000000002307),  -- 锁定批次（F）
-(1761300000000000012, 1761400000000002308),  -- 发放工资（F）
-(1761300000000000012, 1761400000000002400),  -- 部门收支目录（父目录，为门店成本录入导航）
-(1761300000000000012, 1761400000000002403);  -- 门店成本录入
-
--- ---------- 人事（role_id=1761300000000000013）----------
--- 基础档案（编辑考勤/积分档案）、数据导入（考勤/积分导入）
--- 注：无贝壳业绩导入、导入批次查询、业绩管理、薪酬计算、部门收支、授权/备份
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000013, 1761400000000002000),  -- 基础档案目录
-(1761300000000000013, 1761400000000002001),  -- 员工档案（编辑）
-(1761300000000000013, 1761400000000002002),  -- 职级与社保模板（编辑）
-(1761300000000000013, 1761400000000002003),  -- 师徒关系（编辑）
-(1761300000000000013, 1761400000000002100),  -- 数据导入目录
-(1761300000000000013, 1761400000000002102),  -- 考勤数据导入
-(1761300000000000013, 1761400000000002103);  -- 积分数据导入
-
--- ---------- 经纪人（role_id=1761300000000000014）----------
--- 业绩管理（本人新签明细/结佣申请/结佣调整-申请）、薪酬计算（本人工资明细）
--- 注：无算薪批次、奖金录入、其他收支、调整与补发、部门收支、授权/备份、无 F 按钮
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000014, 1761400000000002200),  -- 业绩管理目录
-(1761300000000000014, 1761400000000002610),  -- 新签明细（本人；菜单由 V140003 提供）
-(1761300000000000014, 1761400000000002611),  -- 新签明细-查询按钮
-(1761300000000000014, 1761400000000002202),  -- 结佣申请（申请调整）
-(1761300000000000014, 1761400000000002203),  -- 结佣调整（申请）
-(1761300000000000014, 1761400000000002300),  -- 薪酬计算目录
-(1761300000000000014, 1761400000000002302);  -- 工资明细（本人）
-
--- ============================================================
--- 三·补、工作流菜单角色绑定
--- 依据：设计文档第五章 5.1 节，结佣申请走 Warm-Flow 审批（通过/驳回）；
---       奖金录入：店长/总监发起→总监审批→计入当月工资
--- 分配策略：
---   总监     → 工作流管理（流程定义/实例/监控/分类）+ 我的任务（全量）
---   店长     → 我的任务（发起结佣申请/奖金录入、审批结果）
---   财务 → 我的任务（处理结佣、发起记录）
---   经纪人   → 我的任务（发起结佣调整申请）
---   人事     → 无工作流需求（不绑定）
--- ============================================================
-
--- ---------- 总监：工作流管理 + 我的任务（全量）----------
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
--- 工作流目录
-(1761300000000000010, 1761400000000011616),
--- 流程分类 + F 按钮
-(1761300000000000010, 1761400000000011622),
-(1761300000000000010, 1761400000000011623),  -- 流程分类查询
-(1761300000000000010, 1761400000000011624),  -- 流程分类新增
-(1761300000000000010, 1761400000000011625),  -- 流程分类修改
-(1761300000000000010, 1761400000000011626),  -- 流程分类删除
-(1761300000000000010, 1761400000000011627),  -- 流程分类导出
--- 流程定义 + F 按钮
-(1761300000000000010, 1761400000000011620),
-(1761300000000000010, 1761400000000011644),  -- 流程定义查询
-(1761300000000000010, 1761400000000011645),  -- 流程定义新增
-(1761300000000000010, 1761400000000011646),  -- 流程定义修改
-(1761300000000000010, 1761400000000011647),  -- 流程定义删除
-(1761300000000000010, 1761400000000011648),  -- 流程定义导出
--- 流程设计
-(1761300000000000010, 1761400000000011700),
--- 流程监控 + 子菜单
-(1761300000000000010, 1761400000000011630),
-(1761300000000000010, 1761400000000011621),  -- 流程实例
-(1761300000000000010, 1761400000000011653),  -- 流程实例查询
-(1761300000000000010, 1761400000000011654),  -- 流程变量查询
-(1761300000000000010, 1761400000000011655),  -- 流程变量修改
-(1761300000000000010, 1761400000000011656),  -- 流程实例激活/挂起
-(1761300000000000010, 1761400000000011657),  -- 流程实例删除
-(1761300000000000010, 1761400000000011658),  -- 流程实例作废
-(1761300000000000010, 1761400000000011659),  -- 流程实例撤销
-(1761300000000000010, 1761400000000011631),  -- 待办任务
-(1761300000000000010, 1761400000000011660),  -- 待办任务修改
--- 我的任务目录 + 子菜单
-(1761300000000000010, 1761400000000011618),
-(1761300000000000010, 1761400000000011629),  -- 我发起的
-(1761300000000000010, 1761400000000011619),  -- 我的待办
-(1761300000000000010, 1761400000000011632),  -- 我的已办
-(1761300000000000010, 1761400000000011633);  -- 我的抄送
-
--- ---------- 店长：我的任务（发起结佣/奖金、审批结果）----------
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000011, 1761400000000011618),
-(1761300000000000011, 1761400000000011629),  -- 我发起的
-(1761300000000000011, 1761400000000011619),  -- 我的待办（总监审批后收到通知）
-(1761300000000000011, 1761400000000011632),  -- 我的已办
-(1761300000000000011, 1761400000000011633);  -- 我的抄送
-
--- ---------- 财务：我的任务（处理结佣、发起记录）----------
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000012, 1761400000000011618),
-(1761300000000000012, 1761400000000011629),  -- 我发起的
-(1761300000000000012, 1761400000000011619),  -- 我的待办（结佣审批通过后处理）
-(1761300000000000012, 1761400000000011632),  -- 我的已办
-(1761300000000000012, 1761400000000011633);  -- 我的抄送
-
--- ---------- 经纪人：我的任务（发起结佣调整申请）----------
-INSERT INTO sys_role_menu (role_id, menu_id) VALUES
-(1761300000000000014, 1761400000000011618),
-(1761300000000000014, 1761400000000011629),  -- 我发起的
-(1761300000000000014, 1761400000000011619),  -- 我的待办（调整审批结果）
-(1761300000000000014, 1761400000000011632),  -- 我的已办
-(1761300000000000014, 1761400000000011633);  -- 我的抄送
-
--- ============================================================
--- 四、菜单清理与排序调整
--- ============================================================
-
--- ---------- 删除非生产所需菜单 ----------
 
 -- 系统工具目录及其子菜单
 DELETE FROM sys_menu WHERE menu_id IN (1761400000000000003, 1761400000000000115, 1761400000000000116,
@@ -391,19 +222,10 @@ DELETE FROM sys_menu WHERE menu_id IN (1761400000000000123,
 -- AI控制台（系统监控下）
 DELETE FROM sys_menu WHERE menu_id = 1761400000000000121;
 
--- 清理角色菜单绑定（删除菜单后对应 role_menu 也要清理）
-DELETE FROM sys_role_menu WHERE menu_id IN (
-  1761400000000000003, 1761400000000000115, 1761400000000000116,
-  1761400000000001055, 1761400000000001056, 1761400000000001057,
-  1761400000000001058, 1761400000000001059, 1761400000000001060,
-  1761400000000000006, 1761400000000000123,
-  1761400000000001061, 1761400000000001062, 1761400000000001063,
-  1761400000000001064, 1761400000000001065, 1761400000000000121
-);
-
--- ---------- 菜单排序：业务菜单在前，系统管理在后 ----------
-
--- 业务菜单（V100001 新增的 order_num 已是 10~50，保持不变）
+-- ============================================================
+-- 三、V1 基线菜单排序（V100001 建立业务菜单在前；V100004/V100006/V100007 的
+--     「我的任务」调整链已折叠为最终 order_num=1）
+-- ============================================================
 
 -- 系统管理目录：1 → 90
 UPDATE sys_menu SET order_num = 90 WHERE menu_id = 1761400000000000001;
@@ -414,253 +236,18 @@ UPDATE sys_menu SET order_num = 95 WHERE menu_id = 1761400000000000002;
 -- 工作流：6 → 60
 UPDATE sys_menu SET order_num = 60 WHERE menu_id = 1761400000000011616;
 
--- 我的任务：7 → 70
-UPDATE sys_menu SET order_num = 70 WHERE menu_id = 1761400000000011618;
+-- 我的任务：7 → 70（V100001）→ 5（V100004）→ 1（V100006/V100007），最终值 1
+UPDATE sys_menu SET order_num = 1 WHERE menu_id = 1761400000000011618;
 
 -- ============================================================
--- 五、工作流定义数据（Warm-Flow）
--- 依据：业务需求说明书 V4.2 + 菜单设计生产上线版
---   1. 结佣申请审批（9.3节）：开始→申请人→核验(财务)→总监审批→结束
---      驳回：总监可驳回回申请人；支持"跳过核验直接总监审批"开关
---   2. 结佣调整审批（9.4节）：漏算补录/金额差异/85折调整，开始→申请人→总监审批→结束
---   3. 奖金录入审批（7.5节）：店长/总监发起→总监审批→计入当月工资
---   4. 算薪批次审批（10.4节）：草稿→待审核→已确认→已锁定，发起人提交→总监审核→锁定
---   5. 补发单审批（10.5节）：工资锁定后少发修正，开始→申请人→总监审批→结束
+-- 四、跨模块菜单修复（V100006/V100007/V100008，目标菜单由其他模块迁移创建）
 -- ============================================================
 
--- ---------- 流程分类 ----------
-INSERT INTO flow_category (category_id, parent_id, ancestors, category_name, order_num, del_flag, create_dept, create_by, create_time)
-VALUES (1762300000000000200, 0, '', '薪酬审批', 1, '0', 1761000000000000100, 1761100000000000001, now());
-
--- ============================================================
--- 流程一：结佣申请审批（commission_apply）
--- 依据：业务需求 9.3 节
--- 链路：开始 → 申请人(${initiator}) → 核验(财务) → 总监审批 → 结束
--- 驳回：总监驳回回申请人；核验驳回回申请人
--- 注：核验节点可跳过（通过 skip_condition 配置开关）
--- ============================================================
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000301, 'commission_apply', '结佣申请审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000310, 0, 1762400000000000301, 'commission_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000311, 1, 1762400000000000301, 'commission_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000312, 1, 1762400000000000301, 'commission_verify', '核验(财务)', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000313, 1, 1762400000000000301, 'commission_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000314, 2, 1762400000000000301, 'commission_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000320, 1762400000000000301, 'commission_start', 0, 'commission_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000321, 1762400000000000301, 'commission_applicant', 1, 'commission_verify', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
--- 跳过核验直接总监审批（通过 skip_condition 控制开关）
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000322, 1762400000000000301, 'commission_applicant', 1, 'commission_director', 1, '跳过核验', 'PASS', '#{skip_verify == true}', '410,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000323, 1762400000000000301, 'commission_verify', 1, 'commission_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000324, 1762400000000000301, 'commission_director', 1, 'commission_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000325, 1762400000000000301, 'commission_director', 1, 'commission_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000326, 1762400000000000301, 'commission_verify', 1, 'commission_applicant', 1, '核验驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 流程二：结佣调整审批（commission_adjust）
--- 依据：业务需求 9.4 节
--- 场景：漏算补录、金额差异、85折调整
--- 链路：开始 → 申请人(${initiator}) → 核验(财务) → 总监审批 → 结束
--- 支持跳过核验开关：#{skip_verify == true}
--- ============================================================
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000501, 'commission_adjust', '结佣调整审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000510, 0, 1762400000000000501, 'adjust_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000511, 1, 1762400000000000501, 'adjust_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000512, 1, 1762400000000000501, 'adjust_verify', '核验(财务)', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000513, 1, 1762400000000000501, 'adjust_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000514, 2, 1762400000000000501, 'adjust_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000520, 1762400000000000501, 'adjust_start', 0, 'adjust_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000521, 1762400000000000501, 'adjust_applicant', 1, 'adjust_verify', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
--- 跳过核验直接总监审批（通过 skip_condition 控制开关）
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000522, 1762400000000000501, 'adjust_applicant', 1, 'adjust_director', 1, '跳过核验', 'PASS', '#{skip_verify == true}', '410,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000523, 1762400000000000501, 'adjust_verify', 1, 'adjust_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000524, 1762400000000000501, 'adjust_director', 1, 'adjust_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000525, 1762400000000000501, 'adjust_director', 1, 'adjust_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000526, 1762400000000000501, 'adjust_verify', 1, 'adjust_applicant', 1, '核验驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 流程三：奖金录入审批（bonus_apply）
--- 依据：业务需求 7.5 节
--- 链路：开始 → 申请人(店长/总监) → 总监审批 → 结束
--- ============================================================
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000401, 'bonus_apply', '奖金录入审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000410, 0, 1762400000000000401, 'bonus_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000411, 1, 1762400000000000401, 'bonus_applicant', '申请人', 'role:1761300000000000011@@role:1761300000000000010', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000412, 1, 1762400000000000401, 'bonus_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000413, 2, 1762400000000000401, 'bonus_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000420, 1762400000000000401, 'bonus_start', 0, 'bonus_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000421, 1762400000000000401, 'bonus_applicant', 1, 'bonus_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000422, 1762400000000000401, 'bonus_director', 1, 'bonus_end', 2, NULL, 'PASS', NULL, '590,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000423, 1762400000000000401, 'bonus_director', 1, 'bonus_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 流程四：算薪批次审批（payroll_batch）
--- 依据：业务需求 10.4 节
--- 链路：开始 → 提交人(财务/店长) → 总监审核 → 总监锁定 → 结束
--- 对应状态机：草稿→待审核→已确认→已锁定
--- ============================================================
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000601, 'payroll_batch', '算薪批次审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000610, 0, 1762400000000000601, 'payroll_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000611, 1, 1762400000000000601, 'payroll_submit', '提交算薪', 'role:1761300000000000012@@role:1761300000000000011', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000612, 1, 1762400000000000601, 'payroll_review', '总监审核', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000613, 1, 1762400000000000601, 'payroll_lock', '总监锁定', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"termination,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000614, 2, 1762400000000000601, 'payroll_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000620, 1762400000000000601, 'payroll_start', 0, 'payroll_submit', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000621, 1762400000000000601, 'payroll_submit', 1, 'payroll_review', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000622, 1762400000000000601, 'payroll_review', 1, 'payroll_lock', 1, '审核通过', 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000623, 1762400000000000601, 'payroll_lock', 1, 'payroll_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000624, 1762400000000000601, 'payroll_review', 1, 'payroll_submit', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 流程五：补发单审批（payroll_supplement）
--- 依据：业务需求 10.5 节
--- 场景：工资已锁定后发现少发，新增补发单并入指定月份
--- 链路：开始 → 申请人(${initiator}) → 核验(财务) → 总监审批 → 结束
--- 支持跳过核验开关：#{skip_verify == true}
--- ============================================================
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762400000000000701, 'payroll_supplement', '补发单审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000710, 0, 1762400000000000701, 'supplement_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000711, 1, 1762400000000000701, 'supplement_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000712, 1, 1762400000000000701, 'supplement_verify', '核验(财务)', 'role:1761300000000000012', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000713, 1, 1762400000000000701, 'supplement_director', '总监审批', 'role:1761300000000000010', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762400000000000714, 2, 1762400000000000701, 'supplement_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000720, 1762400000000000701, 'supplement_start', 0, 'supplement_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000721, 1762400000000000701, 'supplement_applicant', 1, 'supplement_verify', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
--- 跳过核验直接总监审批（通过 skip_condition 控制开关）
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000722, 1762400000000000701, 'supplement_applicant', 1, 'supplement_director', 1, '跳过核验', 'PASS', '#{skip_verify == true}', '410,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000723, 1762400000000000701, 'supplement_verify', 1, 'supplement_director', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000724, 1762400000000000701, 'supplement_director', 1, 'supplement_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000725, 1762400000000000701, 'supplement_director', 1, 'supplement_applicant', 1, '驳回', 'REJECT', NULL, '720,200;360,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762400000000000726, 1762400000000000701, 'supplement_verify', 1, 'supplement_applicant', 1, '核验驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
--- ============================================================
--- 六、系统参数配置（panjia. 前缀）
--- 跳过核验开关：发起流程时读取此参数，传入流程变量 skip_verify
--- ============================================================
-
-INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
-VALUES (1761500000000000001, '结佣申请审批-跳过核验', 'panjia.workflow.commission_apply.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '结佣申请审批是否跳过核验(财务)直接总监审批，true=跳过，false=不跳过');
-
-INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
-VALUES (1761500000000000002, '结佣调整审批-跳过核验', 'panjia.workflow.commission_adjust.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '结佣调整审批是否跳过核验(财务)直接总监审批，true=跳过，false=不跳过');
-
-INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, create_dept, create_by, create_time, remark)
-VALUES (1761500000000000003, '补发单审批-跳过核验', 'panjia.workflow.payroll_supplement.skip_verify', 'false', 'Y', 1761000000000000100, 1761100000000000001, now(), '补发单审批是否跳过核验(财务)直接总监审批，true=跳过，false=不跳过');
-
-COMMIT;
+-- 「模板管理」(2510，panjia-import 创建) 从「系统管理」改挂到「数据导入」：
+-- 修复财务/人事菜单树断裂。注意：panjia-import V120006 会重插 2510（parent=1），
+-- 其合并文件需保留 parent_id=2100 的最终值，否则本语句（V100001 段位）先执行无法兜底。
+UPDATE sys_menu SET parent_id = 1761400000000002100
+ WHERE menu_id = 1761400000000002510;
+
+-- 「实收明细」(2640，panjia-performance V140003 创建) 菜单名与业务流程对齐（V100008）
+UPDATE sys_menu SET menu_name = '实收明细' WHERE menu_id = 1761400000000002640 AND menu_name != '实收明细';

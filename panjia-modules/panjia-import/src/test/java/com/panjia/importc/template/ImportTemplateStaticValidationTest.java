@@ -68,8 +68,20 @@ class ImportTemplateStaticValidationTest {
         "weekendOvertime", "holidayOvertime",
         // POINTS
         "pointDate", "score", "violationCount",
+        // POINTS V200 填报时间（V120019/V120020 submit_time 映射）
+        "submitTime",
         // OTHERS
         "itemType", "amount", "reason",
+        // KE_SIGNED 归档列（V120028 role_sys_no 选填版最终态）
+        "transferDate", "completeDate", "propertyAddress", "feeItem",
+        "totalReceivable", "totalReceived",
+        "deptCode", "storeCode", "storeName",
+        "franchiserCode", "franchiserMdmCode", "franchiserName",
+        "splitAccountNo", "remark", "reporterName",
+        "contractTotalArrivalAmount", "contractMonthlyArrivalAmount",
+        "monthlyHandlingFee", "totalHandlingFee",
+        // KE_RECEIVED 归档列（V120025/V120027 最终态）
+        "roleArrivalAmount", "personalLeaveDays", "sickLeaveDays",
         // ===== V100003 旧版种子历史字段（停用模板兼容，勿用于新模板） =====
         "agentName", "performanceAmount", "signDate",
         "attendanceDays", "scoreValue", "grade"

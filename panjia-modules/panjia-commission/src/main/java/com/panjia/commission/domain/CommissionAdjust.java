@@ -64,7 +64,7 @@ public class CommissionAdjust implements Serializable {
     /** 调整对象合同号 */
     private String contractNo;
 
-    /** 事实口径（PERF_REAL，结佣调整固定为实收业绩） */
+    /** 事实口径（结佣调整涉及 PERF_REAL 与 PERF_EXPECT 双口径事实；历史单明细绑实收、新口径单绑新签） */
     private String factType;
 
     /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */

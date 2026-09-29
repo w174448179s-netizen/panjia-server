@@ -105,6 +105,50 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public List<PerformanceFactSummaryDTO> findActiveByBizKeys(java.util.Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        // 跨月查找：order_no 或 contract_no 命中键集合即返回（新签可能早于到账月）
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(FactType.fromCode(factType) != null, PerformanceFact::getFactType, FactType.fromCode(factType))
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
+                .or().in(PerformanceFact::getContractNo, bizKeys))
+            .orderByAsc(PerformanceFact::getId);
+        List<PerformanceFactSummaryDTO> list = toSummaries(factMapper.selectList(wrapper));
+        enrichWithEmployeeData(list);
+        return list;
+    }
+
+    @Override
+    public Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriod(java.util.Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
+                .or().in(PerformanceFact::getContractNo, bizKeys))
+            .select(PerformanceFact::getOrderNo, PerformanceFact::getContractNo,
+                PerformanceFact::getPerformanceAmount);
+        java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (PerformanceFact f : factMapper.selectList(wrapper)) {
+            BigDecimal amt = f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount();
+            // 同一事实同时计入订单号键与合同号键（调用方按输入键取值）
+            if (StringUtils.isNotBlank(f.getOrderNo()) && wanted.contains(f.getOrderNo())) {
+                result.merge(f.getOrderNo(), amt, BigDecimal::add);
+            }
+            if (StringUtils.isNotBlank(f.getContractNo()) && wanted.contains(f.getContractNo())) {
+                result.merge(f.getContractNo(), amt, BigDecimal::add);
+            }
+        }
+        return result;
+    }
+
+    @Override
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId) {
         return factMapper.selectContractSummaries(period, factType, deptId, employeeId);
     }

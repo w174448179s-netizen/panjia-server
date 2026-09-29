@@ -4,6 +4,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * 业绩调整单创建请求。
@@ -24,7 +25,7 @@ public class PerformanceAdjustCreateBo {
     /** 原部门 ID */
     private Long deptId;
 
-    /** 调整类型：AMOUNT / VOID / TRANSFER */
+    /** 调整类型：AMOUNT / VOID / TRANSFER / ADD_MEMBER */
     private String adjustType;
 
     /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
@@ -56,4 +57,30 @@ public class PerformanceAdjustCreateBo {
 
     /** 调整详情 JSON（扩展字段） */
     private String payloadJson;
+
+    // ==================== 增加角色人（ADD_MEMBER，2026-09-28） ====================
+
+    /** 新角色人员工 ID（增加角色人时必填，须不在该合同既有有效事实中） */
+    private Long newEmployeeId;
+
+    /** 新角色人角色类型（如"合作人"，自由文本） */
+    private String newRoleType;
+
+    /** 新角色人业绩金额（>0 且 ≤ 合同当前业绩合计） */
+    private BigDecimal newAmount;
+
+    /** 新角色人业绩归属部门（默认取员工档案部门，可改） */
+    private Long newDeptId;
+
+    /** 指定扣除清单：优先从指定既有角色人身上精确扣除，剩余由未指定行按占比等比分摊 */
+    private List<AdjustDeductionBo> deductions;
+
+    // ==================== 可编辑表格指定值模式（2026-09-28） ====================
+
+    /**
+     * 明细指定值清单：调整弹窗可编辑表格按行提交「调整后金额/角色占比」，
+     * 审批通过后按指定值精确落库。合同级 AMOUNT（金额调整）与 ADD_MEMBER（增加角色人）均支持；
+     * 为空时保持旧交互（AMOUNT 等比分摊 / ADD_MEMBER deductions 扣除）。
+     */
+    private List<AdjustDetailTargetBo> detailTargets;
 }

@@ -2,6 +2,7 @@ package com.panjia.performance.util;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.List;
 
 /**
  * 金额工具类。
@@ -162,5 +163,52 @@ public final class MoneyUtil {
             return ZERO.setScale(SCALE_AMOUNT, RoundingMode.HALF_UP);
         }
         return safeA.divide(b, SCALE_AMOUNT, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 按金额占比分摊总变动额，返回各条分摊后的变动额数组。
+     * <p>
+     * 保证：Σparts = deltaTotal 精确成立（尾差补到绝对值最大的一条）。
+     * 使用 8 位中间精度 + round2 输出，调整单详情展示与执行落库共用本方法，
+     * 确保审批时看到的每人调整金额与执行后实际落库金额一致。
+     *
+     * @param amounts    各条金额（按占比分摊的基准；null 按 0 处理）
+     * @param deltaTotal 总变动额
+     * @return 各条分摊后的变动额数组，长度与 amounts 一致
+     */
+    public static BigDecimal[] allocateByAmount(List<BigDecimal> amounts, BigDecimal deltaTotal) {
+        BigDecimal total = amounts.stream()
+            .map(a -> a == null ? ZERO : a)
+            .reduce(ZERO, BigDecimal::add);
+        BigDecimal[] parts = new BigDecimal[amounts.size()];
+        if (total.signum() == 0) {
+            // 总额为 0：平摊，尾差补到第一条
+            BigDecimal even = amounts.isEmpty() ? ZERO
+                : round2(deltaTotal.divide(BigDecimal.valueOf(amounts.size()), 8, RoundingMode.HALF_UP));
+            BigDecimal allocated = ZERO;
+            for (int i = 0; i < amounts.size(); i++) {
+                parts[i] = even;
+                allocated = allocated.add(even);
+            }
+            if (!amounts.isEmpty()) {
+                parts[0] = round2(parts[0].add(deltaTotal.subtract(allocated)));
+            }
+            return parts;
+        }
+        BigDecimal allocated = ZERO;
+        int largestIdx = 0;
+        BigDecimal largestAbs = ZERO;
+        for (int i = 0; i < amounts.size(); i++) {
+            BigDecimal base = amounts.get(i) == null ? ZERO : amounts.get(i);
+            parts[i] = round2(deltaTotal.multiply(base).divide(total, 8, RoundingMode.HALF_UP));
+            allocated = allocated.add(parts[i]);
+            if (base.abs().compareTo(largestAbs) > 0) {
+                largestAbs = base.abs();
+                largestIdx = i;
+            }
+        }
+        // 尾差补到绝对值最大的行
+        parts[largestIdx] = round2(parts[largestIdx].add(deltaTotal.subtract(allocated)));
+        return parts;
     }
 }

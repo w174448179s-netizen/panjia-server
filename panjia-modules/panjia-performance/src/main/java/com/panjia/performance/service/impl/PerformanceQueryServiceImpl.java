@@ -25,6 +25,7 @@ import com.panjia.performance.domain.bo.PerformanceSearchBo;
 import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
 import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
+import com.panjia.performance.util.MoneyUtil;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.PerformancePeriodCloseMapper;
 import com.panjia.performance.service.FactConversionResolver;
@@ -43,6 +44,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -186,6 +188,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             contracts = factMapper.selectManagePageContracts(
                 period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId, offset, size);
             fillContractOriginalAmount(contracts, period, factType);
+            fillContractPendingAdjust(contracts, period, factType);
             fillContractConversion(contracts);
         }
         vo.setRows(contracts);
@@ -215,7 +218,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         List<PerformanceManageVo> rows = factMapper.selectManageListByContractNos(
             period, factType, contractNos);
         fillManageDetailEmployeeAndDept(rows);
-        fillManageDetailOriginalAmount(rows);
+        fillManageDetailOriginalAmount(rows, period, factType, contractNos);
+        fillManageDetailPendingAdjust(rows, period, factType, contractNos);
         fillManageDetailSettled(rows);
         fillManageDetailConversion(rows);
 
@@ -507,6 +511,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     /**
      * 合同管理列表：批量查调整前金额（originalAmount），直接查调整表的 original_amount 快照。
+     * <p>
+     * 调整单 contract_no 存的是提交时的展示键（合同号或订单号，随入口而异），
+     * 与 {@link #fillContractPendingAdjust} 同理按双键查询与匹配；
      * 无调整的合同 originalAmount 为 null，前端据此只显示单值。
      */
     private void fillContractOriginalAmount(List<PerformanceManageContractVo> rows,
@@ -514,15 +521,20 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (rows == null || rows.isEmpty()) {
             return;
         }
-        Set<String> contractNos = rows.stream()
-            .map(PerformanceManageContractVo::getContractNo)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toSet());
-        if (contractNos.isEmpty()) {
+        Set<String> keys = new HashSet<>();
+        for (PerformanceManageContractVo row : rows) {
+            if (row.getContractNo() != null) {
+                keys.add(row.getContractNo());
+            }
+            if (row.getOrderNo() != null) {
+                keys.add(row.getOrderNo());
+            }
+        }
+        if (keys.isEmpty()) {
             return;
         }
         Map<String, BigDecimal> originalMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.doSelectOriginalAmounts(period, factType, contractNos)) {
+        for (Map<String, Object> row : adjustMapper.doSelectOriginalAmounts(period, factType, keys)) {
             Object key = row.get("bizKey");
             Object val = row.get("originalAmount");
             if (key != null && val != null) {
@@ -530,7 +542,143 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         for (PerformanceManageContractVo row : rows) {
-            row.setOriginalAmount(originalMap.get(row.getContractNo()));
+            BigDecimal original = originalMap.get(row.getContractNo());
+            if (original == null && row.getOrderNo() != null) {
+                original = originalMap.get(row.getOrderNo());
+            }
+            row.setOriginalAmount(original);
+        }
+    }
+
+    /**
+     * 合同管理列表：批量填充审批中的合同级调整单（SUBMITTED/APPROVED，执行前金额未变）。
+     * <p>
+     * 调整单 contract_no 存的是提交时的展示键（合同号或订单号，随入口而异），
+     * 故按两个键都查，命中任一即填充；前端据此显示「调整审批中」标记 + 目标金额。
+     */
+    private void fillContractPendingAdjust(List<PerformanceManageContractVo> rows,
+                                           String period, String factType) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<String> keys = new HashSet<>();
+        for (PerformanceManageContractVo row : rows) {
+            if (row.getContractNo() != null) {
+                keys.add(row.getContractNo());
+            }
+            if (row.getOrderNo() != null) {
+                keys.add(row.getOrderNo());
+            }
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        Map<String, Map<String, Object>> pendingMap = new HashMap<>();
+        for (Map<String, Object> pending : adjustMapper.doSelectPendingByBizKeys(period, factType, keys)) {
+            Object key = pending.get("bizKey");
+            if (key != null) {
+                pendingMap.put(key.toString(), pending);
+            }
+        }
+        if (pendingMap.isEmpty()) {
+            return;
+        }
+        for (PerformanceManageContractVo row : rows) {
+            Map<String, Object> pending = pendingMap.get(row.getContractNo());
+            if (pending == null && row.getOrderNo() != null) {
+                pending = pendingMap.get(row.getOrderNo());
+            }
+            if (pending != null) {
+                row.setAdjustPending(true);
+                Object type = pending.get("adjustType");
+                row.setAdjustPendingType(type == null ? null : type.toString());
+                Object target = pending.get("targetAmount");
+                row.setAdjustPendingAmount(target == null ? null : new BigDecimal(target.toString()));
+            }
+        }
+    }
+
+    /**
+     * 合同管理明细：批量填充审批中的调整单（SUBMITTED/APPROVED，执行前金额未变）。
+     * <p>
+     * 两种口径：
+     * <ul>
+     *   <li>明细级调整（factId 定位）：目标金额直接取调整单 target_amount；</li>
+     *   <li>合同级调整（contract_no 定位）：按各明细金额占比分摊总变动额
+     *       （{@link MoneyUtil#allocateByAmount}，与执行落库共用同一算法），
+     *       审批前即可看到每人分摊的调整金额与调整后业绩。</li>
+     * </ul>
+     * 明细级优先：已命中明细级调整单的行不再叠加合同级分摊。
+     */
+    private void fillManageDetailPendingAdjust(List<PerformanceManageVo> rows,
+                                               String period, String factType,
+                                               List<String> contractNos) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        // 1. 明细级：按 factId 批量查
+        Set<Long> factIds = rows.stream()
+            .map(PerformanceManageVo::getId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (!factIds.isEmpty()) {
+            Map<Long, Map<String, Object>> pendingMap = new HashMap<>();
+            for (Map<String, Object> pending : adjustMapper.doSelectPendingByFactIds(factIds)) {
+                Object key = pending.get("factId");
+                if (key != null) {
+                    pendingMap.put(((Number) key).longValue(), pending);
+                }
+            }
+            for (PerformanceManageVo row : rows) {
+                Map<String, Object> pending = pendingMap.get(row.getId());
+                if (pending != null) {
+                    row.setAdjustPending(true);
+                    Object type = pending.get("adjustType");
+                    row.setAdjustPendingType(type == null ? null : type.toString());
+                    Object target = pending.get("targetAmount");
+                    BigDecimal targetAmt = target == null ? null : new BigDecimal(target.toString());
+                    row.setAdjustPendingAmount(targetAmt);
+                    BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
+                    row.setAdjustPendingDelta(targetAmt == null ? null : MoneyUtil.round2(targetAmt.subtract(amt)));
+                }
+            }
+        }
+        // 2. 合同级：按业务键查，delta 按金额占比分摊到各明细行
+        if (contractNos == null || contractNos.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> contractPendings =
+            adjustMapper.doSelectPendingByBizKeys(period, factType, new HashSet<>(contractNos));
+        if (contractPendings.size() != 1) {
+            // 明细弹窗单合同场景应恰好命中 1 单；0 单无需分摊，多单口径不明跳过
+            return;
+        }
+        Map<String, Object> pending = contractPendings.get(0);
+        Object type = pending.get("adjustType");
+        if (!"AMOUNT".equals(type == null ? null : type.toString())) {
+            return;
+        }
+        Object targetObj = pending.get("targetAmount");
+        Object originalObj = pending.get("originalAmount");
+        if (targetObj == null || originalObj == null) {
+            return;
+        }
+        BigDecimal delta = MoneyUtil.round2(
+            new BigDecimal(targetObj.toString()).subtract(new BigDecimal(originalObj.toString())));
+        List<BigDecimal> amounts = rows.stream()
+            .map(r -> r.getAmount() != null ? r.getAmount() : BigDecimal.ZERO)
+            .toList();
+        BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
+        for (int i = 0; i < rows.size(); i++) {
+            PerformanceManageVo row = rows.get(i);
+            if (Boolean.TRUE.equals(row.getAdjustPending())) {
+                continue; // 明细级优先，不叠加
+            }
+            BigDecimal amt = amounts.get(i);
+            row.setAdjustPending(true);
+            row.setAdjustPendingType("AMOUNT");
+            row.setAdjustPendingDelta(parts[i]);
+            row.setAdjustPendingAmount(MoneyUtil.round2(amt.add(parts[i])));
         }
     }
 
@@ -548,6 +696,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
+            // 带出折算系数：调整弹窗录入业绩后前端自动算折算金额（折算列不可编辑）
+            row.setConversionFactor(factor);
         }
     }
 
@@ -580,27 +730,78 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 合同管理明细：批量查调整前金额（直接查调整表 original_amount 快照，无调整为 null）。
      */
-    private void fillManageDetailOriginalAmount(List<PerformanceManageVo> rows) {
+    private void fillManageDetailOriginalAmount(List<PerformanceManageVo> rows,
+                                                String period, String factType,
+                                                List<String> contractNos) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
+        // 1. 明细级已执行调整：调整单上有 fact_id，直接回填 originalAmount 与调整金额
         Set<Long> factIds = rows.stream()
             .map(PerformanceManageVo::getId)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
-        if (factIds.isEmpty()) {
-            return;
-        }
-        Map<Long, BigDecimal> originalMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.selectOriginalAmountsByFactIds(factIds)) {
-            Object key = row.get("factId");
-            Object val = row.get("originalAmount");
-            if (key != null && val != null) {
-                originalMap.put(((Number) key).longValue(), new BigDecimal(val.toString()));
+        if (!factIds.isEmpty()) {
+            Map<Long, BigDecimal> originalMap = new HashMap<>();
+            for (Map<String, Object> row : adjustMapper.selectOriginalAmountsByFactIds(factIds)) {
+                Object key = row.get("factId");
+                Object val = row.get("originalAmount");
+                if (key != null && val != null) {
+                    originalMap.put(((Number) key).longValue(), new BigDecimal(val.toString()));
+                }
+            }
+            for (PerformanceManageVo row : rows) {
+                BigDecimal original = originalMap.get(row.getId());
+                if (original != null) {
+                    row.setOriginalAmount(original);
+                    BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
+                    BigDecimal changed = MoneyUtil.round2(amt.subtract(original));
+                    if (changed.signum() != 0) {
+                        row.setAdjustDelta(changed);
+                    }
+                }
             }
         }
-        for (PerformanceManageVo row : rows) {
-            row.setOriginalAmount(originalMap.get(row.getId()));
+        // 2. 合同级已执行调整：调整单无 fact_id 痕迹，从当前金额逆向分摊还原
+        //    （等比分摊在「分摊基数 = 调整后金额」时结果不变，故用当前金额逆推与执行时按
+        //    原始金额分摊的结果一致；多单链式调整按 id 倒序逐单回退）
+        if (contractNos == null || contractNos.size() != 1) {
+            return; // 多合同混合场景键无法区分，不做还原（明细弹窗为单合同）
+        }
+        List<Map<String, Object>> executed =
+            adjustMapper.doSelectExecutedContractAmounts(period, factType, contractNos);
+        if (executed.isEmpty()) {
+            return;
+        }
+        int n = rows.size();
+        BigDecimal[] working = new BigDecimal[n];
+        for (int i = 0; i < n; i++) {
+            BigDecimal amt = rows.get(i).getAmount();
+            working[i] = amt != null ? amt : BigDecimal.ZERO;
+        }
+        for (Map<String, Object> adj : executed) {
+            Object targetObj = adj.get("targetAmount");
+            Object originalObj = adj.get("originalAmount");
+            if (targetObj == null || originalObj == null) {
+                continue;
+            }
+            BigDecimal delta = MoneyUtil.round2(
+                new BigDecimal(targetObj.toString()).subtract(new BigDecimal(originalObj.toString())));
+            BigDecimal[] parts = MoneyUtil.allocateByAmount(java.util.Arrays.asList(working), delta);
+            for (int i = 0; i < n; i++) {
+                working[i] = MoneyUtil.round2(working[i].subtract(parts[i]));
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            PerformanceManageVo row = rows.get(i);
+            if (row.getOriginalAmount() == null) {
+                row.setOriginalAmount(working[i]);
+            }
+            BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
+            BigDecimal changed = MoneyUtil.round2(amt.subtract(working[i]));
+            if (changed.signum() != 0) {
+                row.setAdjustDelta(changed);
+            }
         }
     }
 
@@ -651,6 +852,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getBizType());
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
+            // 带出折算系数：调整弹窗录入业绩后前端自动算折算金额（折算列不可编辑）
+            row.setConversionFactor(factor);
         }
     }
 

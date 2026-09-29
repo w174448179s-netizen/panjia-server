@@ -1,8 +1,9 @@
 -- ============================================================
--- 结佣域 V1.0 核心表结构（结佣域详细设计 §5.1~§5.4）
--- 段位：V150001
--- 包含：pj_commission_application（申请单）+ pj_commission_item（结佣明细）
---       + pj_commission_adjust（调整单）+ pj_commission_consume_log（消费日志）
+-- 结佣域 V1.0 核心表结构最终态（建表+索引一步到位）
+-- 合并自 V150001,V150005,V150006,V150007,V150008
+--   （V150001 建表；V150005 补合同维度查询索引；V150006 补订单号查询索引；
+--     V150007 补审批时间列；V150008 调整单事实模型字段；
+--     结佣审批流程语句不在本文件，见 V150003 工作流文件）
 -- 说明：
 --   1) 主键用 BIGINT（雪花 ID，应用层 ASSIGN_ID 生成），非 BIGSERIAL（CI C8）；
 --   2) 金额为【结佣业绩金额】（实收业绩原样透传），非佣金金额，无任何提成/折算字段（CI C6/C7）；
@@ -33,6 +34,7 @@ CREATE TABLE pj_commission_application (
     process_instance_id VARCHAR(64),
     applicant_id        BIGINT,
     approver_id         BIGINT,
+    approve_time        TIMESTAMP,
     lock_time           TIMESTAMP,
     version             INT           NOT NULL DEFAULT 0,
     create_time         TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -43,6 +45,14 @@ CREATE TABLE pj_commission_application (
 CREATE UNIQUE INDEX uk_capp_period_contract ON pj_commission_application(period, contract_no)
     WHERE status IN ('DRAFT','SUBMITTED','APPROVED','LOCKED');
 CREATE INDEX idx_capp_status ON pj_commission_application(period, status);
+
+-- 合同维度聚合按 (contract_no, period) 取最新申请单（合并自 V150005）
+CREATE INDEX IF NOT EXISTS idx_capp_contract_period
+    ON pj_commission_application(contract_no, period, id);
+
+-- 批量审批/批量发起按订单号查找（「合同号 OR 订单号」匹配，合并自 V150006）
+CREATE INDEX IF NOT EXISTS idx_capp_period_order
+    ON pj_commission_application(period, order_no);
 
 COMMENT ON TABLE  pj_commission_application IS '结佣申请单(合同+业绩归属月粒度)';
 COMMENT ON COLUMN pj_commission_application.id IS '雪花ID';
@@ -63,6 +73,7 @@ COMMENT ON COLUMN pj_commission_application.approved_month IS '审批通过月=�
 COMMENT ON COLUMN pj_commission_application.process_instance_id IS '审批流程实例ID(Warm-Flow commission_apply)';
 COMMENT ON COLUMN pj_commission_application.applicant_id IS '发起人ID';
 COMMENT ON COLUMN pj_commission_application.approver_id IS '审批人ID';
+COMMENT ON COLUMN pj_commission_application.approve_time IS '审批时间（最近节点办理留痕：总监通过/终审锁定/驳回）';
 COMMENT ON COLUMN pj_commission_application.lock_time IS '锁定时间';
 COMMENT ON COLUMN pj_commission_application.version IS '乐观锁版本号';
 COMMENT ON COLUMN pj_commission_application.create_time IS '创建时间';
@@ -120,7 +131,9 @@ COMMENT ON COLUMN pj_commission_item.version IS '乐观锁版本号';
 COMMENT ON COLUMN pj_commission_item.create_time IS '创建时间';
 COMMENT ON COLUMN pj_commission_item.update_time IS '更新时间';
 
--- ---------- 三、结佣调整单 ----------
+-- ---------- 三、结佣调整单（含 V150008 事实模型字段最终态） ----------
+-- V150008 说明：对齐新签调整（PerformanceAdjust），直接调整业绩事实（PERF_REAL + PERF_EXPECT）；
+--   复用 new_amount 列存调整后金额，diff_amount 列存调整差额（展示用）
 CREATE TABLE pj_commission_adjust (
     id                  BIGINT        PRIMARY KEY,
     adjust_no           VARCHAR(32)   NOT NULL,
@@ -137,6 +150,12 @@ CREATE TABLE pj_commission_adjust (
     process_instance_id VARCHAR(64),
     applicant_id        BIGINT,
     approver_id         BIGINT,
+    original_amount     NUMERIC(18,2),
+    contract_no         VARCHAR(64),
+    fact_type           VARCHAR(32),
+    adjust_scope        VARCHAR(16),
+    fact_id             BIGINT,
+    target_dept_id      BIGINT,
     create_time         TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time         TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -161,6 +180,12 @@ COMMENT ON COLUMN pj_commission_adjust.status IS '状态 SUBMITTED=已提交 APP
 COMMENT ON COLUMN pj_commission_adjust.process_instance_id IS '审批流程实例ID(预留 Warm-Flow)';
 COMMENT ON COLUMN pj_commission_adjust.applicant_id IS '发起人ID';
 COMMENT ON COLUMN pj_commission_adjust.approver_id IS '审批人ID';
+COMMENT ON COLUMN pj_commission_adjust.original_amount IS '调整前金额（PERF_REAL 合计或单条明细金额）';
+COMMENT ON COLUMN pj_commission_adjust.contract_no IS '调整对象合同号';
+COMMENT ON COLUMN pj_commission_adjust.fact_type IS '事实口径（PERF_REAL，结佣调整固定为实收业绩）';
+COMMENT ON COLUMN pj_commission_adjust.adjust_scope IS '调整范围（CONTRACT 合同级 / DETAIL 明细级）';
+COMMENT ON COLUMN pj_commission_adjust.fact_id IS '明细级调整对应的业绩事实 ID（合同级为 NULL）';
+COMMENT ON COLUMN pj_commission_adjust.target_dept_id IS '部门划转目标部门 ID（TRANSFER 用）';
 COMMENT ON COLUMN pj_commission_adjust.create_time IS '创建时间';
 COMMENT ON COLUMN pj_commission_adjust.update_time IS '更新时间';
 
@@ -193,54 +218,5 @@ COMMENT ON COLUMN pj_commission_consume_log.status IS '消费状态 SUCCESS=成�
 COMMENT ON COLUMN pj_commission_consume_log.message IS '备注/失败原因';
 COMMENT ON COLUMN pj_commission_consume_log.create_time IS '创建时间';
 COMMENT ON COLUMN pj_commission_consume_log.update_time IS '更新时间';
-
--- ============================================================
--- 结佣审批流程（commission_apply，需求文档 §3.1/§3.4/§3.5）
--- 链路：开始 → 申请人(${initiator}) → 总监审批(role:director) → 财务审批(role:finance) → 结束
---   实收与应收无差异（或配置跳过财务）：总监通过后财务节点由系统自动完成，不流转财务
---   实收与应收有差异：总监通过时系统自动把实收对齐应收（合同+明细），随后流转财务人工审批
--- 审批结果由 CommissionApplyWorkflowListener 回调：finish→锁定并发布结佣通过事件
--- ============================================================
--- 清理 V140 旧版 commission_apply 定义（旧链路：申请人→财务核验(commission_verify)→总监；
--- 需求 §3.1 改为 申请人→总监(capp_director)→财务(capp_finance)），避免同 flow_code 两条已发布定义
-DELETE FROM flow_skip WHERE definition_id = 1762400000000000301;
-DELETE FROM flow_node WHERE definition_id = 1762400000000000301;
-DELETE FROM flow_definition WHERE id = 1762400000000000301;
-
-INSERT INTO flow_definition (id, flow_code, flow_name, model_value, category, "version", is_publish, form_custom, form_path, activity_status, listener_type, listener_path, ext, create_time, create_by, update_time, update_by, del_flag, tenant_id)
-VALUES (1762500000000000001, 'commission_apply', '结佣审批', 'CLASSICS', '1762300000000000200', '1', 1, 'N', '/workflow/processDefinition/index', 1, NULL, NULL, NULL, now(), '1761100000000000001', NULL, NULL, '0', '000000');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762500000000000010, 0, 1762500000000000001, 'capp_start', '开始', NULL, '0.000', '200,200|200,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762500000000000011, 1, 1762500000000000001, 'capp_applicant', '申请人', '${initiator}', '0.000', '360,200|360,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,file,copy"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762500000000000012, 1, 1762500000000000001, 'capp_director', '总监审批', 'role:1761300000000000010', '0.000', '540,200|540,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762500000000000013, 1, 1762500000000000001, 'capp_finance', '财务审批', 'role:1761300000000000012', '0.000', '720,200|720,200', NULL, '', '', 'N', NULL, '1', '[{"code":"ButtonPermissionEnum","value":"back,termination,copy,transfer,trust,file"}]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_node (id, node_type, definition_id, node_code, node_name, permission_flag, node_ratio, coordinate, any_node_skip, listener_type, listener_path, form_custom, form_path, "version", ext, del_flag, tenant_id, create_time, create_by)
-VALUES (1762500000000000014, 2, 1762500000000000001, 'capp_end', '结束', NULL, '0.000', '900,200|900,200', NULL, NULL, NULL, 'N', NULL, '1', '[]', '0', '000000', now(), '1761100000000000001');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000020, 1762500000000000001, 'capp_start', 0, 'capp_applicant', 1, NULL, 'PASS', NULL, '220,200;310,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000021, 1762500000000000001, 'capp_applicant', 1, 'capp_director', 1, NULL, 'PASS', NULL, '410,200;490,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000022, 1762500000000000001, 'capp_director', 1, 'capp_finance', 1, NULL, 'PASS', NULL, '590,200;670,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000023, 1762500000000000001, 'capp_finance', 1, 'capp_end', 2, NULL, 'PASS', NULL, '770,200;880,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000024, 1762500000000000001, 'capp_director', 1, 'capp_applicant', 1, '驳回', 'REJECT', NULL, '540,200;360,200', now(), '1761100000000000001', '0', '000000');
-
-INSERT INTO flow_skip (id, definition_id, now_node_code, now_node_type, next_node_code, next_node_type, skip_name, skip_type, skip_condition, coordinate, create_time, create_by, del_flag, tenant_id)
-VALUES (1762500000000000025, 1762500000000000001, 'capp_finance', 1, 'capp_director', 1, '驳回', 'REJECT', NULL, '720,200;540,200', now(), '1761100000000000001', '0', '000000');
 
 COMMIT;

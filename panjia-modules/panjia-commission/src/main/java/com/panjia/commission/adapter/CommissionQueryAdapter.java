@@ -86,11 +86,34 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
 
     @Override
     public List<CommissionItemDTO> findRealFacts(String period, Long deptId) {
-        List<PerformanceFactSummaryDTO> baseFacts = performanceQueryPort
+        // 未发起明细与发起后口径一致（2026-09-27 定稿新签口径）：明细源 = 该部门当月实收合同
+        // 对应的跨月 ACTIVE 新签事实逐行，金额 = 事实当前值（调整后）；实收事实（含空经纪人
+        // 行，仅展示）只用于收集业务键，不产生明细；金额为 0 的明细不展示
+        List<PerformanceFactSummaryDTO> realFacts = performanceQueryPort
             .findActiveByDept(period, deptId, FACT_TYPE_REAL);
-        if (baseFacts.isEmpty()) return Collections.emptyList();
-        List<Long> factIds = baseFacts.stream().map(PerformanceFactSummaryDTO::getFactId).toList();
-        return performanceQueryPort.findActiveByFacts(factIds).stream().map(this::fromFact).toList();
+        if (realFacts.isEmpty()) return Collections.emptyList();
+        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
+        for (PerformanceFactSummaryDTO f : realFacts) {
+            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
+            // findActiveByBizKeys 内部仍会对 contract_no 列做 OR 匹配兜底（历史数据兼容）
+            if (f.getOrderNo() != null && !f.getOrderNo().isBlank()) {
+                bizKeys.add(f.getOrderNo());
+            }
+        }
+        List<PerformanceFactSummaryDTO> expects =
+            performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
+        List<CommissionItemDTO> result = new ArrayList<>(expects.size());
+        for (PerformanceFactSummaryDTO e : expects) {
+            // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
+            if (e.getEmployeeId() == null) {
+                continue;
+            }
+            if (e.getAmount() == null || e.getAmount().signum() == 0) {
+                continue;
+            }
+            result.add(fromFact(e));
+        }
+        return result;
     }
 
     @Override

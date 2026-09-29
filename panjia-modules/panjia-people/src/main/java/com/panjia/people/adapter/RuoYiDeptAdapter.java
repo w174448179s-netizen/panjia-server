@@ -5,6 +5,7 @@ import com.panjia.people.config.PeopleProperties;
 import com.panjia.people.dto.DeptNode;
 import com.panjia.people.port.DeptPort;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.enums.UserStatus;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.system.domain.SysDept;
@@ -18,6 +19,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 部门端口 RuoYi 实现。
@@ -25,6 +27,7 @@ import java.util.Map;
  * 按 "门店-组别" 路径在客户根部门下逐级建树（不存在才建），返回最末级 dept_id。
  * ancestors 遵循 RuoYi 约定：子部门 ancestors = 父 ancestors + "," + parentId。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class RuoYiDeptAdapter implements DeptPort {
@@ -249,5 +252,29 @@ public class RuoYiDeptAdapter implements DeptPort {
         }
         roots.sort(Comparator.comparing(DeptNode::getDeptName));
         return roots;
+    }
+
+    @Override
+    public Map<String, Long> findActiveDeptIdsByCategories(Collection<String> categories) {
+        if (categories == null || categories.isEmpty()) {
+            return Map.of();
+        }
+        List<SysDept> depts = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .in(SysDept::getDeptCategory, categories)
+            .eq(SysDept::getStatus, UserStatus.OK.getCode())
+            .orderByAsc(SysDept::getDeptId));
+        Map<String, List<SysDept>> byCategory = depts.stream()
+            .filter(d -> d.getDeptCategory() != null)
+            .collect(Collectors.groupingBy(SysDept::getDeptCategory, LinkedHashMap::new, Collectors.toList()));
+        Map<String, Long> result = new LinkedHashMap<>();
+        byCategory.forEach((category, list) -> {
+            // 理论上一个类别编码只对应一个部门，多配取 dept_id 最小的第一个并告警
+            if (list.size() > 1) {
+                log.warn("[部门端口] 类别编码命中多个部门，取第一个：category={}, count={}, deptId={}",
+                    category, list.size(), list.get(0).getDeptId());
+            }
+            result.put(category, list.get(0).getDeptId());
+        });
+        return result;
     }
 }

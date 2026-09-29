@@ -511,6 +511,11 @@
             </dependency>
             <dependency>
                 <groupId>com.panjia</groupId>
+                <artifactId>panjia-received</artifactId>
+                <version>${panjia.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.panjia</groupId>
                 <artifactId>panjia-commission</artifactId>
                 <version>${panjia.version}</version>
             </dependency>

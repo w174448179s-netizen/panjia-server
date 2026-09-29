@@ -20,6 +20,7 @@ import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.domain.raw.RawManual;
 import com.panjia.importdomain.domain.raw.RawPayroll;
 import com.panjia.importdomain.domain.raw.RawPoints;
+import com.panjia.importdomain.domain.raw.RawReceived;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.datasource.DataSource;
 import com.panjia.importdomain.datasource.ImportContext;
@@ -32,6 +33,7 @@ import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import com.panjia.importdomain.mapper.RawManualMapper;
 import com.panjia.importdomain.mapper.RawPayrollMapper;
 import com.panjia.importdomain.mapper.RawPointsMapper;
+import com.panjia.importdomain.mapper.RawReceivedMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import com.panjia.importdomain.template.ImportTemplateBridge;
 import com.panjia.importdomain.template.TemplateHeaderSniffer;
@@ -88,6 +90,7 @@ public class ImportEngine {
     private final ImportIssueMapper issueMapper;
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final RawSignedMapper rawSignedMapper;
+    private final RawReceivedMapper rawReceivedMapper;
     private final RawAttendanceMapper rawAttendanceMapper;
     private final RawPointsMapper rawPointsMapper;
     private final RawManualMapper rawManualMapper;
@@ -657,17 +660,67 @@ public class ImportEngine {
         Map<String, NormalizedRecord> pendingRecords = dedupDaily ? new java.util.LinkedHashMap<>() : null;
         Map<String, Integer> pendingRowNo = dedupDaily ? new java.util.HashMap<>() : null;
 
+        // 贝壳新签：经纪人为空（roleSysNo 空）的行按店组挂到门店虚拟人（2026-09-28）
+        //（行上店组编码 → sys_dept.dept_category 部门类别编码 → 该部门工号=店组编码的虚拟人）。
+        // 预扫描空经纪人行的店组编码，一次批量解析，避免循环内逐行跨域查询；
+        // 店组为空/未配置/部门下无虚拟人的店组不在结果中，循环内按匹配失败记 issue
+        Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> virtualByStoreGroup = Map.of();
+        if (sourceType == ImportSourceType.KE_SIGNED) {
+            java.util.Set<String> storeGroups = new java.util.HashSet<>();
+            for (RawData raw : rawRows) {
+                Map<String, Object> json = parseRawJson(raw.getRawJson());
+                String code = extractExternalCode(json);
+                if (code == null || code.isEmpty()) {
+                    String deptCode = str(json, "deptCode");
+                    if (deptCode != null && !deptCode.isBlank()) {
+                        storeGroups.add(deptCode);
+                    }
+                }
+            }
+            if (!storeGroups.isEmpty()) {
+                virtualByStoreGroup = peopleQueryPort.findVirtualEmployeesByStoreGroups(storeGroups);
+            }
+        }
+
         for (RawData raw : rawRows) {
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
             String externalCode = extractExternalCode(jsonMap);
 
+            // 贝壳实收导入特例：角色人系统号可为空（贝壳未给到人的到账行），
+            // 有订单号/合同号即可落归一化记录（employeeId 空）；实收明细仅展示、
+            // 不参与任何计算（判定在业绩域按合同维度合计），两号全空仍阻断。
+            // 贝壳新签特例（2026-09-28）：经纪人为空按店组挂门店虚拟人，
+            // 匹配失败（店组空/未配置类别/部门下无虚拟人）记 issue 阻断
+            boolean contractLevelRow = false;
+            boolean attachedVirtual = false;
             Long matchedEmployeeId = null;
             if (externalCode == null || externalCode.isEmpty()) {
-                // 员工号为空：理论上被模板层必填卡住（required + DataValidation +
-                // 服务端 BasicValidator 三道防线）；落到这里说明用户绕过了模板
-                // （如自行拼装 Excel）。记 REQUIRED_MISSING issue，不写归一化记录。
-                issues.add(buildIssue(raw.getRowNo(), ImportIssueType.REQUIRED_MISSING,
-                    "employeeCode", null, "员工号为空"));
+                Object orderNoVal = jsonMap.get("orderNo");
+                Object contractNoVal = jsonMap.get("contractNo");
+                contractLevelRow = sourceType == ImportSourceType.KE_RECEIVED
+                    && ((orderNoVal != null && !orderNoVal.toString().isBlank())
+                        || (contractNoVal != null && !contractNoVal.toString().isBlank()));
+                if (!contractLevelRow && sourceType == ImportSourceType.KE_SIGNED) {
+                    String deptCode = str(jsonMap, "deptCode");
+                    com.panjia.contracts.dto.EmployeeMainDataDTO virtual =
+                        deptCode == null ? null : virtualByStoreGroup.get(deptCode);
+                    if (virtual != null) {
+                        // 挂靠成功：员工号/员工 ID 均写虚拟人（事实构建按员工号查快照自动对齐）
+                        matchedEmployeeId = virtual.getEmployeeId();
+                        externalCode = virtual.getEmployeeCode();
+                        attachedVirtual = true;
+                    } else {
+                        issues.add(buildIssue(raw.getRowNo(), ImportIssueType.EMPLOYEE_NOT_MATCH,
+                            "employeeCode", deptCode,
+                            "经纪人为空且店组未匹配到虚拟人: deptCode=" + deptCode));
+                    }
+                } else if (!contractLevelRow) {
+                    // 员工号为空：理论上被模板层必填卡住（required + DataValidation +
+                    // 服务端 BasicValidator 三道防线）；落到这里说明用户绕过了模板
+                    // （如自行拼装 Excel）。记 REQUIRED_MISSING issue，不写归一化记录。
+                    issues.add(buildIssue(raw.getRowNo(), ImportIssueType.REQUIRED_MISSING,
+                        "employeeCode", null, "员工号为空"));
+                }
             } else if (!codeToId.containsKey(externalCode)) {
                 // 员工号未在主数据中匹配上：EMPLOYEE_NOT_MATCH issue
                 // 主数据不在导入域管辖，由 issue 提示用户去人事系统补录或清理后重归一化
@@ -678,8 +731,9 @@ public class ImportEngine {
             }
 
             // 未匹配行不写归一化记录：该行不参与 fact 表下沉；批次进入
-            // PENDING_CONFIRM 由人工决定后续动作（修复主数据、重归一化、整批关闭）
-            if (matchedEmployeeId == null) {
+            // PENDING_CONFIRM 由人工决定后续动作（修复主数据、重归一化、整批关闭）；
+            // 例外：贝壳实收无角色行（contractLevelRow）照常落库，employeeId 留空
+            if (matchedEmployeeId == null && !contractLevelRow) {
                 continue;
             }
 
@@ -693,7 +747,15 @@ public class ImportEngine {
 
             // sourceKey
             if (keyGen != null) {
-                nr.setSourceKey(keyGen.generate(jsonMap));
+                String sourceKey = keyGen.generate(jsonMap);
+                // 空角色行（贝壳实收 contractLevelRow / 新签挂虚拟人 attachedVirtual）：
+                // 键缺角色人系统号，同合同多条空行会撞 uk_norm_source_key，
+                // 追加批内行号保证行级唯一（重归一化行号稳定；
+                // uk_perf_fact_source_key 为 WHERE ACTIVE 部分索引，跨批 supersede 无冲突）
+                if ((contractLevelRow || attachedVirtual) && sourceKey != null) {
+                    sourceKey = sourceKey + "#" + raw.getRowNo();
+                }
+                nr.setSourceKey(sourceKey);
             }
 
             // 金额/业务字段
@@ -787,6 +849,11 @@ public class ImportEngine {
                     rawSignedMapper.insert((RawSigned) r);
                 }
             }
+            case KE_RECEIVED -> {
+                for (RawData r : rows) {
+                    rawReceivedMapper.insert((RawReceived) r);
+                }
+            }
             case ATTENDANCE -> {
                 for (RawData r : rows) {
                     rawAttendanceMapper.insert((RawAttendance) r);
@@ -824,6 +891,7 @@ public class ImportEngine {
     private List<? extends RawData> selectRawData(ImportSourceType type, Long batchId) {
         return switch (type) {
             case KE_SIGNED -> rawSignedMapper.selectList(byBatch(RawSigned::getBatchId, batchId));
+            case KE_RECEIVED -> rawReceivedMapper.selectList(byBatch(RawReceived::getBatchId, batchId));
             case ATTENDANCE -> rawAttendanceMapper.selectList(byBatch(RawAttendance::getBatchId, batchId));
             case POINTS -> rawPointsMapper.selectList(byBatch(RawPoints::getBatchId, batchId));
             case OTHERS -> rawManualMapper.selectList(byBatch(RawManual::getBatchId, batchId));
@@ -889,6 +957,18 @@ public class ImportEngine {
                 nr.setSignDate(str(json, "signDate"));
                 nr.setFeeItem(str(json, "feeItem"));
             }
+            case KE_RECEIVED -> {
+                // 贝壳实收（理房通到账）：单口径实收，金额=角色人当月到账金额（可为负）
+                nr.setBizType(str(json, "bizType"));
+                nr.setReceivedAmount(decimal(json, "roleArrivalAmount"));
+                nr.setShareRatio(decimal(json, "shareRatio"));
+                nr.setRoleType(truncate(str(json, "roleType"), 30, "roleType", "KE_RECEIVED"));
+                nr.setRoleName(str(json, "roleName"));
+                nr.setOrderNo(str(json, "orderNo"));
+                nr.setContractNo(str(json, "contractNo"));
+                nr.setPropertyAddress(str(json, "propertyAddress"));
+                nr.setSignDate(str(json, "signDate"));
+            }
             case ATTENDANCE -> {
                 nr.setReceivableAmount(decimal(json, "leaveAmount"));
                 Map<String, Object> extra = new LinkedHashMap<>();
@@ -922,6 +1002,7 @@ public class ImportEngine {
     private NormalizedRecordType toRecordType(ImportSourceType type) {
         return switch (type) {
             case KE_SIGNED -> NormalizedRecordType.SIGNED;
+            case KE_RECEIVED -> NormalizedRecordType.KE_RECEIVED;
             case ATTENDANCE -> NormalizedRecordType.ATTENDANCE;
             case POINTS -> NormalizedRecordType.POINTS;
             case OTHERS -> NormalizedRecordType.MANUAL;

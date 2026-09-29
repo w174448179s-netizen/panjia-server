@@ -6,6 +6,7 @@ import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.PerformanceFactCreatedEvent;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
+import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.performance.domain.ConsumeStatus;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
@@ -71,8 +72,7 @@ public class PerformanceEngine {
     private final EventPort eventPort;
     private final ConfigService configService;
     private final IPeriodCloseService periodCloseService;
-    private final ReceivedApplyMapper receivedApplyMapper;
-    private final IReceivedApplyService receivedApplyService;
+    private final ReceivedApplyPort receivedApplyPort;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /** 期间格式：YYYY-MM */
@@ -215,12 +215,20 @@ public class PerformanceEngine {
                     }
 
                     // ★ 双口径分发（V4.2 算薪对齐 / C-12）：
-                    //  SIGNED 行（贝壳业绩明细表，唯一业绩来源）→ PERF_REAL(实收) + PERF_EXPECT(应收) 双发
+                    //  SIGNED 行（贝壳新签明细表）→ PERF_EXPECT(应收) 单发
+                    //  KE_RECEIVED 行（贝壳实收到账明细）→ PERF_REAL(实收) 单发
                     //  其余类型 → 不产生业绩事实（handler 层已过滤，此处双保险）
                     List<FactType> factTypes = factTypesForRecord(record);
                     if (factTypes.isEmpty()) {
                         log.debug("[业绩消费] 非业绩类记录跳过：recordId={}, recordType={}",
                             record.getId(), record.getRecordType());
+                        continue;
+                    }
+                    // 贝壳实收无角色行（角色人系统号为空）：以空经纪人直接落库（仅展示、
+                    // 不参与任何计算，实收审批判定按合同维度合计），生成 PERF_REAL
+                    if (isContractLevelReceived(record)) {
+                        buildContractLevelReceivedFacts(record, operatorId, createdFacts);
+                        successCount++;
                         continue;
                     }
                     for (FactType factType : factTypes) {
@@ -424,7 +432,11 @@ public class PerformanceEngine {
         // ★ 金额铁律（§2.8 修订）：退单必须镜像成交月原事实的冻结口径冲回，
         //   禁止用退单当月的员工快照（部门/职级可能已变）与当期折算配置重算。
         //   例：8月 A2/60% 计提 6,000，9月升 A3/65% 后整单退 → 必须冲回 6,000，不是 6,500。
-        if (MoneyUtil.isNegative(currentAmount)) {
+        // ★ 例外：贝壳实收导入（KE_RECEIVED）负数行 = 负实收（到账退回），直接按到账金额
+        //   落库，不走红冲镜像——其比较基准是新签应收（PERF_EXPECT），且到账金额可超过
+        //   历史实收正数额，红冲的超额拦截会误杀。
+        if (MoneyUtil.isNegative(currentAmount)
+                && !RECORD_TYPE_KE_RECEIVED.equals(record.getRecordType())) {
             PerformanceFact original = factMapper.selectOriginalPositiveFact(
                 buildSourceKeyPrefix(record), factType.getCode());
             if (original != null) {
@@ -462,6 +474,18 @@ public class PerformanceEngine {
         if (existingFact != null) {
             log.debug("[业绩构建] 幂等命中，跳过：sourceKey={}, factType={}", sourceKey, factType);
             return existingFact;
+        }
+
+        // ========== 3.5 新签金额为 0 的行不进系统（2026-09-28） ==========
+        // 结佣规则：什么时候有实收、什么时候有结佣，结佣明细按合同号跨月直接取签约月新签；
+        // 为触发结佣补录一笔当月 0 金额新签已无意义，直接跳过不生成事实
+        //（历史导入 HIST_EXPECT 不受影响）
+        if (factType == FactType.PERF_EXPECT
+                && RECORD_TYPE_SIGNED.equals(record.getRecordType())
+                && performanceAmount.signum() == 0) {
+            log.info("[业绩构建] 新签金额为 0，跳过不生成事实：sourceKey={}, recordId={}",
+                sourceKey, record.getId());
+            return null;
         }
 
         // ========== 4. 构建并保存业绩事实 ==========
@@ -687,7 +711,7 @@ public class PerformanceEngine {
         return sourceType + "-" + recordSourceKey + "-";
     }
 
-    /** 归一化记录类型 code：贝壳业绩明细行，同携当月应收 + 当月实收两列金额 */
+    /** 归一化记录类型 code：贝壳新签明细行（原贝壳业绩导入，仅当月应收列参与事实，实收改由贝壳实收导入产生） */
     public static final String RECORD_TYPE_SIGNED = "SIGNED";
 
     /** 归一化记录类型 code：历史工资·新签业绩行（单口径，仅当月应收列有值） */
@@ -696,19 +720,125 @@ public class PerformanceEngine {
     /** 归一化记录类型 code：历史工资·结佣业绩行（单口径，仅实收列有值） */
     public static final String RECORD_TYPE_HIST_REAL = "HIST_REAL";
 
+    /** 归一化记录类型 code：贝壳实收导入行（理房通到账贡献明细，单发 PERF_REAL，金额=角色人当月到账金额，可为负） */
+    public static final String RECORD_TYPE_KE_RECEIVED = "KE_RECEIVED";
+
     /**
-     * 按归一化记录类型决定本条记录要生成的事实口径集合（V4.2 双口径契约，纯函数）。
+     * 贝壳实收无角色行判定：角色人系统号为空（归一化未匹配到人，employeeCode 空）的到账行，
+     * 直接以空经纪人保存实收事实（仅展示，不参与任何计算）。
+     */
+    private static boolean isContractLevelReceived(NormalizedRecordDTO record) {
+        return RECORD_TYPE_KE_RECEIVED.equals(record.getRecordType())
+            && StringUtils.isBlank(record.getEmployeeCode());
+    }
+
+    /**
+     * 贝壳实收无角色行落库：直接以 employeeId=null 保存 PERF_REAL 实收事实
+     * （实收明细仅展示作用，不参与任何计算；实收审批判定在建单分流按合同维度合计）。
+     * <p>
+     * 部门归属：取该订单/合同任一 ACTIVE 新签事实的 deptId，保证空行可被部门权限
+     * 过滤链正常查出；查不到新签时留空。
+     *
+     * @param record           无角色实收归一化记录
+     * @param operatorId       操作人 ID
+     * @param createdFacts     新建事实收集器
+     */
+    private void buildContractLevelReceivedFacts(NormalizedRecordDTO record, Long operatorId,
+                                                 List<PerformanceFact> createdFacts) {
+        BigDecimal arrival = MoneyUtil.round2(resolveFactCurrentAmount(record, FactType.PERF_REAL));
+        if (arrival == null) {
+            arrival = BigDecimal.ZERO;
+        }
+        PerformanceFact fact = insertContractLevelFact(record, arrival, generateSourceKey(record), operatorId);
+        if (fact != null) {
+            createdFacts.add(fact);
+        }
+        log.info("[业绩构建] 无角色实收行以空经纪人落库（仅展示）：orderNo={}, contractNo={}, amount={}",
+            record.getOrderNo(), record.getContractNo(), arrival);
+    }
+
+    /**
+     * 构建无角色实收行的实收事实：公共字段复制归一化记录，员工归属留空
+     * （employeeId/externalCode=null），部门取同合同新签事实。
+     * 幂等：sourceKey + PERF_REAL + ACTIVE 已存在时跳过（重试/重归一化场景），返回 null。
+     */
+    private PerformanceFact insertContractLevelFact(NormalizedRecordDTO record,
+                                                    BigDecimal amount, String sourceKey, Long operatorId) {
+        PerformanceFact existing = factMapper.selectOne(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getSourceKey, sourceKey)
+            .eq(PerformanceFact::getFactType, FactType.PERF_REAL)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE));
+        if (existing != null) {
+            log.debug("[业绩构建] 无角色实收事实幂等命中，跳过：sourceKey={}", sourceKey);
+            return null;
+        }
+        PerformanceFact fact = new PerformanceFact();
+        fact.setFactType(FactType.PERF_REAL);
+        fact.setPeriod(record.getPeriod());
+        fact.setBusinessDate(record.getBusinessDate());
+        fact.setBatchId(record.getBatchId());
+        fact.setNormalizedRecordId(record.getId());
+        fact.setSourceKey(sourceKey);
+        fact.setBizType(record.getBizType());
+        fact.setOrderNo(record.getOrderNo());
+        fact.setContractNo(record.getContractNo());
+        fact.setPropertyAddress(record.getPropertyAddress());
+        fact.setFeeItem(record.getFeeItem());
+        fact.setRoleType(truncate(record.getRoleType(), 30));
+        fact.setRoleName(record.getRoleName());
+        // 员工归属留空：实收明细仅展示、不参与任何计算；部门取同合同新签事实（保证部门权限过滤可见）
+        fact.setEmployeeId(null);
+        fact.setEmployeeExternalCode(null);
+        fact.setDeptId(resolveContractDeptId(record));
+        fact.setShareRatio(record.getShareRatio());
+        fact.setPerformanceAmount(amount);
+        fact.setEffectiveDate(record.getBusinessDate());
+        fact.setFactStatus(FactStatus.ACTIVE);
+        fact.setSource(PerformanceSource.IMPORT);
+        fact.setOperatorId(operatorId);
+        factMapper.insert(fact);
+        return fact;
+    }
+
+    /** 空行部门归属：该订单/合同任一 ACTIVE 新签事实的 deptId（跨月查找，查不到返回 null）。 */
+    private Long resolveContractDeptId(NormalizedRecordDTO record) {
+        String orderNo = record.getOrderNo();
+        String contractNo = record.getContractNo();
+        if (StringUtils.isBlank(orderNo) && StringUtils.isBlank(contractNo)) {
+            return null;
+        }
+        PerformanceFact expect = factMapper.selectOne(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .and(w -> {
+                if (StringUtils.isNotBlank(orderNo) && StringUtils.isNotBlank(contractNo)) {
+                    w.eq(PerformanceFact::getOrderNo, orderNo)
+                        .or().eq(PerformanceFact::getContractNo, contractNo);
+                } else if (StringUtils.isNotBlank(orderNo)) {
+                    w.eq(PerformanceFact::getOrderNo, orderNo);
+                } else {
+                    w.eq(PerformanceFact::getContractNo, contractNo);
+                }
+            })
+            .last("LIMIT 1"));
+        return expect == null ? null : expect.getDeptId();
+    }
+
+    /**
+     * 按归一化记录类型决定本条记录要生成的事实口径集合（纯函数）。
      * <p>
      * <ul>
-     *   <li>{@code SIGNED}（贝壳·经纪人业绩明细表，唯一业绩来源）：同一条业务行双发
-     *       <b>PERF_REAL（实收，结佣计薪）+ PERF_EXPECT（应收，新签/团队基数）</b>；
-     *       两事实 sourceKey 相同、factType 不同，由部分唯一索引
-     *       {@code uk_perf_fact_source_key(fact_type, source_key, fact_status)} 保证共存不冲突；</li>
+     *   <li>{@code SIGNED}（贝壳新签导入·经纪人业绩结算明细表）：单发
+     *       <b>PERF_EXPECT（应收，新签/团队基数）</b>；实收业绩改由贝壳实收导入
+     *       （KE_RECEIVED，理房通到账明细）产生，原双口径契约自 2026-09 起拆分；</li>
+     *   <li>{@code KE_RECEIVED}（贝壳实收导入·经纪人到账贡献明细表）：单发
+     *       <b>PERF_REAL（实收，结佣计薪）</b>，金额=角色人当月到账金额（可为负）；</li>
      *   <li>{@code HIST_EXPECT}（历史工资·新签业绩）：单发 PERF_EXPECT；
      *   <li>{@code HIST_REAL}（历史工资·结佣业绩）：单发 PERF_REAL；</li>
      *   <li>其余类型（考勤 / 积分 / 手工 / 历史工资族）：不产生业绩事实，返回空列表。</li>
      * </ul>
-     * 顺序固定 REAL 在前 EXPECT 在后，保证事件发布顺序稳定可预期。
+     * 同一业务行两事实 sourceKey 相同、factType 不同，由部分唯一索引
+     * {@code uk_perf_fact_source_key(fact_type, source_key, fact_status)} 保证共存不冲突。
      *
      * @param record 归一化记录 DTO
      * @return 需生成的事实口径列表（可能为空，永不为 null）
@@ -717,10 +847,13 @@ public class PerformanceEngine {
         if (record == null || record.getRecordType() == null) {
             return List.of();
         }
+        // ★ 拆表后：PERF_REAL 已从 pj_perf_fact 迁出到实收域
+        // KE_RECEIVED / HIST_REAL 不再建 PERF_REAL 事实，改由 ImportToReceivedPort 直接写实收表
         return switch (record.getRecordType()) {
-            case RECORD_TYPE_SIGNED -> List.of(FactType.PERF_REAL, FactType.PERF_EXPECT);
+            case RECORD_TYPE_SIGNED -> List.of(FactType.PERF_EXPECT);
+            case RECORD_TYPE_KE_RECEIVED -> List.of();
             case RECORD_TYPE_HIST_EXPECT -> List.of(FactType.PERF_EXPECT);
-            case RECORD_TYPE_HIST_REAL -> List.of(FactType.PERF_REAL);
+            case RECORD_TYPE_HIST_REAL -> List.of();
             default -> List.of();
         };
     }
@@ -735,8 +868,8 @@ public class PerformanceEngine {
      * 实收列有值——若回退，9 月 PERF_EXPECT 会错取实收额，导致店长团队提成/总监门店
      * 提成按同一笔钱在 8、9 两月重复计提。
      * <p>
-     * 历史工资单口径行（HIST_EXPECT/HIST_REAL）同样并入 dualCaliber 语义：
-     * 该口径金额列为空按 0 处理，禁止回退 originAmount（另一口径）。
+     * 历史工资单口径行（HIST_EXPECT/HIST_REAL）与贝壳实收行（KE_RECEIVED）同样并入
+     * dualCaliber 语义：该口径金额列为空按 0 处理，禁止回退 originAmount（另一口径）。
      * 仅其余非金额型历史行才回退 DTO.originAmount 兼容。
      */
     public static BigDecimal resolveFactCurrentAmount(NormalizedRecordDTO record, FactType factType) {
@@ -744,6 +877,7 @@ public class PerformanceEngine {
             return null;
         }
         boolean dualCaliber = RECORD_TYPE_SIGNED.equals(record.getRecordType())
+            || RECORD_TYPE_KE_RECEIVED.equals(record.getRecordType())
             || RECORD_TYPE_HIST_EXPECT.equals(record.getRecordType())
             || RECORD_TYPE_HIST_REAL.equals(record.getRecordType());
         if (factType == FactType.PERF_EXPECT) {
@@ -948,8 +1082,8 @@ public class PerformanceEngine {
             return result;
         }
         // ② 建审批单（source=MANUAL，batchId=null）
-        int applyCount = receivedApplyService.createApplyForRealFacts(
-            mirror.getCreated(), period, operatorId, null);
+        int applyCount = receivedApplyPort.createApplyForRealFacts(
+            mirror.getCreated().stream().map(PerformanceFact::getId).toList(), period, operatorId, null);
         result.createdApplyCount = applyCount;
         return result;
     }

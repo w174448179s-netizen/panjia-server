@@ -62,7 +62,12 @@ public class EmployeeServiceImpl implements EmployeeService {
     private static final String BOOL_FALSE = "false";
     /** 无师傅时 MENTOR 事实存储值 */
     private static final String NO_MENTOR = "";
-    /** 系统操作人（导入等无人值守场景） */
+    /**
+     * 门店虚拟角色人识别方式（2026-09-28 改）：
+     * 原方案虚拟人工号以 99999 开头识别；现改为「工号 = 店组编码」，
+     * 即虚拟人 employee_code 直接等于 sys_dept.dept_category（如 CD_15_1696157）。
+     * 初始化脚本见 script/sql/init_virtual_roles.sql。
+     */
     private static final Long SYSTEM_OPERATOR_ID = 0L;
 
     private final EmployeeMapper employeeMapper;
@@ -530,6 +535,43 @@ public class EmployeeServiceImpl implements EmployeeService {
             map.put(e.getEmployeeCode(), e.getEmployeeId());
         }
         return map;
+    }
+
+    @Override
+    public Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findVirtualEmployeesByStoreGroups(
+            Collection<String> storeGroups) {
+        if (storeGroups == null || storeGroups.isEmpty()) {
+            return Map.of();
+        }
+        // 1. 店组编码（= 部门类别编码 dept_category）→ 门店部门
+        Map<String, Long> deptByCategory = deptPort.findActiveDeptIdsByCategories(storeGroups);
+        if (deptByCategory.isEmpty()) {
+            return Map.of();
+        }
+        // 2. 部门 → 虚拟人（工号 = 店组编码，即 employee_code IN storeGroups；同部门多条取工号最小的第一个）
+        List<Employee> virtuals = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+            .in(Employee::getDeptId, deptByCategory.values())
+            .in(Employee::getEmployeeCode, storeGroups)
+            .orderByAsc(Employee::getEmployeeCode));
+        Map<Long, Employee> byDept = new LinkedHashMap<>();
+        for (Employee e : virtuals) {
+            byDept.putIfAbsent(e.getDeptId(), e);
+        }
+        // 3. 组装 店组编码 → 虚拟人主数据；部门下无虚拟人 → 不含该键（调用方按匹配失败处理）
+        Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> result = new LinkedHashMap<>();
+        deptByCategory.forEach((category, deptId) -> {
+            Employee v = byDept.get(deptId);
+            if (v == null) {
+                return;
+            }
+            com.panjia.contracts.dto.EmployeeMainDataDTO dto = new com.panjia.contracts.dto.EmployeeMainDataDTO();
+            dto.setEmployeeId(v.getEmployeeId());
+            dto.setEmployeeCode(v.getEmployeeCode());
+            dto.setEmployeeName(v.getEmployeeName());
+            dto.setDeptId(v.getDeptId());
+            result.put(category, dto);
+        });
+        return result;
     }
 
     @Override

@@ -60,7 +60,7 @@ public class CommissionApplication implements Serializable {
     /** 明细条数 */
     private Integer itemCount;
 
-    /** 结佣业绩金额合计（原样透传，非佣金金额；§3.5 对齐后=应收合计） */
+    /** 结佣业绩金额合计（=Σ明细，新签口径原样透传，非佣金金额；2026-09-27 定稿后与 expectedAmount 同基数） */
     private BigDecimal totalAmount;
 
     /** 应收业绩合计（提交时快照，§3.4/3.5 差异判定） */

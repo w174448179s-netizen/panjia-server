@@ -12,6 +12,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -214,8 +215,10 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 手工对齐确认（§3.5 改造）：实收对齐应收不再随总监通过自动执行，
-     * 由财务审批人核对差异后人工触发。仅审批中 + 财务节点 + 有差异 + 未对齐可执行。
+     * [已下线 2026-09-27] 手工对齐确认端点：实收判定改合同维度后，实收明细仅展示、
+     * 不参与任何计算（结佣金额=新签口径），把到账金额改写为应收口径会丢失公司到账
+     * 记录，对齐操作失去业务意义。Service 层 {@code alignToExpected} 与业绩域端口
+     * 方法保留（历史数据兼容），入口关闭。
      *
      * @param id 申请单 ID
      */
@@ -223,7 +226,6 @@ public class CommissionApplyController extends BaseController {
     @Log(title = "结佣申请单手工对齐", businessType = BusinessType.UPDATE)
     @PostMapping("/{id}/align")
     public R<Void> align(@PathVariable Long id) {
-        applicationService.alignToExpected(id);
-        return R.ok();
+        throw new ServiceException("实收对齐功能已下线（实收明细仅展示，不参与结佣计算）");
     }
 }

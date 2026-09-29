@@ -21,10 +21,11 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
      * 批量查询员工姓名（按员工 ID）。
      *
      * @param ids 员工 ID 集合
-     * @return 每行含 employee_id / employee_name；ids 为空时返回空列表
+     * @return 每行含 employee_id / employee_name / employee_code / dept_id；ids 为空时返回空列表
      */
     @Select("<script>"
-        + "SELECT employee_id AS \"employeeId\", employee_name AS \"employeeName\" "
+        + "SELECT employee_id AS \"employeeId\", employee_name AS \"employeeName\", "
+        + "employee_code AS \"employeeCode\", dept_id AS \"deptId\" "
         + "FROM pj_people_employee "
         + "WHERE employee_id IN "
         + "<foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>"
@@ -105,11 +106,11 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
 
 
     /**
-     * 批量查询已执行调整单的原始金额（按合同号聚合，取最早一条的 original_amount 快照）。
+     * 批量查询已执行调整单的原始金额（按业务键聚合，取最早一条的 original_amount 快照）。
      *
      * @param period      归属期间
      * @param factType    事实口径
-     * @param contractNos 合同号集合
+     * @param contractNos 业务键集合（合同号/订单号混合，调整单 contract_no 存的是提交时的展示键）
      * @return 每行含 bizKey(contract_no) / originalAmount；空集合时返回空列表
      */
     @Select("""
@@ -155,4 +156,88 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
         </script>
         """)
     List<Map<String, Object>> doSelectOriginalAmountsByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
+
+    /**
+     * 批量查询审批中的合同级调整单（SUBMITTED/APPROVED，尚未执行，每合同取最新一单）。
+     * <p>
+     * 用于列表/详情展示「调整审批中」标记 + 目标金额：执行前事实金额未变，
+     * 仅靠 originalAmount（只取 EXECUTED）无法感知在途调整。
+     *
+     * @param period    归属期间
+     * @param factType  事实口径
+     * @param keys      业务键集合（合同号/订单号混合，调整单 contract_no 存的是提交时的展示键）
+     * @return 每行含 bizKey / adjustType / targetAmount；空集合返回空列表
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (contract_no)
+               contract_no AS "bizKey",
+               adjust_type AS "adjustType",
+               target_amount AS "targetAmount",
+               original_amount AS "originalAmount"
+        FROM pj_perf_adjust
+        WHERE period = #{period}
+          AND fact_type = #{factType}
+          AND status IN ('SUBMITTED', 'APPROVED')
+          AND contract_no IN
+        <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
+        ORDER BY contract_no, id DESC
+        </script>
+        """)
+    List<Map<String, Object>> doSelectPendingByBizKeys(@Param("period") String period,
+                                                       @Param("factType") String factType,
+                                                       @Param("keys") java.util.Collection<String> keys);
+
+    /**
+     * 批量查询审批中的明细级调整单（SUBMITTED/APPROVED，每事实取最新一单）。
+     *
+     * @param factIds 事实 ID 集合
+     * @return 每行含 factId / adjustType / targetAmount；空集合返回空列表
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (fact_id)
+               fact_id AS "factId",
+               adjust_type AS "adjustType",
+               target_amount AS "targetAmount"
+        FROM pj_perf_adjust
+        WHERE status IN ('SUBMITTED', 'APPROVED')
+          AND fact_id IN
+        <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+        ORDER BY fact_id, id DESC
+        </script>
+        """)
+    List<Map<String, Object>> doSelectPendingByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
+
+    /**
+     * 批量查询已执行的合同级金额调整单（含链式多次调整，新→旧排列，供逆向还原每人调整前金额）。
+     * <p>
+     * 合同级 AMOUNT 调整执行时按占比分摊到各事实，但不落 fact_id 级痕迹；
+     * 分摊具有等比不变性，可用当前金额 + 逆向分摊精确还原调整前金额。
+     *
+     * @param period    归属期间
+     * @param factType  事实口径
+     * @param keys      业务键集合（合同号/订单号混合）
+     * @return 每行含 bizKey / adjustType / targetAmount / originalAmount，按 id 倒序
+     */
+    @Select("""
+        <script>
+        SELECT contract_no AS "bizKey",
+               adjust_type AS "adjustType",
+               target_amount AS "targetAmount",
+               original_amount AS "originalAmount"
+        FROM pj_perf_adjust
+        WHERE period = #{period}
+          AND fact_type = #{factType}
+          AND status = 'EXECUTED'
+          AND adjust_scope = 'CONTRACT'
+          AND adjust_type = 'AMOUNT'
+          AND contract_no IN
+        <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
+        ORDER BY id DESC
+        </script>
+        """)
+    List<Map<String, Object>> doSelectExecutedContractAmounts(@Param("period") String period,
+                                                              @Param("factType") String factType,
+                                                              @Param("keys") java.util.Collection<String> keys);
 }

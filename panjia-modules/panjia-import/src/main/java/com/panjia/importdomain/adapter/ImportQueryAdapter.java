@@ -7,9 +7,11 @@ import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
+import com.panjia.importdomain.domain.raw.RawReceived;
 import com.panjia.importdomain.domain.raw.RawSigned;
 import com.panjia.importdomain.mapper.ImportBatchMapper;
 import com.panjia.importdomain.mapper.NormalizedRecordMapper;
+import com.panjia.importdomain.mapper.RawReceivedMapper;
 import com.panjia.importdomain.mapper.RawSignedMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +46,7 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
     private final NormalizedRecordMapper normalizedRecordMapper;
     private final ImportBatchMapper importBatchMapper;
     private final RawSignedMapper rawSignedMapper;
+    private final RawReceivedMapper rawReceivedMapper;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     @Override
@@ -102,13 +105,17 @@ public class ImportQueryAdapter implements ImportNormalizedRecordQueryPort {
         if (record == null || record.getRawDataId() == null) {
             return null;
         }
-        // 业绩记录统一路由到 SIGNED 原始行表（贝壳业绩明细表，唯一业绩来源）；
-        // 历史新签/结佣业绩行（HIST_EXPECT/HIST_REAL）原始行同样落在 RawSigned 表（recordType 存 rawJson）
+        // 业绩记录路由到 SIGNED 原始行表（贝壳新签明细表；历史新签/结佣业绩行同样落 RawSigned 表，recordType 存 rawJson）；
+        // 贝壳实收行（KE_RECEIVED）路由到独立 RawReceived 表（理房通到账明细）
         NormalizedRecordType type = record.getRecordType();
         if (type == NormalizedRecordType.SIGNED
             || type == NormalizedRecordType.HIST_EXPECT
             || type == NormalizedRecordType.HIST_REAL) {
             RawSigned raw = rawSignedMapper.selectById(record.getRawDataId());
+            return raw == null ? null : raw.getRawJson();
+        }
+        if (type == NormalizedRecordType.KE_RECEIVED) {
+            RawReceived raw = rawReceivedMapper.selectById(record.getRawDataId());
             return raw == null ? null : raw.getRawJson();
         }
         return null;
