@@ -1009,8 +1009,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             Object key = row.get("factId");
             Object val = row.get("settleDate");
             if (key != null) {
-                settleMap.put(((Number) key).longValue(),
-                    val == null ? null : java.time.LocalDateTime.class.cast(val));
+                java.time.LocalDateTime settleDate = null;
+                if (val instanceof java.sql.Timestamp ts) {
+                    settleDate = ts.toLocalDateTime();
+                } else if (val instanceof java.time.LocalDateTime ldt) {
+                    settleDate = ldt;
+                }
+                settleMap.put(((Number) key).longValue(), settleDate);
             }
         }
         for (PerformanceManageVo row : rows) {

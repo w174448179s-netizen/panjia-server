@@ -213,19 +213,4 @@ public class CommissionApplyController extends BaseController {
         applicationService.approve(id, action, comment);
         return R.ok();
     }
-
-    /**
-     * [已下线 2026-09-27] 手工对齐确认端点：实收判定改合同维度后，实收明细仅展示、
-     * 不参与任何计算（结佣金额=新签口径），把到账金额改写为应收口径会丢失公司到账
-     * 记录，对齐操作失去业务意义。Service 层 {@code alignToExpected} 与业绩域端口
-     * 方法保留（历史数据兼容），入口关闭。
-     *
-     * @param id 申请单 ID
-     */
-    @SaCheckPermission("commission:apply:approve")
-    @Log(title = "结佣申请单手工对齐", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/align")
-    public R<Void> align(@PathVariable Long id) {
-        throw new ServiceException("实收对齐功能已下线（实收明细仅展示，不参与结佣计算）");
-    }
 }

@@ -103,10 +103,6 @@ public class CommissionApplicationService {
     /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
     private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
 
-    /** 配置项：实收应收差异容忍阈值（元），默认 1。 */
-    private static final String CONFIG_DIFF_TOLERANCE = "panjia.commission.diff_tolerance";
-    private static final BigDecimal DEFAULT_DIFF_TOLERANCE = BigDecimal.ONE;
-
     /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
     public static final String ROW_STATUS_NONE = "NONE";
 
@@ -791,26 +787,6 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 实收/应收差异容忍阈值（元），从系统参数 {@code panjia.commission.diff_tolerance} 读取，
-     * 缺失时回退默认值 1 元。
-     */
-    private BigDecimal getDiffTolerance() {
-        BigDecimal v = configService.getConfigDecimal(CONFIG_DIFF_TOLERANCE);
-        return v == null ? DEFAULT_DIFF_TOLERANCE : v;
-    }
-
-    /**
-     * 实收/应收差异容忍判定：|a - b| <= 容忍阈值（默认 1 元）视为无差异。
-     * <p>用于：① 互斥网关是否跳过财务节点；② 是否触发实收对齐应收；③ 前端「有差异」标签展示。
-     * 容忍范围内的小额尾差不做对齐，保持实收原样。阈值可在系统参数中调整，无需改代码。</p>
-     */
-    public boolean isWithinTolerance(BigDecimal a, BigDecimal b) {
-        BigDecimal av = a == null ? BigDecimal.ZERO : a;
-        BigDecimal bv = b == null ? BigDecimal.ZERO : b;
-        return av.subtract(bv).abs().compareTo(getDiffTolerance()) <= 0;
-    }
-
-    /**
      * 0 值过滤（纯函数，供单测）：仅保留 amount &lt;&gt; 0 的事实（BigDecimal compareTo 比较）。
      */
     public static List<PerformanceFactSummaryDTO> filterNonZero(List<PerformanceFactSummaryDTO> facts) {
@@ -918,24 +894,17 @@ public class CommissionApplicationService {
 
     /**
      * 更新流程变量 realAmount / expectedAmount（供互斥网关 skip_condition 求值，T-04）。
-     * <p>当配置开关 {@code panjia.commission.skip_finance_when_match} 关闭时，
-     * 故意将 realAmount 设为与 expectedAmount 不同的值，使条件线不命中，
-     * 流程走默认分支进财务人工审批。</p>
+     * <p>结佣金额=新签口径，realAmount 与 expectedAmount 同基数天然一致；
+     * 是否跳过财务节点由 {@code panjia.commission.skip_finance_when_match} 开关决定：
+     * 开关开则令网关 eq 命中跳过财务，关则故意写不等值走财务人工审批。</p>
      */
     private void updateAmountVariables(CommissionApplication application) {
-        boolean skipEnabled = Boolean.TRUE.equals(
-            configService.getConfigBool(CONFIG_SKIP_FINANCE_WHEN_MATCH));
-        BigDecimal realAmount = application.getTotalAmount() == null
-            ? BigDecimal.ZERO : application.getTotalAmount();
         BigDecimal expectedAmount = application.getExpectedAmount() == null
             ? BigDecimal.ZERO : application.getExpectedAmount();
-        if (!skipEnabled) {
-            // 开关关闭：故意写入不相等的值，条件线不命中，走财务节点
-            realAmount = expectedAmount.add(BigDecimal.ONE);
-        } else if (isWithinTolerance(realAmount, expectedAmount)) {
-            // 差异在容忍阈值（1 元）以内：视为无差异，令网关 eq 命中跳过财务节点
-            realAmount = expectedAmount;
-        }
+        boolean skipEnabled = Boolean.TRUE.equals(
+            configService.getConfigBool(CONFIG_SKIP_FINANCE_WHEN_MATCH));
+        BigDecimal realAmount = skipEnabled
+            ? expectedAmount : expectedAmount.add(BigDecimal.ONE);
         Map<String, Object> vars = new HashMap<>(2);
         vars.put("realAmount", realAmount);
         vars.put("expectedAmount", expectedAmount);
@@ -1752,19 +1721,14 @@ public class CommissionApplicationService {
         Map<String, Object> variables = new HashMap<>(4);
         variables.put("ignore", true);
         // T-04：发起流程时写入 realAmount/expectedAmount 初值，供互斥网关 skip_condition 求值；
-        // 总监办理前 approve() 会再次更新为最新值。差异容忍（≤1 元）逻辑与 updateAmountVariables 保持一致，
-        // 以覆盖总监发起时系统自动过总监节点的场景（该路径不经 approve，不会再次修改变量）。
-        BigDecimal realAmount = application.getTotalAmount() == null
-            ? BigDecimal.ZERO : application.getTotalAmount();
+        // 总监办理前 approve() 会再次更新为最新值。跳过逻辑与 updateAmountVariables 一致，
+        // 覆盖总监发起时系统自动过总监节点的场景（该路径不经 approve，不会再次修改变量）。
         BigDecimal expectedAmount = application.getExpectedAmount() == null
             ? BigDecimal.ZERO : application.getExpectedAmount();
         boolean skipEnabled = Boolean.TRUE.equals(
             configService.getConfigBool(CONFIG_SKIP_FINANCE_WHEN_MATCH));
-        if (!skipEnabled) {
-            realAmount = expectedAmount.add(BigDecimal.ONE);
-        } else if (isWithinTolerance(realAmount, expectedAmount)) {
-            realAmount = expectedAmount;
-        }
+        BigDecimal realAmount = skipEnabled
+            ? expectedAmount : expectedAmount.add(BigDecimal.ONE);
         variables.put("realAmount", realAmount);
         variables.put("expectedAmount", expectedAmount);
         cmd.setVariables(variables);
@@ -1799,15 +1763,9 @@ public class CommissionApplicationService {
     /**
      * 总监节点办理完成后的联动（由 capp_finance 任务创建事件驱动）。
      * <p>
-     * T-04 改造后：实收==应收时互斥网关 skip_condition 直接跳到 capp_end，
-     * 财务节点不创建，本方法不触发；本方法仅在「有差异进入财务节点」时执行。
+     * T-04 互斥网关 skip_condition 命中时直跳 capp_end，财务节点不创建，本方法不触发；
+     * 仅在进入财务节点时执行：回填最近审批人/审批时间。
      * </p>
-     * <ol>
-     *   <li>回填最近审批人/审批时间；</li>
-     *   <li>实收对齐应收改为<b>手工确认</b>：系统不再自动改实收事实，
-     *       由财务审批人核对差异后在审批弹窗点「对齐」执行（{@link #alignToExpected}），
-     *       本方法仅记录差异日志供追踪。</li>
-     * </ol>
      * <p>监听器在总监 completeTask 的事务内同步执行；warm-flow 引擎在进入监听前已完成
      * 任务持久化。</p>
      */
@@ -1818,8 +1776,7 @@ public class CommissionApplicationService {
             log.warn("[结佣-总监通过联动] 申请单不存在，忽略：id={}", applicationId);
             return;
         }
-        // 流程进入财务节点 = 总监节点已办理：回填最近审批人/审批时间（与实收 stampApproverOnDirectorNode 同口径）。
-        // 定向更新两列，避免触碰 current_node/version。
+        // 流程进入财务节点 = 总监节点已办理：回填最近审批人/审批时间（定向更新两列，避免触碰 current_node/version）
         if (application.getStatus() == ApplicationStatus.SUBMITTED && operatorId != null) {
             LocalDateTime approvedAt = LocalDateTime.now();
             applicationMapper.update(null, new LambdaUpdateWrapper<CommissionApplication>()
@@ -1827,78 +1784,7 @@ public class CommissionApplicationService {
                 .set(CommissionApplication::getApproverId, operatorId)
                 .set(CommissionApplication::getApproveTime, approvedAt));
         }
-        BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
-        BigDecimal expected = application.getExpectedAmount() == null
-            ? BigDecimal.ZERO : application.getExpectedAmount();
-        // 实收对齐应收已改为手工确认（§3.5 改造）：有差异时仅记录日志，等待财务人工对齐
-        if (!isWithinTolerance(received, expected) && !Boolean.TRUE.equals(application.getAligned())) {
-            log.info("[结佣-对齐] 实收与应收存在差异，等待财务手工对齐确认：id={}, received={}, expected={}",
-                application.getId(), received, expected);
-        }
         refreshCurrentNode(application);
-    }
-
-    /**
-     * 手工对齐确认（§3.5 改造：实收对齐应收由财务审批人人工触发，系统不再自动对齐）。
-     * <p>
-     * 校验通过后执行原自动对齐逻辑：调业绩域对齐端口，实收事实（合同+每人明细）
-     * supersede 为应收口径，结佣明细按映射重绑事实+金额并重算合计。
-     * 对齐后停留在财务节点，由财务继续人工审批（通过或驳回）。
-     *
-     * @param applicationId 申请单 ID
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void alignToExpected(Long applicationId) {
-        CommissionApplication application = applicationMapper.selectById(applicationId);
-        if (application == null) {
-            throw new ServiceException("结佣申请单不存在");
-        }
-        if (application.getStatus() != ApplicationStatus.SUBMITTED) {
-            throw new ServiceException("仅审批中的申请单可执行对齐（当前：" + application.getStatus().getDesc() + "）");
-        }
-        if (!NODE_FINANCE.equals(application.getCurrentNode())) {
-            throw new ServiceException("仅财务审批节点可执行对齐（当前节点：" + application.getCurrentNode() + "）");
-        }
-        if (Boolean.TRUE.equals(application.getAligned())) {
-            throw new ServiceException("该申请单已完成对齐，无需重复操作");
-        }
-        BigDecimal received = application.getTotalAmount() == null ? BigDecimal.ZERO : application.getTotalAmount();
-        BigDecimal expected = application.getExpectedAmount() == null
-            ? BigDecimal.ZERO : application.getExpectedAmount();
-        if (isWithinTolerance(received, expected)) {
-            throw new ServiceException("实收与应收无差异，无需对齐");
-        }
-        Long operatorId = LoginHelper.getUserId();
-        log.info("[结佣-对齐] 财务手工确认对齐：id={}, operatorId={}, received={}, expected={}",
-            application.getId(), operatorId, received, expected);
-        ReceivedAlignmentResultDTO result = performanceQueryPort.alignReceivedToExpected(
-            application.getPeriod(), application.getContractNo(), operatorId);
-        rebindItemsAfterAlignment(application, result);
-        application.setAligned(true);
-        recalcAggregates(application.getId(), application);
-    }
-
-    /**
-     * 对齐后按 旧事实→新事实 映射重绑结佣明细：事实 ID / 金额 / 期间 / 门店 同步到新事实。
-     */
-    private void rebindItemsAfterAlignment(CommissionApplication application, ReceivedAlignmentResultDTO result) {
-        if (result == null || result.getMappings() == null || result.getMappings().isEmpty()) {
-            return;
-        }
-        for (ReceivedAlignmentResultDTO.Mapping mapping : result.getMappings()) {
-            PerformanceFactSummaryDTO newFact = mapping.getNewFact();
-            if (mapping.getOldFactId() == null || newFact == null) {
-                continue;
-            }
-            itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-                .eq(CommissionItem::getApplicationId, application.getId())
-                .eq(CommissionItem::getPerformanceFactId, mapping.getOldFactId())
-                .ne(CommissionItem::getStatus, ItemStatus.REVERSED)
-                .set(CommissionItem::getPerformanceFactId, newFact.getFactId())
-                .set(CommissionItem::getAmount, newFact.getAmount())
-                .set(newFact.getPeriod() != null, CommissionItem::getPeriod, newFact.getPeriod())
-                .set(newFact.getDeptId() != null, CommissionItem::getDeptId, newFact.getDeptId()));
-        }
     }
 
     private Long taskAtNode(Long applicationId, String nodeCode) {
