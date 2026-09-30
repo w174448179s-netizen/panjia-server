@@ -6,6 +6,7 @@ import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.contracts.event.ImportBatchRenormalizedEvent;
 import com.panjia.contracts.event.ImportBatchRevokedEvent;
 import com.panjia.contracts.port.BatchConsumptionQueryPort;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.beans.factory.ObjectProvider;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportBatchStatus;
@@ -250,7 +251,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         ImportBatch batch = requireBatch(batchId);
         // 前置校验①：仅已归档批次可撤销
         if (batch.getStatus() != ImportBatchStatus.ARCHIVED) {
-            throw new IllegalStateException(
+            throw new ServiceException(
                 "仅已归档批次可撤销，当前状态：" + batch.getStatus().getDesc());
         }
         // 前置校验②：通过反向端口查询下游消费状态（封账/调整/实收）
@@ -273,7 +274,7 @@ public class ImportBatchServiceImpl implements ImportBatchService {
             log.warn("[导入撤销] BatchConsumptionQueryPort 未实现，保守拒绝：batchId={}", batchId);
         }
         if (!revocable) {
-            throw new IllegalStateException(rejectReason);
+            throw new ServiceException(rejectReason);
         }
 
         Long operatorId = null;
