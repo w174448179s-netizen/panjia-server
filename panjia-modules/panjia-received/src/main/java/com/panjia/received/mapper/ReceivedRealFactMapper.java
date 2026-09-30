@@ -190,8 +190,21 @@ public interface ReceivedRealFactMapper {
                    SELECT SUM(pe.performance_amount)
                    FROM pj_perf_fact pe
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-                     AND pe.period = #{period}
                      AND (COALESCE(pe.order_no, pe.contract_no)) = s.biz_key
+                     AND (
+                           (pe.period = #{period} AND EXISTS (
+                               SELECT 1 FROM pj_perf_fact pc
+                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                                 AND pc.period = #{period}
+                                 AND pc.performance_amount != 0
+                                 AND (COALESCE(pc.order_no, pc.contract_no)) = s.biz_key))
+                        OR (pe.period &lt; #{period} AND NOT EXISTS (
+                               SELECT 1 FROM pj_perf_fact pc
+                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                                 AND pc.period = #{period}
+                                 AND pc.performance_amount != 0
+                                 AND (COALESCE(pc.order_no, pc.contract_no)) = s.biz_key))
+                         )
                ), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
