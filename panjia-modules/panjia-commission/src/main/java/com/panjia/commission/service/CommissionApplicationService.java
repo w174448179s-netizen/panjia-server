@@ -304,6 +304,15 @@ public class CommissionApplicationService {
             : findActiveApplication(period, contractNo);
         if (active != null) {
             if (active.getStatus() == ApplicationStatus.DRAFT) {
+                // 新签调整（加人/金额变更）会 supersede 旧事实 → FACT_REVERSED 把旧结佣明细
+                // 置 REVERSED；FACT_CREATED 不重建明细（设计如此）。DRAFT 单明细可能全部被冲销，
+                // 提交前需检查：没有 ACTIVE 明细则从当前新签事实重建。
+                long activeItems = itemMapper.selectCount(new LambdaQueryWrapper<CommissionItem>()
+                    .eq(CommissionItem::getApplicationId, active.getId())
+                    .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
+                if (activeItems == 0) {
+                    rebuildItems(active, period, contractNo);
+                }
                 if (!Objects.equals(active.getApplicantId(), operatorId)) {
                     active.setApplicantId(operatorId);
                     applicationMapper.updateById(active);
@@ -610,6 +619,36 @@ public class CommissionApplicationService {
             application.getApplyNo(), period, contractNo, application.getItemCount(),
             application.getTotalAmount(), application.getExpectedAmount());
         return application;
+    }
+
+    /**
+     * 重建结佣明细（新签调整后旧明细全部被冲销时，从当前 ACTIVE 新签事实重新生成）。
+     * <p>
+     * 场景：用户加角色人/调整金额 → 新签事实 supersede → FACT_REVERSED 把旧结佣明细置 REVERSED；
+     * FACT_CREATED 不重建明细（设计如此）。提交前发现 DRAFT 单没有 ACTIVE 明细，
+     * 从当前新签事实跨月加载并重建，口径与 {@link #createApplicationWithItems} 一致。
+     */
+    private void rebuildItems(CommissionApplication application, String period, String contractNo) {
+        List<PerformanceFactSummaryDTO> facts =
+            performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+        List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
+        if (nonZeroFacts.isEmpty()) {
+            throw new ServiceException("合同 " + contractNo + " " + period
+                + " 月无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
+        }
+        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts);
+        if (itemFacts.isEmpty()) {
+            throw new ServiceException(
+                "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
+        }
+        List<CommissionItem> items = new ArrayList<>(itemFacts.size());
+        for (PerformanceFactSummaryDTO fact : itemFacts) {
+            items.add(buildItem(application, fact, fact.getAmount(), null));
+        }
+        itemMapper.insertBatch(items);
+        recalcAggregates(application.getId(), null);
+        log.info("[结佣-重建明细] 合同 {} {} 月明细已重建：{} 条",
+            contractNo, period, itemFacts.size());
     }
 
     /**

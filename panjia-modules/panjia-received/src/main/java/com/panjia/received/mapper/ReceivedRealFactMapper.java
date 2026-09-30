@@ -180,7 +180,7 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
-        SELECT s.biz_key AS "contractNo",
+        SELECT MAX(s.contract_no) AS "contractNo",
                MAX(s.order_no) AS "orderNo",
                MAX(s.biz_type) AS "bizType",
                MAX(s.property_address) AS "propertyAddress",
@@ -203,6 +203,7 @@ public interface ReceivedRealFactMapper {
                COUNT(*) AS "detailCount"
         FROM (
             SELECT COALESCE(rc.order_no, rc.contract_no) AS biz_key,
+                   rc.contract_no,
                    rc.order_no,
                    rc.biz_type,
                    rc.property_address,
