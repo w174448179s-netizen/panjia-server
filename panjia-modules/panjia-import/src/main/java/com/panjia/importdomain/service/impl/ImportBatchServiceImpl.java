@@ -98,7 +98,33 @@ public class ImportBatchServiceImpl implements ImportBatchService {
             qw.eq(ImportBatch::getPeriod, period);
         }
         qw.orderByDesc(ImportBatch::getCreateTime);
-        return batchMapper.selectList(qw);
+        List<ImportBatch> batches = batchMapper.selectList(qw);
+        fillBatchErrorCount(batches);
+        return batches;
+    }
+
+    /**
+     * 批量填充批次级错误数量（BATCH_ERROR 类型 issue）。
+     * <p>
+     * 归一化/归档阶段整批失败时，failed_rows 保持 0 但有批次级错误，
+     * 前端据此显示"问题清单"按钮。一次 IN 查询按 batchId 分组统计，避免 N+1。
+     */
+    private void fillBatchErrorCount(List<ImportBatch> batches) {
+        if (batches == null || batches.isEmpty()) {
+            return;
+        }
+        List<Long> batchIds = batches.stream().map(ImportBatch::getId).toList();
+        // 按批次分组统计 BATCH_ERROR 数量
+        List<ImportIssue> batchErrors = issueMapper.selectList(new LambdaQueryWrapper<ImportIssue>()
+            .select(ImportIssue::getBatchId)
+            .in(ImportIssue::getBatchId, batchIds)
+            .eq(ImportIssue::getIssueType, com.panjia.importdomain.domain.ImportIssueType.BATCH_ERROR));
+        java.util.Map<Long, Long> countByBatch = batchErrors.stream()
+            .collect(java.util.stream.Collectors.groupingBy(ImportIssue::getBatchId,
+                java.util.stream.Collectors.counting()));
+        for (ImportBatch b : batches) {
+            b.setBatchErrorCount(countByBatch.getOrDefault(b.getId(), 0L).intValue());
+        }
     }
 
     @Override

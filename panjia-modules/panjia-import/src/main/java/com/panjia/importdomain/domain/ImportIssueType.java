@@ -27,7 +27,9 @@ public enum ImportIssueType {
     /** 重复键（同一业务键多行冲突，阻塞） */
     DUPLICATE_KEY("重复键", true),
     /** 跨月不一致（归属月与行内日期偏离过大，阻塞） */
-    PERIOD_MISMATCH("跨月不一致", true);
+    PERIOD_MISMATCH("跨月不一致", true),
+    /** 批次级错误（归一化/归档阶段整批失败，如红冲超额、数据约束冲突；阻塞，row_no 为空表示批次级） */
+    BATCH_ERROR("批次级错误", true);
 
     @EnumValue
     private final String code;

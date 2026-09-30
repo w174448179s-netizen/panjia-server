@@ -2,6 +2,7 @@ package com.panjia.performance.handler;
 
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
+import com.panjia.contracts.port.ImportBatchWritePort;
 import com.panjia.contracts.port.ImportToReceivedPort;
 import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.performance.domain.PerformanceConsumeLog;
@@ -44,6 +45,7 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
     private final PerformanceEngine performanceEngine;
     private final ImportToReceivedPort importToReceivedPort;
     private final ReceivedApplyPort receivedApplyPort;
+    private final ImportBatchWritePort importBatchWritePort;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -80,6 +82,8 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
             }
         } catch (Exception e) {
             log.error("[导入归档] 处理失败：batchId={}, eventId={}", event.getBatchId(), eventId, e);
+            // 回写批次级失败原因到 import 域问题清单，供前端展示（如归一化/归档阶段整批失败）
+            importBatchWritePort.recordBatchError(event.getBatchId(), e.getMessage());
             throw e;
         }
     }

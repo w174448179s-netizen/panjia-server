@@ -188,7 +188,7 @@ public class ImportEngine {
             self.doNormalizePhase(batch.getId(), sourceType, period);
         } catch (Exception e) {
             log.error("归一化失败 batchId={}", batch.getId(), e);
-            markFailed(batch.getId());
+            markFailed(batch.getId(), e);
             throw e;
         }
         return batch.getId();
@@ -265,7 +265,7 @@ public class ImportEngine {
             self.doNormalizePhase(batch.getId(), sourceType, period);
         } catch (Exception e) {
             log.error("归一化失败 batchId={}", batch.getId(), e);
-            markFailed(batch.getId());
+            markFailed(batch.getId(), e);
             throw e;
         }
         return batch.getId();
@@ -1134,14 +1134,36 @@ public class ImportEngine {
         }
     }
 
-    private void markFailed(Long batchId) {
+    /**
+     * 批次标记失败（终态）+ 记录批次级失败原因到问题清单。
+     * <p>
+     * 归一化/归档阶段的批次级异常（如红冲超额、数据约束冲突）会走到这里，
+     * 此时批次已是 FAILED，但 failed_rows 保持 0（行级校验已通过）。
+     * 问题清单里记录批次级错误，供前端展示。
+     */
+    private void markFailed(Long batchId, Throwable cause) {
         ImportBatch batch = batchMapper.selectById(batchId);
-        if (batch != null) {
+        if (batch == null) {
+            return;
+        }
+        try {
+            batch.fail();
+            batchMapper.updateById(batch);
+        } catch (Exception e) {
+            log.warn("标记批次失败状态异常", e);
+        }
+        if (cause != null) {
             try {
-                batch.fail();
-                batchMapper.updateById(batch);
+                ImportIssue issue = new ImportIssue();
+                issue.setBatchId(batchId);
+                issue.setRowNo(null);
+                issue.setIssueType(ImportIssueType.BATCH_ERROR);
+                issue.setMessage(truncate(cause.getMessage(), 1000));
+                issue.setStatus(ImportIssueStatus.OPEN);
+                issue.setPhase(ImportIssuePhase.NORMALIZE);
+                issueMapper.insert(issue);
             } catch (Exception e) {
-                log.warn("标记批次失败状态异常", e);
+                log.warn("记录批次级失败原因异常: batchId={}", batchId, e);
             }
         }
     }

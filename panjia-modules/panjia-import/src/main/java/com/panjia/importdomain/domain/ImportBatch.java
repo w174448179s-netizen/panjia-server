@@ -59,6 +59,15 @@ public class ImportBatch implements Serializable {
     /** 被新批次废弃后回填，一经设置不可改 */
     private Long supersededByBatchId;
 
+    /**
+     * 批次级错误数量（归一化/归档阶段整批失败，非行级校验错误）。
+     * <p>
+     * 非持久化字段，列表查询时通过 {@code ImportIssue} 聚合填充，供前端判定是否展示
+     * "问题清单"按钮。归档后（ARCHIVED）批次若归档消费失败，仍可通过该值暴露问题。
+     */
+    @com.baomidou.mybatisplus.annotation.TableField(exist = false)
+    private int batchErrorCount;
+
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 
