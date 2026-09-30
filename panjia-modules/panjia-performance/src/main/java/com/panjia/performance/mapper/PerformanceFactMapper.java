@@ -206,7 +206,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             AND f.employee_id = #{selfEmployeeId}
           </if>
         GROUP BY COALESCE(f.order_no, f.contract_no)
-        ORDER BY "businessDate" DESC, "contractNo"
+        ORDER BY "businessDate" DESC, COALESCE(MAX(f.order_no), MAX(f.contract_no))
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)

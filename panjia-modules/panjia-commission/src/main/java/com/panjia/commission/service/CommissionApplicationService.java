@@ -295,6 +295,25 @@ public class CommissionApplicationService {
             submit(rejected.getId(), operatorId);
             return rejected;
         }
+        // 实收审批通过后系统自动生成的 DRAFT 草稿单（不自动提交，保留人工审批链）：
+        // 人工单个/批量发起时直接提交该草稿；草稿常由导入归档操作人身份自动建立，
+        // 提交时把申请人改为实际提交人（列表「申请人」、审批中数据隔离均以申请人为准）。
+        // SUBMITTED/APPROVED/LOCKED 属重复发起，直接拒绝。
+        CommissionApplication active = ctx != null
+            ? ctx.activeApps.get(contractNo)
+            : findActiveApplication(period, contractNo);
+        if (active != null) {
+            if (active.getStatus() == ApplicationStatus.DRAFT) {
+                if (!Objects.equals(active.getApplicantId(), operatorId)) {
+                    active.setApplicantId(operatorId);
+                    applicationMapper.updateById(active);
+                }
+                submit(active.getId(), operatorId);
+                return active;
+            }
+            throw new ServiceException("合同 " + contractNo + " " + period
+                + " 月已存在" + active.getStatus().getDesc() + "申请单（" + active.getApplyNo() + "），请勿重复发起");
+        }
         CommissionApplication application = createApplicationWithItems(period, contractNo, operatorId, ctx);
         submit(application.getId(), operatorId);
         return application;
@@ -458,7 +477,9 @@ public class CommissionApplicationService {
                 CommissionApplication existing = ctx != null
                     ? ctx.activeApps.get(contractNo)
                     : findActiveApplication(period, contractNo);
-                if (existing != null && existing.getStatus() != ApplicationStatus.REJECTED) {
+                // DRAFT（实收通过自动生成的草稿）放行，由 apply 直接提交；
+                // SUBMITTED/APPROVED/LOCKED 等未完结单跳过；REJECTED 不在活跃单集合内，走重提
+                if (existing != null && existing.getStatus() != ApplicationStatus.DRAFT) {
                     result.getSkippedContracts().add(contractNo);
                     continue;
                 }
@@ -1290,9 +1311,10 @@ public class CommissionApplicationService {
             all.add(toContractVO(period, periodClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
         }
 
+        // 三个业绩列表统一排序：签约/认购时间倒序 → 合同号(空取订单号)次序 → id 倒序兜底
         all.sort((a, b) -> {
             if (a.getBusinessDate() == null && b.getBusinessDate() == null) {
-                return 0;
+                return compareContractRow(a, b);
             }
             if (a.getBusinessDate() == null) {
                 return 1;
@@ -1300,7 +1322,8 @@ public class CommissionApplicationService {
             if (b.getBusinessDate() == null) {
                 return -1;
             }
-            return b.getBusinessDate().compareTo(a.getBusinessDate());
+            int byDate = b.getBusinessDate().compareTo(a.getBusinessDate());
+            return byDate != 0 ? byDate : compareContractRow(a, b);
         });
         int total = all.size();
         int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
@@ -1344,6 +1367,40 @@ public class CommissionApplicationService {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, vo.getBizType());
             vo.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(original, factor));
         }
+    }
+
+    /**
+     * 合同行兜底排序（签约时间相同时）：订单号（空取合同号）升序，仍相同按申请单 ID 倒序。
+     * 与新签/实收列表 SQL 的 COALESCE(order_no, contract_no), id DESC 口径一致。
+     */
+    private static int compareContractRow(CommissionContractVo a, CommissionContractVo b) {
+        String ka = StringUtils.isNotBlank(a.getOrderNo()) ? a.getOrderNo() : a.getContractNo();
+        String kb = StringUtils.isNotBlank(b.getOrderNo()) ? b.getOrderNo() : b.getContractNo();
+        if (ka == null && kb == null) {
+            return 0;
+        }
+        if (ka == null) {
+            return 1;
+        }
+        if (kb == null) {
+            return -1;
+        }
+        int byKey = ka.compareTo(kb);
+        if (byKey != 0) {
+            return byKey;
+        }
+        Long ia = a.getApplicationId();
+        Long ib = b.getApplicationId();
+        if (ia == null && ib == null) {
+            return 0;
+        }
+        if (ia == null) {
+            return 1;
+        }
+        if (ib == null) {
+            return -1;
+        }
+        return ib.compareTo(ia);
     }
 
     /**

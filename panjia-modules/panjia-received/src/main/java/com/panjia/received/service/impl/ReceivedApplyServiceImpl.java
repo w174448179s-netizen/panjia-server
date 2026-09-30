@@ -970,7 +970,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 .like(ReceivedApply::getContractNo, query.getKeyword())
                 .or().like(ReceivedApply::getOrderNo, query.getKeyword())
                 .or().like(ReceivedApply::getPropertyAddress, query.getKeyword()))
-            .orderByDesc(ReceivedApply::getCreateTime);
+            // 三个业绩列表统一排序：签约/认购时间倒序 → 订单号(空取合同号)次序 → id 倒序兜底，
+            // 不再按建单时间排（批量导入时建单时间集中且与业务发生顺序无关）
+            .orderByDesc(ReceivedApply::getBusinessDate)
+            .last(", COALESCE(order_no, contract_no), id DESC");
         // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）
         applyApprovalNodeScope(wrapper);
         // 门店/组别筛选：通过实收明细关联员工归属部门过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。

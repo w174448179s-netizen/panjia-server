@@ -32,7 +32,7 @@ public interface ReceivedRealFactMapper {
             COALESCE(rd.employee_id, e.employee_id) AS "employeeId",
             COALESCE(e.employee_code, rd.employee_external_code) AS "employeeCode",
             e.employee_name AS "employeeName",
-            COALESCE(rd.dept_id, rc.dept_id) AS "deptId",
+            COALESCE(rd.dept_id, rc.dept_id, e.dept_id) AS "deptId",
             fd.dept_name AS "deptName",
             rc.biz_type AS "bizType",
             rd.role_type AS "roleType",
@@ -54,7 +54,7 @@ public interface ReceivedRealFactMapper {
             LEFT JOIN pj_people_employee e
                    ON (e.employee_id = rd.employee_id
                        OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-            LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+            LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
             LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         """;
 
@@ -67,14 +67,14 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           AND rd.period = #{period}
         <if test="deptId != null">
-          AND (COALESCE(rd.dept_id, rc.dept_id) = #{deptId}
+          AND (COALESCE(rd.dept_id, rc.dept_id, e.dept_id) = #{deptId}
                OR EXISTS (SELECT 1 FROM sys_dept sd
-                          WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+                          WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
                             AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
         </if>
         ORDER BY rd.id
@@ -91,7 +91,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           AND rd.period = #{period}
@@ -109,7 +109,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           AND rd.period = #{period}
@@ -128,7 +128,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           AND (rc.order_no IN
@@ -150,7 +150,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           AND rd.id IN
@@ -168,7 +168,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+        LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.id = #{id}
         """)
@@ -211,7 +211,7 @@ public interface ReceivedRealFactMapper {
                    ra.status AS ra_status,
                    ra.id AS ra_id,
                    COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code) AS emp_key,
-                   COALESCE(rd.dept_id, rc.dept_id) AS dept_id,
+                   COALESCE(rd.dept_id, rc.dept_id, e.dept_id) AS dept_id,
                    COALESCE(rd.employee_id, e.employee_id) AS employee_id
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
@@ -223,9 +223,9 @@ public interface ReceivedRealFactMapper {
               AND rd.period = #{period}
               AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
             <if test="deptId != null">
-              AND (COALESCE(rd.dept_id, rc.dept_id) = #{deptId}
+              AND (COALESCE(rd.dept_id, rc.dept_id, e.dept_id) = #{deptId}
                    OR EXISTS (SELECT 1 FROM sys_dept sd
-                              WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+                              WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
                                 AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
             </if>
             <if test="employeeId != null">
@@ -282,7 +282,7 @@ public interface ReceivedRealFactMapper {
                rc.property_address AS "propertyAddress",
                rc.business_date AS "businessDate",
                rc.biz_type AS "bizType",
-               COALESCE(rd.dept_id, rc.dept_id) AS "deptId",
+               COALESCE(rd.dept_id, rc.dept_id, e.dept_id) AS "deptId",
                COALESCE(rd.employee_id, e.employee_id) AS "employeeId",
                rd.role_type AS "roleType",
                rd.fee_item AS "feeItem",
