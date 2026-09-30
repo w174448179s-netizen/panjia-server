@@ -580,9 +580,9 @@ public class CommissionApplicationService {
         application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
         application.setStatus(ApplicationStatus.DRAFT);
         application.setApplicantId(operatorId);
-        // 结佣金额口径（2026-09-27 定稿）：明细源 = 该合同跨月 ACTIVE 新签事实逐行，
-        // 金额 = 事实当前值（调整后），不再按到账占比分摊；实收事实仅用于 §3.2 审批校验与合同快照
-        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts);
+        // 结佣金额口径（2026-09-30 定稿）：当月有新签用当月，当月无新签用历史（实收月之前全部月合计）
+        // 金额 = 新签事实当前值（调整后）；实收事实仅用于 §3.2 审批校验与合同快照
+        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts, period);
         if (itemFacts.isEmpty()) {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
@@ -632,7 +632,7 @@ public class CommissionApplicationService {
             throw new ServiceException("合同 " + contractNo + " " + period
                 + " 月无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
-        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts);
+        List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts, period);
         if (itemFacts.isEmpty()) {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
@@ -730,7 +730,8 @@ public class CommissionApplicationService {
      *   <li>空经纪人实收行天然不在此列（实收明细仅展示，不参与任何计算）。</li>
      * </ul>
      */
-    private List<PerformanceFactSummaryDTO> loadExpectItemFacts(List<PerformanceFactSummaryDTO> realFacts) {
+    private List<PerformanceFactSummaryDTO> loadExpectItemFacts(List<PerformanceFactSummaryDTO> realFacts,
+                                                                 String period) {
         java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
         for (PerformanceFactSummaryDTO f : realFacts) {
             // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
@@ -741,7 +742,10 @@ public class CommissionApplicationService {
         }
         List<PerformanceFactSummaryDTO> expects =
             performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
-        List<PerformanceFactSummaryDTO> itemFacts = new ArrayList<>(expects.size());
+        // 结佣金额口径（2026-09-30 定稿）：当月有新签用当月，当月无新签用历史（实收月之前全部月合计）
+        // 当月有新签时只用当月，不含历史，避免跨月重复结佣；都无则返回空（L586 抛异常不建单）
+        List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
+        List<PerformanceFactSummaryDTO> history = new ArrayList<>();
         for (PerformanceFactSummaryDTO e : expects) {
             // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
             if (e.getEmployeeId() == null) {
@@ -750,9 +754,14 @@ public class CommissionApplicationService {
             if (e.getAmount() == null || e.getAmount().signum() == 0) {
                 continue;
             }
-            itemFacts.add(e);
+            String ep = e.getPeriod();
+            if (period.equals(ep)) {
+                currentMonth.add(e);
+            } else if (ep != null && ep.compareTo(period) < 0) {
+                history.add(e);
+            }
         }
-        return itemFacts;
+        return !currentMonth.isEmpty() ? currentMonth : history;
     }
 
     /**

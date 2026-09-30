@@ -548,9 +548,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 }
                 ReceivedApply apply = newApplyFromContract(period, contract, batchId, operatorId,
                     rows.size(), realSum, expectedAmount, uniqueDeptId);
-                boolean hasNewSign = expectedAmount != null && expectedAmount.signum() > 0;
+                boolean hasNewSign = expectedAmount != null && expectedAmount.signum() != 0;
                 if (!hasNewSign) {
-                    // 无新签：DRAFT 不启动工作流、不 emit，等新签导入触发（修复原自动通过 bug）
+                    // 无新签（新签0元行不进系统，expectedAmount=0 等价无新签）：DRAFT 不启动工作流、不 emit，等新签导入触发
+                    // 注意：负数新签（红冲退单扣回）是有效业绩，signum()!=0 判定有新签，走下方正常审批流程
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
                     log.info("[实收审批] 贝壳实收无新签，DRAFT 待新签触发：applyNo={}, orderNo={}, received={}",
