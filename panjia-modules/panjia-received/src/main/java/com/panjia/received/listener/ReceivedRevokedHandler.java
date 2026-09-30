@@ -20,6 +20,10 @@ import tools.jackson.databind.ObjectMapper;
  * <p>
  * KE_RECEIVED / HISTORY_PAYROLL 批次撤销 → 硬删实收合同 + 实收明细 + 关联审批单。
  * （实收表在拆表后已迁出 pj_perf_fact，不再走 PerformanceRevokedHandler）。
+ * <p>
+ * 审批单状态约定（2026-09-30）：撤销前置校验（BatchConsumptionQueryAdapter 校验③）
+ * 已拦截 SUBMITTED(审批中)/APPROVED(已通过) 单，到达此 handler 的审批单均为 DRAFT
+ * （无新签等待中，无工作流实例），硬删安全不留孤儿。
  */
 @Slf4j
 @Component
