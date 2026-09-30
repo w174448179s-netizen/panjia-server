@@ -938,25 +938,31 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .orderByDesc(ReceivedApply::getCreateTime);
         // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）
         applyApprovalNodeScope(wrapper);
-        // 门店/组别筛选：通过事实表过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。
-        // 只要有一笔事实属于本部门（含下级），该审批单就可见。
+        // 门店/组别筛选：通过实收明细关联员工归属部门过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。
+        // 拆表后 PERF_REAL 已迁出 pj_perf_fact → pj_received_detail；导入时 employee_id 暂留空、
+        // 只存 employee_external_code，故须按外部工号关联 pj_people_employee 取 dept_id
+        // （兼容后续 employee_id 回填：优先 ID 直连，为空时按工号匹配）。
         if (effectiveDeptId != null) {
             wrapper.and(w -> w.apply(
-                "EXISTS (SELECT 1 FROM pj_perf_fact f"
-                    + " WHERE f.received_apply_id = pj_perf_received_apply.id"
-                    + " AND f.fact_status = 'ACTIVE'"
-                    + " AND (f.dept_id = {0}"
-                    + " OR f.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                "EXISTS (SELECT 1 FROM pj_received_detail rd"
+                    + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
+                    + "   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))"
+                    + " WHERE rd.received_apply_id = pj_perf_received_apply.id"
+                    + " AND rd.detail_status = 'ACTIVE'"
+                    + " AND (e.dept_id = {0}"
+                    + " OR e.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
                     + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))))",
                 effectiveDeptId));
         }
-        // 员工筛选：通过事实表的 employee_id 过滤（合同下可能有多个员工）
+        // 员工筛选：通过实收明细关联员工（口径同上，employee_id 未回填时按外部工号匹配）
         if (query.getEmployeeId() != null) {
             wrapper.and(w -> w.apply(
-                "EXISTS (SELECT 1 FROM pj_perf_fact f"
-                    + " WHERE f.received_apply_id = pj_perf_received_apply.id"
-                    + " AND f.fact_status = 'ACTIVE'"
-                    + " AND f.employee_id = {0})",
+                "EXISTS (SELECT 1 FROM pj_received_detail rd"
+                    + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
+                    + "   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))"
+                    + " WHERE rd.received_apply_id = pj_perf_received_apply.id"
+                    + " AND rd.detail_status = 'ACTIVE'"
+                    + " AND e.employee_id = {0})",
                 query.getEmployeeId()));
         }
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
