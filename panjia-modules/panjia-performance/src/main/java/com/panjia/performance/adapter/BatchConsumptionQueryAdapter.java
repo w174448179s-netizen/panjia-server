@@ -75,19 +75,34 @@ public class BatchConsumptionQueryAdapter implements BatchConsumptionQueryPort {
                 "该批次存在审批中/已通过的实收确认单（" + activeApplyCount + " 条），禁止撤销，请走退单/调整流程");
         }
 
-        // 校验④：新签批次反查同订单是否有 SUBMITTED/APPROVED 实收单
-        // 新签可能已触发下游实收审批/通过（resolveDraftAfterNewSign），撤销会让下游+结佣单成孤儿
+        // 校验④：新签批次反查同合同/订单是否有 SUBMITTED/APPROVED 实收单
+        // 新签可能已触发下游实收审批/通过（resolveDraftAfterNewSign → APPROVED → 建结佣单），
+        // 撤销会让下游实收单+结佣单成孤儿（结佣单明细引用已删新签事实）
+        // 双键反查：orderNo + contractNo，避免新签缺 orderNo 时漏检
         List<String> newSignOrderNos = facts.stream()
             .filter(f -> FactType.PERF_EXPECT.equals(f.getFactType()))
             .map(PerformanceFact::getOrderNo)
             .filter(s -> s != null && !s.isEmpty())
             .distinct()
             .toList();
-        if (!newSignOrderNos.isEmpty()) {
-            Long downstreamCount = receivedApplyMapper.selectCount(
-                new LambdaQueryWrapper<ReceivedApply>()
-                    .in(ReceivedApply::getOrderNo, newSignOrderNos)
-                    .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED));
+        List<String> newSignContractNos = facts.stream()
+            .filter(f -> FactType.PERF_EXPECT.equals(f.getFactType()))
+            .map(PerformanceFact::getContractNo)
+            .filter(s -> s != null && !s.isEmpty())
+            .distinct()
+            .toList();
+        if (!newSignOrderNos.isEmpty() || !newSignContractNos.isEmpty()) {
+            LambdaQueryWrapper<ReceivedApply> downstreamQuery = new LambdaQueryWrapper<ReceivedApply>()
+                .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED);
+            if (!newSignOrderNos.isEmpty() && !newSignContractNos.isEmpty()) {
+                downstreamQuery.and(w -> w.in(ReceivedApply::getOrderNo, newSignOrderNos)
+                    .or().in(ReceivedApply::getContractNo, newSignContractNos));
+            } else if (!newSignOrderNos.isEmpty()) {
+                downstreamQuery.in(ReceivedApply::getOrderNo, newSignOrderNos);
+            } else {
+                downstreamQuery.in(ReceivedApply::getContractNo, newSignContractNos);
+            }
+            Long downstreamCount = receivedApplyMapper.selectCount(downstreamQuery);
             if (downstreamCount != null && downstreamCount > 0) {
                 return RevokeCheckResult.reject(
                     "该新签批次已触发下游实收审批/通过（" + downstreamCount + " 条），禁止撤销，请先走退单/调整流程");
