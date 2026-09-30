@@ -68,6 +68,9 @@ public class PerformanceFactSearchVo {
     /** 调整类型（最近一条） */
     private String adjustType;
 
+    /** 是否存在「增加角色人」调整单（任意一条，含在途/已执行；独立于最近一条调整单类型） */
+    private Boolean hasAddMember;
+
     /** 实收审批单状态（最近一条） */
     private String receivedStatus;
 

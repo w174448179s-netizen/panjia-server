@@ -129,4 +129,7 @@ public class PerformanceManageVo {
 
     /** 已执行调整累计到本明细的调整金额（= amount − originalAmount，合同级由逆向分摊还原） */
     private BigDecimal adjustDelta;
+
+    /** 是否为「新增角色人」调整产生的新人事实行（source=MANUAL 且 source_key 带 MANUAL-ADJ 标记） */
+    private Boolean manualAdjust;
 }

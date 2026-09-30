@@ -169,7 +169,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount",
-               CASE WHEN BOOL_OR(f.fact_status = 'ACTIVE') THEN 'ACTIVE' ELSE 'VOIDED' END AS "factStatus"
+               CASE WHEN BOOL_OR(f.fact_status = 'ACTIVE') THEN 'ACTIVE' ELSE 'VOIDED' END AS "factStatus",
+               -- 加人调整口径：合同下存在 ACTIVE 的 MANUAL-ADJ 事实行即为「新增角色人」已生效
+               -- （驳回/撤销会冲销该行为 REVERSED，故无需再关联调整单表判断）
+               BOOL_OR(f.fact_status = 'ACTIVE' AND f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "hasAddMember"
         FROM pj_perf_fact f
         WHERE
         <choose>
@@ -298,7 +301,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.role_name AS roleName,
                f.share_ratio AS shareRatio,
                f.performance_amount AS amount,
-               f.source_key AS sourceKey
+               f.source_key AS sourceKey,
+               (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust"
         FROM pj_perf_fact f
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           AND f.period = #{period}
@@ -1067,7 +1071,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                lr.received_amount AS "receivedRealAmount",
                lc.status AS "commissionStatus",
                lc.apply_no AS "commissionApplyNo",
-               lc.total_amount AS "commissionAmount"
+               lc.total_amount AS "commissionAmount",
+               EXISTS (
+                   SELECT 1 FROM pj_perf_adjust pa2
+                   WHERE pa2.period = fa."period"
+                     AND pa2.adjust_type = 'ADD_MEMBER'
+                     AND pa2.status IN ('SUBMITTED', 'APPROVING', 'EXECUTED')
+                     AND pa2.contract_no IN (fa."contractNo", fa."orderNo")
+               ) AS "hasAddMember"
         FROM fact_agg fa
         LEFT JOIN LATERAL (
             SELECT pa.status, pa.adjust_no, pa.adjust_type

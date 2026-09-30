@@ -69,4 +69,7 @@ public class PerformanceManageContractVo {
 
     /** 审批中调整单的目标金额（仅 AMOUNT 类型有值，即调整后合同业绩合计） */
     private BigDecimal adjustPendingAmount;
+
+    /** 是否存在已生效的「新增角色人」调整（合同下有 ACTIVE 的 MANUAL-ADJ 事实行） */
+    private Boolean hasAddMember;
 }

@@ -503,6 +503,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             dto.setTargetAmount(targetAmt);
         }
 
+        // 2.5 合同级调整：dto.contractNo 是前端业务键（订单号优先、合同号兜底），
+        // 落库前归一化为事实表的真实合同号——否则调整单/详情把订单号当合同号展示，
+        // 而事实表 contract_no / order_no 两列本就分开存储
+        if (SCOPE_CONTRACT.equals(scope)) {
+            dto.setContractNo(resolveRealContractNo(dto));
+        }
+
         // 3. 构建调整单
         PerformanceAdjust adjust = new PerformanceAdjust();
         adjust.setAdjustNo(generateAdjustNo());
@@ -596,6 +603,23 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         log.info("[调整单] 创建并提交审批成功：adjustId={}, adjustNo={}, scope={}, type={}, applicantId={}",
             adjust.getId(), adjust.getAdjustNo(), scope, adjustType.getCode(), applicantId);
         return adjust;
+    }
+
+    /**
+     * 合同级调整的真实合同号归一化：dto.contractNo 为前端业务键（订单号优先、合同号兜底），
+     * 取该合同任一 ACTIVE 事实的 contract_no 回填；事实 contract_no 为空或无事实时原样返回业务键。
+     * 跨月调整时事实在 originalPeriod（原业绩归属月），与下方员工/部门回填的取数期间一致。
+     */
+    private String resolveRealContractNo(PerformanceAdjustCreateBo dto) {
+        String factLoadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+            ? dto.getOriginalPeriod() : dto.getPeriod();
+        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
+            factLoadPeriod, dto.getFactType(), dto.getContractNo());
+        return facts.stream()
+            .map(PerformanceFact::getContractNo)
+            .filter(StringUtils::isNotBlank)
+            .findFirst()
+            .orElse(dto.getContractNo());
     }
 
     @Override
