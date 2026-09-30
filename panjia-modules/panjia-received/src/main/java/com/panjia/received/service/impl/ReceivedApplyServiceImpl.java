@@ -493,8 +493,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
         // ===== 3. 批量查新签应收（ACTIVE PERF_EXPECT）→ 按匹配键归集到实收订单 =====
         // 匹配口径（2026-09-30）：合同号优先，合同号为空用订单号。
-        // 金额口径：当月优先（与 loadExpectItemFacts 一致）——实收月有新签 → 只用当月合计；
-        // 无 → 用历史（<实收月）合计；避免跨月重复计入
+        // 金额口径：当月优先——实收月有<b>非零</b>新签 → 只取当月合计；
+        // 当月新签为 0/无 → 不参与当月计算，回退汇总历史（<实收月）合计
         ExpectMatchKeys matchKeys = ExpectMatchKeys.build(contractByOrder);
         Map<String, BigDecimal> expectTotalByOrder = new HashMap<>();
         if (!matchKeys.isEmpty()) {
@@ -701,12 +701,13 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 跨月查该实收合同对应的 PERF_EXPECT ACTIVE 新签金额合计（合同号优先，空则订单号）。
+     * 按「当月优先」口径查该实收合同对应的 PERF_EXPECT ACTIVE 新签金额合计（合同号优先，空则订单号）。
+     * <p>当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，回退汇总历史（&lt;当月）。
      * 贝壳新签源数据 orderNo 可能误填成合同号，故有 contractNo 时按新签 contract_no 关联。
      */
     private BigDecimal sumExpectForMatch(String orderNo, String contractNo, String period) {
         boolean byContract = StringUtils.isNotBlank(contractNo);
-        if (!byContract && StringUtils.isBlank(orderNo)) {
+        if (period == null || (!byContract && StringUtils.isBlank(orderNo))) {
             return BigDecimal.ZERO;
         }
         LambdaQueryWrapper<PerformanceFact> q = new LambdaQueryWrapper<PerformanceFact>()
@@ -717,7 +718,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         } else {
             q.eq(PerformanceFact::getOrderNo, orderNo);
         }
-        // 当月优先口径（与 loadExpectItemFacts / sumExpect 一致）：实收月有新签 → 只用当月；无 → 历史
         BigDecimal currentSum = BigDecimal.ZERO;
         boolean hasCurrent = false;
         BigDecimal historySum = BigDecimal.ZERO;
@@ -727,14 +727,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 continue;
             }
             String fp = e.getPeriod();
-            if (period != null && period.equals(fp)) {
+            if (period.equals(fp)) {
                 hasCurrent = true;
                 currentSum = currentSum.add(amt);
-            } else if (period != null && fp != null && fp.compareTo(period) < 0) {
+            } else if (fp != null && fp.compareTo(period) < 0) {
                 historySum = historySum.add(amt);
-            } else if (period == null) {
-                // 无期间上下文时退化为全量合计（兼容旧调用）
-                currentSum = currentSum.add(amt);
             }
         }
         return hasCurrent ? currentSum : historySum;
@@ -1513,12 +1510,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         apply.setReceivedAmount(bound.stream()
             .map(d -> d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO)
             .reduce(BigDecimal.ZERO, BigDecimal::add));
-        // PERF_EXPECT 应收合计（从 pj_perf_fact 查，跨月）
-        Map<String, BigDecimal> expectedMap = factMapper.selectExpectSumsByBizKeys(apply.getPeriod(), List.of(apply.getOrderNo()))
-            .stream()
-            .collect(Collectors.toMap(BatchFactBindRow::getBizKey,
-                r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount(), (a, b) -> a));
-        apply.setExpectedAmount(expectedMap.getOrDefault(apply.getOrderNo(), BigDecimal.ZERO));
+        // PERF_EXPECT 应收合计（当月优先口径：当月有新签只取当月，无则历史；与建单/结佣一致）
+        apply.setExpectedAmount(
+            sumExpectForMatch(apply.getOrderNo(), apply.getContractNo(), apply.getPeriod()));
         apply.setUpdateTime(LocalDateTime.now());
         applyMapper.updateById(apply);
     }
@@ -1527,15 +1521,15 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * （已重写为查实收表，旧版查 PERF_REAL 的方法已删除） */
 
     private BigDecimal sumExpect(String period, String contractNo) {
-        // 当月优先口径（与 loadExpectItemFacts 一致）：实收月有新签 → 只用当月合计；
-        // 无 → 用历史（<实收月）合计。一次查询内存分流，避免跨月重复计入
+        // 当月优先口径：当月有<b>非零</b>新签 → 只取当月合计；
+        // 当月为 0/无 → 不参与当月计算，回退汇总历史（<实收月）合计。一次查询内存分流
         List<PerformanceFact> facts = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
                 .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
                 .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
                 .and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
                     .or().eq(PerformanceFact::getOrderNo, contractNo)));
-        List<PerformanceFact> currentMonth = new java.util.ArrayList<>();
-        List<PerformanceFact> history = new java.util.ArrayList<>();
+        List<PerformanceFact> currentMonth = new ArrayList<>();
+        List<PerformanceFact> history = new ArrayList<>();
         for (PerformanceFact f : facts) {
             if (f.getPerformanceAmount() == null || f.getPerformanceAmount().signum() == 0) {
                 continue;

@@ -745,8 +745,8 @@ public class CommissionApplicationService {
         }
         List<PerformanceFactSummaryDTO> expects =
             performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
-        // 结佣金额口径（2026-09-30 定稿）：当月有新签用当月，当月无新签用历史（实收月之前全部月合计）
-        // 当月有新签时只用当月，不含历史，避免跨月重复结佣；都无则返回空（L586 抛异常不建单）
+        // 结佣金额口径（2026-09-30 定稿）：当月有非零新签用当月，当月为 0/无新签用历史
+        // （实收月之前全部月合计）。0 元新签不参与计算、不视为"当月有新签"，仍回退汇总历史
         List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
         List<PerformanceFactSummaryDTO> history = new ArrayList<>();
         for (PerformanceFactSummaryDTO e : expects) {
@@ -1576,6 +1576,8 @@ public class CommissionApplicationService {
     /**
      * 查当前 ACTIVE PERF_EXPECT 合计，与申请单快照比较：
      * 不一致时置 expectedAdjusted=true，并用当前值覆盖 expectedAmount 供前端展示。
+     * <p>金额口径当月优先（与 loadExpectItemFacts 一致）：当月有<b>非零</b>新签 → 只取当月合计；
+     * 当月为 0/无 → 不参与当月计算，取历史（&lt;实收月）合计。
      */
     private void fillExpectedAdjusted(CommissionApplication app) {
         if (app == null || StringUtils.isBlank(app.getPeriod())
@@ -1583,9 +1585,23 @@ public class CommissionApplicationService {
             return;
         }
         String lookupKey = StringUtils.isNotBlank(app.getContractNo()) ? app.getContractNo() : app.getOrderNo();
-        List<PerformanceFactSummaryDTO> expectFacts =
-            performanceQueryPort.findActiveByContract(app.getPeriod(), lookupKey, FACT_TYPE_EXPECT);
-        BigDecimal currentExpected = expectFacts.stream()
+        List<PerformanceFactSummaryDTO> allExpects =
+            performanceQueryPort.findActiveByBizKeys(java.util.List.of(lookupKey), FACT_TYPE_EXPECT);
+        List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
+        List<PerformanceFactSummaryDTO> history = new ArrayList<>();
+        for (PerformanceFactSummaryDTO e : allExpects) {
+            if (e.getAmount() == null || e.getAmount().signum() == 0) {
+                continue;
+            }
+            String ep = e.getPeriod();
+            if (app.getPeriod().equals(ep)) {
+                currentMonth.add(e);
+            } else if (ep != null && ep.compareTo(app.getPeriod()) < 0) {
+                history.add(e);
+            }
+        }
+        List<PerformanceFactSummaryDTO> target = !currentMonth.isEmpty() ? currentMonth : history;
+        BigDecimal currentExpected = target.stream()
             .map(PerformanceFactSummaryDTO::getAmount)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
         if (app.getExpectedAmount() != null && app.getExpectedAmount().compareTo(currentExpected) != 0) {

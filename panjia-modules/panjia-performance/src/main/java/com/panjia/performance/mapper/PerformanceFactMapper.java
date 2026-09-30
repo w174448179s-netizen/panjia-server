@@ -575,8 +575,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 关联 pj_people_employee（导入时 rd.employee_id 暂留空）。
      * <p>
      * 应收金额按「同合同 + 同员工工号 + 同角色」配对 ACTIVE PERF_EXPECT 求和
-     * （同员工同角色可能跨多个费项，故聚合为一行）；金额口径<b>当月优先</b>——实收月有新签
-     * → 只取当月合计，无 → 取历史（&lt;实收月）合计，与建单/结佣口径一致。
+     * （同员工同角色可能跨多个费项，故聚合为一行）；金额口径<b>当月优先</b>——当月有
+     * <b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，取历史（&lt;实收月）合计，
+     * 与建单/结佣口径一致。
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
      *
@@ -593,11 +594,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ),
         expect_scope AS (
-            -- 新签金额口径：实收月有新签 → 只取当月；无 → 取历史（&lt;实收月），与建单/结佣口径一致
+            -- 新签金额口径：当月有非零新签 → 只取当月；
+            -- 当月为 0/无 → 不参与当月计算，取历史（实收月之前），与建单/结佣口径一致
             SELECT EXISTS (
                 SELECT 1 FROM pj_perf_fact pc
                 WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
                   AND pc.period = #{period}
+                  AND pc.performance_amount != 0
                   AND (pc.contract_no = #{contractNo} OR pc.order_no = #{contractNo})
             ) AS has_current
         ),
@@ -683,8 +686,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 员工去重按员工主数据 ID（rd.employee_id 暂留空时回退外部工号）。
      * <p>
      * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
-     * 金额口径当月优先：实收月有新签 → 只取当月合计；无 → 取历史（&lt;实收月）合计，
-     * 与建单/结佣口径一致（避免跨月重复计入）。
+     * 金额口径当月优先：当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，
+     * 取历史（&lt;实收月）合计，与建单/结佣口径一致。
      * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
      * （前端据此不展示「原值 → 调整后值」）。
      * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
@@ -711,11 +714,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                SELECT 1 FROM pj_perf_fact pc
                                WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
                                  AND pc.period = #{period}
+                                 AND pc.performance_amount != 0
                                  AND (pc.contract_no = k.key OR pc.order_no = k.key)))
                         OR (pe.period &lt; #{period} AND NOT EXISTS (
                                SELECT 1 FROM pj_perf_fact pc
                                WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
                                  AND pc.period = #{period}
+                                 AND pc.performance_amount != 0
                                  AND (pc.contract_no = k.key OR pc.order_no = k.key)))
                          )
                ), 0) AS "expectedAmount"
