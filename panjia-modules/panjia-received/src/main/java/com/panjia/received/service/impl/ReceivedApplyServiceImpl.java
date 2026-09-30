@@ -491,10 +491,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             log.info("[实收审批] 贝壳实收批次无有效订单号，跳过建单：batchId={}", batchId);
             return 0;
         }
-        // ===== 3. 批量查新签应收（跨月 PERF_EXPECT ACTIVE）→ 按匹配键归集到实收订单 =====
+        // ===== 3. 批量查新签应收（ACTIVE PERF_EXPECT）→ 按匹配键归集到实收订单 =====
         // 匹配口径（2026-09-30）：合同号优先，合同号为空用订单号。
-        // 贝壳新签源数据 orderNo 可能误填成合同号（与实收 orderNo 不同），有 contractNo 时按新签
-        // contract_no 关联；跨月基数 = 该合同全部月份新签合计（含调整后 supersede 新事实）
+        // 金额口径：当月优先（与 loadExpectItemFacts 一致）——实收月有新签 → 只用当月合计；
+        // 无 → 用历史（<实收月）合计；避免跨月重复计入
         ExpectMatchKeys matchKeys = ExpectMatchKeys.build(contractByOrder);
         Map<String, BigDecimal> expectTotalByOrder = new HashMap<>();
         if (!matchKeys.isEmpty()) {
@@ -509,13 +509,26 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             } else {
                 expectQ.in(PerformanceFact::getOrderNo, matchKeys.orderOnlyKeys);
             }
+            Map<String, BigDecimal> currentMonthTotal = new HashMap<>();
+            Map<String, BigDecimal> historyTotal = new HashMap<>();
             for (PerformanceFact e : factMapper.selectList(expectQ)) {
+                BigDecimal amt = nvlAmount(e.getPerformanceAmount());
+                if (amt.signum() == 0) {
+                    continue;
+                }
                 String targetOrderNo = matchKeys.resolveTarget(e.getOrderNo(), e.getContractNo());
                 if (targetOrderNo == null) {
                     continue;
                 }
-                expectTotalByOrder.merge(targetOrderNo, nvlAmount(e.getPerformanceAmount()), BigDecimal::add);
+                String fp = e.getPeriod();
+                if (period.equals(fp)) {
+                    currentMonthTotal.merge(targetOrderNo, amt, BigDecimal::add);
+                } else if (fp != null && fp.compareTo(period) < 0) {
+                    historyTotal.merge(targetOrderNo, amt, BigDecimal::add);
+                }
             }
+            expectTotalByOrder.putAll(historyTotal);
+            currentMonthTotal.forEach(expectTotalByOrder::put);
         }
         // ===== 4. 活跃审批单批量预加载（判重维度同匹配口径） =====
         Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, matchKeys);
@@ -660,8 +673,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             return false;
         }
 
-        // 2. 跨月查该实收合同对应 PERF_EXPECT ACTIVE 合计（合同号优先，口径同 autoCreateForReceivedBatch）
-        BigDecimal expectTotal = sumExpectForMatch(apply.getOrderNo(), apply.getContractNo());
+        // 2. 当月优先查该实收合同对应 PERF_EXPECT ACTIVE 合计（合同号优先，口径同 autoCreateForReceivedBatch）
+        BigDecimal expectTotal = sumExpectForMatch(apply.getOrderNo(), apply.getContractNo(), apply.getPeriod());
         if (expectTotal.signum() <= 0) {
             // 仍无新签（兜底，不应发生——新签刚导入触发）
             return false;
@@ -691,7 +704,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 跨月查该实收合同对应的 PERF_EXPECT ACTIVE 新签金额合计（合同号优先，空则订单号）。
      * 贝壳新签源数据 orderNo 可能误填成合同号，故有 contractNo 时按新签 contract_no 关联。
      */
-    private BigDecimal sumExpectForMatch(String orderNo, String contractNo) {
+    private BigDecimal sumExpectForMatch(String orderNo, String contractNo, String period) {
         boolean byContract = StringUtils.isNotBlank(contractNo);
         if (!byContract && StringUtils.isBlank(orderNo)) {
             return BigDecimal.ZERO;
@@ -704,11 +717,27 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         } else {
             q.eq(PerformanceFact::getOrderNo, orderNo);
         }
-        BigDecimal sum = BigDecimal.ZERO;
+        // 当月优先口径（与 loadExpectItemFacts / sumExpect 一致）：实收月有新签 → 只用当月；无 → 历史
+        BigDecimal currentSum = BigDecimal.ZERO;
+        boolean hasCurrent = false;
+        BigDecimal historySum = BigDecimal.ZERO;
         for (PerformanceFact e : factMapper.selectList(q)) {
-            sum = sum.add(nvlAmount(e.getPerformanceAmount()));
+            BigDecimal amt = nvlAmount(e.getPerformanceAmount());
+            if (amt.signum() == 0) {
+                continue;
+            }
+            String fp = e.getPeriod();
+            if (period != null && period.equals(fp)) {
+                hasCurrent = true;
+                currentSum = currentSum.add(amt);
+            } else if (period != null && fp != null && fp.compareTo(period) < 0) {
+                historySum = historySum.add(amt);
+            } else if (period == null) {
+                // 无期间上下文时退化为全量合计（兼容旧调用）
+                currentSum = currentSum.add(amt);
+            }
         }
-        return sum;
+        return hasCurrent ? currentSum : historySum;
     }
 
     /**
@@ -1498,15 +1527,29 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * （已重写为查实收表，旧版查 PERF_REAL 的方法已删除） */
 
     private BigDecimal sumExpect(String period, String contractNo) {
-        // 跨月口径：新签事实归属签约月，实收可能后续月份到账（如实收 8 月、新签 7 月），
-        // 限当月查询会把历史新签漏成 0；与建单快照 sumExpectForMatch 保持同口径
-        return factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+        // 当月优先口径（与 loadExpectItemFacts 一致）：实收月有新签 → 只用当月合计；
+        // 无 → 用历史（<实收月）合计。一次查询内存分流，避免跨月重复计入
+        List<PerformanceFact> facts = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
                 .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
                 .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
                 .and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
-                    .or().eq(PerformanceFact::getOrderNo, contractNo)))
-            .stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
+                    .or().eq(PerformanceFact::getOrderNo, contractNo)));
+        List<PerformanceFact> currentMonth = new java.util.ArrayList<>();
+        List<PerformanceFact> history = new java.util.ArrayList<>();
+        for (PerformanceFact f : facts) {
+            if (f.getPerformanceAmount() == null || f.getPerformanceAmount().signum() == 0) {
+                continue;
+            }
+            String fp = f.getPeriod();
+            if (period.equals(fp)) {
+                currentMonth.add(f);
+            } else if (fp != null && fp.compareTo(period) < 0) {
+                history.add(f);
+            }
+        }
+        List<PerformanceFact> target = !currentMonth.isEmpty() ? currentMonth : history;
+        return target.stream()
+            .map(f -> nvlAmount(f.getPerformanceAmount()))
             .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 

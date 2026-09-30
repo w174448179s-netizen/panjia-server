@@ -86,6 +86,19 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
              AND (pe.order_no = rp.order_no OR pe.contract_no = rp.contract_no)
              AND pe.employee_external_code IS NOT DISTINCT FROM rp.emp_code
              AND pe.role_type IS NOT DISTINCT FROM rp.role_type
+             -- 当月优先口径：实收月有新签 → 只取当月；无 → 取历史（&lt;实收月）
+             AND (
+                   (pe.period = rp.period AND EXISTS (
+                       SELECT 1 FROM pj_perf_fact pc
+                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                         AND pc.period = rp.period
+                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
+                OR (pe.period &lt; rp.period AND NOT EXISTS (
+                       SELECT 1 FROM pj_perf_fact pc
+                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                         AND pc.period = rp.period
+                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
+                 )
             GROUP BY 1, 2, 3, 4, 5
         ),
         rd_original_expect AS (
@@ -107,6 +120,19 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               ON (chain.order_no = rp.order_no OR chain.contract_no = rp.contract_no)
              AND chain.emp_code IS NOT DISTINCT FROM rp.emp_code
              AND chain.role_type IS NOT DISTINCT FROM rp.role_type
+             -- 与 rd_active_expect 同口径：当月有新签取当月链，否则取历史链
+             AND (
+                   (chain.period = rp.period AND EXISTS (
+                       SELECT 1 FROM pj_perf_fact pc
+                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                         AND pc.period = rp.period
+                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
+                OR (chain.period &lt; rp.period AND NOT EXISTS (
+                       SELECT 1 FROM pj_perf_fact pc
+                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                         AND pc.period = rp.period
+                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
+                 )
             GROUP BY 1, 2, 3, 4, 5
         ),
         reversed_real AS (

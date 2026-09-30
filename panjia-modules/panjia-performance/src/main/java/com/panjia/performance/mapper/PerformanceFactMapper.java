@@ -575,8 +575,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 关联 pj_people_employee（导入时 rd.employee_id 暂留空）。
      * <p>
      * 应收金额按「同合同 + 同员工工号 + 同角色」配对 ACTIVE PERF_EXPECT 求和
-     * （同员工同角色可能跨多个费项，故聚合为一行）；<b>跨月口径</b>——新签事实归属签约月，
-     * 实收可能后续月份到账（如实收 8 月、新签 7 月），不限 period，与建单快照口径一致。
+     * （同员工同角色可能跨多个费项，故聚合为一行）；金额口径<b>当月优先</b>——实收月有新签
+     * → 只取当月合计，无 → 取历史（&lt;实收月）合计，与建单/结佣口径一致。
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
      *
@@ -592,13 +592,24 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             WHERE rc.period = #{period}
               AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ),
+        expect_scope AS (
+            -- 新签金额口径：实收月有新签 → 只取当月；无 → 取历史（&lt;实收月），与建单/结佣口径一致
+            SELECT EXISTS (
+                SELECT 1 FROM pj_perf_fact pc
+                WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                  AND pc.period = #{period}
+                  AND (pc.contract_no = #{contractNo} OR pc.order_no = #{contractNo})
+            ) AS has_current
+        ),
         active_expect AS (
             SELECT pe.employee_external_code AS emp_code, pe.role_type,
                    SUM(pe.performance_amount) AS exp_amt
-            FROM pj_perf_fact pe
-            JOIN rc ON (pe.order_no = rc.order_no OR pe.contract_no = rc.contract_no)
+            FROM pj_perf_fact pe, expect_scope es
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
+              AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
+              AND ((es.has_current AND pe.period = #{period})
+                   OR (NOT es.has_current AND pe.period &lt; #{period}))
             GROUP BY pe.employee_external_code, pe.role_type
         ),
         reversed_chain AS (
@@ -609,9 +620,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact a
             JOIN pj_perf_fact b ON b.source_key = a.source_key
                AND b.fact_type = 'PERF_EXPECT' AND b.fact_status = 'REVERSED'
-            JOIN rc ON (a.order_no = rc.order_no OR a.contract_no = rc.contract_no)
+            CROSS JOIN expect_scope es
             WHERE a.fact_status = 'ACTIVE'
               AND a.fact_type = 'PERF_EXPECT'
+              AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
+              AND ((es.has_current AND a.period = #{period})
+                   OR (NOT es.has_current AND a.period &lt; #{period}))
             ORDER BY a.source_key, b.id ASC
         ),
         original_expect AS (
@@ -669,7 +683,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 员工去重按员工主数据 ID（rd.employee_id 暂留空时回退外部工号）。
      * <p>
      * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
-     * <b>跨月口径</b>——新签事实归属签约月，实收可能后续月份到账，不限 period，与建单快照口径一致。
+     * 金额口径当月优先：实收月有新签 → 只取当月合计；无 → 取历史（&lt;实收月）合计，
+     * 与建单/结佣口径一致（避免跨月重复计入）。
      * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
      * （前端据此不展示「原值 → 调整后值」）。
      * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
@@ -691,6 +706,18 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    FROM pj_perf_fact pe
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                      AND (pe.contract_no = k.key OR pe.order_no = k.key)
+                     AND (
+                           (pe.period = #{period} AND EXISTS (
+                               SELECT 1 FROM pj_perf_fact pc
+                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                                 AND pc.period = #{period}
+                                 AND (pc.contract_no = k.key OR pc.order_no = k.key)))
+                        OR (pe.period &lt; #{period} AND NOT EXISTS (
+                               SELECT 1 FROM pj_perf_fact pc
+                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                                 AND pc.period = #{period}
+                                 AND (pc.contract_no = k.key OR pc.order_no = k.key)))
+                         )
                ), 0) AS "expectedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
