@@ -575,8 +575,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 关联 pj_people_employee（导入时 rd.employee_id 暂留空）。
      * <p>
      * 应收金额按「同合同 + 同员工工号 + 同角色」配对 ACTIVE PERF_EXPECT 求和
-     * （同员工同角色可能跨多个费项，故聚合为一行）；应收原值沿 ACTIVE 行 sourceKey
-     * 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
+     * （同员工同角色可能跨多个费项，故聚合为一行）；<b>跨月口径</b>——新签事实归属签约月，
+     * 实收可能后续月份到账（如实收 8 月、新签 7 月），不限 period，与建单快照口径一致。
+     * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
      *
      * @param period     归属期间
@@ -598,7 +599,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             JOIN rc ON (pe.order_no = rc.order_no OR pe.contract_no = rc.contract_no)
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
-              AND pe.period = #{period}
             GROUP BY pe.employee_external_code, pe.role_type
         ),
         reversed_chain AS (
@@ -612,7 +612,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             JOIN rc ON (a.order_no = rc.order_no OR a.contract_no = rc.contract_no)
             WHERE a.fact_status = 'ACTIVE'
               AND a.fact_type = 'PERF_EXPECT'
-              AND a.period = #{period}
             ORDER BY a.source_key, b.id ASC
         ),
         original_expect AS (
@@ -669,7 +668,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * {@code pj_received_contract rc + pj_received_detail rd}（ACTIVE 明细），
      * 员工去重按员工主数据 ID（rd.employee_id 暂留空时回退外部工号）。
      * <p>
-     * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
+     * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
+     * <b>跨月口径</b>——新签事实归属签约月，实收可能后续月份到账，不限 period，与建单快照口径一致。
      * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
      * （前端据此不展示「原值 → 调整后值」）。
      * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
@@ -690,7 +690,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    SELECT SUM(pe.performance_amount)
                    FROM pj_perf_fact pe
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-                     AND pe.period = #{period}
                      AND (pe.contract_no = k.key OR pe.order_no = k.key)
                ), 0) AS "expectedAmount"
         FROM (VALUES

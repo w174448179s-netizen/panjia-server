@@ -83,7 +83,6 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             FROM rd_pair rp
             JOIN pj_perf_fact pe
               ON pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-             AND pe.period = rp.period
              AND (pe.order_no = rp.order_no OR pe.contract_no = rp.contract_no)
              AND pe.employee_external_code IS NOT DISTINCT FROM rp.emp_code
              AND pe.role_type IS NOT DISTINCT FROM rp.role_type
@@ -105,8 +104,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                 WHERE a.fact_status = 'ACTIVE' AND a.fact_type = 'PERF_EXPECT'
                 ORDER BY a.source_key, b.id ASC
             ) chain
-              ON chain.period = rp.period
-             AND (chain.order_no = rp.order_no OR chain.contract_no = rp.contract_no)
+              ON (chain.order_no = rp.order_no OR chain.contract_no = rp.contract_no)
              AND chain.emp_code IS NOT DISTINCT FROM rp.emp_code
              AND chain.role_type IS NOT DISTINCT FROM rp.role_type
             GROUP BY 1, 2, 3, 4, 5

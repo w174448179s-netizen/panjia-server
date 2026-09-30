@@ -1498,7 +1498,14 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * （已重写为查实收表，旧版查 PERF_REAL 的方法已删除） */
 
     private BigDecimal sumExpect(String period, String contractNo) {
-        return factMapper.selectActiveFactsByContractNo(period, FACT_TYPE_EXPECT, contractNo).stream()
+        // 跨月口径：新签事实归属签约月，实收可能后续月份到账（如实收 8 月、新签 7 月），
+        // 限当月查询会把历史新签漏成 0；与建单快照 sumExpectForMatch 保持同口径
+        return factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+                .and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
+                    .or().eq(PerformanceFact::getOrderNo, contractNo)))
+            .stream()
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
