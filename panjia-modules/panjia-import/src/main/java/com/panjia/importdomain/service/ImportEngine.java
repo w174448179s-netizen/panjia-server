@@ -682,6 +682,10 @@ public class ImportEngine {
             }
         }
 
+        // 批内已用 sourceKey 集合：检测同键冲突（同合同同角色正负对冲行/重复行），
+        // 冲突时追加行号保证唯一，避免撞 uk_norm_source_key 导致整批导入失败
+        java.util.Set<String> usedSourceKeys = new java.util.HashSet<>();
+
         for (RawData raw : rawRows) {
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
             String externalCode = extractExternalCode(jsonMap);
@@ -754,6 +758,13 @@ public class ImportEngine {
                 // uk_perf_fact_source_key 为 WHERE ACTIVE 部分索引，跨批 supersede 无冲突）
                 if ((contractLevelRow || attachedVirtual) && sourceKey != null) {
                     sourceKey = sourceKey + "#" + raw.getRowNo();
+                }
+                // 批内同键冲突（如同合同同角色同费用项的正负对冲行：新签+退单红冲同批出现）：
+                // 追加行号保证批内唯一。正常行不加后缀保持 sourceKey 稳定（下游幂等锚点不变），
+                // 仅冲突行加 #rowNo（行号对同一 Excel 稳定，重导幂等）
+                if (sourceKey != null && !usedSourceKeys.add(sourceKey)) {
+                    sourceKey = sourceKey + "#" + raw.getRowNo();
+                    usedSourceKeys.add(sourceKey);
                 }
                 nr.setSourceKey(sourceKey);
             }

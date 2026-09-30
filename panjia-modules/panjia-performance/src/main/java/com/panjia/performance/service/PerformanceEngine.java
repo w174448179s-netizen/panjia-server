@@ -431,8 +431,11 @@ public class PerformanceEngine {
         //   历史实收正数额，红冲的超额拦截会误杀。
         if (MoneyUtil.isNegative(currentAmount)
                 && !RECORD_TYPE_KE_RECEIVED.equals(record.getRecordType())) {
+            // 红冲回溯用剥离批内冲突后缀（#行号，同批正负对冲行）的原始业务键前缀，
+            // 保证能找到历史成交月原正数事实；generateSourceKey 幂等锚点仍用完整 key。
+            // 排除当前批次：同批次的正负行（签约补录+比例调整）不互为红冲原事实。
             PerformanceFact original = factMapper.selectOriginalPositiveFact(
-                buildSourceKeyPrefix(record), factType.getCode());
+                buildSourceKeyPrefixForRedink(record), factType.getCode(), record.getBatchId());
             if (original != null) {
                 return buildRedinkFact(record, factType, currentAmount, original,
                     sourceKey, operatorId, createdCollector);
@@ -601,13 +604,18 @@ public class PerformanceEngine {
         } else {
             // 部分退：红冲比例（负数）= 本次负数当前额 ÷ 原当前额，按比例冲回
             BigDecimal ratio = negCurrentAmount.divide(originalCurrent, 8, RoundingMode.HALF_UP);
-            if (ratio.abs().compareTo(BigDecimal.ONE) > 0) {
-                // §3.5 红冲超额拦截：退金额 > 原金额时禁止生成超额红冲事实，
-                // 否则合同 real_total 可能变负、下游算薪扣回异常。
-                // 仅 warn 会让错误数据静默入库，此处抛异常拒绝并提示核对贝壳数据。
+            // §3.5 红冲超额拦截：退金额 > 该业务线历史累计正业绩时禁止生成，
+            // 否则合同 real_total 可能变负、下游算薪扣回异常。
+            // 基准 = 该合同该人该业务线（同业务键前缀）跨全部月份的 ACTIVE 正事实合计，
+            // 而非单条原事实金额——同一笔业务跨月多笔成交时，退单可从累计业绩冲减，
+            // 单看当月/单条原事实会误杀合法退单。
+            BigDecimal totalPositive = factMapper.sumPositiveBySourceKeyPrefix(
+                buildSourceKeyPrefixForRedink(record), factType.getCode());
+            if (negCurrentAmount.abs().compareTo(totalPositive) > 0) {
                 throw new ServiceException(
-                    "[业绩红冲] 红冲金额超过原正数事实（超额退单），拒绝生成超额红冲事实：originalFactId="
-                        + original.getId() + ", ratio=" + ratio
+                    "[业绩红冲] 红冲金额超过该业务线历史累计正业绩（超额退单），拒绝生成超额红冲事实：originalFactId="
+                        + original.getId() + ", 红冲金额=" + MoneyUtil.round2(negCurrentAmount)
+                        + ", 历史累计正业绩=" + MoneyUtil.round2(totalPositive)
                         + "，请核对贝壳数据后重新导入");
             }
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().multiply(ratio));
@@ -703,6 +711,27 @@ public class PerformanceEngine {
         String sourceType = record.getSourceType() == null ? "" : record.getSourceType();
         String recordSourceKey = record.getSourceKey() == null ? "" : record.getSourceKey();
         return sourceType + "-" + recordSourceKey + "-";
+    }
+
+    /**
+     * 红冲回溯专用业务键前缀：剥离归一化层批内冲突追加的 {@code #行号} 后缀。
+     * <p>
+     * 同一合同同角色同费用项在同批次出现正负两行（新签+退单红冲）时，归一化层为通过
+     * {@code uk_norm_source_key} 会给第二行追加 {@code #rowNo}。红冲回溯成交月原事实时
+     * 必须按原始业务键（订单|合同|角色|费项|角色类型）匹配，故剥离该后缀。
+     * 空角色行（contractLevelRow/attachedVirtual）本就带 {@code #rowNo}，剥离后前缀
+     * 与成交月同键原事实仍一致，语义正确。
+     */
+    private static String buildSourceKeyPrefixForRedink(NormalizedRecordDTO record) {
+        String prefix = buildSourceKeyPrefix(record);
+        int hashIdx = prefix.indexOf('#');
+        if (hashIdx <= 0) {
+            return prefix;
+        }
+        // 结构 sourceType-key#rowNo-：剔除 #rowNo 段，保留尾部 '-'
+        int tailDash = prefix.indexOf('-', hashIdx);
+        return tailDash > 0 ? prefix.substring(0, hashIdx) + prefix.substring(tailDash)
+                            : prefix.substring(0, hashIdx);
     }
 
     /** 归一化记录类型 code：贝壳新签明细行（原贝壳业绩导入，仅当月应收列参与事实，实收改由贝壳实收导入产生） */

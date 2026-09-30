@@ -443,9 +443,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * （订单|合同|角色人|费项|角色类型）在成交月与退单月仅末尾 period 不同，
      * 故用 POSITION 做严格前缀匹配（避免 LIKE 下业务键含 _ / % 的歧义），
      * 取最早期间的一条正数事实作为红冲镜像源。
+     * <p>
+     * 排除当前批次：同一批次内同业务键的正负两行（如签约补录 + 比例变更调整同批出现）
+     * 不是"跨月退单"，互冲会误判超额；红冲只应对历史批次的成交月原事实镜像。
      *
      * @param sourceKeyPrefix 业务键前缀（sourceType + "-" + recordSourceKey + "-"，不含 period）
      * @param factType        事实口径
+     * @param excludeBatchId  当前批次 ID（其事实不参与原事实匹配）
      * @return 最早的正数 ACTIVE 原事实；无则返回 null
      */
     @Select("""
@@ -456,11 +460,31 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           AND f.performance_amount > 0
           AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
           AND LENGTH(f.source_key) = LENGTH(#{sourceKeyPrefix}) + 7
+          AND (f.batch_id IS NULL OR f.batch_id != #{excludeBatchId})
         ORDER BY f.period ASC, f.id ASC
         LIMIT 1
         """)
     PerformanceFact selectOriginalPositiveFact(@Param("sourceKeyPrefix") String sourceKeyPrefix,
-                                               @Param("factType") String factType);
+                                               @Param("factType") String factType,
+                                               @Param("excludeBatchId") Long excludeBatchId);
+
+    /**
+     * 同业务键前缀下所有 ACTIVE 正事实的业绩合计（红冲超额校验基准）。
+     * <p>
+     * 口径：该合同该人该业务线（订单|合同|角色|费项|角色类型）跨全部月份的正业绩总额。
+     * 退单可冲减的上限 = 历史累计正业绩，而非单条原事实金额。
+     */
+    @Select("""
+        SELECT COALESCE(SUM(f.performance_amount), 0)
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = #{factType}
+          AND f.performance_amount > 0
+          AND POSITION(#{sourceKeyPrefix} IN f.source_key) = 1
+          AND LENGTH(f.source_key) = LENGTH(#{sourceKeyPrefix}) + 7
+        """)
+    java.math.BigDecimal sumPositiveBySourceKeyPrefix(@Param("sourceKeyPrefix") String sourceKeyPrefix,
+                                                      @Param("factType") String factType);
 
     /**
      * 按事实 ID 集合查询事实摘要（含合同号/订单号/房源地址）。
