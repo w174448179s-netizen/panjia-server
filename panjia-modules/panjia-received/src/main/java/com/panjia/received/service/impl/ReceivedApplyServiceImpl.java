@@ -546,10 +546,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                         existing.getId(), orderNo);
                     continue;
                 }
-                // 合同维度判定：订单到账合计 vs 订单跨月新签合计
-                boolean needManual = needManualReview(realSum, expectedAmount);
                 ReceivedApply apply = newApplyFromContract(period, contract, batchId, operatorId,
                     rows.size(), realSum, expectedAmount, uniqueDeptId);
+                boolean hasNewSign = expectedAmount != null && expectedAmount.signum() > 0;
+                if (!hasNewSign) {
+                    // 无新签：DRAFT 不启动工作流、不 emit，等新签导入触发（修复原自动通过 bug）
+                    insertApply(apply);
+                    bindFacts(factIds, apply.getId());
+                    log.info("[实收审批] 贝壳实收无新签，DRAFT 待新签触发：applyNo={}, orderNo={}, received={}",
+                        apply.getApplyNo(), orderNo, apply.getReceivedAmount());
+                    created++;
+                    continue;
+                }
+                // 合同维度判定：订单到账合计 vs 订单跨月新签合计
+                boolean needManual = needManualReview(realSum, expectedAmount);
                 if (needManual) {
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
@@ -606,6 +616,77 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     private static BigDecimal nvlAmount(BigDecimal v) {
         return v == null ? BigDecimal.ZERO : v;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean resolveDraftAfterNewSign(String period, String contractNo, Long operatorId) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+            return false;
+        }
+        if (operatorId == null) {
+            try {
+                operatorId = LoginHelper.getUserId();
+            } catch (Exception ignored) {
+            }
+        }
+        if (operatorId == null) {
+            operatorId = 1L;
+        }
+
+        // 1. 查该合同当月 DRAFT 实收审批单（取最新一张）
+        ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
+            .eq(ReceivedApply::getPeriod, period)
+            .eq(ReceivedApply::getContractNo, contractNo)
+            .eq(ReceivedApply::getStatus, ReceivedApplyStatus.DRAFT)
+            .orderByDesc(ReceivedApply::getId)
+            .last("LIMIT 1"));
+        if (apply == null) {
+            return false;
+        }
+
+        // 2. 跨月查该订单 PERF_EXPECT ACTIVE 合计（口径同 autoCreateForReceivedBatch）
+        BigDecimal expectTotal = sumExpectByOrderNo(apply.getOrderNo());
+        if (expectTotal.signum() <= 0) {
+            // 仍无新签（兜底，不应发生——新签刚导入触发）
+            return false;
+        }
+
+        BigDecimal realSum = nvlAmount(apply.getReceivedAmount());
+        apply.setExpectedAmount(expectTotal);
+        if (realSum.compareTo(expectTotal) >= 0) {
+            // 实收 ≥ 新签 → 自动通过 + emit（触发结佣建单）
+            apply.setStatus(ReceivedApplyStatus.APPROVED);
+            apply.setApproverId(operatorId);
+            apply.setApproveTime(LocalDateTime.now());
+            applyMapper.updateById(apply);
+            emitApprovedEvent(apply, operatorId);
+            log.info("[实收审批] 新签触发自动通过：applyNo={}, orderNo={}, received={}, expect={}",
+                apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal);
+            return true;
+        }
+        // 实收 < 新签 → 启动人工审批工作流（与导入时"有新签但不足"路径一致）
+        startWorkflow(apply, apply.getApplicantId(), Set.of());
+        log.info("[实收审批] 新签触发人工审批（实收不足）：applyNo={}, orderNo={}, received={}, expect={}",
+            apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal);
+        return false;
+    }
+
+    /**
+     * 跨月查该订单 PERF_EXPECT ACTIVE 业绩金额合计（复用 autoCreateForReceivedBatch 口径）。
+     */
+    private BigDecimal sumExpectByOrderNo(String orderNo) {
+        if (StringUtils.isBlank(orderNo)) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal sum = BigDecimal.ZERO;
+        for (PerformanceFact e : factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+                .eq(PerformanceFact::getOrderNo, orderNo))) {
+            sum = sum.add(nvlAmount(e.getPerformanceAmount()));
+        }
+        return sum;
     }
 
     /**

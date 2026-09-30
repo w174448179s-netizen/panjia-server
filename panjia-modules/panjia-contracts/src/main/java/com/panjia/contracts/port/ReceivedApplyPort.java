@@ -72,4 +72,22 @@ public interface ReceivedApplyPort {
      * @return 提交结果（新建明细数 + 新建审批单数 + 跳过原因）
      */
     ManualReceivedSubmitResultDTO manualSubmitReceived(Collection<String> bizKeys, String period, Long operatorId);
+
+    /**
+     * 新签导入后重新评估该合同当月 DRAFT 实收审批单（2026-09-30 定稿）。
+     * <p>评估口径同 autoCreateForReceivedBatch：新签=该订单跨月 PERF_EXPECT ACTIVE 合计，
+     * 实收=审批单 receivedAmount（含历史合并入 DRAFT 的全部到账）。
+     * <ul>
+     *   <li>实收 ≥ 新签 → 自动通过(APPROVED) + emit ReceivedApprovedEvent（触发结佣建单）；</li>
+     *   <li>实收 &lt; 新签 → 启动人工审批工作流(SUBMITTED)，与导入时"有新签但不足"路径一致；</li>
+     *   <li>仍无新签 → 保持 DRAFT（不应发生，新签刚导入；兜底不处理）。</li>
+     * </ul>
+     * 仅处理 DRAFT 单；SUBMITTED(人工流中)/APPROVED(已通过) 不打扰。
+     *
+     * @param period     实收归属期间 YYYY-MM
+     * @param contractNo 合同号
+     * @param operatorId 操作人 ID（事件场景无登录上下文，null 走兜底）
+     * @return true=已自动通过；false=未通过（启动人工或保持 DRAFT）
+     */
+    boolean resolveDraftAfterNewSign(String period, String contractNo, Long operatorId);
 }
