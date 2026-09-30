@@ -732,12 +732,15 @@ public class CommissionApplicationService {
      */
     private List<PerformanceFactSummaryDTO> loadExpectItemFacts(List<PerformanceFactSummaryDTO> realFacts,
                                                                  String period) {
+        // 匹配键（2026-09-30）：合同号优先，合同号为空用订单号。
+        // 贝壳新签源数据 orderNo 可能误填成合同号（与实收 orderNo 不同），有 contractNo 时按合同号
+        // 关联新签；findActiveByBizKeys 内部按 order_no OR contract_no 双键匹配
         java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
         for (PerformanceFactSummaryDTO f : realFacts) {
-            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
-            // findActiveByBizKeys 内部仍会对 contract_no 列做 OR 匹配兜底
-            if (f.getOrderNo() != null && !f.getOrderNo().isBlank()) {
-                bizKeys.add(f.getOrderNo());
+            String key = (f.getContractNo() != null && !f.getContractNo().isBlank())
+                ? f.getContractNo() : f.getOrderNo();
+            if (key != null && !key.isBlank()) {
+                bizKeys.add(key);
             }
         }
         List<PerformanceFactSummaryDTO> expects =
