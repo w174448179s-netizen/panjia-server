@@ -23,7 +23,9 @@ import java.util.stream.Collectors;
  * <p>
  * 分治规则：
  * <ul>
- *   <li>PENDING（未审批）→ 随动作废 REVERSED，reversed_reason = 事件 reason；</li>
+ *   <li>PENDING/DRAFT（未审批）→ 随动作废 REVERSED，reversed_reason = 事件 reason；
+ *       所属 SUBMITTED 单由 {@code revertSubmittedToDraftIfNeeded} 终止审批流程 + 回退 DRAFT
+ *       + 按调整后新签金额重建明细；DRAFT 单直接重建明细；</li>
  *   <li>APPROVED（已审批）→ <b>金额一动不动</b>，仅置 origin_reversed = true + 告警
  *       （V4.2 §9.2-4：已审批数据永不覆盖，是否调整由人工走 DIFF 调整单决定）；</li>
  *   <li>REVERSED（已冲销）→ 忽略（终态）。</li>
@@ -111,12 +113,15 @@ public class CommissionReverseService {
                 .set(CommissionItem::getOriginReversed, true));
         }
 
-        // 聚合重算（PENDING 作废影响 total_amount；APPROVED 标记不影响金额但重算无害）
+        // 聚合重算 + 按单状态分治联动：
+        //   DRAFT 单：明细被冲销后从当前新签事实重建（rebuildItemsIfNeeded）；
+        //   SUBMITTED 单：终止审批流程 + 回退 DRAFT + 按调整后新签金额重建（revertSubmittedToDraftIfNeeded）；
+        //   APPROVED/LOCKED 单：明细金额不动（仅 origin_reversed 标记），不重建。
         Set<Long> applicationIds = affectedItems.stream()
             .map(CommissionItem::getApplicationId)
             .collect(Collectors.toSet());
         for (Long applicationId : applicationIds) {
-            applicationService.recalcAggregates(applicationId, null);
+            applicationService.revertSubmittedToDraftIfNeeded(applicationId);
         }
 
         // 写消费日志（幂等锚点 + 留痕）

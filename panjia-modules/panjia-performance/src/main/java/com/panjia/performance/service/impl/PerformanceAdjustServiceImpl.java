@@ -30,6 +30,7 @@ import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
+import com.panjia.contracts.port.CommissionGatePort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,6 +42,7 @@ import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.DeptService;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -118,6 +120,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     private final FactConversionResolver factConversionResolver;
     /** 部门子树解析（登录用户数据权限范围） */
     private final DeptService deptService;
+    /**
+     * 结佣闸门端口（发起/执行新签调整前校验结佣是否已审批锁定）。ObjectProvider 惰性取用：
+     * 实现 bean 在 panjia-commission（performance 不反向依赖 commission），运行期由 Spring 装配，
+     * 端口实现缺失时回退跳过校验，保证本模块上下文可独立启动。
+     */
+    private final ObjectProvider<CommissionGatePort> commissionGatePortProvider;
 
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(PerformanceAdjustBo query, PageQuery pageQuery) {
@@ -465,6 +473,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         } else if (dto.getFactId() == null) {
             throw new ServiceException("明细级调整缺少关联业绩事实");
+        } else {
+            // 明细级：校验该事实所属合同的结佣是否已审批锁定
+            PerformanceFact fact = factMapper.selectById(dto.getFactId());
+            if (fact != null && StringUtils.isNotBlank(fact.getContractNo())) {
+                assertCommissionNotLocked(fact.getPeriod(), fact.getContractNo());
+            }
         }
 
         // 1.5 合同存在已作废明细时禁止调整（作废为合同级操作，口径一致：先恢复合同业绩再调整）
@@ -508,6 +522,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 而事实表 contract_no / order_no 两列本就分开存储
         if (SCOPE_CONTRACT.equals(scope)) {
             dto.setContractNo(resolveRealContractNo(dto));
+            // 结佣已审批锁定则禁止发起新签调整（保护已审批结佣数据）
+            String gatePeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+                ? dto.getOriginalPeriod() : dto.getPeriod();
+            assertCommissionNotLocked(gatePeriod, dto.getContractNo());
         }
 
         // 3. 构建调整单
@@ -739,6 +757,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             ? adjust.getOriginalPeriod() : adjust.getPeriod();
         assertPeriodNotClosed(originalPeriod, "原业绩归属月");
         assertPeriodNotClosed(adjust.getPeriod(), "调整生效月");
+        // 结佣已审批锁定则禁止执行新签调整（兜底：防发起后结佣变锁定）
+        assertCommissionNotLocked(originalPeriod, adjust.getContractNo());
 
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
@@ -790,6 +810,27 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     // ==================== 内部方法 ====================
+
+    /** 结佣闸门端口（端口实现缺失时返回 null，校验跳过）。 */
+    private CommissionGatePort commissionGate() {
+        return commissionGatePortProvider.getIfAvailable();
+    }
+
+    /**
+     * 校验指定合同 + 业绩归属月的结佣是否已审批锁定（LOCKED）。
+     * <p>结佣已审批通过并计入工资后，新签事实调整会破坏一致性，必须先作废结佣单再调整。
+     * 端口实现缺失（本模块独立启动）或参数缺失时跳过校验。
+     */
+    private void assertCommissionNotLocked(String period, String contractNo) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+            return;
+        }
+        CommissionGatePort gate = commissionGate();
+        if (gate != null && gate.isCommissionLocked(period, contractNo)) {
+            throw new ServiceException("合同 " + contractNo + " " + period
+                + " 月结佣已审批通过并锁定，不能发起新签调整；如需调整请先作废结佣单");
+        }
+    }
 
     /**
      * 构建审批启动命令（业务编码/标题 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。

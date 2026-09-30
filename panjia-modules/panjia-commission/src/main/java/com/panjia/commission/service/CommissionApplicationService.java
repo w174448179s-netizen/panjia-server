@@ -652,6 +652,81 @@ public class CommissionApplicationService {
     }
 
     /**
+     * DRAFT 结佣单明细被冲销后自动重建（新签调整 supersede 联动）。
+     * <p>
+     * 调用时机：CommissionReverseService.handleReversed 冲销 DRAFT 明细后调用。
+     * 此时新签事实已落库（supersede 同事务，outbox 事件提交后投递）。
+     * 仅 DRAFT 单自动重建；SUBMITTED/APPROVED 需人工走调整单。
+     */
+    public void rebuildItemsIfNeeded(Long applicationId) {
+        CommissionApplication app = applicationMapper.selectById(applicationId);
+        if (app == null || app.getStatus() != ApplicationStatus.DRAFT) {
+            return;
+        }
+        long activeItems = itemMapper.selectCount(new LambdaQueryWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, applicationId)
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
+        if (activeItems > 0) {
+            return;
+        }
+        try {
+            rebuildItems(app, app.getPeriod(), app.getContractNo());
+        } catch (ServiceException e) {
+            log.info("[结佣-自动重建] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
+        }
+    }
+
+    /**
+     * 新签调整冲销审批中的结佣单时回退到 DRAFT 并按调整后新签金额重建明细（2026-09-30）。
+     * <p>
+     * 场景：结佣单处于 SUBMITTED（审批中），新签事实 supersede → FACT_REVERSED
+     * 把旧 PENDING 明细冲销为 REVERSED。规则：终止当前审批流程 + 单状态回 DRAFT
+     * （保留申请单，用户调整后重新提交）+ 按调整后新签事实重建明细（金额=调整后值）。
+     * <p>
+     * 时序保证：{@link ApprovalPort#cancel} 走 Warm-Flow 删除链路，同步发 ApprovalEvent(cancel)，
+     * Spring {@code @EventListener} 在同事务线程内同步触发 {@link #handleWorkflowEvent}
+     * 的 cancel 分支置 CANCELLED + 冲销未审批明细（幂等）。cancel 返回后本方法覆盖回 DRAFT，
+     * 无异步时序冲突。幂等：非 SUBMITTED 单走原 {@link #rebuildItemsIfNeeded} 路径。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void revertSubmittedToDraftIfNeeded(Long applicationId) {
+        CommissionApplication app = applicationMapper.selectById(applicationId);
+        if (app == null) {
+            return;
+        }
+        if (app.getStatus() != ApplicationStatus.SUBMITTED) {
+            // 非 SUBMITTED 单：保持 handleReversed 既有行为（DRAFT 单重建、APPROVED/LOCKED 不动）
+            recalcAggregates(applicationId, null);
+            rebuildItemsIfNeeded(applicationId);
+            return;
+        }
+        // SUBMITTED 单：先终止运行中的审批流程（触发 cancel 事件 → CANCELLED + 冲销 PENDING 明细，幂等）
+        if (StringUtils.isNotBlank(app.getProcessInstanceId())) {
+            approvalPort.cancel(BizType.COMMISSION, applicationId);
+        }
+        // cancel 事件已同步置 CANCELLED 并冲销明细；此处覆盖回 DRAFT 保留申请单供用户重新提交
+        app = applicationMapper.selectById(applicationId);
+        if (app == null) {
+            return;
+        }
+        app.setStatus(ApplicationStatus.DRAFT);
+        app.setProcessInstanceId(null);
+        app.setCurrentNode(null);
+        app.setApproverId(null);
+        app.setApproveTime(null);
+        applicationMapper.updateById(app);
+        log.info("[结佣-审批回退] 新签调整导致 SUBMITTED 单回退 DRAFT：applyNo={}, contractNo={}, period={}",
+            app.getApplyNo(), app.getContractNo(), app.getPeriod());
+        // 按调整后新签事实重建明细（金额=调整后值）；重建失败不阻断（保留 DRAFT 空单由人工处理）
+        try {
+            rebuildItems(app, app.getPeriod(), app.getContractNo());
+        } catch (ServiceException e) {
+            log.info("[结佣-审批回退] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
+        }
+        recalcAggregates(applicationId, null);
+    }
+
+    /**
      * 结佣明细源（2026-09-27 定稿新签口径）：按合同/订单双键跨月取 ACTIVE 新签事实
      * （PERF_EXPECT，每条事实一行，金额=事实当前值即调整后值）。
      * <ul>
