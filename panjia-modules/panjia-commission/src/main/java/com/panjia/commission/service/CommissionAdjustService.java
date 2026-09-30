@@ -166,7 +166,8 @@ public class CommissionAdjustService {
             originalAmount = item.getAmount();
             factId = item.getPerformanceFactId();
         } else {
-            originalAmount = sumFacts(application.getPeriod(), application.getContractNo(), FACT_TYPE_REAL);
+            // 结佣金额口径=新签（PERF_EXPECT），调整基准取新签合计；实收仅为门控不参与金额
+            originalAmount = sumFacts(application.getPeriod(), application.getContractNo(), FACT_TYPE_EXPECT);
         }
         BigDecimal targetAmount = dto.getTargetAmount();
         BigDecimal deltaAmount = targetAmount == null ? null
@@ -182,7 +183,7 @@ public class CommissionAdjustService {
         adjust.setDiffAmount(deltaAmount);            // 复用 diff_amount 列：调整差额
         adjust.setOriginalAmount(originalAmount);
         adjust.setContractNo(application.getContractNo());
-        adjust.setFactType(FACT_TYPE_REAL);
+        adjust.setFactType(FACT_TYPE_EXPECT);
         adjust.setAdjustScope(dto.getAdjustScope());
         adjust.setFactId(factId);
         adjust.setTargetDeptId(dto.getTargetDeptId());
@@ -495,32 +496,24 @@ public class CommissionAdjustService {
         BigDecimal targetAmount = adjust.getNewAmount();
         BigDecimal delta = adjust.getDiffAmount();
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 1. PERF_REAL 合同级分摊调整
-            Map<Long, Long> realMapping = performanceQueryPort.adjustContractFactsAmount(
-                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_REAL, targetAmount, approverId, adjust.getId());
-            // 2. PERF_EXPECT 同步差额（2026-09-27）：明细绑定期望事实后 REAL合计 ≠ 明细Σ（新签口径），
-            //    差额基准改为当前明细Σ；当期基数承担差额（跨月期望事实不动），
-            //    保证调整后 Σ明细（跨月） = targetAmount 与 Σ实收 = targetAmount 同时精确成立
+            // 结佣金额口径=新签（PERF_EXPECT）：合同级调整只 supersede 新签事实，不动实收（实收仅门控）。
+            // 以明细合计为基准，差额由当期新签事实按金额占比分摊（跨月新签事实不动）。
             BigDecimal currentDetailSum = listActiveItems(adjust.getApplicationId()).stream()
                 .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            BigDecimal deltaExpect = targetAmount.subtract(currentDetailSum);
             BigDecimal currentExpect = sumFacts(adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT);
-            BigDecimal targetExpect = currentExpect.add(deltaExpect);
+            BigDecimal targetExpect = currentExpect.add(targetAmount.subtract(currentDetailSum));
             Map<Long, Long> expectMapping = performanceQueryPort.adjustContractFactsAmount(
                 adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT, targetExpect, approverId, adjust.getId());
-            // 3. 回写 CommissionItem：amount 与 performance_fact_id 指向新事实
-            //    （新口径明细绑定期望事实 → expectMapping 优先；历史单绑实收事实 → realMapping 兜底）
+            // 回写 CommissionItem：performance_fact_id 指向新事实，amount 从新事实回查
             List<CommissionItem> items = listActiveItems(adjust.getApplicationId());
             for (CommissionItem item : items) {
-                Long newFactId = expectMapping.getOrDefault(item.getPerformanceFactId(),
-                    realMapping.get(item.getPerformanceFactId()));
+                Long newFactId = expectMapping.get(item.getPerformanceFactId());
                 if (newFactId != null) {
                     item.setPerformanceFactId(newFactId);
                     item.setAdjustId(adjust.getId());
                 }
             }
-            // amount 从新事实批量回查
             if (!items.isEmpty()) {
                 Map<Long, BigDecimal> amountByFact = loadFactAmounts(
                     items.stream().map(CommissionItem::getPerformanceFactId).toList());
@@ -533,8 +526,8 @@ public class CommissionAdjustService {
                 }
             }
             applicationService.recalcAggregates(adjust.getApplicationId(), null);
-            log.info("[结佣-调整-AMOUNT-合同级] 完成：adjustId={}, delta={}, deltaExpect={}, expectFacts={}",
-                adjust.getId(), delta, deltaExpect, expectMapping.size());
+            log.info("[结佣-调整-AMOUNT-合同级] 完成（仅调新签）：adjustId={}, targetExpect={}, expectFacts={}",
+                adjust.getId(), targetExpect, expectMapping.size());
         } else {
             // 明细级
             CommissionItem item = itemMapper.selectById(adjust.getItemId());
@@ -579,11 +572,7 @@ public class CommissionAdjustService {
      */
     private void executeVoidAdjust(CommissionAdjust adjust, Long approverId) {
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 合同级：跨月冲销该合同全部 PERF_REAL 与 PERF_EXPECT 事实
-            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
-                contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_REAL)) {
-                performanceQueryPort.voidFact(f.getFactId(), approverId, adjust.getId());
-            }
+            // 结佣口径=新签：合同级冲销只冲 PERF_EXPECT 事实，不动实收（实收为客观到账，不随结佣调整）
             for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
                 contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_EXPECT)) {
                 performanceQueryPort.voidFact(f.getFactId(), approverId, adjust.getId());
@@ -592,7 +581,7 @@ public class CommissionAdjustService {
                 reverseItem(item, adjust.getId());
             }
             applicationService.recalcAggregates(adjust.getApplicationId(), null);
-            log.info("[结佣-调整-VOID-合同级] 完成：adjustId={}", adjust.getId());
+            log.info("[结佣-调整-VOID-合同级] 完成（仅冲新签）：adjustId={}", adjust.getId());
         } else {
             CommissionItem item = itemMapper.selectById(adjust.getItemId());
             requireItem(item, adjust);
@@ -621,11 +610,7 @@ public class CommissionAdjustService {
     private void executeTransferAdjust(CommissionAdjust adjust, Long approverId) {
         Long targetDeptId = adjust.getTargetDeptId();
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 合同级：跨月划转该合同全部 PERF_REAL 与 PERF_EXPECT 事实
-            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
-                contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_REAL)) {
-                performanceQueryPort.transferFact(f.getFactId(), targetDeptId, approverId, adjust.getId());
-            }
+            // 结佣口径=新签：合同级划转只划转 PERF_EXPECT 事实部门，不动实收
             for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
                 contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_EXPECT)) {
                 performanceQueryPort.transferFact(f.getFactId(), targetDeptId, approverId, adjust.getId());
@@ -635,7 +620,7 @@ public class CommissionAdjustService {
                 item.setAdjustId(adjust.getId());
                 itemMapper.updateById(item);
             }
-            log.info("[结佣-调整-TRANSFER-合同级] 完成：adjustId={}, targetDeptId={}", adjust.getId(), targetDeptId);
+            log.info("[结佣-调整-TRANSFER-合同级] 完成（仅划新签）：adjustId={}, targetDeptId={}", adjust.getId(), targetDeptId);
         } else {
             CommissionItem item = itemMapper.selectById(adjust.getItemId());
             requireItem(item, adjust);

@@ -135,11 +135,23 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         return (r.getOrderNo() != null ? r.getOrderNo() : "") + "|" + period + "|" + sourceType;
     }
 
+    /**
+     * 实收明细幂等键。
+     * <p>
+     * 必须包含【角色】（和费项）：同一员工在同一合同当月可兼任多个角色（如姚宇同时是
+     * 房源维护人/钥匙人/推广等 6 个角色），若键里不含角色，同员工的多行 source_key 完全
+     * 相同，{@code uk_received_detail_anchor} 幂等检查会把除首行外的角色全部吞掉。
+     * <p>
+     * 粒度：订单 + 合同 + 员工 + 费项 + 角色 + 期间（同月同人同角色的多笔到账聚合为一行
+     * 当月实收）。与新签事实 source_key「订单|合同|员工|费项|角色-期间」口径对齐。
+     */
     private String buildDetailSourceKey(NormalizedRecordDTO r, String period) {
         return (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
+            + (r.getContractNo() != null ? r.getContractNo() : "") + "|"
             + (r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
-            + period + "|"
-            + (r.getBusinessDate() != null ? r.getBusinessDate() : "");
+            + (r.getFeeItem() != null ? r.getFeeItem() : "") + "|"
+            + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
+            + period;
     }
 
     private ReceivedContract buildContract(NormalizedRecordDTO r, String period, String sourceType, Long batchId) {

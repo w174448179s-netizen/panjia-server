@@ -4,7 +4,6 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
-import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
@@ -12,12 +11,10 @@ import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.domain.vo.BatchApproveResultVo;
 import com.panjia.performance.dto.BatchFactBindRow;
 import com.panjia.performance.domain.bo.ReceivedApplyBo;
-import com.panjia.performance.dto.ReceivedContractGroupDTO;
 import com.panjia.performance.domain.vo.ReceivedContractMetricsVo;
 import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
-import com.panjia.performance.service.FactConversionResolver;
 import com.panjia.received.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -70,7 +67,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     private static final String NODE_FINANCE = "rcv_finance";
     private static final String NODE_DIRECTOR = "rcv_director";
-    private static final String FACT_TYPE_REAL = FactType.PERF_REAL.getCode();
     private static final String FACT_TYPE_EXPECT = FactType.PERF_EXPECT.getCode();
 
     private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
@@ -85,8 +81,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private final TaskExecutor taskExecutor;
     /** 折算因子公共方法（取比例 / 金额乘算的唯一入口） */
     private final ConversionFactorPort conversionFactorPort;
-    /** 业绩域自有标识 → bizType 的解析（factId 反查） */
-    private final FactConversionResolver factConversionResolver;
     /** 部门子树解析（店长/总监数据权限范围） */
     private final DeptService deptService;
     /** 实收审批通过事件（结佣域按合同自动产生结佣记录，outbox 原子提交） */
@@ -138,20 +132,30 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         Map<Long, com.panjia.received.domain.ReceivedContract> contractMap = contractMapper.selectBatchIds(contractIds)
             .stream().collect(Collectors.toMap(com.panjia.received.domain.ReceivedContract::getId, c -> c));
 
-        // 3. 明细行 → PerformanceFact（只填 createApplyForRealFactsInternal 用到的字段）
+        // 3. 明细行 → PerformanceFact
+        return mapDetailsToFacts(details, contractMap, batchId);
+    }
+
+    /**
+     * 实收明细行（JOIN 合同）→ 内存 PerformanceFact（仅填建单/手工提交链路用到的字段）。
+     * <p>批次自动建单、按 factId(rd.id) 建单、手工提交镜像三条路径共用，保证映射口径唯一。
+     */
+    private List<PerformanceFact> mapDetailsToFacts(List<com.panjia.received.domain.ReceivedDetail> details,
+                                                     Map<Long, com.panjia.received.domain.ReceivedContract> contractMap,
+                                                     Long batchId) {
         List<PerformanceFact> result = new ArrayList<>(details.size());
         for (com.panjia.received.domain.ReceivedDetail d : details) {
             com.panjia.received.domain.ReceivedContract c = contractMap.get(d.getContractId());
             if (c == null) continue;
             PerformanceFact f = new PerformanceFact();
             f.setId(d.getId());
-            f.setBatchId(batchId);
+            f.setBatchId(batchId != null ? batchId : d.getSourceBatchId());
             f.setPeriod(d.getPeriod());
             f.setOrderNo(c.getOrderNo());
             f.setContractNo(c.getContractNo());
             f.setBizType(c.getBizType());
             f.setPropertyAddress(c.getPropertyAddress());
-            f.setDeptId(c.getDeptId());
+            f.setDeptId(d.getDeptId() != null ? d.getDeptId() : c.getDeptId());
             f.setEmployeeId(d.getEmployeeId());
             f.setEmployeeExternalCode(d.getEmployeeExternalCode());
             f.setRoleType(d.getRoleType());
@@ -341,18 +345,44 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (operatorId == null) {
             operatorId = 1L;
         }
-        List<ReceivedContractGroupDTO> groups = factMapper.selectBatchReceivedContractGroups(batchId, period);
-        if (groups.isEmpty()) {
-            log.info("[实收审批] 历史批次无待建单实收订单组：batchId={}, period={}", batchId, period);
+        // 拆表后历史工资批次实收落在 rd/rc：取批次内未挂单 ACTIVE 明细（period 同批一致仍显式过滤）
+        List<com.panjia.received.domain.ReceivedDetail> batchDetails = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .eq(com.panjia.received.domain.ReceivedDetail::getSourceBatchId, batchId)
+                .eq(com.panjia.received.domain.ReceivedDetail::getPeriod, period)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE")
+                .isNull(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId));
+        if (batchDetails.isEmpty()) {
+            log.info("[实收审批] 历史批次无待建单实收明细：batchId={}, period={}", batchId, period);
             return 0;
         }
-        // ===== 批量预加载（同 autoCreateForBatch 的 3 次 SQL） =====
-        List<String> bizKeys = groups.stream().map(ReceivedContractGroupDTO::getOrderNo).toList();
-        Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, bizKeys);
-        Map<String, List<BatchFactBindRow>> rowsByKey = new LinkedHashMap<>();
-        for (BatchFactBindRow row : factMapper.selectBatchUnboundRealFacts(batchId, period, bizKeys)) {
-            rowsByKey.computeIfAbsent(row.getBizKey(), k -> new ArrayList<>()).add(row);
+        // 批量加载合同并按订单号分组（空订单号行无法建单，跳过）
+        List<Long> contractIds = batchDetails.stream()
+            .map(com.panjia.received.domain.ReceivedDetail::getContractId).distinct().toList();
+        Map<Long, com.panjia.received.domain.ReceivedContract> contractById = contractMapper.selectBatchIds(contractIds)
+            .stream().collect(Collectors.toMap(com.panjia.received.domain.ReceivedContract::getId, c -> c));
+        Map<String, List<com.panjia.received.domain.ReceivedDetail>> rowsByOrder = new LinkedHashMap<>();
+        Map<String, com.panjia.received.domain.ReceivedContract> contractByOrder = new HashMap<>();
+        for (com.panjia.received.domain.ReceivedDetail d : batchDetails) {
+            com.panjia.received.domain.ReceivedContract c = contractById.get(d.getContractId());
+            if (c == null || StringUtils.isBlank(c.getOrderNo())) {
+                continue;
+            }
+            // 与老口径一致：0 元行不绑定、不计数（selectBatchUnboundRealFacts 的 amount &lt;&gt; 0 过滤）
+            if (d.getPerformanceAmount() == null
+                || d.getPerformanceAmount().compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+            rowsByOrder.computeIfAbsent(c.getOrderNo(), k -> new ArrayList<>()).add(d);
+            contractByOrder.putIfAbsent(c.getOrderNo(), c);
         }
+        if (rowsByOrder.isEmpty()) {
+            log.info("[实收审批] 历史批次无有效订单号/非零实收，跳过直建：batchId={}", batchId);
+            return 0;
+        }
+        // ===== 批量预加载：活跃审批单 + PERF_EXPECT 应收合计（同老路径 2 次 SQL） =====
+        List<String> bizKeys = new ArrayList<>(rowsByOrder.keySet());
+        Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, bizKeys);
         Map<String, BigDecimal> expectedMap = factMapper.selectExpectSumsByBizKeys(period, bizKeys)
             .stream()
             .collect(Collectors.toMap(BatchFactBindRow::getBizKey,
@@ -360,26 +390,27 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 (a, b) -> a));
 
         int created = 0;
-        for (ReceivedContractGroupDTO group : groups) {
-            String bizKey = group.getOrderNo();
-            List<BatchFactBindRow> rows = rowsByKey.getOrDefault(bizKey, List.of());
-            if (rows.isEmpty()) {
-                continue;
-            }
+        for (Map.Entry<String, List<com.panjia.received.domain.ReceivedDetail>> entry : rowsByOrder.entrySet()) {
+            String bizKey = entry.getKey();
+            List<com.panjia.received.domain.ReceivedDetail> rows = entry.getValue();
             // 幂等：同订单号当月已有活跃审批单时跳过（历史重导场景由批次 supersede 冲销重建）
             if (activeApplies.containsKey(bizKey)) {
                 log.info("[实收审批] 历史直建跳过，订单当月已有审批单：applyId={}, orderNo={}",
                     activeApplies.get(bizKey).getId(), bizKey);
                 continue;
             }
-            List<Long> factIds = rows.stream().map(BatchFactBindRow::getFactId).toList();
+            List<Long> factIds = rows.stream().map(com.panjia.received.domain.ReceivedDetail::getId).toList();
             BigDecimal realSum = rows.stream()
-                .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+                .map(r -> r.getPerformanceAmount() == null ? BigDecimal.ZERO : r.getPerformanceAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            Long uniqueDeptId = uniqueDeptId(rows);
+            if (realSum.compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+            // 明细级门店唯一时取明细值（老口径 f.dept_id），否则回退合同级门店
+            Long uniqueDeptId = uniqueDetailDeptId(rows, contractByOrder.get(bizKey));
             BigDecimal expectedAmount = expectedMap.getOrDefault(bizKey, BigDecimal.ZERO);
             try {
-                ReceivedApply apply = newApplyFromGroup(period, group, batchId, operatorId,
+                ReceivedApply apply = newApplyFromContract(period, contractByOrder.get(bizKey), batchId, operatorId,
                     rows.size(), realSum, expectedAmount, uniqueDeptId);
                 // 审批终态直接 INSERT：APPROVED + 无流程实例（同老导入器第 8 段语义）
                 apply.setStatus(ReceivedApplyStatus.APPROVED);
@@ -599,15 +630,19 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return result;
     }
 
-    /** 事实行归属门店去重：恰好一个门店时返回该 ID，多门店/无门店返回 null（跨店合作单留空）。 */
-    private Long uniqueDeptId(List<BatchFactBindRow> rows) {
+    /** 明细行归属门店去重：恰好一个门店时返回该 ID；明细全空时回退合同级门店；多门店返回 null（跨店合作单留空）。 */
+    private Long uniqueDetailDeptId(List<com.panjia.received.domain.ReceivedDetail> rows,
+                                    com.panjia.received.domain.ReceivedContract contract) {
         Set<Long> deptIds = new java.util.HashSet<>();
-        for (BatchFactBindRow row : rows) {
+        for (com.panjia.received.domain.ReceivedDetail row : rows) {
             if (row.getDeptId() != null) {
                 deptIds.add(row.getDeptId());
             }
         }
-        return deptIds.size() == 1 ? deptIds.iterator().next() : null;
+        if (deptIds.size() == 1) {
+            return deptIds.iterator().next();
+        }
+        return contract == null ? null : contract.getDeptId();
     }
 
     // ==================== 驳回重提 ====================
@@ -1035,20 +1070,13 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     }
                     apply.setReceivedAmount(m.getReceivedAmount());
                 }
-                // 折算后金额：应收合计与实收合计用同一因子，从批量结果中取（Map 查询，无 DB 访问）
+                // 应收折算后金额：按业务类型因子从批量结果中取（实收已不做折算）
                 BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
                 if (m.getExpectedAmount() != null) {
                     apply.setExpectedConvertedAmount(conversionFactorPort.convert(m.getExpectedAmount(), factor));
                     if (apply.getOriginalExpectedAmount() != null) {
                         apply.setOriginalExpectedConvertedAmount(
                             conversionFactorPort.convert(apply.getOriginalExpectedAmount(), factor));
-                    }
-                }
-                if (apply.getReceivedAmount() != null) {
-                    apply.setReceivedConvertedAmount(conversionFactorPort.convert(apply.getReceivedAmount(), factor));
-                    if (apply.getOriginalReceivedAmount() != null) {
-                        apply.setOriginalReceivedConvertedAmount(
-                            conversionFactorPort.convert(apply.getOriginalReceivedAmount(), factor));
                     }
                 }
             }
@@ -1076,50 +1104,28 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
         List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
             apply.getPeriod(), apply.getContractNo());
-        // 折算后金额：按 factId 批量解析因子，应收业绩与实收业绩同取本行因子，
-        // 取比例与乘算都走公共方法（ConversionFactorPort）
-        Set<Long> factIds = facts.stream().map(ReceivedFactDetailVo::getFactId).filter(f -> f != null).collect(java.util.stream.Collectors.toSet());
-        Map<Long, BigDecimal> factorMap = factConversionResolver.factorByFactIds(factIds);
+        // 实收不再做折算；应收折算因子按合同业务类型取（整单同一因子）
+        String bizType = apply.getBizType();
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
+            bizType == null ? java.util.Collections.emptySet() : java.util.Collections.singleton(bizType));
+        BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
         BigDecimal recvSum = BigDecimal.ZERO;
-        BigDecimal recvOriginalSum = BigDecimal.ZERO;
-        BigDecimal recvConvertedSum = BigDecimal.ZERO;
-        BigDecimal recvOriginalConvertedSum = BigDecimal.ZERO;
         BigDecimal expectConvertedSum = BigDecimal.ZERO;
         BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
-        boolean receivedAdjusted = false;
         for (ReceivedFactDetailVo f : facts) {
-            BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getFactId());
-            f.setConvertedAmount(conversionFactorPort.convert(f.getAmount(), factor));
+            // 应收折算（实收折算已取消）
             f.setExpectedConvertedAmount(conversionFactorPort.convert(f.getExpectedAmount(), factor));
             // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出（无调整则与原值一致，前端不展示）
             if (f.getOriginalExpectedAmount() != null) {
                 f.setOriginalConvertedAmount(conversionFactorPort.convert(f.getOriginalExpectedAmount(), factor));
             }
-            // 调整前实收的折算后金额：结佣调整 supersede 后同 sourceKey 存在 REVERSED 的 PERF_REAL
-            if (f.getOriginalAmount() != null) {
-                f.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(f.getOriginalAmount(), factor));
-            }
-            if (Boolean.TRUE.equals(f.getReceivedAdjusted())) {
-                receivedAdjusted = true;
-            }
             if (f.getAmount() != null) recvSum = recvSum.add(f.getAmount());
-            if (f.getOriginalAmount() != null) recvOriginalSum = recvOriginalSum.add(f.getOriginalAmount());
-            if (f.getConvertedAmount() != null) recvConvertedSum = recvConvertedSum.add(f.getConvertedAmount());
-            if (f.getOriginalReceivedConvertedAmount() != null) {
-                recvOriginalConvertedSum = recvOriginalConvertedSum.add(f.getOriginalReceivedConvertedAmount());
-            }
             if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
             if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
         }
-        // 实收合计与明细列同源（实时 ACTIVE PERF_REAL 求和，含已生效结佣调整）；
-        // 存在已调整行时留存「调整前合计」，供详情「实收合计」展示「原值 → 调整后值」
+        // 实收合计取实收明细实时合计（rd ACTIVE）；实收侧暂无调整链，不展示「原值 → 调整后值」，也不再折算
         apply.setReceivedAmount(recvSum);
-        apply.setReceivedAdjusted(receivedAdjusted);
-        if (receivedAdjusted) {
-            apply.setOriginalReceivedAmount(recvOriginalSum);
-            apply.setOriginalReceivedConvertedAmount(recvOriginalConvertedSum);
-        }
-        apply.setReceivedConvertedAmount(recvConvertedSum);
+        apply.setReceivedAdjusted(false);
         apply.setExpectedConvertedAmount(expectConvertedSum);
         // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）
         apply.setOriginalExpectedConvertedAmount(expectOriginalConvertedSum);
@@ -1245,80 +1251,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         applyMapper.updateById(apply);
     }
 
-    /**
-     * 自动建单组装。实收合计/条数/门店由批量预加载的非零事实行内存计算，
-     * 不再在 insert 后重查事实（注意：聚合 group 的 itemCount 含 0 值行，
-     * 与实际绑定的非零行数不一致，最终落库口径以 factCount 为准）。
-     */
-    private ReceivedApply newApplyFromGroup(String period, ReceivedContractGroupDTO group,
-                                            Long batchId, Long applicantId,
-                                            int factCount, BigDecimal receivedAmount,
-                                            BigDecimal expectedAmount, Long deptId) {
-        ReceivedApply apply = baseApply(period, group.getContractNo(), applicantId);
-        apply.setOrderNo(group.getOrderNo());
-        apply.setBizType(group.getBizType());
-        apply.setPropertyAddress(group.getPropertyAddress());
-        apply.setBusinessDate(group.getBusinessDate());
-        apply.setBatchId(batchId);
-        apply.setReceivedAmount(receivedAmount);
-        apply.setExpectedAmount(expectedAmount);
-        apply.setItemCount(factCount);
-        apply.setDeptId(deptId);
-        return apply;
-    }
-
-    /** 手工建单：取合同全部非零 ACTIVE 实收事实。 */
-    private ReceivedApply newApplyFromContractFacts(String period, String contractNo, Long applicantId) {
-        List<PerformanceFact> realFacts = factMapper.selectActiveFactsByContractNo(
-            period, FACT_TYPE_REAL, contractNo);
-        List<PerformanceFact> nonZero = realFacts.stream()
-            .filter(f -> f.getPerformanceAmount() != null
-                && f.getPerformanceAmount().compareTo(BigDecimal.ZERO) != 0)
-            .toList();
-        ReceivedApply apply = baseApply(period, contractNo, applicantId);
-        if (!nonZero.isEmpty()) {
-            PerformanceFact first = nonZero.get(0);
-            // 业务类型快照（落库列 biz_type）：手工建单也要带上，供列表展示/筛选
-            apply.setBizType(first.getBizType());
-            // 快照字段由事实 JOIN 取出的摘要回填
-            List<PerformanceFactSummaryDTO> summaries = factMapper
-                .selectActiveFactSummariesByContractNo(period, FACT_TYPE_REAL, contractNo);
-            PerformanceFactSummaryDTO snap = summaries.isEmpty() ? null : summaries.get(0);
-            if (snap != null) {
-                apply.setOrderNo(snap.getOrderNo());
-                apply.setPropertyAddress(snap.getPropertyAddress());
-            }
-            apply.setBusinessDate(first.getBusinessDate());
-            apply.setBatchId(first.getBatchId());
-            Set<Long> deptIds = new java.util.HashSet<>();
-            for (PerformanceFact f : nonZero) {
-                if (f.getDeptId() != null) {
-                    deptIds.add(f.getDeptId());
-                }
-            }
-            apply.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
-            apply.setItemCount(nonZero.size());
-            apply.setReceivedAmount(nonZero.stream()
-                .map(PerformanceFact::getPerformanceAmount).reduce(BigDecimal.ZERO, BigDecimal::add));
-            apply.setExpectedAmount(sumExpect(period, contractNo));
-        } else {
-            apply.setItemCount(0);
-            apply.setReceivedAmount(BigDecimal.ZERO);
-            apply.setExpectedAmount(sumExpect(period, contractNo));
-        }
-        return apply;
-    }
-
-    private ReceivedApply baseApply(String period, String contractNo, Long applicantId) {
-        ReceivedApply apply = new ReceivedApply();
-        apply.setApplyNo("RCV" + LocalDateTime.now().format(APPLY_NO_FORMATTER));
-        apply.setPeriod(period);
-        apply.setContractNo(contractNo);
-        apply.setStatus(ReceivedApplyStatus.DRAFT);
-        apply.setApplicantId(applicantId);
-        return apply;
-    }
-
     private void insertApply(ReceivedApply apply) {
         try {
             applyMapper.insert(apply);
@@ -1326,19 +1258,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             throw new ServiceException("合同 " + apply.getContractNo() + " " + apply.getPeriod()
                 + " 月已存在未完结实收审批单，请刷新");
         }
-    }
-
-    /** 绑定合同下全部未挂单的非零实收事实（手工建单）。 */
-    private void bindAllContractFacts(ReceivedApply apply) {
-        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
-            apply.getPeriod(), FACT_TYPE_REAL, apply.getContractNo());
-        List<Long> ids = facts.stream()
-            .filter(f -> f.getReceivedApplyId() == null
-                && f.getPerformanceAmount() != null
-                && f.getPerformanceAmount().compareTo(BigDecimal.ZERO) != 0)
-            .map(PerformanceFact::getId)
-            .toList();
-        bindFacts(ids, apply.getId());
     }
 
     private void bindFacts(List<Long> detailIds, Long applyId) {
@@ -1491,7 +1410,179 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (factIds == null || factIds.isEmpty()) {
             return 0;
         }
-        List<PerformanceFact> realFacts = factMapper.selectBatchIds(factIds);
+        // 拆表后 factId 即 pj_received_detail.id：加载 rd + 批量 JOIN rc 映射成内存事实再建单
+        List<com.panjia.received.domain.ReceivedDetail> details = detailMapper.selectBatchIds(factIds);
+        if (details.isEmpty()) {
+            return 0;
+        }
+        List<Long> contractIds = details.stream()
+            .map(com.panjia.received.domain.ReceivedDetail::getContractId).distinct().toList();
+        Map<Long, com.panjia.received.domain.ReceivedContract> contractMap = contractMapper.selectBatchIds(contractIds)
+            .stream().collect(Collectors.toMap(com.panjia.received.domain.ReceivedContract::getId, c -> c));
+        List<PerformanceFact> realFacts = mapDetailsToFacts(details, contractMap, batchId);
         return createApplyForRealFacts(realFacts, period, operatorId, batchId);
+    }
+
+    /** 手工实收镜像合同来源类型（rc.source_type），与导入 KE_RECEIVED/HISTORY_PAYROLL 区分 */
+    private static final String SOURCE_TYPE_MANUAL = "MANUAL";
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public com.panjia.contracts.dto.ManualReceivedSubmitResultDTO manualSubmitReceived(
+            Collection<String> bizKeys, String period, Long operatorId) {
+        com.panjia.contracts.dto.ManualReceivedSubmitResultDTO result =
+            new com.panjia.contracts.dto.ManualReceivedSubmitResultDTO();
+        if (bizKeys == null || bizKeys.isEmpty() || StringUtils.isBlank(period)) {
+            return result;
+        }
+        Long effectiveOperator = operatorId;
+        if (effectiveOperator == null) {
+            try {
+                effectiveOperator = LoginHelper.getUserId();
+            } catch (Exception ignored) {
+            }
+        }
+        if (effectiveOperator == null) {
+            effectiveOperator = 1L;
+        }
+        // ① 查 PERF_EXPECT ACTIVE（按期间 + 订单号/合同号），口径同原 PerformanceEngine 手工入口
+        List<PerformanceFact> expects = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+            .eq(PerformanceFact::getPeriod, period)
+            .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
+                .or().in(PerformanceFact::getContractNo, bizKeys))
+            .orderByAsc(PerformanceFact::getId));
+        if (expects.isEmpty()) {
+            return result;
+        }
+        // ② 逐条镜像造 rc(source_type=MANUAL) + rd（幂等：同 sourceKey ACTIVE rd 已存在则跳过）
+        List<com.panjia.received.domain.ReceivedDetail> createdDetails = new ArrayList<>();
+        Map<Long, com.panjia.received.domain.ReceivedContract> touchedContractMap = new LinkedHashMap<>();
+        for (PerformanceFact expect : expects) {
+            if (StringUtils.isBlank(expect.getOrderNo())) {
+                result.getSkippedReasons().put(expect.getId(), "应收事实无订单号，无法手工提交实收");
+                continue;
+            }
+            Long existing = detailMapper.selectCount(new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .eq(com.panjia.received.domain.ReceivedDetail::getSourceKey, expect.getSourceKey())
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"));
+            if (existing != null && existing > 0) {
+                result.getSkippedReasons().put(expect.getId(), "已有实收事实，不能重复提交");
+                continue;
+            }
+            try {
+                com.panjia.received.domain.ReceivedContract contract =
+                    getOrCreateManualContract(expect, period, effectiveOperator);
+                com.panjia.received.domain.ReceivedDetail detail =
+                    buildManualDetail(expect, contract.getId(), period, effectiveOperator);
+                detailMapper.insert(detail);
+                createdDetails.add(detail);
+                touchedContractMap.put(contract.getId(), contract);
+            } catch (Exception e) {
+                result.getSkippedReasons().put(expect.getId(), "插入失败：" + e.getMessage());
+            }
+        }
+        result.setCreatedDetailCount(createdDetails.size());
+        if (createdDetails.isEmpty()) {
+            return result;
+        }
+        // ③ 重算涉及合同的 ACTIVE 明细聚合（period_total_received / item_count）
+        for (Long contractId : touchedContractMap.keySet()) {
+            refreshContractAggregate(contractId);
+        }
+        // ④ 映射成内存事实走公共建单段（按订单号分组 + 活跃审批单合并 + startWorkflow）
+        List<PerformanceFact> realFacts = mapDetailsToFacts(createdDetails, touchedContractMap, null);
+        int applyCount = createApplyForRealFactsInternal(realFacts, period, effectiveOperator, null);
+        result.setCreatedApplyCount(applyCount);
+        log.info("[实收审批] 手工提交实收完成：period={}, 新建明细={}, 新建审批单={}, 跳过={}",
+            period, result.getCreatedDetailCount(), applyCount, result.getSkippedReasons().size());
+        return result;
+    }
+
+    /** 按 (order_no, period, MANUAL) 幂等查/建手工实收合同（uk_received_contract_anchor 兜底）。 */
+    private com.panjia.received.domain.ReceivedContract getOrCreateManualContract(
+            PerformanceFact expect, String period, Long operatorId) {
+        com.panjia.received.domain.ReceivedContract existing = contractMapper.selectOne(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, expect.getOrderNo())
+                .eq(com.panjia.received.domain.ReceivedContract::getPeriod, period)
+                .eq(com.panjia.received.domain.ReceivedContract::getSourceType, SOURCE_TYPE_MANUAL)
+                .last("LIMIT 1"));
+        if (existing != null) {
+            return existing;
+        }
+        com.panjia.received.domain.ReceivedContract contract = new com.panjia.received.domain.ReceivedContract();
+        contract.setOrderNo(expect.getOrderNo());
+        contract.setContractNo(expect.getContractNo());
+        contract.setBizType(expect.getBizType());
+        contract.setPeriod(period);
+        contract.setBusinessDate(expect.getBusinessDate());
+        contract.setBatchId(null);
+        contract.setSourceType(SOURCE_TYPE_MANUAL);
+        contract.setDeptId(expect.getDeptId());
+        contract.setPropertyAddress(expect.getPropertyAddress());
+        contract.setPeriodTotalReceived(BigDecimal.ZERO);
+        contract.setItemCount(0);
+        try {
+            contractMapper.insert(contract);
+        } catch (DuplicateKeyException e) {
+            // 并发手工提交撞 uk_received_contract_anchor：重查取既有合同
+            com.panjia.received.domain.ReceivedContract raced = contractMapper.selectOne(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                    .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, expect.getOrderNo())
+                    .eq(com.panjia.received.domain.ReceivedContract::getPeriod, period)
+                    .eq(com.panjia.received.domain.ReceivedContract::getSourceType, SOURCE_TYPE_MANUAL)
+                    .last("LIMIT 1"));
+            if (raced != null) {
+                return raced;
+            }
+            throw e;
+        }
+        return contract;
+    }
+
+    /** 以 PERF_EXPECT 为镜像构造手工实收明细（sourceKey 沿用应收，rd 与导入 sourceKey 不同源不会撞锚点）。 */
+    private com.panjia.received.domain.ReceivedDetail buildManualDetail(
+            PerformanceFact expect, Long contractId, String period, Long operatorId) {
+        com.panjia.received.domain.ReceivedDetail d = new com.panjia.received.domain.ReceivedDetail();
+        d.setContractId(contractId);
+        d.setEmployeeId(expect.getEmployeeId());
+        d.setDeptId(expect.getDeptId());
+        d.setEmployeeExternalCode(expect.getEmployeeExternalCode());
+        d.setRoleType(expect.getRoleType());
+        d.setRoleName(expect.getRoleName());
+        d.setShareRatio(expect.getShareRatio() != null ? expect.getShareRatio() : BigDecimal.ONE);
+        d.setPerformanceAmount(expect.getPerformanceAmount() != null ? expect.getPerformanceAmount() : BigDecimal.ZERO);
+        d.setFeeItem(expect.getFeeItem());
+        d.setPeriod(period);
+        d.setEffectiveDate(expect.getEffectiveDate() != null ? expect.getEffectiveDate()
+            : (expect.getBusinessDate() != null ? expect.getBusinessDate().toLocalDate() : java.time.LocalDate.now()));
+        d.setSourceKey(expect.getSourceKey());
+        d.setSourceBatchId(null);
+        d.setNormalizedRecordId(null);
+        d.setDetailStatus("ACTIVE");
+        d.setOperatorId(operatorId);
+        return d;
+    }
+
+    /** 重算合同级 ACTIVE 明细聚合（period_total_received / item_count）。 */
+    private void refreshContractAggregate(Long contractId) {
+        if (contractId == null) {
+            return;
+        }
+        List<com.panjia.received.domain.ReceivedDetail> active = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .eq(com.panjia.received.domain.ReceivedDetail::getContractId, contractId)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"));
+        com.panjia.received.domain.ReceivedContract contract = contractMapper.selectById(contractId);
+        if (contract == null) {
+            return;
+        }
+        contract.setItemCount(active.size());
+        contract.setPeriodTotalReceived(active.stream()
+            .map(d -> d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        contractMapper.updateById(contract);
     }
 }

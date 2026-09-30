@@ -5,6 +5,7 @@ import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
+import com.panjia.contracts.port.ReceivedRealFactPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
@@ -15,6 +16,7 @@ import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.utils.StringUtils;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -45,9 +47,28 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     private final ReceivedAlignmentService receivedAlignmentService;
     private final ReverseService reverseService;
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
+    /**
+     * 实收域端口（PERF_REAL 拆表后唯一读写落地处）。ObjectProvider 惰性取用：
+     * 实现 bean 在 panjia-received（performance 不反向依赖 received），运行期由 Spring 装配，
+     * 端口实现缺失时回退空结果/原 PERF_EXPECT 路径，保证本模块上下文可独立启动。
+     */
+    private final ObjectProvider<ReceivedRealFactPort> receivedRealFactPortProvider;
+
+    /** PERF_REAL 读/写全部委托实收域端口；端口实现缺失时返回 null（调用方按空结果兜底）。 */
+    private ReceivedRealFactPort realPort() {
+        return receivedRealFactPortProvider.getIfAvailable();
+    }
+
+    private static boolean isReal(String factType) {
+        return FactType.PERF_REAL.getCode().equals(factType);
+    }
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByDept(String period, Long deptId, String factType) {
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList() : port.findActiveByDept(period, deptId);
+        }
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getPeriod, period)
             .eq(deptId != null, PerformanceFact::getDeptId, deptId)
@@ -59,6 +80,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByEmployee(String period, Long employeeId, String factType) {
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList() : port.findActiveByEmployee(period, employeeId);
+        }
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(PerformanceFact::getPeriod, period)
             .eq(PerformanceFact::getEmployeeId, employeeId)
@@ -74,6 +99,22 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             return Collections.emptyList();
         }
         List<PerformanceFactSummaryDTO> all = factMapper.selectFactSummariesByIds(factIds);
+        // 拆表后 PERF_REAL 明细在实收域：pj_perf_fact 查不到的 ID 再去 rd 补查（含历史单绑 rd.id 的场景）
+        Set<Long> foundIds = new HashSet<>();
+        for (PerformanceFactSummaryDTO dto : all) {
+            foundIds.add(dto.getFactId());
+        }
+        List<Long> missingIds = new ArrayList<>();
+        for (Long id : factIds) {
+            if (id != null && !foundIds.contains(id)) {
+                missingIds.add(id);
+            }
+        }
+        ReceivedRealFactPort port = realPort();
+        if (port != null && !missingIds.isEmpty()) {
+            all = new ArrayList<>(all);
+            all.addAll(port.findActiveByIds(missingIds));
+        }
         List<PerformanceFactSummaryDTO> active = new ArrayList<>(all.size());
         for (PerformanceFactSummaryDTO dto : all) {
             if ("ACTIVE".equals(dto.getFactStatus())) {
@@ -90,15 +131,21 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             return null;
         }
         List<PerformanceFactSummaryDTO> list = factMapper.selectFactSummariesByIds(Collections.singletonList(factId));
-        if (list.isEmpty()) {
-            return null;
+        if (!list.isEmpty()) {
+            enrichWithEmployeeData(list);
+            return list.get(0);
         }
-        enrichWithEmployeeData(list);
-        return list.get(0);
+        // pj_perf_fact 查不到：尝试实收明细 ID（rd.id，不限状态，溯源用）
+        ReceivedRealFactPort port = realPort();
+        return port == null ? null : port.getById(factId);
     }
 
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType) {
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList() : port.findActiveByContract(period, contractNo);
+        }
         List<PerformanceFactSummaryDTO> list = factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
         enrichWithEmployeeData(list);
         return list;
@@ -108,6 +155,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     public List<PerformanceFactSummaryDTO> findActiveByBizKeys(java.util.Collection<String> bizKeys, String factType) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyList();
+        }
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList() : port.findActiveByBizKeys(bizKeys);
         }
         // 跨月查找：order_no 或 contract_no 命中键集合即返回（新签可能早于到账月）
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
@@ -150,6 +201,11 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     @Override
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId) {
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList()
+                : port.listContractSummaries(period, deptId, employeeId);
+        }
         return factMapper.selectContractSummaries(period, factType, deptId, employeeId);
     }
 
@@ -157,6 +213,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     public Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, java.util.Collection<String> bizKeys, String factType) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyMap();
+        }
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyMap() : port.sumOriginalAmountsByKeys(period, bizKeys);
         }
         List<Map<String, Object>> rows = factMapper.selectOriginalFactAmountsByKeys(period, factType, bizKeys);
         Map<String, BigDecimal> result = new HashMap<>();
@@ -182,31 +242,9 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         if (period == null || period.isBlank() || batchId == null) {
             return Collections.emptyList();
         }
-        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(PerformanceFact::getPeriod, period)
-            .eq(PerformanceFact::getBatchId, batchId)
-            .eq(PerformanceFact::getFactType, FactType.PERF_REAL)
-            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
-            .orderByAsc(PerformanceFact::getId);
-        List<PerformanceFact> facts = factMapper.selectList(wrapper);
-        List<com.panjia.contracts.dto.HistoryRealFactDTO> list = new ArrayList<>(facts.size());
-        for (PerformanceFact f : facts) {
-            com.panjia.contracts.dto.HistoryRealFactDTO dto = new com.panjia.contracts.dto.HistoryRealFactDTO();
-            dto.setFactId(f.getId());
-            dto.setOrderNo(f.getOrderNo());
-            dto.setContractNo(f.getContractNo());
-            dto.setSourceKey(f.getSourceKey());
-            dto.setPropertyAddress(f.getPropertyAddress());
-            dto.setBusinessDate(f.getBusinessDate());
-            dto.setBizType(f.getBizType());
-            dto.setDeptId(f.getDeptId());
-            dto.setEmployeeId(f.getEmployeeId());
-            dto.setRoleType(f.getRoleType());
-            dto.setFeeItem(f.getFeeItem());
-            dto.setAmount(f.getPerformanceAmount());
-            list.add(dto);
-        }
-        return list;
+        // 拆表后 PERF_REAL 历史工资明细在实收域 rd（source_batch_id），统一委托实收端口
+        ReceivedRealFactPort port = realPort();
+        return port == null ? Collections.emptyList() : port.listRealFactsByBatch(period, batchId);
     }
 
     @Override
@@ -306,6 +344,12 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     @Override
     public Map<Long, Long> adjustContractFactsAmount(String period, String contractNo, String factType,
                                                       BigDecimal targetAmount, Long operatorId, Long adjustId) {
+        if (isReal(factType)) {
+            // PERF_REAL 合同级调整落实收域 rd（分摊 + supersede 由实收端口实现）
+            ReceivedRealFactPort port = realPort();
+            return port == null ? new HashMap<>()
+                : port.adjustContractDetailsAmount(period, contractNo, targetAmount, operatorId, adjustId);
+        }
         List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
         Map<Long, Long> mapping = new HashMap<>();
         if (facts == null || facts.isEmpty()) {
@@ -338,6 +382,11 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     @Override
     public Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId) {
+        // 拆表后 factId 可能是 rd.id：实收明细命中则走实收 supersede，否则走业绩事实原路径
+        ReceivedRealFactPort port = realPort();
+        if (port != null && port.getById(factId) != null) {
+            return port.adjustDetailAmount(factId, targetAmount, operatorId, adjustId);
+        }
         PerformanceFact oldFact = factMapper.selectById(factId);
         if (oldFact == null) {
             return null;
@@ -351,11 +400,22 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     @Override
     public void voidFact(Long factId, Long operatorId, Long adjustId) {
+        // rd 命中：实收明细单行冲销（不插新行）；否则走业绩事实冲销
+        ReceivedRealFactPort port = realPort();
+        if (port != null && port.getById(factId) != null) {
+            port.voidDetail(factId, operatorId, adjustId);
+            return;
+        }
         reverseService.reverseByAdjust(factId, adjustId, ReversedReason.MANUAL_ADJUST, operatorId);
     }
 
     @Override
     public Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId) {
+        // rd 命中：实收明细部门划转 supersede；否则走业绩事实原路径
+        ReceivedRealFactPort port = realPort();
+        if (port != null && port.getById(factId) != null) {
+            return port.transferDetail(factId, targetDeptId, operatorId, adjustId);
+        }
         PerformanceFact oldFact = factMapper.selectById(factId);
         if (oldFact == null) {
             return null;

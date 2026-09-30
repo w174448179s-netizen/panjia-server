@@ -218,8 +218,11 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
-        List<PerformanceManageVo> rows = factMapper.selectManageListByContractNos(
-            period, factType, contractNos);
+        // 拆表后 PERF_REAL 物理落在实收域 rd/rc：结佣业绩口径走实收明细表，
+        // 其余填充（员工/部门、结佣状态、折算）按 rd.id 与 rc.biz_type 同样适用
+        List<PerformanceManageVo> rows = "PERF_REAL".equals(factType)
+            ? factMapper.selectReceivedManageListByContractNos(period, contractNos)
+            : factMapper.selectManageListByContractNos(period, factType, contractNos);
         fillManageDetailEmployeeAndDept(rows);
         fillManageDetailOriginalAmount(rows, period, factType, contractNos);
         fillManageDetailPendingAdjust(rows, period, factType, contractNos);

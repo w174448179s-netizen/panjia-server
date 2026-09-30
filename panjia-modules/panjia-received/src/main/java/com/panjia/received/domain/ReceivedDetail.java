@@ -28,6 +28,9 @@ public class ReceivedDetail {
     /** 角色人员工 ID（空经纪人场景可为 NULL，仅展示不参与计算） */
     private Long employeeId;
 
+    /** 明细级归属门店（空取合同级 rc.dept_id；结佣单行划转时写目标部门） */
+    private Long deptId;
+
     /** 员工外部编码（贝壳员工号） */
     private String employeeExternalCode;
 
@@ -69,6 +72,15 @@ public class ReceivedDetail {
 
     /** 明细状态：ACTIVE=有效 / REVERSED=已红冲（对应调整） */
     private String detailStatus;
+
+    /** 关联调整单 ID（结佣调整/新签调整；仅 supersede 新行有值） */
+    private Long adjustId;
+
+    /** 本行被冲销原因（ReversedReason code；仅 REVERSED 行有值） */
+    private String reversalType;
+
+    /** 退款/红冲指向的原始实收明细行 ID */
+    private Long refundOfDetailId;
 
     /** 操作人 ID */
     private Long operatorId;

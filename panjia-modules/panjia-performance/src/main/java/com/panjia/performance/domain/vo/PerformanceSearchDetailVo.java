@@ -54,7 +54,7 @@ public class PerformanceSearchDetailVo {
     /** 应收原始金额（调整前；未调整时 = expectAmount） */
     private BigDecimal originalExpectAmount;
 
-    /** 实收金额（PERF_REAL，按 source_key 配对；无实收时为 0） */
+    /** 实收金额（拆表后取 rd，按 期间+合同双键+工号+角色 配对；无实收时为 0） */
     private BigDecimal realAmount;
 
     /** 新签业绩折算后金额（originalExpectAmount × conversionFactor） */

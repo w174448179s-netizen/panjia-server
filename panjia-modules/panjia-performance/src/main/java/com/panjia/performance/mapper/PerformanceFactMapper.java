@@ -127,9 +127,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 故二者互为等价业务键，`CASE WHEN biz_type IN ('一手房','房产金融','家装荐客')` 的分派是冗余的。
      *
      * 【已统一】实收建单链路（2026-09-22 改动）：
-     * - 分组维度 selectBatchReceivedContractGroups：`GROUP BY rs.order_no`，CASE 已删；
-     * - 单据匹配 selectBatchUnboundRealFacts / selectExpectSumsByBizKeys：
-     *   纯 `f.order_no = 键`，不再 OR contract_no（订单号与合同号 1:1，简化为单一键）。
+     * - 实收建单已物理拆分至 pj_received_detail / pj_received_contract，PERF_REAL 不再落 pj_perf_fact；
+     * - 期望侧批量匹配 selectExpectSumsByBizKeys：纯 `f.order_no = 键`，
+     *   不再 OR contract_no（订单号与合同号 1:1，简化为单一键）。
      *
      * 【未统一】本文件其余 21 处 CASE 分派（业绩管理列表 / 作废恢复 / 调整 / 结佣 / 业绩查询，见
      * line 318 起至 1741）保持原样：它们的调用方可能回传「按业务类型决定的展示键」（前端
@@ -319,6 +319,55 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                              @Param("contractNos") List<String> contractNos);
 
     /**
+     * 按业务键集合查询实收明细（结佣业绩口径，合同维度树表懒加载数据源）。
+     * <p>
+     * 拆表后 PERF_REAL 已迁出 pj_perf_fact：实收侧以 {@code pj_received_detail rd}
+     * JOIN {@code pj_received_contract rc} 为底（ACTIVE 明细），员工 ID 按
+     * employee_external_code 关联 pj_people_employee 回填（导入时 rd.employee_id 暂留空）。
+     * <p>
+     * 投影列与 {@link #selectManageListByContractNos} 完全对齐，结佣审批详情
+     * （未发起模式）按「员工+角色」合并每行实收金额。
+     *
+     * @param period      归属期间
+     * @param contractNos 业务键集合（不能为空；订单号/合同号双列 OR 匹配）
+     * @return 实收明细行
+     */
+    @Select("""
+        <script>
+        SELECT rd.id,
+               'ACTIVE' AS "factStatus",
+               'PERF_REAL' AS "factType",
+               rd.period,
+               rc.business_date AS "businessDate",
+               rc.order_no AS "orderNo",
+               rc.contract_no AS "contractNo",
+               rc.biz_type AS "bizType",
+               rc.property_address AS "propertyAddress",
+               rd.fee_item AS "feeItem",
+               e.employee_id AS "employeeId",
+               rd.role_type AS "roleType",
+               rd.role_name AS "roleName",
+               rd.share_ratio AS "shareRatio",
+               rd.performance_amount AS "amount",
+               rd.source_key AS "sourceKey",
+               FALSE AS "manualAdjust"
+        FROM pj_received_detail rd
+        JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+        WHERE rd.detail_status = 'ACTIVE'
+          AND rd.period = #{period}
+          AND (rc.order_no IN
+          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
+              OR rc.contract_no IN
+          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>)
+        ORDER BY rc.contract_no, e.employee_id, rc.business_date, rd.role_type, rd.id
+        </script>
+        """)
+    List<PerformanceManageVo> selectReceivedManageListByContractNos(
+            @Param("period") String period,
+            @Param("contractNos") List<String> contractNos);
+
+    /**
      * 查询指定合同号/订单号下全部 ACTIVE 业绩事实（合同级调整 / 实收建单用）。
      * <p>
      * 通过 normalized_record → raw_signed 关联定位同组的所有明细事实。
@@ -497,52 +546,59 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 按期间 + 合同号查询实收审批单详情明细（每人一行，含应收/实收双口径）。
      * <p>
-     * 列口径对齐「合同业绩明细」页（selectManageListByContractNos）：
-     * deptPath / 工号 / 姓名 / 角色 / 角色占比；应收金额按同 sourceKey 的
-     * PERF_EXPECT 事实配对（导入引擎一行双发，与 ReceivedAlignmentService 口径一致）。
+     * 拆表后 PERF_REAL 已迁出 pj_perf_fact：实收侧以 pj_received_detail 为底
+     * （JOIN pj_received_contract 取合同号/订单号），员工信息按 employee_external_code
+     * 关联 pj_people_employee（导入时 rd.employee_id 暂留空）。
      * <p>
-     * 应收同时给出 originalExpectedAmount（调整前：同 sourceKey 最早一条 REVERSED 的
-     * PERF_EXPECT 金额，无调整时回退为当前 ACTIVE 金额），与「合同业绩明细」页
-     * originalAmount 同口径，供前端展示「原值 → 调整后值」。
+     * 应收金额按「同合同 + 同员工工号 + 同角色」配对 ACTIVE PERF_EXPECT 求和
+     * （同员工同角色可能跨多个费项，故聚合为一行）；应收原值沿 ACTIVE 行 sourceKey
+     * 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
+     * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
      *
      * @param period     归属期间
-     * @param contractNo 合同号
+     * @param contractNo 合同号/订单号（双列匹配）
      * @return 每人实收明细行
      */
     @Select("""
         <script>
-        WITH src_keys AS (
-            SELECT DISTINCT source_key
-            FROM pj_perf_fact
-            WHERE fact_status = 'ACTIVE'
-              AND period = #{period}
-              AND fact_type = 'PERF_REAL'
-              AND (contract_no = #{contractNo} OR order_no = #{contractNo})
-        ),
-        reversed_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
-            FROM src_keys sk
-            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
-               AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
-            ORDER BY sk.source_key, pe.id ASC
+        WITH rc AS (
+            SELECT rc.id, rc.order_no, rc.contract_no
+            FROM pj_received_contract rc
+            WHERE rc.period = #{period}
+              AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ),
         active_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
-            FROM src_keys sk
-            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
-               AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-            ORDER BY sk.source_key, pe.id
+            SELECT pe.employee_external_code AS emp_code, pe.role_type,
+                   SUM(pe.performance_amount) AS exp_amt
+            FROM pj_perf_fact pe
+            JOIN rc ON (pe.order_no = rc.order_no OR pe.contract_no = rc.contract_no)
+            WHERE pe.fact_status = 'ACTIVE'
+              AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period = #{period}
+            GROUP BY pe.employee_external_code, pe.role_type
         ),
-        reversed_real AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pr.performance_amount
-            FROM src_keys sk
-            JOIN pj_perf_fact pr ON pr.source_key = sk.source_key
-               AND pr.fact_status = 'REVERSED' AND pr.fact_type = 'PERF_REAL'
-            ORDER BY sk.source_key, pr.id ASC
+        reversed_chain AS (
+            SELECT DISTINCT ON (a.source_key)
+                   a.employee_external_code AS emp_code, a.role_type,
+                   a.order_no AS order_no, a.contract_no AS contract_no,
+                   a.source_key, b.performance_amount AS orig_amt
+            FROM pj_perf_fact a
+            JOIN pj_perf_fact b ON b.source_key = a.source_key
+               AND b.fact_type = 'PERF_EXPECT' AND b.fact_status = 'REVERSED'
+            JOIN rc ON (a.order_no = rc.order_no OR a.contract_no = rc.contract_no)
+            WHERE a.fact_status = 'ACTIVE'
+              AND a.fact_type = 'PERF_EXPECT'
+              AND a.period = #{period}
+            ORDER BY a.source_key, b.id ASC
+        ),
+        original_expect AS (
+            SELECT emp_code, role_type, order_no, contract_no, SUM(orig_amt) AS orig_amt
+            FROM reversed_chain
+            GROUP BY 1, 2, 3, 4
         )
-        SELECT f.id AS "factId",
-               f.employee_id AS "employeeId",
-               COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
+        SELECT rd.id AS "factId",
+               e.employee_id AS "employeeId",
+               COALESCE(e.employee_code, rd.employee_external_code) AS "employeeCode",
                e.employee_name AS "employeeName",
                CASE
                    WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
@@ -556,28 +612,27 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               f.role_type AS "roleType",
-               f.role_name AS "roleName",
-               f.share_ratio AS "shareRatio",
-               ae.performance_amount AS "expectedAmount",
-               COALESCE(re.performance_amount, ae.performance_amount) AS "originalExpectedAmount",
-               (re.source_key IS NOT NULL) AS "expectedAdjusted",
-               f.performance_amount AS "amount",
-               COALESCE(rr.performance_amount, f.performance_amount) AS "originalAmount",
-               (rr.source_key IS NOT NULL) AS "receivedAdjusted"
-        FROM pj_perf_fact f
-        LEFT JOIN active_expect ae ON ae.source_key = f.source_key
-        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
-        LEFT JOIN reversed_real rr ON rr.source_key = f.source_key
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
+               rd.role_type AS "roleType",
+               rd.role_name AS "roleName",
+               rd.share_ratio AS "shareRatio",
+               ae.exp_amt AS "expectedAmount",
+               COALESCE(oe.orig_amt, ae.exp_amt) AS "originalExpectedAmount",
+               (oe.orig_amt IS NOT NULL) AS "expectedAdjusted",
+               rd.performance_amount AS "amount",
+               rd.performance_amount AS "originalAmount",
+               FALSE AS "receivedAdjusted"
+        FROM rc
+        JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
+        LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+        LEFT JOIN sys_dept d ON d.dept_id = e.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
-          AND f.fact_type = 'PERF_REAL'
-          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
-        ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
+        LEFT JOIN active_expect ae ON ae.emp_code IS NOT DISTINCT FROM rd.employee_external_code
+                                  AND ae.role_type IS NOT DISTINCT FROM rd.role_type
+        LEFT JOIN original_expect oe ON (oe.order_no = rc.order_no OR oe.contract_no = rc.contract_no)
+                                    AND oe.emp_code IS NOT DISTINCT FROM rd.employee_external_code
+                                    AND oe.role_type IS NOT DISTINCT FROM rd.role_type
+        ORDER BY e.employee_name, e.dept_id, rd.role_type, rd.id
         </script>
         """)
     List<ReceivedFactDetailVo> selectReceivedFactDetails(@Param("period") String period,
@@ -586,57 +641,41 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 按期间 + 业务键集合查询实收明细列表的补充字段（涉及人数、应收合计），每传入键一行。
      * <p>
-     * <b>业务类型已落库</b>到 {@code pj_perf_received_apply.biz_type}（建单时快照），
-     * 列表页不再依赖本查询回填 bizType；此处仍带出 bizType 便于口径核对。
-     * 应收合计取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
-     * 实收合计取 ACTIVE PERF_REAL，并额外给出 originalReceivedAmount（按当前 ACTIVE 事实
-     * sourceKey 链取最早一条事实金额求和，含已生效结佣调整前原值），使列表「实收业绩」
-     * 可展示「原值 → 调整后值」。
+     * 拆表后 PERF_REAL 已迁出 pj_perf_fact：实收合计/涉及人数取实收域
+     * {@code pj_received_contract rc + pj_received_detail rd}（ACTIVE 明细），
+     * 员工去重按员工主数据 ID（rd.employee_id 暂留空时回退外部工号）。
+     * <p>
+     * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额。
+     * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
+     * （前端据此不展示「原值 → 调整后值」）。
      * 匹配口径：传入键命中 {@code contract_no} 或 {@code order_no} 任一即可（二者 1:1，
      * 兼容早期把订单号写进 contract_no 的一手房单据）。
      *
      * @param period      归属期间
      * @param contractNos 单据上的合同号/订单号集合（不可为空，调用方需先过滤）
-     * @return 每键一行的业务类型、涉及人数、实收/应收合计与实收调整前合计
+     * @return 每键一行的业务类型、涉及人数、实收/应收合计
      */
     @Select("""
         <script>
         SELECT k.key AS "contractNo",
-               MAX(f.biz_type) AS "bizType",
-               COUNT(DISTINCT f.employee_id) AS "employeeCount",
-               COALESCE(SUM(f.performance_amount), 0) AS "receivedAmount",
+               MAX(rc.biz_type) AS "bizType",
+               COUNT(DISTINCT COALESCE(e.employee_id::text, rd.employee_external_code)) AS "employeeCount",
+               COALESCE(SUM(rd.performance_amount), 0) AS "receivedAmount",
+               COALESCE(SUM(rd.performance_amount), 0) AS "originalReceivedAmount",
                COALESCE((
-                   SELECT SUM(e.performance_amount)
-                   FROM pj_perf_fact e
-                   WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period}
-                     AND (e.contract_no = k.key OR e.order_no = k.key)
-               ), 0) AS "expectedAmount",
-               COALESCE((
-                   SELECT SUM(o.performance_amount)
-                   FROM (
-                       SELECT DISTINCT ON (a.source_key) a.source_key, a.performance_amount
-                       FROM pj_perf_fact a
-                       WHERE a.fact_type = 'PERF_REAL'
-                         AND a.period = #{period}
-                         AND (a.contract_no = k.key OR a.order_no = k.key)
-                         AND a.source_key IN (
-                             SELECT b.source_key
-                             FROM pj_perf_fact b
-                             WHERE b.fact_status = 'ACTIVE' AND b.fact_type = 'PERF_REAL'
-                               AND b.period = #{period}
-                               AND (b.contract_no = k.key OR b.order_no = k.key)
-                         )
-                       ORDER BY a.source_key, a.id ASC
-                   ) o
-               ), 0) AS "originalReceivedAmount"
+                   SELECT SUM(pe.performance_amount)
+                   FROM pj_perf_fact pe
+                   WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                     AND pe.period = #{period}
+                     AND (pe.contract_no = k.key OR pe.order_no = k.key)
+               ), 0) AS "expectedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
         ) AS k(key)
-        JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
-                           AND f.fact_type = 'PERF_REAL'
-                           AND f.period = #{period}
-        WHERE (f.contract_no = k.key OR f.order_no = k.key)
+        JOIN pj_received_contract rc ON rc.period = #{period}
+                                    AND (rc.contract_no = k.key OR rc.order_no = k.key)
+        JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
+        LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
         GROUP BY k.key
         </script>
         """)
@@ -758,86 +797,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                                  @Param("employeeId") Long employeeId);
 
     /**
-     * 按导入批次聚合「实收业绩订单组」（实收审批单自动建单用，§2.1）。
-     * <p>
-     * 仅取本批新建、ACTIVE、尚未挂实收审批单（received_apply_id IS NULL）的 PERF_REAL 事实，
-     * <b>按订单号聚合</b>：实收合计、快照字段、业务类型、明细条数。
-     * <p>
-     * 订单号即业务键：贝壳原始行中 {@code order_no} 与 {@code contract_no} 严格 1:1
-     * （实测 0 冲突、238 组全等），故无需按业务类型做 CASE 分派——统一按订单号聚合，
-     * 结果与旧的「一手房/房产金融/家装荐客取订单号、其余取合同号」口径完全等价。
-     *
-     * @param batchId 导入批次 ID
-     * @param period  归属期间
-     * @return 订单聚合组列表（orderNo = 业务键）
-     */
-    @Select("""
-        SELECT MAX(s.contract_no) AS "contractNo",
-               s.order_no AS "orderNo",
-               MAX(s.property_address) AS "propertyAddress",
-               MAX(s.business_date) AS "businessDate",
-               MAX(s.biz_type) AS "bizType",
-               COALESCE(SUM(s.amount), 0) AS "receivedAmount",
-               COUNT(*) AS "itemCount"
-        FROM (
-            SELECT f.order_no,
-                   f.contract_no,
-                   f.biz_type,
-                   f.property_address,
-                   f.business_date,
-                   f.performance_amount AS amount
-            FROM pj_perf_fact f
-            WHERE f.fact_status = 'ACTIVE'
-              AND f.fact_type = 'PERF_REAL'
-              AND f.batch_id = #{batchId}
-              AND f.period = #{period}
-              AND f.received_apply_id IS NULL
-              AND f.order_no IS NOT NULL
-        ) s
-        GROUP BY s.order_no
-        HAVING COALESCE(SUM(s.amount), 0) <> 0
-        ORDER BY s.order_no
-        """)
-    List<com.panjia.performance.dto.ReceivedContractGroupDTO> selectBatchReceivedContractGroups(
-        @Param("batchId") Long batchId, @Param("period") String period);
-
-    /**
-     * 一次查询批次内全部待绑定的非零 ACTIVE 实收事实行（自动建单性能优化用）。
-     * <p>
-     * 纯订单号匹配（{@code f.order_no = 键}），每个 factId 唯一归属一个订单号，
-     * 无需服务层竞争裁决。
-     *
-     * @param batchId 导入批次 ID
-     * @param period  归属期间
-     * @param bizKeys 本批次聚合出的业务键（订单号）
-     * @return 待绑定事实行（received_apply_id 为空、金额非 0）
-     */
-    @Select("""
-        <script>
-        SELECT f.id AS "factId",
-               kv.biz_key AS "bizKey",
-               f.dept_id AS "deptId",
-               f.performance_amount AS "amount"
-        FROM pj_perf_fact f
-        JOIN (VALUES
-        <foreach collection="bizKeys" item="k" separator=",">(CAST(#{k} AS text))</foreach>
-        ) kv(biz_key)
-          ON f.order_no = kv.biz_key
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = 'PERF_REAL'
-          AND f.batch_id = #{batchId}
-          AND f.period = #{period}
-          AND f.received_apply_id IS NULL
-          AND f.performance_amount IS NOT NULL
-          AND f.performance_amount &lt;&gt; 0
-        ORDER BY kv.biz_key, f.id
-        </script>
-        """)
-    List<com.panjia.performance.dto.BatchFactBindRow> selectBatchUnboundRealFacts(
-        @Param("batchId") Long batchId, @Param("period") String period,
-        @Param("bizKeys") List<String> bizKeys);
-
-    /**
      * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。
      * <p>
      * 纯订单号匹配，一条事实对一个键只计一次。
@@ -936,13 +895,38 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.role_type AS "roleType",
                f.role_name AS "roleName",
                f.share_ratio AS "shareRatio",
-               (SELECT pe.performance_amount
-                  FROM pj_perf_fact pe
-                 WHERE pe.fact_status = 'ACTIVE'
-                   AND pe.fact_type = CASE WHEN #{factType} = 'PERF_EXPECT' THEN 'PERF_REAL' ELSE 'PERF_EXPECT' END
-                   AND pe.source_key = f.source_key
-                 ORDER BY pe.id
-                 LIMIT 1) AS "expectedAmount",
+               (CASE WHEN #{factType} = 'PERF_EXPECT' THEN
+                   -- 拆表后实收落在 rd：按「同期间 + 合同双键 + 同工号 + 同角色」配对，
+                   -- rd 每组(合同,工号,角色)仅 1 行、应收侧可能多行，按组内应收行数均摊实收
+                   (SELECT ROUND(grp.real_sum / NULLIF(grp.exp_cnt, 0), 2) FROM (
+                       SELECT COALESCE(SUM(rdx.performance_amount), 0) AS real_sum,
+                              (SELECT COUNT(*) FROM pj_perf_fact fc
+                                WHERE fc.fact_status = 'ACTIVE'
+                                  AND fc.fact_type = 'PERF_EXPECT'
+                                  AND fc.period = f.period
+                                  AND (fc.order_no = f.order_no OR fc.contract_no = f.contract_no
+                                       OR fc.order_no = f.contract_no OR fc.contract_no = f.order_no)
+                                  AND fc.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                                  AND fc.role_type IS NOT DISTINCT FROM f.role_type) AS exp_cnt
+                       FROM pj_received_detail rdx
+                       JOIN pj_received_contract rc ON rc.id = rdx.contract_id
+                       WHERE rdx.detail_status = 'ACTIVE'
+                         AND rdx.period = f.period
+                         AND (rc.order_no = f.order_no OR rc.contract_no = f.contract_no
+                              OR rc.order_no = f.contract_no OR rc.contract_no = f.order_no)
+                         AND rdx.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                         AND rdx.role_type IS NOT DISTINCT FROM f.role_type
+                   ) grp)
+                   ELSE
+                   -- 实收口径行（当前无此路径，保留应收 sourceKey 配对）
+                   (SELECT pe.performance_amount
+                      FROM pj_perf_fact pe
+                     WHERE pe.fact_status = 'ACTIVE'
+                       AND pe.fact_type = 'PERF_EXPECT'
+                       AND pe.source_key = f.source_key
+                     ORDER BY pe.id
+                     LIMIT 1)
+                END) AS "expectedAmount",
                f.performance_amount AS "amount",
                f.source_key AS "sourceKey",
                f.fact_status AS "factStatus"
@@ -988,31 +972,76 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        WITH contract_period AS (
+        WITH all_rows AS (
+            -- 应收侧（ACTIVE PERF_EXPECT）
             SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
-                   MAX(f.period) AS max_period
+                   f.period AS period,
+                   f.dept_id AS dept_id,
+                   f.employee_id AS employee_id,
+                   f.biz_type AS biz_type,
+                   f.order_no AS order_no,
+                   f.contract_no AS contract_no,
+                   f.property_address AS property_address,
+                   f.business_date AS business_date,
+                   f.adjust_id AS adjust_id,
+                   f.source_key AS source_key,
+                   f.employee_external_code AS emp_code,
+                   f.role_type AS role_type,
+                   f.performance_amount AS amount,
+                   'E' AS src
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
               AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+            UNION ALL
+            -- 实收侧（拆表后 ACTIVE rd + rc；rd.employee_id 暂留空，按工号关联员工主数据）
+            SELECT COALESCE(rc.order_no, rc.contract_no),
+                   rd.period,
+                   COALESCE(rd.dept_id, rc.dept_id),
+                   e.employee_id,
+                   rc.biz_type,
+                   rc.order_no,
+                   rc.contract_no,
+                   rc.property_address,
+                   rc.business_date,
+                   rd.adjust_id,
+                   rd.source_key,
+                   rd.employee_external_code,
+                   rd.role_type,
+                   rd.performance_amount,
+                   'R'
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+            WHERE rd.detail_status = 'ACTIVE'
+              AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
+        ),
+        kf AS (
+            SELECT * FROM all_rows
+            WHERE 1 = 1
             <if test="period != null and period != ''">
-              AND f.period = #{period}
+              AND period = #{period}
             </if>
             <if test="deptId != null">
-              AND (f.dept_id = #{deptId}
-                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+              AND (dept_id = #{deptId}
+                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = dept_id
                               AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
             </if>
             <if test="employeeId != null">
-              AND f.employee_id = #{employeeId}
+              AND employee_id = #{employeeId}
             </if>
             <if test="bizType != null and bizType != ''">
-              AND f.biz_type = #{bizType}
+              AND biz_type = #{bizType}
             </if>
             <if test="keyword != null and keyword != ''">
-              AND (f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+              AND (contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
             </if>
+        ),
+        contract_period AS (
+            SELECT biz_key, MAX(period) AS max_period
+            FROM kf
             GROUP BY 1
         ),
         reversed_expect AS (
@@ -1029,24 +1058,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         fact_agg AS (
             SELECT cp.biz_key AS "bizKey",
                    cp.max_period AS "period",
-                   MAX(f.contract_no) AS "contractNo",
-                   MAX(f.order_no) AS "orderNo",
-                   MAX(f.biz_type) AS "bizType",
-                   MAX(f.property_address) AS "propertyAddress",
-                   MAX(f.business_date) AS "signDate",
-                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT' THEN f.performance_amount ELSE 0 END), 0) AS "expectAmount",
-                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_EXPECT'
-                                     THEN COALESCE(re.performance_amount, f.performance_amount) ELSE 0 END), 0) AS "expectOriginalAmount",
-                   COALESCE(SUM(CASE WHEN f.fact_type = 'PERF_REAL' THEN f.performance_amount ELSE 0 END), 0) AS "realAmount",
-                   BOOL_OR(f.adjust_id IS NOT NULL) AS "hasAdjust",
-                   COUNT(DISTINCT f.employee_id) AS "employeeCount",
+                   MAX(ar.contract_no) AS "contractNo",
+                   MAX(ar.order_no) AS "orderNo",
+                   MAX(ar.biz_type) AS "bizType",
+                   MAX(ar.property_address) AS "propertyAddress",
+                   MAX(ar.business_date) AS "signDate",
+                   COALESCE(SUM(CASE WHEN ar.src = 'E' THEN ar.amount ELSE 0 END), 0) AS "expectAmount",
+                   COALESCE(SUM(CASE WHEN ar.src = 'E'
+                                     THEN COALESCE(re.performance_amount, ar.amount) ELSE 0 END), 0) AS "expectOriginalAmount",
+                   COALESCE(SUM(CASE WHEN ar.src = 'R' THEN ar.amount ELSE 0 END), 0) AS "realAmount",
+                   BOOL_OR(ar.adjust_id IS NOT NULL) AS "hasAdjust",
+                   COUNT(DISTINCT COALESCE(ar.employee_id::text, ar.emp_code)) AS "employeeCount",
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
-            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
-                AND COALESCE(f.order_no, f.contract_no) = cp.biz_key
-            LEFT JOIN reversed_expect re ON re.source_key = f.source_key
+            JOIN all_rows ar ON ar.biz_key = cp.biz_key
+            LEFT JOIN reversed_expect re ON re.source_key = ar.source_key
             <if test="employeeId != null">
-              WHERE f.employee_id = #{employeeId}
+              WHERE ar.employee_id = #{employeeId}
             </if>
             GROUP BY cp.biz_key, cp.max_period
         )
@@ -1119,32 +1147,63 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
 
     /**
      * 完整业绩查询的合同数（分页 total，按业务键去重）。
+     * <p>
+     * 业务键口径与列表一致：ACTIVE PERF_EXPECT（pj_perf_fact）与 ACTIVE 实收
+     * （rd + rc）两侧 UNION 后去重，筛选条件（期间/部门子树/员工/类型/关键字）
+     * 与 {@link #selectFactSearchByContract} 的 kf 完全相同。
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT COALESCE(f.order_no, f.contract_no))
-        FROM pj_perf_fact f
-        WHERE f.fact_status = 'ACTIVE'
-          AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+        WITH all_rows AS (
+            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
+                   f.period AS period,
+                   f.dept_id AS dept_id,
+                   f.employee_id AS employee_id,
+                   f.biz_type AS biz_type,
+                   f.contract_no AS contract_no,
+                   f.order_no AS order_no,
+                   f.property_address AS property_address
+            FROM pj_perf_fact f
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
+              AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+            UNION ALL
+            SELECT COALESCE(rc.order_no, rc.contract_no),
+                   rd.period,
+                   COALESCE(rd.dept_id, rc.dept_id),
+                   e.employee_id,
+                   rc.biz_type,
+                   rc.contract_no,
+                   rc.order_no,
+                   rc.property_address
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+            WHERE rd.detail_status = 'ACTIVE'
+              AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
+        )
+        SELECT COUNT(DISTINCT biz_key)
+        FROM all_rows
+        WHERE 1 = 1
           <if test="period != null and period != ''">
-            AND f.period = #{period}
+            AND period = #{period}
           </if>
           <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+            AND (dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = dept_id
                             AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
           </if>
           <if test="employeeId != null">
-            AND f.employee_id = #{employeeId}
+            AND employee_id = #{employeeId}
           </if>
           <if test="bizType != null and bizType != ''">
-            AND f.biz_type = #{bizType}
+            AND biz_type = #{bizType}
           </if>
           <if test="keyword != null and keyword != ''">
             AND (
-              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR property_address ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
         </script>
@@ -1158,24 +1217,44 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
 
     /**
      * 完整业绩查询的业务类型下拉选项：在与列表完全相同的数据范围（期间/部门子树/经纪人本人）
-     * 内，对 ACTIVE 事实的 biz_type 去重排序；不含关键字过滤，避免输入关键字后选项被清空。
+     * 内，对 ACTIVE 应收（PERF_EXPECT）与实收（rd+rc）两侧的 biz_type 去重排序；
+     * 不含关键字过滤，避免输入关键字后选项被清空。
      */
     @Select("""
         <script>
-        SELECT DISTINCT f.biz_type
-        FROM pj_perf_fact f
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.biz_type IS NOT NULL
+        WITH all_rows AS (
+            SELECT f.period AS period,
+                   f.dept_id AS dept_id,
+                   f.employee_id AS employee_id,
+                   f.biz_type AS biz_type
+            FROM pj_perf_fact f
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
+              AND f.biz_type IS NOT NULL
+            UNION ALL
+            SELECT rd.period,
+                   COALESCE(rd.dept_id, rc.dept_id),
+                   e.employee_id,
+                   rc.biz_type
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+            WHERE rd.detail_status = 'ACTIVE'
+              AND rc.biz_type IS NOT NULL
+        )
+        SELECT DISTINCT biz_type
+        FROM all_rows
+        WHERE 1 = 1
           <if test="period != null and period != ''">
-            AND f.period = #{period}
+            AND period = #{period}
           </if>
           <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+            AND (dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = dept_id
                             AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
           </if>
           <if test="employeeId != null">
-            AND f.employee_id = #{employeeId}
+            AND employee_id = #{employeeId}
           </if>
         ORDER BY 1
         </script>
@@ -1188,8 +1267,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
      * <p>
-     * 以 PERF_EXPECT（新签/应收）ACTIVE 事实为基准行，按 source_key 配对同业务的
-     * PERF_REAL（实收）金额，一行同时展示应收/实收双口径；含该业务键全部期间
+     * 以 PERF_EXPECT（新签/应收）ACTIVE 事实为基准行；拆表后实收落在 rd，
+     * 按「同期间 + 合同双键 + 同工号 + 同角色」配对实收金额（rd 每组一行），
+     * 一行同时展示应收/实收双口径；含该业务键全部期间
      * （与 {@link #selectFactSearchByContract} 的合同全周期聚合口径一致）。
      * 业务键口径：一手房、房产金融、家装荐客传订单号，其余传合同号（空则订单号）。
      *
@@ -1233,11 +1313,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    f.performance_amount)
                END AS "originalExpectAmount",
                COALESCE(
-                 (SELECT pr.performance_amount FROM pj_perf_fact pr
-                  WHERE pr.source_key = f.source_key
-                    AND pr.fact_type = 'PERF_REAL'
-                    AND pr.fact_status = 'ACTIVE'
-                  ORDER BY pr.id DESC LIMIT 1),
+                 -- 拆表后实收落在 rd：按「同期间 + 合同双键 + 同工号 + 同角色」配对
+                 (SELECT SUM(rdx.performance_amount)
+                  FROM pj_received_detail rdx
+                  JOIN pj_received_contract rc ON rc.id = rdx.contract_id
+                  WHERE rdx.detail_status = 'ACTIVE'
+                    AND rdx.period = f.period
+                    AND (rc.order_no = f.order_no OR rc.contract_no = f.contract_no
+                         OR rc.order_no = f.contract_no OR rc.contract_no = f.order_no)
+                    AND rdx.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                    AND rdx.role_type IS NOT DISTINCT FROM f.role_type),
                  0
                ) AS "realAmount",
                (ci.id IS NOT NULL) AS "settled",

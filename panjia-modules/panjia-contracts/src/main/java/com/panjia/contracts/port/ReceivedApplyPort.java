@@ -1,5 +1,7 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.ManualReceivedSubmitResultDTO;
+
 import java.util.Collection;
 
 /**
@@ -57,4 +59,17 @@ public interface ReceivedApplyPort {
      * @return 新建审批单数量（合并不计）
      */
     int createApplyForRealFacts(Collection<Long> factIds, String period, Long operatorId, Long batchId);
+
+    /**
+     * 手工提交实收完整入口：按业务键（合同号/订单号）查 ACTIVE PERF_EXPECT 应收，
+     * 由实收域在 pj_received_detail/contract 镜像造实收明细（source_type=MANUAL），
+     * 再按订单号分组建实收审批单走审批流。
+     * <p>拆表后 performance 域不再插 PERF_REAL 事实，本方法是手工提交的唯一落地处。
+     *
+     * @param bizKeys    合同号/订单号集合
+     * @param period     归属期间 YYYY-MM
+     * @param operatorId 操作人 ID
+     * @return 提交结果（新建明细数 + 新建审批单数 + 跳过原因）
+     */
+    ManualReceivedSubmitResultDTO manualSubmitReceived(Collection<String> bizKeys, String period, Long operatorId);
 }

@@ -219,11 +219,12 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 查合同实收事实的门店 ID（取首条事实的 deptId）。
+     * 查合同归属门店 ID（取该合同 ACTIVE 新签事实的首条 deptId）。
+     * 实收仅为门控，部门归属以新签事实为准。
      */
     Long resolveContractDeptId(String period, String contractNo) {
         List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-            .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+            .findActiveByContract(period, contractNo, FACT_TYPE_EXPECT);
         return facts.stream()
             .map(PerformanceFactSummaryDTO::getDeptId)
             .filter(java.util.Objects::nonNull)
@@ -503,7 +504,8 @@ public class CommissionApplicationService {
             : performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL);
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
-            throw new ServiceException("合同 " + contractNo + " " + period + " 月无可入账的实收业绩（amount>0 的实收事实为 0 条）");
+            throw new ServiceException("合同 " + contractNo + " " + period
+                + " 月无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
 
         // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣
@@ -1328,8 +1330,9 @@ public class CommissionApplicationService {
         if (keys.isEmpty()) {
             return;
         }
+        // 调整前原值取新签口径（结佣金额=新签）：沿 PERF_EXPECT sourceKey 链取最早 REVERSED 金额
         Map<String, BigDecimal> originalMap =
-            performanceQueryPort.sumOriginalAmountsByKeys(period, keys, FACT_TYPE_REAL);
+            performanceQueryPort.sumOriginalAmountsByKeys(period, keys, FACT_TYPE_EXPECT);
         for (CommissionContractVo vo : pageRows) {
             BigDecimal original = originalMap.get(vo.getContractNo());
             if (original == null || vo.getAmount() == null
@@ -1380,7 +1383,8 @@ public class CommissionApplicationService {
                 vo.setOriginalExpectedAmount(app.getExpectedAmount());
             }
         } else {
-            vo.setAmount(c.getAmount());
+            // 未发起结佣：结佣业绩金额 = 新签应收合计（expectedAmount），实收仅做门控不参与金额
+            vo.setAmount(c.getExpectedAmount());
             vo.setDetailCount(c.getDetailCount());
         }
         // 折算后金额：合同维度聚合行无 factId，按本行 bizType 的因子折算（同一合同同一因子，应收/实收同因子）
