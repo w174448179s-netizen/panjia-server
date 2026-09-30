@@ -59,14 +59,14 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND rd3.source_key IS NOT NULL
         ),
         reversed_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount, pe.period AS exp_period
             FROM src_keys sk
             JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
                AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
             ORDER BY sk.source_key, pe.id ASC
         ),
         active_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount, pe.period AS exp_period
             FROM src_keys sk
             JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
                AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
@@ -79,7 +79,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         ),
         rd_active_expect AS (
             SELECT rp.period, rp.order_no, rp.contract_no, rp.emp_code, rp.role_type,
-                   SUM(pe.performance_amount) AS exp_amt
+                   SUM(pe.performance_amount) AS exp_amt,
+                   STRING_AGG(DISTINCT pe.period, ',' ORDER BY pe.period) AS exp_period
             FROM rd_pair rp
             JOIN pj_perf_fact pe
               ON pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
@@ -105,7 +106,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         ),
         rd_original_expect AS (
             SELECT rp.period, rp.order_no, rp.contract_no, rp.emp_code, rp.role_type,
-                   SUM(chain.orig_amt) AS orig_amt
+                   SUM(chain.orig_amt) AS orig_amt,
+                   STRING_AGG(DISTINCT chain.period, ',' ORDER BY chain.period) AS orig_period
             FROM rd_pair rp
             JOIN (
                 -- 每条 ACTIVE 应收 sourceKey 链取最早一条 REVERSED 金额（同 selectReceivedFactDetails）
@@ -172,6 +174,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(f.share_ratio, rd2.share_ratio) AS "shareRatio",
                ci.biz_type AS "bizType",
                COALESCE(ae.performance_amount, rae.exp_amt) AS "expectedAmount",
+               COALESCE(ae.exp_period, rae.exp_period, re.exp_period, roe.orig_period,
+                        f.period, rd2.period) AS "expectPeriod",
                COALESCE(re.performance_amount, roe.orig_amt,
                         ae.performance_amount, rae.exp_amt) AS "originalExpectedAmount",
                (re.source_key IS NOT NULL OR roe.orig_amt IS NOT NULL) AS "expectedAdjusted",

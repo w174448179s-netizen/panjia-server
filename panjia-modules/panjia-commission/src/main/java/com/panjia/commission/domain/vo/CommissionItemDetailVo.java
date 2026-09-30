@@ -51,6 +51,9 @@ public class CommissionItemDetailVo implements Serializable {
     /** 应收金额（同 sourceKey 的 PERF_EXPECT 事实金额） */
     private BigDecimal expectedAmount;
 
+    /** 新签月份（应收对应的新签事实归属月，如 2026-06、2026-07；跨月汇总时逗号分隔） */
+    private String expectPeriod;
+
     /** 应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
     private Boolean expectedAdjusted;
 
