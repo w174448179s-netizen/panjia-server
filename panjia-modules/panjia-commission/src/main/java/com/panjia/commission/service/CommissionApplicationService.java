@@ -1461,34 +1461,76 @@ public class CommissionApplicationService {
         fillOriginalReceivedAmounts(period, pageRows, factorMap);
         // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
         fillContractPendingAdjust(pageRows);
+        // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
+        fillAddMemberMark(period, pageRows);
         return PageResult.build(pageRows, (long) total);
     }
 
     /**
-     * 批量填充列表行的结佣业绩调整前合计（PERF_REAL 事实链最早值）及折算后金额。
-     * 未调整（原值=当前合计）或无 ACTIVE 事实的行保持 null，前端按单值展示。
+     * 批量标记当前页合同是否存在已生效的「增加角色人」（口径与新签合同列表一致）。
+     * 合同号/订单号双键匹配；不逐行查询。
+     */
+    private void fillAddMemberMark(String period, List<CommissionContractVo> pageRows) {
+        if (pageRows == null || pageRows.isEmpty()) {
+            return;
+        }
+        Set<String> keys = new HashSet<>();
+        for (CommissionContractVo r : pageRows) {
+            if (StringUtils.isNotBlank(r.getContractNo())) {
+                keys.add(r.getContractNo());
+            }
+            if (StringUtils.isNotBlank(r.getOrderNo())) {
+                keys.add(r.getOrderNo());
+            }
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        Set<String> hit = new HashSet<>(itemMapper.selectAddMemberBizKeys(period, keys));
+        for (CommissionContractVo r : pageRows) {
+            r.setHasAddMember(hit.contains(r.getContractNo()) || hit.contains(r.getOrderNo()));
+        }
+    }
+
+    /**
+     * 批量填充列表行的结佣业绩调整前合计。
+     * <p>
+     * 口径：结佣金额列的「原值 → 调整后值」只反映<b>结佣调整单(AMOUNT)</b>，不反映新签调整——
+     * 新签调整（含新签侧增加角色人）只在「新签业绩」列体现。原额 = 当前合计 − 该申请单下
+     * 已执行 AMOUNT 调整单的累计差额；无差额（纯新签调整/未调整）时保持 null，前端只显示单值。
      */
     private void fillOriginalReceivedAmounts(String period, List<CommissionContractVo> pageRows,
                                              Map<String, BigDecimal> factorMap) {
         if (pageRows == null || pageRows.isEmpty()) {
             return;
         }
-        Set<String> keys = pageRows.stream()
-            .map(CommissionContractVo::getContractNo)
-            .filter(StringUtils::isNotBlank)
+        Set<Long> applicationIds = pageRows.stream()
+            .map(CommissionContractVo::getApplicationId)
+            .filter(java.util.Objects::nonNull)
             .collect(Collectors.toSet());
-        if (keys.isEmpty()) {
+        if (applicationIds.isEmpty()) {
             return;
         }
-        // 调整前原值取新签口径（结佣金额=新签）：沿 PERF_EXPECT sourceKey 链取最早 REVERSED 金额
-        Map<String, BigDecimal> originalMap =
-            performanceQueryPort.sumOriginalAmountsByKeys(period, keys, FACT_TYPE_EXPECT);
+        Map<Long, BigDecimal> deltaByApp = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.selectExecutedAmountDeltaSum(applicationIds)) {
+            Object id = row.get("applicationId");
+            Object delta = row.get("deltaSum");
+            if (id != null && delta instanceof BigDecimal bd) {
+                deltaByApp.put(((Number) id).longValue(), bd);
+            }
+        }
+        if (deltaByApp.isEmpty()) {
+            return;
+        }
         for (CommissionContractVo vo : pageRows) {
-            BigDecimal original = originalMap.get(vo.getContractNo());
-            if (original == null || vo.getAmount() == null
-                || original.compareTo(vo.getAmount()) == 0) {
+            if (vo.getApplicationId() == null || vo.getAmount() == null) {
                 continue;
             }
+            BigDecimal delta = deltaByApp.get(vo.getApplicationId());
+            if (delta == null || delta.compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+            BigDecimal original = vo.getAmount().subtract(delta);
             vo.setReceivedAdjusted(true);
             vo.setOriginalAmount(original);
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, vo.getBizType());

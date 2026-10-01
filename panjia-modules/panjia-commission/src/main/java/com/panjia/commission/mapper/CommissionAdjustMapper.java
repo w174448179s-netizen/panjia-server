@@ -80,4 +80,28 @@ public interface CommissionAdjustMapper extends BaseMapperPlus<CommissionAdjust,
         }
         return selectDeptNamesByIds(ids);
     }
+
+    /**
+     * 批量汇总各结佣申请单「已执行金额调整(AMOUNT)」的累计差额。
+     * <p>
+     * 结佣明细列表「结佣业绩：原值 → 调整后值」的原额 = 当前合计 − 累计差额
+     * （连续多次调整时各次差额相对执行时的当时值，链式可加）。
+     * 仅 EXECUTED 的 AMOUNT 单计入；ADD_MEMBER 不改变合同总额（新人金额由他人扣减分摊），不计入。
+     *
+     * @param applicationIds 申请单 ID 集合
+     * @return 每行 applicationId / deltaSum
+     */
+    @Select("""
+        <script>
+        SELECT application_id AS "applicationId",
+               COALESCE(SUM(diff_amount), 0) AS "deltaSum"
+        FROM pj_commission_adjust
+        WHERE status = 'EXECUTED'
+          AND adjust_type = 'AMOUNT'
+          AND application_id IN
+        <foreach collection="applicationIds" item="aid" open="(" separator="," close=")">#{aid}</foreach>
+        GROUP BY application_id
+        </script>
+        """)
+    List<Map<String, Object>> selectExecutedAmountDeltaSum(@Param("applicationIds") Collection<Long> applicationIds);
 }

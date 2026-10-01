@@ -77,6 +77,9 @@ public class CommissionContractVo implements Serializable {
     /** 应收已被调整（当前 ACTIVE 应收与提交快照不一致时置 true） */
     private Boolean expectedAdjusted;
 
+    /** 合同存在已生效的「增加角色人」（有 ACTIVE 的 MANUAL-ADJ/MANUAL-CADJ 新签事实行） */
+    private Boolean hasAddMember;
+
     /** 是否已发生实收对齐应收 */
     private Boolean aligned;
 

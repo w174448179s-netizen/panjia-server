@@ -60,6 +60,13 @@ public class CommissionItemDetailVo implements Serializable {
     /** 应收已被调整（同 sourceKey 存在 REVERSED 的 PERF_EXPECT 事实） */
     private Boolean expectedAdjusted;
 
+    /**
+     * 是否为「增加角色人」(ADD_MEMBER) 产生的新人明细行
+     * （关联事实 source=MANUAL 且 sourceKey 带 MANUAL-ADJ/MANUAL-CADJ 标记）。
+     * 新人行调整前新签业绩为 0，前端展示「新增角色人」标记与 0 → X。
+     */
+    private Boolean manualAdjust;
+
     /** 调整前应收金额（同 sourceKey 最早一条 REVERSED 的 PERF_EXPECT；无调整时回退当前值） */
     private BigDecimal originalExpectedAmount;
 

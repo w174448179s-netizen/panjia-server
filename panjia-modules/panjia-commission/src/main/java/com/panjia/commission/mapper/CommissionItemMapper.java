@@ -177,18 +177,46 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(ae.performance_amount, rae.exp_amt) AS "expectedAmount",
                COALESCE(ae.exp_period, rae.exp_period, re.exp_period, roe.orig_period,
                         f.period, rd2.period) AS "expectPeriod",
-               COALESCE(re.performance_amount, roe.orig_amt,
-                        ae.performance_amount, rae.exp_amt) AS "originalExpectedAmount",
-               (re.source_key IS NOT NULL OR roe.orig_amt IS NOT NULL) AS "expectedAdjusted",
+               CASE
+                   -- 增加角色人（ADD_MEMBER）产生的新人事实：无 REVERSED 前序事实，
+                   -- 调整前新签业绩按 0 展示（0 → X），与新签明细行口径一致
+                   WHEN f.source = 'MANUAL'
+                        AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%') THEN 0
+                   ELSE COALESCE(re.performance_amount, roe.orig_amt,
+                        ae.performance_amount, rae.exp_amt)
+               END AS "originalExpectedAmount",
+               (re.source_key IS NOT NULL OR roe.orig_amt IS NOT NULL
+                OR (f.source = 'MANUAL'
+                    AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%'))) AS "expectedAdjusted",
+               -- 增加角色人新人行标记（新签侧 MANUAL-ADJ / 结佣侧 MANUAL-CADJ），前端展示「新增角色人」
+               (f.source = 'MANUAL'
+                AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%')) AS "manualAdjust",
                ci.amount AS "amount",
-               COALESCE(re.performance_amount, rr.performance_amount, roe.orig_amt,
-                        ae.performance_amount, rae.exp_amt,
-                        f.performance_amount, rd2.performance_amount, ci.amount) AS "originalAmount",
-               (re.source_key IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
+               -- 结佣金额「调整前」只认结佣调整（不认新签调整）：
+               -- ① 新口径（ci 绑 PERF_EXPECT 事实）：当前事实 adjust_id 命中结佣调整单
+               --    （pj_commission_adjust）即为结佣调整所改，原额取同 sourceKey 链上紧邻前驱
+               --    事实金额（结佣侧增加角色人链无前驱，按 0）；
+               -- ② 历史口径（ci 绑 rd）：沿 rd.source_key 存在 REVERSED 行；
+               -- ③ 其余（含纯新签金额调整/新签侧增加角色人）：原额=当前金额，前端只显示单值。
+               CASE
+                   WHEN caj.id IS NOT NULL THEN
+                       COALESCE((SELECT x.performance_amount
+                                 FROM pj_perf_fact x
+                                 WHERE x.source_key = f.source_key
+                                   AND x.fact_type = 'PERF_EXPECT'
+                                   AND x.id &lt; f.id
+                                 ORDER BY x.id DESC
+                                 LIMIT 1), 0)
+                   WHEN rr.source_key IS NOT NULL THEN rr.performance_amount
+                   ELSE ci.amount
+               END AS "originalAmount",
+               (caj.id IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
                ci.status AS "status"
         FROM pj_commission_item ci
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
+        -- 当前事实由结佣调整单产生（adjust_id = pj_commission_adjust.id）：结佣金额列才显示「原值 → 调整后」
+        LEFT JOIN pj_commission_adjust caj ON caj.id = f.adjust_id
         LEFT JOIN pj_received_detail rd2 ON rd2.id = ci.performance_fact_id
         LEFT JOIN pj_received_contract rc2 ON rc2.id = rd2.contract_id
         LEFT JOIN active_expect ae ON ae.source_key = f.source_key
@@ -236,4 +264,39 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         </script>
     """)
     List<Map<String, Object>> selectBizTypeByItemIds(@Param("itemIds") Collection<Long> itemIds);
+
+
+    /**
+     * 批量查「当前存在已生效增加角色人」的合同/订单键。
+     * <p>
+     * 判定口径与新签合同列表一致：同期间存在 ACTIVE 且 source=MANUAL、
+     * sourceKey 带 MANUAL-ADJ（新签侧发起）/ MANUAL-CADJ（结佣侧发起）标记的 PERF_EXPECT 事实。
+     * 合同号/订单号双键任一命中即返回该键（一手房等以订单号为准）。
+     *
+     * @param period 归属期间
+     * @param keys   当前页合同号/订单号集合
+     * @return 命中的业务键集合（合同号与订单号混合）
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT k.biz_key
+        FROM (
+            SELECT contract_no AS biz_key FROM pj_perf_fact
+            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT' AND period = #{period}
+              AND source = 'MANUAL'
+              AND (source_key LIKE '%|MANUAL-ADJ%' OR source_key LIKE '%|MANUAL-CADJ%')
+              AND contract_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+            UNION
+            SELECT order_no AS biz_key FROM pj_perf_fact
+            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT' AND period = #{period}
+              AND source = 'MANUAL'
+              AND (source_key LIKE '%|MANUAL-ADJ%' OR source_key LIKE '%|MANUAL-CADJ%')
+              AND order_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+        ) k
+        WHERE k.biz_key IS NOT NULL AND k.biz_key &lt;&gt; ''
+        </script>
+        """)
+    List<String> selectAddMemberBizKeys(@Param("period") String period, @Param("keys") Collection<String> keys);
 }
