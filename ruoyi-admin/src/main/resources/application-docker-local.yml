@@ -18,6 +18,6 @@ spring:
 
 # MinIO（panjia-server/script/docker/docker-compose.yml 已暴露 9000 到宿主机）
 panjia:
-  import:
+  import-util:
     minio:
       endpoint: http://host.docker.internal:9000

@@ -161,7 +161,7 @@ public class EmployeeController extends BaseController {
      * @return 导入批次 ID
      */
     @SaCheckPermission("people:employee:import")
-    @Log(title = "员工导入", businessType = BusinessType.IMPORT)
+    @Log(title = "员工导入", businessType = BusinessType.IMPORT, excludeParamNames = {"file"})
     @PostMapping("/import")
     public R<Long> importEmployees(EmployeeImportQuery query) {
         try {
