@@ -155,6 +155,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
                ci.employee_id AS "employeeId",
+               ci.dept_id AS "deptId",
                COALESCE(e.employee_code, f.employee_external_code, rd2.employee_external_code) AS "employeeCode",
                e.employee_name AS "employeeName",
                CASE

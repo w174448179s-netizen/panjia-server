@@ -36,6 +36,9 @@ public class CommissionItemDetailVo implements Serializable {
     /** 门店/组别（「集团-门店-组别」，与业绩明细页 deptPath 同口径） */
     private String deptPath;
 
+    /** 归属部门 ID（调整详情回填部门名用） */
+    private Long deptId;
+
     /** 角色类型 code（归一化优先） */
     private String roleType;
 
@@ -98,6 +101,9 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 预演调整后金额 */
     private BigDecimal afterAmount;
+
+    /** 预演调整后折算金额（afterAmount × conversionFactor） */
+    private BigDecimal convertedAfterAmount;
 
     /** 是否本单调整目标行（true=调整行，红色高亮） */
     private Boolean target;

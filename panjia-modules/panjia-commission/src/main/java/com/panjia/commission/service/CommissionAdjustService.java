@@ -51,18 +51,14 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 结佣调整单服务（DISCOUNT / DIFF / VOID，结佣域详细设计 §4.5）。
+ * 结佣调整单服务（当前支持 AMOUNT 金额调整 / ADD_MEMBER 增加角色人）。
  * <p>
  * 已审批结佣数据变更的唯一入口（V4.2 §9.4），不自动修复。EXECUTED 同事务动作：
  * <ul>
- *   <li>DISCOUNT：旧明细 REVERSED（reason=MANUAL_ADJUST）+ 新明细（amount=折后值直接存储，
- *       performance_fact_id 沿用原值，命中 uk_citem_fact_active 排除 REVERSED 的部分唯一索引）；</li>
- *   <li>DIFF：新增差额明细（performance_fact_id = NULL，period = target_period）；</li>
- *   <li>VOID：旧明细 REVERSED。</li>
+ *   <li>AMOUNT：旧结佣明细 REVERSED（reason=MANUAL_ADJUST）+ 按调整后金额生成新明细；
+ *       合同级按明细占比分摊，尾差归最后一行；</li>
+ *   <li>ADD_MEMBER：既有角色人按快照逐行 supersede，再插入新角色人事实与明细。</li>
  * </ul>
- * <p>
- * 折扣不存系数：发起 DISCOUNT 时算好折后值直接存 {@code amount = 8500}，reason 写"85折"供审计，
- * 系统不认识"系数"这个概念（§2.2）。
  */
 @Slf4j
 @Service
@@ -528,21 +524,31 @@ public class CommissionAdjustService {
             .like(StringUtils.isNotBlank(query.getKeyword()), CommissionAdjust::getContractNo, query.getKeyword())
             .orderByDesc(CommissionAdjust::getCreateTime);
 
-        // employeeId / bizType 过滤：通过 CommissionItem 反查 itemId 集合
-        if (query.getEmployeeId() != null || StringUtils.isNotBlank(query.getBizType())) {
+        // employeeId / bizType / deptId 过滤：一次查询 CommissionItem 反查 itemId / applicationId 集合。
+        // deptId 子树先一次性查出部门 ID 再 IN（避免对 item 每行做 sys_dept 子串子查询）。
+        if (query.getEmployeeId() != null || StringUtils.isNotBlank(query.getBizType())
+            || query.getDeptId() != null) {
             LambdaQueryWrapper<CommissionItem> itemWrapper = new LambdaQueryWrapper<>();
+            itemWrapper.select(CommissionItem::getId, CommissionItem::getApplicationId);
             if (query.getEmployeeId() != null) {
                 itemWrapper.eq(CommissionItem::getEmployeeId, query.getEmployeeId());
             }
             if (StringUtils.isNotBlank(query.getBizType())) {
                 itemWrapper.eq(CommissionItem::getBizType, query.getBizType());
             }
-            List<CommissionItem> items = itemMapper.selectList(itemWrapper);
-            Set<Long> itemIds = items.stream().map(CommissionItem::getId).collect(Collectors.toSet());
-            if (itemIds.isEmpty()) {
+            if (query.getDeptId() != null) {
+                List<Long> subDeptIds = adjustMapper.selectSubDeptIds(query.getDeptId());
+                if (subDeptIds.isEmpty()) {
+                    return PageResult.build(List.of(), 0);
+                }
+                itemWrapper.in(CommissionItem::getDeptId, subDeptIds);
+            }
+            List<CommissionItem> scopeItems = itemMapper.selectList(itemWrapper);
+            if (scopeItems.isEmpty()) {
                 return PageResult.build(List.of(), 0);
             }
-            Set<Long> appIds = items.stream()
+            Set<Long> itemIds = scopeItems.stream().map(CommissionItem::getId).collect(Collectors.toSet());
+            Set<Long> appIds = scopeItems.stream()
                 .map(CommissionItem::getApplicationId)
                 .filter(java.util.Objects::nonNull)
                 .collect(Collectors.toSet());
@@ -554,33 +560,90 @@ public class CommissionAdjustService {
                 .in(CommissionAdjust::getApplicationId, appIds));
         }
 
-        // deptId 过滤：通过 CommissionItem 的 deptId 反查，含下级组别（与新签调整/业绩明细口径一致）
-        if (query.getDeptId() != null) {
-            Long deptId = query.getDeptId();
-            String subtree = "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))";
-            LambdaQueryWrapper<CommissionItem> deptWrapper = new LambdaQueryWrapper<>();
-            deptWrapper.apply(subtree, deptId);
-            List<CommissionItem> deptItems = itemMapper.selectList(deptWrapper);
-            Set<Long> deptItemIds = deptItems.stream().map(CommissionItem::getId).collect(Collectors.toSet());
-            if (deptItemIds.isEmpty()) {
-                return PageResult.build(List.of(), 0);
-            }
-            Set<Long> deptAppIds = deptItems.stream()
-                .map(CommissionItem::getApplicationId)
-                .filter(java.util.Objects::nonNull)
-                .collect(Collectors.toSet());
-            wrapper.and(w -> w
-                .in(CommissionAdjust::getItemId, deptItemIds)
-                .or()
-                .isNull(CommissionAdjust::getItemId)
-                .in(CommissionAdjust::getApplicationId, deptAppIds));
-        }
-
         var page = adjustMapper.selectPage(pageQuery.build(), wrapper);
         List<CommissionAdjust> records = page.getRecords();
         fillConvertedAmounts(records);
+        fillListDisplay(records);
         return PageResult.build(records, page.getTotal());
+    }
+
+    /**
+     * 列表行展示字段批量回填（避免 N+1）：
+     * <ul>
+     *   <li>明细级：按 itemId 取明细的员工/部门，回填员工姓名/工号/门店名；</li>
+     *   <li>合同级：按申请单 deptId 回填门店名（调整对象列展示合同号，不展示员工）。</li>
+     * </ul>
+     */
+    private void fillListDisplay(List<CommissionAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Set<Long> detailItemIds = records.stream()
+            .map(CommissionAdjust::getItemId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        Set<Long> contractAppIds = records.stream()
+            .filter(r -> r.getItemId() == null)
+            .map(CommissionAdjust::getApplicationId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+
+        Map<Long, CommissionItem> itemById = new HashMap<>();
+        if (!detailItemIds.isEmpty()) {
+            LambdaQueryWrapper<CommissionItem> w = new LambdaQueryWrapper<>();
+            w.select(CommissionItem::getId, CommissionItem::getEmployeeId, CommissionItem::getDeptId)
+                .in(CommissionItem::getId, detailItemIds);
+            for (CommissionItem item : itemMapper.selectList(w)) {
+                itemById.put(item.getId(), item);
+            }
+        }
+        Map<Long, Long> appDeptId = new HashMap<>();
+        if (!contractAppIds.isEmpty()) {
+            for (CommissionApplication app : applicationMapper.selectBatchIds(contractAppIds)) {
+                appDeptId.put(app.getId(), app.getDeptId());
+            }
+        }
+
+        Set<Long> employeeIds = itemById.values().stream()
+            .map(CommissionItem::getEmployeeId).filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, Map<String, Object>> empMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.employeeNames(employeeIds)) {
+            Object id = row.get("employeeId");
+            if (id != null) {
+                empMap.put(((Number) id).longValue(), row);
+            }
+        }
+
+        Set<Long> deptIds = new HashSet<>();
+        itemById.values().stream().map(CommissionItem::getDeptId).filter(java.util.Objects::nonNull).forEach(deptIds::add);
+        appDeptId.values().stream().filter(java.util.Objects::nonNull).forEach(deptIds::add);
+        Map<Long, String> deptNameMap = new HashMap<>();
+        for (Map<String, Object> row : adjustMapper.deptNames(deptIds)) {
+            Object id = row.get("deptId");
+            Object name = row.get("deptName");
+            if (id != null && name != null) {
+                deptNameMap.put(((Number) id).longValue(), String.valueOf(name));
+            }
+        }
+
+        for (CommissionAdjust r : records) {
+            if (r.getItemId() != null) {
+                CommissionItem item = itemById.get(r.getItemId());
+                if (item != null) {
+                    if (item.getEmployeeId() != null) {
+                        Map<String, Object> emp = empMap.get(item.getEmployeeId());
+                        if (emp != null) {
+                            r.setEmployeeName(emp.get("employeeName") == null ? null : String.valueOf(emp.get("employeeName")));
+                            r.setEmployeeCode(emp.get("employeeCode") == null ? null : String.valueOf(emp.get("employeeCode")));
+                        }
+                    }
+                    if (item.getDeptId() != null) {
+                        r.setDeptName(deptNameMap.get(item.getDeptId()));
+                    }
+                }
+            } else if (r.getApplicationId() != null) {
+                Long deptId = appDeptId.get(r.getApplicationId());
+                if (deptId != null) {
+                    r.setDeptName(deptNameMap.get(deptId));
+                }
+            }
+        }
     }
 
     /**
@@ -651,6 +714,7 @@ public class CommissionAdjustService {
             }
         }
         int lastIdx = rows.size() - 1;
+        Long targetDeptId = null;
         for (int i = 0; i < rows.size(); i++) {
             CommissionItemDetailVo row = rows.get(i);
             boolean target = detailScope
@@ -714,9 +778,14 @@ public class CommissionAdjustService {
                 row.setDeltaAmount(BigDecimal.ZERO);
                 row.setAfterAmount(amount);
             }
+            // 折算后金额（调整前 / 调整后），与新签调整详情同口径展示
+            BigDecimal rowFactor = conversionFactorPort.factorOf(row.getBizType());
+            row.setConvertedAmount(conversionFactorPort.convert(amount, rowFactor));
+            row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), rowFactor));
             if (detailScope && target) {
                 adjust.setEmployeeName(row.getEmployeeName());
                 adjust.setEmployeeCode(row.getEmployeeCode());
+                targetDeptId = row.getDeptId();
             }
         }
         // ADD_MEMBER：末尾追加新角色人虚拟行（未执行时明细中尚无该行）
@@ -732,10 +801,21 @@ public class CommissionAdjustService {
             virtualRow.setAmount(BigDecimal.ZERO);
             virtualRow.setDeltaAmount(nm.getAmount());
             virtualRow.setAfterAmount(nm.getAmount());
+            BigDecimal virtualFactor = conversionFactorPort.factorOf(null);
+            virtualRow.setConvertedAmount(BigDecimal.ZERO);
+            virtualRow.setConvertedAfterAmount(conversionFactorPort.convert(nm.getAmount(), virtualFactor));
             virtualRow.setTarget(true);
             rows.add(virtualRow);
             adjust.setEmployeeName(nm.getEmployeeName());
             adjust.setEmployeeCode(nm.getEmployeeCode());
+        }
+        // 回填归属门店名：明细级取目标行部门，合同级取申请单归属部门
+        Long deptId = detailScope ? targetDeptId : (app != null ? app.getDeptId() : null);
+        if (deptId != null) {
+            List<Map<String, Object>> deptRows = adjustMapper.deptNames(List.of(deptId));
+            if (!deptRows.isEmpty() && deptRows.get(0).get("deptName") != null) {
+                adjust.setDeptName(String.valueOf(deptRows.get(0).get("deptName")));
+            }
         }
         adjust.setDetails(rows);
         adjust.setDetailCount(rows.size());

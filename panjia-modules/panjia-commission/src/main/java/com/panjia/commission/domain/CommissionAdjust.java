@@ -154,9 +154,9 @@ public class CommissionAdjust implements Serializable {
     @TableField(exist = false)
     private String employeeCode;
 
-    /** 部门划转目标部门名（TRANSFER 展示用） */
+    /** 归属门店/组别名称（列表/详情展示用，由 sys_dept 回填，不入库） */
     @TableField(exist = false)
-    private String targetDeptName;
+    private String deptName;
 
     /** 折算后调整前金额（originalAmount × 当前生效折算因子，展示用，不入库） */
     @TableField(exist = false)
