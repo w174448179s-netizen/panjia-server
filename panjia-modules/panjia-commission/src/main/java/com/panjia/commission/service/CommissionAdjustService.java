@@ -848,6 +848,8 @@ public class CommissionAdjustService {
                 }
             }
             applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            // 新签调整单镜像：合同级（旧等比分摊路径）登记 EXECUTED 快照，供新签列表/明细还原「原值 → 调整后」
+            recordAmountMirror(adjust, currentDetailSum, targetAmount, null, null, null, null);
             log.info("[结佣-调整-AMOUNT-合同级] 完成（仅调新签）：adjustId={}, targetExpect={}, expectFacts={}",
                 adjust.getId(), targetExpect, expectMapping.size());
         } else {
@@ -883,6 +885,9 @@ public class CommissionAdjustService {
                 itemMapper.updateById(item);
             }
             applicationService.recalcAggregates(adjust.getApplicationId(), null);
+            // 新签调整单镜像：明细级登记 EXECUTED 快照，供新签明细还原「原值 → 调整后」
+            recordAmountMirror(adjust, item.getAmount().subtract(delta == null ? BigDecimal.ZERO : delta),
+                targetAmount, item.getPerformanceFactId(), null, null, null);
             log.info("[结佣-调整-AMOUNT-明细级] 完成：adjustId={}, itemId={}, delta={}",
                 adjust.getId(), item.getId(), delta);
         }
@@ -922,6 +927,8 @@ public class CommissionAdjustService {
 
         int affected = applyDetailTargets(adjust, itemById, payload.getDetailTargets(), approverId);
         applicationService.recalcAggregates(adjust.getApplicationId(), null);
+        // 新签调整单镜像：指定值模式同样登记 EXECUTED 快照（originalAmount=发起时明细合计）
+        recordAmountMirror(adjust, payload.getContractTotal(), adjust.getNewAmount(), null, null, null, null);
         log.info("[结佣-调整-AMOUNT-合同级-指定值] 完成：adjustId={}, 明细数={}, 实际调整条数={}, 目标金额={}",
             adjust.getId(), items.size(), affected, round2(adjust.getNewAmount()));
     }
@@ -987,6 +994,9 @@ public class CommissionAdjustService {
         }
 
         // 既有行指定值执行 + 完整性校验：Σ指定行目标 + 未指定行现值 + 新人金额 = 发起时快照 afterTotal
+        // 分摊快照在执行前采集（item.performance_fact_id / amount 尚未被 supersede 覆盖），
+        // Alloc.factId 须为旧事实 ID —— 新签明细页按旧事实 sourceKey 映射回当前行做逆向还原
+        List<com.panjia.contracts.dto.CommissionAdjustMirrorDTO.Alloc> memberAllocations = new ArrayList<>();
         if (payload.getDetailTargets() != null && !payload.getDetailTargets().isEmpty()) {
             BigDecimal coveredSum = BigDecimal.ZERO;
             Set<Long> coveredIds = new HashSet<>();
@@ -1009,6 +1019,21 @@ public class CommissionAdjustService {
                     + " + 未指定行" + round2(uncoveredSum) + " + 新人" + round2(newAmount)
                     + " ≠ 发起时调整后总额" + round2(payload.getAfterTotal())
                     + "），为避免金额错乱终止执行：adjustId=" + adjust.getId());
+            }
+            for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
+                if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+                CommissionItem item = itemById.get(t.getItemId());
+                BigDecimal before = item.getAmount() == null ? BigDecimal.ZERO : item.getAmount();
+                BigDecimal target = round2(t.getTargetAmount());
+                if (target.compareTo(before) == 0) continue;
+                com.panjia.contracts.dto.CommissionAdjustMirrorDTO.Alloc alloc =
+                    new com.panjia.contracts.dto.CommissionAdjustMirrorDTO.Alloc();
+                alloc.setFactId(item.getPerformanceFactId());
+                alloc.setEmployeeId(item.getEmployeeId());
+                alloc.setEmployeeName(employeeNameOf(item.getEmployeeId()));
+                alloc.setBefore(before);
+                alloc.setDelta(target.subtract(before));
+                memberAllocations.add(alloc);
             }
             applyDetailTargets(adjust, itemById, payload.getDetailTargets(), approverId);
         }
@@ -1036,8 +1061,76 @@ public class CommissionAdjustService {
         itemMapper.insert(newItem);
 
         applicationService.recalcAggregates(adjust.getApplicationId(), null);
+        // 新签调整单镜像：登记 EXECUTED 的 ADD_MEMBER 快照（含既有行逐人分摊 allocations，执行前已采集），
+        // 供新签列表/明细还原「原值 → 调整后」（新人行 0 → X）
+        recordAmountMirror(adjust, payload.getContractTotal(), newAmount, null,
+            nm, payload.getAfterTotal(), memberAllocations);
         log.info("[结佣-调整-ADD_MEMBER] 执行完成：adjustId={}, applicationId={}, newEmployeeId={}, newAmount={}",
             adjust.getId(), adjust.getApplicationId(), nm.getEmployeeId(), round2(newAmount));
+    }
+
+    /**
+     * 登记新签调整单镜像（写入 pj_perf_adjust，status=EXECUTED，无审批流）。
+     * <p>
+     * 用途：结佣调整直接 supersede 业绩事实（PERF_EXPECT），但新签界面「原值 → 调整后值」展示
+     * 依赖 pj_perf_adjust 调整单快照还原；执行结佣调整时同步登记一单已执行的新签调整单。
+     * 镜像失败仅记日志不阻断主流程（事实已 supersede 生效，镜像缺失仅影响新签侧「原值 → 调整后」展示）。
+     *
+     * @param adjust      结佣调整单
+     * @param original    调整前金额（合同级=合同合计；明细级=该明细调整前金额）
+     * @param target      调整后金额（AMOUNT=目标值；ADD_MEMBER=新人金额 X）
+     * @param factId      明细级镜像对应的新事实 ID（合同级传 null）
+     * @param nm          ADD_MEMBER 新角色人信息（AMOUNT 传 null）
+     * @param afterTotal  ADD_MEMBER 调整后合同合计（AMOUNT 传 null）
+     * @param allocations ADD_MEMBER 既有行逐人分摊快照（AMOUNT 传 null）
+     */
+    private void recordAmountMirror(CommissionAdjust adjust, BigDecimal original, BigDecimal target,
+                                    Long factId, CommissionAdjustPayload.NewMember nm,
+                                    BigDecimal afterTotal,
+                                    List<com.panjia.contracts.dto.CommissionAdjustMirrorDTO.Alloc> allocations) {
+        try {
+            com.panjia.contracts.dto.CommissionAdjustMirrorDTO mirror =
+                new com.panjia.contracts.dto.CommissionAdjustMirrorDTO();
+            mirror.setAdjustNo(adjust.getAdjustNo());
+            mirror.setPeriod(adjust.getPeriod());
+            mirror.setContractNo(adjust.getContractNo());
+            mirror.setAdjustScope(adjust.getAdjustScope());
+            mirror.setAdjustType(adjust.getAdjustType() == null ? null : adjust.getAdjustType().name());
+            mirror.setFactId(factId);
+            mirror.setOriginalAmount(round2(original == null ? BigDecimal.ZERO : original));
+            mirror.setTargetAmount(round2(target == null ? BigDecimal.ZERO : target));
+            mirror.setReason(adjust.getReason());
+            mirror.setApplicantId(adjust.getApplicantId());
+            mirror.setApproverId(adjust.getApproverId());
+            if (nm != null) {
+                mirror.setNewEmployeeId(nm.getEmployeeId());
+                mirror.setNewEmployeeCode(nm.getEmployeeCode());
+                mirror.setNewEmployeeName(nm.getEmployeeName());
+                mirror.setNewDeptId(nm.getDeptId());
+                mirror.setNewRoleType(nm.getRoleType());
+                mirror.setNewShareRatio(nm.getShareRatio());
+                mirror.setAfterTotal(round2(afterTotal == null ? BigDecimal.ZERO : afterTotal));
+                mirror.setAllocations(allocations);
+            }
+            performanceQueryPort.recordExecutedAdjustMirror(mirror);
+        } catch (Exception e) {
+            log.warn("[结佣-调整-镜像] 登记新签调整单镜像失败（不影响主流程）：adjustNo={}, contractNo={}",
+                adjust.getAdjustNo(), adjust.getContractNo(), e);
+        }
+    }
+
+    /** 员工姓名查询（镜像 allocations 展示用；查询失败返回 null，不阻断主流程）。 */
+    private String employeeNameOf(Long employeeId) {
+        if (employeeId == null) {
+            return null;
+        }
+        try {
+            EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByEmployeeId(employeeId);
+            return emp == null ? null : emp.getEmployeeName();
+        } catch (Exception e) {
+            log.warn("[结佣-调整-镜像] 员工姓名查询失败：employeeId={}", employeeId, e);
+            return null;
+        }
     }
 
     /** 解析调整单快照，解析失败返回 null（合同级旧单无快照时走原分摊逻辑兜底）。 */

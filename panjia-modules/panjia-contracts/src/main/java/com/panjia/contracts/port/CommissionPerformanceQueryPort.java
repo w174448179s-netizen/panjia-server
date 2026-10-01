@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.CommissionAdjustMirrorDTO;
 import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
@@ -182,6 +183,17 @@ public interface CommissionPerformanceQueryPort {
      */
     Long createMemberFact(Long templateFactId, Long employeeId, String employeeCode, Long deptId,
                           String roleType, BigDecimal amount, BigDecimal shareRatio, Long operatorId, Long adjustId);
+
+    /**
+     * 结佣调整执行后登记新签调整单镜像（pj_perf_adjust，status=EXECUTED，无审批流）。
+     * <p>
+     * 新签界面「原值 → 调整后值」展示依赖 pj_perf_adjust 快照还原；结佣调整直接 supersede
+     * 事实不产生新签调整单，执行时须同步登记镜像，否则新签侧只显示最终金额。
+     * 同事务：镜像写入失败则整个执行回滚。仅 AMOUNT / ADD_MEMBER 调用。
+     *
+     * @param mirror 镜像单据内容（adjustNo 取结佣调整单号，唯一幂等）
+     */
+    void recordExecutedAdjustMirror(CommissionAdjustMirrorDTO mirror);
 
     /**
      * 明细级业绩冲销：单条事实冲销（结佣调整 VOID 用）。

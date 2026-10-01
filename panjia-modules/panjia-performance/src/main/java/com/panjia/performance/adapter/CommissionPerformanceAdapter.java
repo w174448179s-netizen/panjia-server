@@ -1,27 +1,35 @@
 package com.panjia.performance.adapter;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.dto.CommissionAdjustMirrorDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ReceivedRealFactPort;
+import com.panjia.performance.domain.AdjustStatus;
+import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
+import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.ReversedReason;
+import com.panjia.performance.domain.bo.AddMemberPayload;
+import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.ReceivedAlignmentService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.json.utils.JsonUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -47,6 +55,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     private final PerformanceFactMapper factMapper;
     private final ReceivedAlignmentService receivedAlignmentService;
     private final ReverseService reverseService;
+    private final PerformanceAdjustMapper adjustMapper;
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
     /**
      * 实收域端口（PERF_REAL 拆表后唯一读写落地处）。ObjectProvider 惰性取用：
@@ -446,6 +455,64 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             + StringUtils.defaultString(roleType));
         factMapper.insert(newFact);
         return newFact.getId();
+    }
+
+    @Override
+    public void recordExecutedAdjustMirror(CommissionAdjustMirrorDTO mirror) {
+        PerformanceAdjust adjust = new PerformanceAdjust();
+        adjust.setAdjustNo(mirror.getAdjustNo());
+        adjust.setFactId(mirror.getFactId());
+        adjust.setPeriod(mirror.getPeriod());
+        adjust.setAdjustType(AdjustType.valueOf(mirror.getAdjustType()));
+        adjust.setAdjustScope(mirror.getAdjustScope());
+        adjust.setContractNo(mirror.getContractNo());
+        adjust.setFactType(FactType.PERF_EXPECT.name());
+        adjust.setOriginalAmount(mirror.getOriginalAmount());
+        adjust.setTargetAmount(mirror.getTargetAmount());
+        adjust.setReason(mirror.getReason());
+        adjust.setStatus(AdjustStatus.EXECUTED);
+        adjust.setApplicantId(mirror.getApplicantId());
+        adjust.setApproverId(mirror.getApproverId());
+        adjust.setOperatorId(mirror.getApproverId());
+        LocalDateTime now = LocalDateTime.now();
+        adjust.setApproveTime(now);
+        adjust.setExecuteTime(now);
+        if (AdjustType.ADD_MEMBER.name().equals(mirror.getAdjustType())) {
+            adjust.setEmployeeId(mirror.getNewEmployeeId());
+            adjust.setPayloadJson(buildAddMemberPayloadJson(mirror));
+        }
+        adjustMapper.insert(adjust);
+    }
+
+    /**
+     * 组装新签侧 ADD_MEMBER 快照 JSON（AddMemberPayload 结构）：
+     * allocations 携带旧事实 ID/员工/调整前后差额，供新签明细页逆向还原每人调整前金额。
+     */
+    private String buildAddMemberPayloadJson(CommissionAdjustMirrorDTO mirror) {
+        AddMemberPayload payload = new AddMemberPayload();
+        payload.setNewEmployeeId(mirror.getNewEmployeeId());
+        payload.setEmployeeCode(mirror.getNewEmployeeCode());
+        payload.setEmployeeName(mirror.getNewEmployeeName());
+        payload.setDeptId(mirror.getNewDeptId());
+        payload.setRoleType(mirror.getNewRoleType());
+        payload.setAmount(mirror.getTargetAmount());
+        payload.setNewShareRatio(mirror.getNewShareRatio());
+        payload.setContractTotal(mirror.getOriginalAmount());
+        payload.setAfterTotal(mirror.getAfterTotal());
+        if (mirror.getAllocations() != null) {
+            List<AddMemberPayload.Alloc> allocs = new ArrayList<>();
+            for (CommissionAdjustMirrorDTO.Alloc a : mirror.getAllocations()) {
+                AddMemberPayload.Alloc alloc = new AddMemberPayload.Alloc();
+                alloc.setFactId(a.getFactId());
+                alloc.setEmployeeId(a.getEmployeeId());
+                alloc.setEmployeeName(a.getEmployeeName());
+                alloc.setBefore(a.getBefore());
+                alloc.setDelta(a.getDelta());
+                allocs.add(alloc);
+            }
+            payload.setAllocations(allocs);
+        }
+        return JsonUtils.toJsonString(payload);
     }
 
     @Override
