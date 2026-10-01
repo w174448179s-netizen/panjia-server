@@ -696,11 +696,31 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void revertSubmittedToDraftIfNeeded(Long applicationId) {
+        revertSubmittedToDraftIfNeeded(applicationId, null);
+    }
+
+    /**
+     * 同 {@link #revertSubmittedToDraftIfNeeded()}，并携带本次冲销原因（DRAFT 单整单重建时
+     * 写入被连带作废明细的 reversed_reason）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void revertSubmittedToDraftIfNeeded(Long applicationId, ReversedReason reason) {
         CommissionApplication app = applicationMapper.selectById(applicationId);
         if (app == null) {
             return;
         }
         if (app.getStatus() != ApplicationStatus.SUBMITTED) {
+            // DRAFT 单：冲销事件可能只命中部分明细（增加角色人仅 supersede 被扣除行、
+            // 明细级金额调整只 supersede 一行），其余未命中明细仍是调整前旧快照。
+            // 先把同单其余未审批明细一并作废（rebuildItemsIfNeeded 仅在无 ACTIVE 明细时重建），
+            // 再按当前全部 ACTIVE 新签事实整单重建，保证 DRAFT 单金额与新签完全一致。
+            if (app.getStatus() == ApplicationStatus.DRAFT) {
+                itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+                    .eq(CommissionItem::getApplicationId, applicationId)
+                    .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
+                    .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+                    .set(reason != null, CommissionItem::getReversedReason, reason));
+            }
             // 非 SUBMITTED 单：保持 handleReversed 既有行为（DRAFT 单重建、APPROVED/LOCKED 不动）
             recalcAggregates(applicationId, null);
             rebuildItemsIfNeeded(applicationId);

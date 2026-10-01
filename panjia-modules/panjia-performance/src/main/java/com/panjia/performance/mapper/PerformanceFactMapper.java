@@ -744,6 +744,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 以各业务键当前 ACTIVE 事实的 sourceKey 集合为准，沿事实链（同 sourceKey，
      * 不区分 fact_status）取 id 最早一条事实金额求和——未调整时最早一条即 ACTIVE 自身，
      * 已调整（新签调整 / 结佣调整 supersede 均保留 sourceKey）时为最早 REVERSED 原值。
+     * <p>
+     * 增加角色人（ADD_MEMBER）例外：新角色人事实是凭空新增的链（sourceKey 含
+     * MANUAL-ADJ/MANUAL-CADJ），调整前该角色在合同上不存在，其链按 0 计入原额；
+     * 否则新人金额会被同时计入「原值」与「现值」（钱只是从一个人转到另一个人，
+     * 合同总额不变），虚增一个新人金额。
      *
      * @param period   归属期间
      * @param factType 事实口径
@@ -763,7 +768,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                AND (f.contract_no = k.key OR f.order_no = k.key)
         ),
         orig AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt
+            SELECT DISTINCT ON (sk.source_key) sk.source_key,
+                   CASE
+                       WHEN sk.source_key LIKE '%MANUAL-ADJ%'
+                         OR sk.source_key LIKE '%MANUAL-CADJ%' THEN 0
+                       ELSE x.performance_amount
+                   END AS amt
             FROM sk
             JOIN pj_perf_fact x ON x.source_key = sk.source_key
                                AND x.fact_type = #{factType}

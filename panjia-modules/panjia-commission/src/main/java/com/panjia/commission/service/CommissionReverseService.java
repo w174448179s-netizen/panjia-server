@@ -121,7 +121,9 @@ public class CommissionReverseService {
             .map(CommissionItem::getApplicationId)
             .collect(Collectors.toSet());
         for (Long applicationId : applicationIds) {
-            applicationService.revertSubmittedToDraftIfNeeded(applicationId);
+            // DRAFT 单部分明细被冲销（增加角色人只 supersede 被扣除行）时，连带作废同单其余
+            // 未审批明细并按当前 ACTIVE 新签事实整单重建（原因写入 reversed_reason）
+            applicationService.revertSubmittedToDraftIfNeeded(applicationId, reversedReason);
         }
 
         // 写消费日志（幂等锚点 + 留痕）
