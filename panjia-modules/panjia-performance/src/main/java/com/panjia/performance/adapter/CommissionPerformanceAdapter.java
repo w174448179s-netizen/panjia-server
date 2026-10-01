@@ -468,6 +468,26 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         adjust.setContractNo(mirror.getContractNo());
         adjust.setFactType(FactType.PERF_EXPECT.name());
         adjust.setOriginalAmount(mirror.getOriginalAmount());
+        // 合同级调整无单员工/单部门，从合同首条 ACTIVE 事实回填（两列 NOT NULL），与新签合同级调整一致；
+        // 明细级调整从指定 factId 回填员工/部门
+        if ("CONTRACT".equals(mirror.getAdjustScope())) {
+            List<PerformanceFactSummaryDTO> facts = findActiveByContract(
+                mirror.getPeriod(), mirror.getContractNo(), FactType.PERF_EXPECT.name());
+            if (!facts.isEmpty()) {
+                adjust.setDeptId(facts.get(0).getDeptId());
+            }
+            adjust.setEmployeeId(0L);
+        } else if (mirror.getFactId() != null) {
+            PerformanceFactSummaryDTO fact = getByFactId(mirror.getFactId());
+            if (fact != null) {
+                adjust.setEmployeeId(fact.getEmployeeId());
+                adjust.setDeptId(fact.getDeptId());
+            } else {
+                adjust.setEmployeeId(0L);
+            }
+        } else {
+            adjust.setEmployeeId(0L);
+        }
         adjust.setTargetAmount(mirror.getTargetAmount());
         adjust.setReason(mirror.getReason());
         adjust.setStatus(AdjustStatus.EXECUTED);

@@ -558,10 +558,13 @@ public class CommissionAdjustService {
                 .in(CommissionAdjust::getApplicationId, appIds));
         }
 
-        // deptId 过滤：通过 CommissionItem 的 deptId 反查
+        // deptId 过滤：通过 CommissionItem 的 deptId 反查，含下级组别（与新签调整/业绩明细口径一致）
         if (query.getDeptId() != null) {
+            Long deptId = query.getDeptId();
+            String subtree = "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))";
             LambdaQueryWrapper<CommissionItem> deptWrapper = new LambdaQueryWrapper<>();
-            deptWrapper.eq(CommissionItem::getDeptId, query.getDeptId());
+            deptWrapper.apply(subtree, deptId);
             List<CommissionItem> deptItems = itemMapper.selectList(deptWrapper);
             Set<Long> deptItemIds = deptItems.stream().map(CommissionItem::getId).collect(Collectors.toSet());
             if (deptItemIds.isEmpty()) {

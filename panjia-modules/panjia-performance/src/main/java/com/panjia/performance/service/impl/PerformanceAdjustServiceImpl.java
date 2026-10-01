@@ -885,6 +885,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      */
     private LambdaQueryWrapper<PerformanceAdjust> buildQueryWrapper(PerformanceAdjustBo query) {
         LambdaQueryWrapper<PerformanceAdjust> wrapper = new LambdaQueryWrapper<>();
+        // 排除结佣调整镜像（adjust_no 以 CADJ 开头）：镜像是结佣域登记的内部快照，
+        // 仅用于新签明细页还原「原值→调整后值」，不属于新签侧审批单，不应出现在新签调整列表
+        wrapper.notLike(PerformanceAdjust::getAdjustNo, "CADJ");
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()),
             PerformanceAdjust::getPeriod, query.getPeriod());
         wrapper.eq(StringUtils.isNotBlank(query.getAdjustType()),
