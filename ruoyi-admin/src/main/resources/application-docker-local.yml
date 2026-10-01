@@ -1,12 +1,16 @@
 # Docker 本地运行时覆盖配置（--spring.profiles.active=dev,docker-local）
 # 容器内通过 host.docker.internal 连接宿主机上 docker-compose 跑的中間件
+# 数据库独立：Docker 后端用 panjia_test 测试库，IDE 开发用 postgres 开发库，互不影响
 
 spring:
   datasource:
     dynamic:
       datasource:
         master:
-          url: jdbc:postgresql://host.docker.internal:5432/postgres?useUnicode=true&characterEncoding=utf8&useSSL=true&autoReconnect=true&reWriteBatchedInserts=true&stringtype=unspecified
+          url: jdbc:postgresql://host.docker.internal:5432/panjia_test?useUnicode=true&characterEncoding=utf8&useSSL=true&autoReconnect=true&reWriteBatchedInserts=true&stringtype=unspecified
+  # Flyway 独立数据源（绕过 dynamic-datasource，application.yml 里写死 localhost，需同步覆盖）
+  flyway:
+    url: jdbc:postgresql://host.docker.internal:5432/panjia_test
   data:
     redis:
       host: host.docker.internal

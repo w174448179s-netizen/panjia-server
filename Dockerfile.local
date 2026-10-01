@@ -1,14 +1,14 @@
 # 本地开发专用：后端打包为 Docker 镜像，与 IDE 的 8080 互不干扰
 # 用法见 panjia-console/bin/frp/run-local-backend.sh
+#
+# 基于本机已有的 panjia-server:latest（内含 Temurin 21 JDK，ENTRYPOINT 已就绪：
+#   java -Dserver.port=${SERVER_PORT} ${JAVA_OPTS} -jar /ruoyi/server/app.jar）
+# 离线可构建，无需访问 Docker Hub。仅需覆盖 jar + 激活 docker-local profile。
 
-FROM eclipse-temurin:21-jre-alpine
-
-WORKDIR /app
+FROM panjia-server:latest
 
 # 复制 Maven 打包产物（要求先执行 mvn package）
-COPY ruoyi-admin/target/ruoyi-admin.jar app.jar
-
-EXPOSE 8080
+COPY ruoyi-admin/target/ruoyi-admin.jar /ruoyi/server/app.jar
 
 # 激活 dev + docker-local 双 profile，后者覆盖 localhost 为 host.docker.internal
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar --spring.profiles.active=dev,docker-local"]
+ENV SPRING_PROFILES_ACTIVE=dev,docker-local
