@@ -49,9 +49,6 @@ public class PerformanceAdjustCreateBo {
     /** 目标金额（金额调整时使用，用户输入的调整后金额） */
     private BigDecimal targetAmount;
 
-    /** 目标部门 ID（部门划转时使用） */
-    private Long targetDeptId;
-
     /** 调整原因 */
     private String reason;
 

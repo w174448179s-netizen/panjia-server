@@ -5,6 +5,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
 /**
  * 业绩调整类型枚举。
  * <p>
+ * 当前仅保留「金额调整」与「增加角色人」；业绩冲销(VOID)、部门划转(TRANSFER) 已下线，
+ * 历史数据不再展示，后续需要时再扩展。
+ * <p>
  * 存储约定：DB 字段 adjust_type VARCHAR(16) 存 code（code 固定取枚举名），
  * MyBatis-Plus 默认按枚举 name() 映射；Jackson 经 {@link JsonValue @JsonValue} 输出 code。
  */
@@ -12,12 +15,6 @@ public enum AdjustType {
 
     /** 金额调整 */
     AMOUNT("金额调整"),
-
-    /** 业绩冲销 */
-    VOID("业绩冲销"),
-
-    /** 部门划转 */
-    TRANSFER("部门划转"),
 
     /** 增加角色人（合同级）：手工多一个人分业绩，合同总额不变（2026-09-28） */
     ADD_MEMBER("增加角色人");

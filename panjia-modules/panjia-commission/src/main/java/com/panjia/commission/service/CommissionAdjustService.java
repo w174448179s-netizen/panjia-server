@@ -148,10 +148,6 @@ public class CommissionAdjustService {
             if (dto.getTargetAmount() == null || dto.getTargetAmount().compareTo(BigDecimal.ZERO) < 0) {
                 throw new ServiceException("金额调整必须指定调整后金额（targetAmount ≥ 0）");
             }
-        } else if (adjustType == AdjustType.TRANSFER) {
-            if (dto.getTargetDeptId() == null) {
-                throw new ServiceException("部门划转必须指定目标部门");
-            }
         } else if (adjustType == AdjustType.ADD_MEMBER) {
             if (detailScope) {
                 throw new ServiceException("增加角色人仅支持合同级调整");
@@ -226,7 +222,6 @@ public class CommissionAdjustService {
         adjust.setFactType(FACT_TYPE_EXPECT);
         adjust.setAdjustScope(dto.getAdjustScope());
         adjust.setFactId(factId);
-        adjust.setTargetDeptId(dto.getTargetDeptId());
         adjust.setPayloadJson(payloadJson);
         adjust.setReason(dto.getReason());
         adjust.setStatus(AdjustStatus.SUBMITTED);
@@ -487,12 +482,13 @@ public class CommissionAdjustService {
         }
 
         AdjustType type = adjust.getAdjustType();
-        switch (type) {
-            case AMOUNT -> executeAmountAdjust(adjust, approverId);
-            case VOID -> executeVoidAdjust(adjust, approverId);
-            case TRANSFER -> executeTransferAdjust(adjust, approverId);
-            case ADD_MEMBER -> executeAddMemberAdjust(adjust, approverId);
-            default -> throw new ServiceException("非法调整类型：" + type);
+        // 仅支持 AMOUNT / ADD_MEMBER；VOID/TRANSFER 已下线
+        if (type == AdjustType.AMOUNT) {
+            executeAmountAdjust(adjust, approverId);
+        } else if (type == AdjustType.ADD_MEMBER) {
+            executeAddMemberAdjust(adjust, approverId);
+        } else {
+            throw new ServiceException("非法调整类型：" + type);
         }
         log.info("[结佣-调整] 调整单已执行：adjustNo={}, type={}, scope={}",
             adjust.getAdjustNo(), type.getCode(), adjust.getAdjustScope());
@@ -622,9 +618,6 @@ public class CommissionAdjustService {
             adjust.setOrderNo(app.getOrderNo());
             adjust.setPropertyAddress(app.getPropertyAddress());
         }
-        if (adjust.getAdjustType() == AdjustType.TRANSFER && adjust.getTargetDeptId() != null) {
-            adjust.setTargetDeptName(adjustMapper.selectDeptName(adjust.getTargetDeptId()));
-        }
         if (adjust.getApplicationId() == null) {
             adjust.setDetails(List.of());
             adjust.setDetailCount(0);
@@ -665,10 +658,7 @@ public class CommissionAdjustService {
                 : true;
             row.setTarget(target);
             BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
-            if (type == AdjustType.VOID) {
-                row.setDeltaAmount(amount.negate());
-                row.setAfterAmount(BigDecimal.ZERO);
-            } else if (!detailScope && !targetByItemId.isEmpty()) {
+            if (!detailScope && !targetByItemId.isEmpty()) {
                 // 合同级指定值模式（AMOUNT / ADD_MEMBER）：指定行 after=快照目标，未指定行不变
                 CommissionAdjustPayload.DetailTarget t = targetByItemId.get(row.getItemId());
                 if (t != null && t.getTargetAmount() != null) {
@@ -720,7 +710,7 @@ public class CommissionAdjustService {
                     row.setDeltaAmount(after.subtract(amount));
                 }
             } else {
-                // TRANSFER / 旧类型（DISCOUNT/DIFF）：金额不变
+                // 兜底：金额不变
                 row.setDeltaAmount(BigDecimal.ZERO);
                 row.setAfterAmount(amount);
             }
@@ -1149,89 +1139,6 @@ public class CommissionAdjustService {
         }
     }
 
-    /**
-     * 业绩冲销（VOID）：冲销绑定事实并同步另一口径，结佣明细置 REVERSED。
-     * 合同级跨月查找（明细绑定的可能是早于申请单月份的新签事实）。
-     */
-    private void executeVoidAdjust(CommissionAdjust adjust, Long approverId) {
-        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 结佣口径=新签：合同级冲销只冲 PERF_EXPECT 事实，不动实收（实收为客观到账，不随结佣调整）
-            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
-                contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_EXPECT)) {
-                performanceQueryPort.voidFact(f.getFactId(), approverId, adjust.getId());
-            }
-            for (CommissionItem item : listActiveItems(adjust.getApplicationId())) {
-                reverseItem(item, adjust.getId());
-            }
-            applicationService.recalcAggregates(adjust.getApplicationId(), null);
-            log.info("[结佣-调整-VOID-合同级] 完成（仅冲新签）：adjustId={}", adjust.getId());
-        } else {
-            CommissionItem item = itemMapper.selectById(adjust.getItemId());
-            requireItem(item, adjust);
-            if (boundFactIsExpect(item)) {
-                // 新口径：直接冲销绑定的新签事实
-                performanceQueryPort.voidFact(item.getPerformanceFactId(), approverId, adjust.getId());
-            } else {
-                // 历史单：冲销实收事实 + 同员工应收同步冲销
-                performanceQueryPort.voidFact(item.getPerformanceFactId(), approverId, adjust.getId());
-                PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
-                    adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
-                if (expectFact != null) {
-                    performanceQueryPort.voidFact(expectFact.getFactId(), approverId, adjust.getId());
-                }
-            }
-            reverseItem(item, adjust.getId());
-            applicationService.recalcAggregates(adjust.getApplicationId(), null);
-            log.info("[结佣-调整-VOID-明细级] 完成：adjustId={}, itemId={}", adjust.getId(), item.getId());
-        }
-    }
-
-    /**
-     * 部门划转（TRANSFER）：划转绑定事实部门并同步另一口径，回写 CommissionItem.deptId。
-     * 合同级跨月查找（明细绑定的可能是早于申请单月份的新签事实）。
-     */
-    private void executeTransferAdjust(CommissionAdjust adjust, Long approverId) {
-        Long targetDeptId = adjust.getTargetDeptId();
-        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 结佣口径=新签：合同级划转只划转 PERF_EXPECT 事实部门，不动实收
-            for (PerformanceFactSummaryDTO f : performanceQueryPort.findActiveByBizKeys(
-                contractBizKeys(adjust.getApplicationId(), adjust.getContractNo()), FACT_TYPE_EXPECT)) {
-                performanceQueryPort.transferFact(f.getFactId(), targetDeptId, approverId, adjust.getId());
-            }
-            for (CommissionItem item : listActiveItems(adjust.getApplicationId())) {
-                item.setDeptId(targetDeptId);
-                item.setAdjustId(adjust.getId());
-                itemMapper.updateById(item);
-            }
-            log.info("[结佣-调整-TRANSFER-合同级] 完成（仅划新签）：adjustId={}, targetDeptId={}", adjust.getId(), targetDeptId);
-        } else {
-            CommissionItem item = itemMapper.selectById(adjust.getItemId());
-            requireItem(item, adjust);
-            if (boundFactIsExpect(item)) {
-                // 新口径：划转绑定的新签事实 + 同员工实收事实同步划转（两口径部门保持一致）
-                performanceQueryPort.transferFact(item.getPerformanceFactId(), targetDeptId, approverId, adjust.getId());
-                PerformanceFactSummaryDTO realFact = findRealByEmployee(
-                    adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
-                if (realFact != null) {
-                    performanceQueryPort.transferFact(realFact.getFactId(), targetDeptId, approverId, adjust.getId());
-                }
-            } else {
-                // 历史单：划转实收事实 + 同员工应收同步划转
-                performanceQueryPort.transferFact(item.getPerformanceFactId(), targetDeptId, approverId, adjust.getId());
-                PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
-                    adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
-                if (expectFact != null) {
-                    performanceQueryPort.transferFact(expectFact.getFactId(), targetDeptId, approverId, adjust.getId());
-                }
-            }
-            item.setDeptId(targetDeptId);
-            item.setAdjustId(adjust.getId());
-            itemMapper.updateById(item);
-            log.info("[结佣-调整-TRANSFER-明细级] 完成：adjustId={}, itemId={}, targetDeptId={}",
-                adjust.getId(), item.getId(), targetDeptId);
-        }
-    }
-
     /** 查申请单下非 REVERSED 的结佣明细。 */
     private List<CommissionItem> listActiveItems(Long applicationId) {
         return itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
@@ -1257,16 +1164,6 @@ public class CommissionAdjustService {
             return null;
         }
         return performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_EXPECT).stream()
-            .filter(f -> employeeId.equals(f.getEmployeeId()))
-            .findFirst().orElse(null);
-    }
-
-    /** 按同合同+同员工匹配 PERF_REAL 事实（明细级同步用，新口径明细绑定期望事实时对偶同步）。 */
-    private PerformanceFactSummaryDTO findRealByEmployee(String period, String contractNo, Long employeeId) {
-        if (employeeId == null) {
-            return null;
-        }
-        return performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL).stream()
             .filter(f -> employeeId.equals(f.getEmployeeId()))
             .findFirst().orElse(null);
     }

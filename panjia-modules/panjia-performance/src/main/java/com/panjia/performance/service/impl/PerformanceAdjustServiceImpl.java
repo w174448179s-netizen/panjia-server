@@ -11,7 +11,6 @@ import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
-import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.domain.bo.AdjustDetailTargetBo;
 import com.panjia.performance.domain.bo.AdjustDeductionBo;
 import com.panjia.performance.domain.bo.AddMemberPayload;
@@ -541,7 +540,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setFactType(dto.getFactType());
         adjust.setOriginalPeriod(dto.getOriginalPeriod());
         adjust.setTargetAmount(targetAmt);
-        adjust.setTargetDeptId(dto.getTargetDeptId());
         adjust.setReason(dto.getReason());
         adjust.setPayloadJson(dto.getPayloadJson());
         adjust.setStatus(AdjustStatus.SUBMITTED);
@@ -774,28 +772,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         } else {
             PerformanceFact oldFact = getActiveFact(adjust);
             boolean crossMonth = !oldFact.getPeriod().equals(adjust.getPeriod());
-            switch (adjust.getAdjustType()) {
-                case AMOUNT -> {
-                    if (crossMonth) {
-                        executeDetailCrossMonthAmountAdjust(adjust, oldFact, operatorId);
-                    } else {
-                        executeAmountAdjust(adjust, operatorId);
-                    }
+            // 明细级仅支持金额调整（AMOUNT）；VOID/TRANSFER 已下线
+            if (adjust.getAdjustType() == AdjustType.AMOUNT) {
+                if (crossMonth) {
+                    executeDetailCrossMonthAmountAdjust(adjust, oldFact, operatorId);
+                } else {
+                    executeAmountAdjust(adjust, operatorId);
                 }
-                case VOID -> {
-                    if (crossMonth) {
-                        executeDetailCrossMonthVoidAdjust(adjust, oldFact, operatorId);
-                    } else {
-                        executeVoidAdjust(adjust, operatorId);
-                    }
-                }
-                case TRANSFER -> {
-                    if (crossMonth) {
-                        throw new ServiceException("部门划转仅支持在业绩原归属月内调整，不支持跨月");
-                    }
-                    executeTransferAdjust(adjust, operatorId);
-                }
-                default -> throw new ServiceException("不支持的调整类型：{}", adjust.getAdjustType());
+            } else {
+                throw new ServiceException("不支持的调整类型：{}", adjust.getAdjustType());
             }
         }
 
@@ -897,16 +882,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         wrapper.eq(query.getEmployeeId() != null,
             PerformanceAdjust::getEmployeeId, query.getEmployeeId());
         // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
-        // 调整单除原部门外，调拨（TRANSFER）的目标部门命中也视为相关，便于按门店追溯去向。
         if (query.getDeptId() != null) {
             Long deptId = query.getDeptId();
             String subtree = "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
                 + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))";
-            wrapper.and(w -> w.apply(subtree, deptId)
-                .or().apply(
-                    "target_dept_id = {0} OR target_dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                        + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))",
-                    deptId));
+            wrapper.apply(subtree, deptId);
         }
         return wrapper;
     }
@@ -1191,18 +1171,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             performanceDelta, adjust.getId()));
         log.info("[调整单-跨月] 明细级跨月冲销事实已生成：adjustId={}, factId={}, {}→{}, deltaPerf={}",
             adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod(), performanceDelta);
-    }
-
-    /**
-     * 执行明细级跨月业绩冲销（§4.6 VOID 跨月）：在调整月生成原事实金额的相反数事实。
-     */
-    private void executeDetailCrossMonthVoidAdjust(PerformanceAdjust adjust, PerformanceFact oldFact,
-                                                   Long operatorId) {
-        factMapper.insert(buildOffsetFact(oldFact, adjust.getPeriod(),
-            MoneyUtil.round2(oldFact.getPerformanceAmount().negate()),
-            adjust.getId()));
-        log.info("[调整单-跨月] 明细级跨月全额冲销事实已生成：adjustId={}, factId={}, {}→{}",
-            adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod());
     }
 
     // ==================== 增加角色人（ADD_MEMBER，2026-09-28） ====================
@@ -1914,30 +1882,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         PerformanceFact newFact = copyFactBase(oldFact);
         newFact.setPerformanceAmount(newPerformance);
-        newFact.setAdjustId(adjust.getId());
-
-        reverseService.supersede(oldFact.getId(), newFact, operatorId);
-    }
-
-    /**
-     * 执行业绩冲销：单条事实冲销。
-     */
-    private void executeVoidAdjust(PerformanceAdjust adjust, Long operatorId) {
-        reverseService.reverseByAdjust(adjust.getFactId(), adjust.getId(),
-            ReversedReason.MANUAL_ADJUST, operatorId);
-    }
-
-    /**
-     * 执行部门划转：旧事实冲销 + 新事实（新部门）生成。
-     */
-    private void executeTransferAdjust(PerformanceAdjust adjust, Long operatorId) {
-        PerformanceFact oldFact = getActiveFact(adjust);
-        if (adjust.getTargetDeptId() == null) {
-            throw new ServiceException("部门划转调整单缺少目标部门：adjustId={}", adjust.getId());
-        }
-
-        PerformanceFact newFact = copyFactBase(oldFact);
-        newFact.setDeptId(adjust.getTargetDeptId());
         newFact.setAdjustId(adjust.getId());
 
         reverseService.supersede(oldFact.getId(), newFact, operatorId);

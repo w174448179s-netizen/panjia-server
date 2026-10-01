@@ -29,15 +29,12 @@ public class CommissionAdjustCreateBo implements Serializable {
     @NotBlank(message = "调整范围不能为空")
     private String adjustScope;
 
-    /** 调整类型（AMOUNT / VOID / TRANSFER / ADD_MEMBER） */
+    /** 调整类型（AMOUNT / ADD_MEMBER） */
     @NotBlank(message = "调整类型不能为空")
     private String adjustType;
 
     /** 调整后金额（AMOUNT 用，前端 = 当前金额 + 录入差额） */
     private BigDecimal targetAmount;
-
-    /** 部门划转目标部门 ID（TRANSFER 用） */
-    private Long targetDeptId;
 
     /** 调整原因（必填，审计） */
     @NotBlank(message = "调整原因不能为空")
