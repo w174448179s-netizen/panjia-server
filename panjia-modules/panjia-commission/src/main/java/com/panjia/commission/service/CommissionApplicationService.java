@@ -8,14 +8,20 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.commission.domain.ApplicationStatus;
+import com.panjia.commission.domain.AdjustStatus;
+import com.panjia.commission.domain.AdjustType;
+import com.panjia.commission.domain.CommissionAdjust;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionConsumeLog;
 import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
+import com.panjia.commission.domain.bo.CommissionAdjustPayload;
 import com.panjia.commission.domain.bo.CommissionApplyBo;
 import com.panjia.commission.domain.vo.CommissionBatchResultVo;
 import com.panjia.commission.domain.vo.CommissionContractVo;
+import com.panjia.commission.domain.vo.CommissionItemDetailVo;
+import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
@@ -39,6 +45,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.ServletUtils;
 import org.dromara.common.core.utils.SpringUtils;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
@@ -50,6 +57,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -109,6 +117,8 @@ public class CommissionApplicationService {
     private final CommissionApplicationMapper applicationMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionConsumeLogMapper consumeLogMapper;
+    /** 调整单 mapper：在途调整预演（列表/详情「调整审批中」标记与金额预览） */
+    private final CommissionAdjustMapper adjustMapper;
     /** 折算比例唯一来源：契约层端口（规则表由薪酬域持有，本域不直连） */
     private final ConversionFactorPort conversionFactorPort;
     private final CommissionPerformanceQueryPort performanceQueryPort;
@@ -1429,6 +1439,8 @@ public class CommissionApplicationService {
         // 结佣业绩「原值 → 调整后值」：仅对当前页批量查事实链最早值（避免全期间回表），
         // 与当前合计不一致时置调整标记（口径与每人明细 originalAmount 一致）
         fillOriginalReceivedAmounts(period, pageRows, factorMap);
+        // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
+        fillContractPendingAdjust(pageRows);
         return PageResult.build(pageRows, (long) total);
     }
 
@@ -1648,7 +1660,167 @@ public class CommissionApplicationService {
     public List<com.panjia.commission.domain.vo.CommissionItemDetailVo> listItemDetails(Long applicationId) {
         List<com.panjia.commission.domain.vo.CommissionItemDetailVo> details = itemMapper.selectItemDetails(applicationId);
         fillItemDetailConversion(details);
+        fillItemDetailPendingAdjust(details, applicationId);
         return details;
+    }
+
+    /**
+     * 明细在途调整预演：审批中（SUBMITTED/APPROVED）调整单回填每人 adjustPending* 字段。
+     * <p>
+     * 口径（与新签明细页一致）：
+     * <ul>
+     *   <li>明细级调整（itemId 定位）：调整后金额取调整单 newAmount；</li>
+     *   <li>合同级 AMOUNT：优先按 payload.detailTargets 逐行指定值预演；旧单无快照按金额占比分摊总差额；</li>
+     *   <li>合同级 ADD_MEMBER：既有行按 payload.detailTargets 预演让出，新人合成虚拟行（0 → X）；</li>
+     *   <li>明细级优先：已命中明细级调整单的行不再叠加合同级预演。</li>
+     * </ul>
+     */
+    private void fillItemDetailPendingAdjust(List<CommissionItemDetailVo> rows, Long applicationId) {
+        List<CommissionAdjust> pendings = adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
+            .eq(CommissionAdjust::getApplicationId, applicationId)
+            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .orderByDesc(CommissionAdjust::getId));
+        if (pendings.isEmpty()) {
+            return;
+        }
+        for (CommissionAdjust adjust : pendings) {
+            if (adjust.getItemId() != null) {
+                // 明细级：直接命中目标行
+                for (CommissionItemDetailVo row : rows) {
+                    if (Boolean.TRUE.equals(row.getAdjustPending())
+                        || !adjust.getItemId().equals(row.getItemId())) {
+                        continue;
+                    }
+                    BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
+                    row.setAdjustPending(true);
+                    row.setAdjustPendingType(adjust.getAdjustType() != null ? adjust.getAdjustType().getCode() : null);
+                    row.setAdjustPendingAmount(adjust.getNewAmount());
+                    row.setAdjustPendingDelta(adjust.getNewAmount() == null ? null
+                        : adjust.getNewAmount().subtract(amount).setScale(2, RoundingMode.HALF_UP));
+                }
+                continue;
+            }
+            // 合同级：AMOUNT / ADD_MEMBER 按快照逐行预演
+            CommissionAdjustPayload payload = parseAdjustPayload(adjust.getPayloadJson());
+            if (adjust.getAdjustType() == AdjustType.AMOUNT || adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+                Map<Long, BigDecimal> targetByItem = new HashMap<>();
+                if (payload != null && payload.getDetailTargets() != null) {
+                    for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
+                        if (t != null && t.getItemId() != null && t.getTargetAmount() != null) {
+                            targetByItem.put(t.getItemId(), t.getTargetAmount());
+                        }
+                    }
+                }
+                if (!targetByItem.isEmpty()) {
+                    for (CommissionItemDetailVo row : rows) {
+                        if (Boolean.TRUE.equals(row.getAdjustPending())) {
+                            continue; // 明细级优先，不叠加
+                        }
+                        BigDecimal target = targetByItem.get(row.getItemId());
+                        if (target == null) {
+                            continue;
+                        }
+                        BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
+                        row.setAdjustPending(true);
+                        row.setAdjustPendingType(adjust.getAdjustType().getCode());
+                        row.setAdjustPendingAmount(target);
+                        row.setAdjustPendingDelta(target.subtract(amount).setScale(2, RoundingMode.HALF_UP));
+                    }
+                } else if (adjust.getAdjustType() == AdjustType.AMOUNT
+                    && adjust.getNewAmount() != null && adjust.getOriginalAmount() != null && !rows.isEmpty()) {
+                    // 旧单无快照兜底：按金额占比分摊总差额
+                    BigDecimal delta = adjust.getNewAmount().subtract(adjust.getOriginalAmount());
+                    List<CommissionItemDetailVo> unmarked = rows.stream()
+                        .filter(r -> !Boolean.TRUE.equals(r.getAdjustPending())).toList();
+                    BigDecimal sum = unmarked.stream()
+                        .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+                    for (CommissionItemDetailVo row : unmarked) {
+                        BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
+                        BigDecimal part = sum.signum() == 0
+                            ? delta.divide(BigDecimal.valueOf(unmarked.size()), 2, RoundingMode.HALF_UP)
+                            : delta.multiply(amount).divide(sum, 2, RoundingMode.HALF_UP);
+                        row.setAdjustPending(true);
+                        row.setAdjustPendingType(AdjustType.AMOUNT.getCode());
+                        row.setAdjustPendingDelta(part);
+                        row.setAdjustPendingAmount(amount.add(part));
+                    }
+                }
+                // ADD_MEMBER：新人虚拟行（审批中新角色人尚无明细行）
+                if (adjust.getAdjustType() == AdjustType.ADD_MEMBER
+                    && payload != null && payload.getNewMember() != null) {
+                    CommissionAdjustPayload.NewMember nm = payload.getNewMember();
+                    CommissionItemDetailVo virtualRow = new CommissionItemDetailVo();
+                    virtualRow.setEmployeeId(nm.getEmployeeId());
+                    virtualRow.setEmployeeCode(nm.getEmployeeCode());
+                    virtualRow.setEmployeeName(nm.getEmployeeName());
+                    virtualRow.setRoleType(nm.getRoleType());
+                    virtualRow.setRoleName(nm.getRoleType());
+                    virtualRow.setShareRatio(nm.getShareRatio());
+                    virtualRow.setBizType(rows.isEmpty() ? null : rows.get(0).getBizType());
+                    virtualRow.setStatus(ItemStatus.APPROVED.getCode());
+                    virtualRow.setAdjustPending(true);
+                    virtualRow.setAdjustPendingType(AdjustType.ADD_MEMBER.getCode());
+                    virtualRow.setAdjustPendingAmount(nm.getAmount());
+                    virtualRow.setAdjustPendingDelta(nm.getAmount());
+                    virtualRow.setNewMemberPending(true);
+                    rows.add(virtualRow);
+                }
+            }
+        }
+    }
+
+    /** 解析调整单快照，解析失败返回 null（不影响主流程）。 */
+    private CommissionAdjustPayload parseAdjustPayload(String payloadJson) {
+        if (StringUtils.isBlank(payloadJson)) {
+            return null;
+        }
+        try {
+            return JsonUtils.parseObject(payloadJson, CommissionAdjustPayload.class);
+        } catch (Exception e) {
+            log.warn("[结佣-在途预演] 快照解析失败，跳过逐行还原：payload={}", payloadJson, e);
+            return null;
+        }
+    }
+
+    /**
+     * 合同列表在途调整标记：当前页申请单存在审批中（SUBMITTED/APPROVED）的合同级调整单时，
+     * 回填 adjustPending / adjustPendingType / adjustPendingAmount（AMOUNT=调整后合计），
+     * 前端据此展示「调整审批中」标签。
+     */
+    private void fillContractPendingAdjust(List<CommissionContractVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        Set<Long> applicationIds = rows.stream()
+            .map(CommissionContractVo::getApplicationId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (applicationIds.isEmpty()) {
+            return;
+        }
+        List<CommissionAdjust> pendings = adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
+            .in(CommissionAdjust::getApplicationId, applicationIds)
+            .isNull(CommissionAdjust::getItemId)
+            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
+        if (pendings.isEmpty()) {
+            return;
+        }
+        Map<Long, CommissionAdjust> pendingByApp = new HashMap<>();
+        for (CommissionAdjust p : pendings) {
+            pendingByApp.putIfAbsent(p.getApplicationId(), p);
+        }
+        for (CommissionContractVo row : rows) {
+            CommissionAdjust pending = row.getApplicationId() == null ? null : pendingByApp.get(row.getApplicationId());
+            if (pending == null) {
+                continue;
+            }
+            row.setAdjustPending(true);
+            row.setAdjustPendingType(pending.getAdjustType() != null ? pending.getAdjustType().getCode() : null);
+            if (pending.getAdjustType() == AdjustType.AMOUNT) {
+                row.setAdjustPendingAmount(pending.getNewAmount());
+            }
+        }
     }
 
     /**

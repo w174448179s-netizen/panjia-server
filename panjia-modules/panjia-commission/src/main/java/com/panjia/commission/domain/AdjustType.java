@@ -24,7 +24,10 @@ public enum AdjustType {
     VOID("业绩冲销"),
 
     /** 部门划转 */
-    TRANSFER("部门划转");
+    TRANSFER("部门划转"),
+
+    /** 增加角色人：合同级新增角色人并分摊业绩（镜像新签调整 ADD_MEMBER） */
+    ADD_MEMBER("增加角色人");
 
     private final String code;
     private final String desc;

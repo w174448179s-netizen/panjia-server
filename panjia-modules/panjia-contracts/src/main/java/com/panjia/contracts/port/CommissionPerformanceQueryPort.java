@@ -152,6 +152,38 @@ public interface CommissionPerformanceQueryPort {
     Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId);
 
     /**
+     * 明细级金额+角色占比调整：单条事实 supersede 为 targetAmount，
+     * shareRatio 非空时同步更新角色占比（结佣合同级指定值模式用，仅 PERF_EXPECT 路径）。
+     *
+     * @param factId       事实 ID
+     * @param targetAmount 调整后金额
+     * @param shareRatio   调整后角色占比（null=不变）
+     * @param operatorId   操作人 ID
+     * @param adjustId     调整单 ID
+     * @return 新事实 ID
+     */
+    Long adjustFactAmount(Long factId, BigDecimal targetAmount, BigDecimal shareRatio, Long operatorId, Long adjustId);
+
+    /**
+     * 新增角色人事实（结佣调整 ADD_MEMBER 用，仅 PERF_EXPECT 路径）：
+     * 以模板事实为基准复制合同/期间/业务类型等基础字段，覆盖员工/角色/金额，
+     * 来源=MANUAL，批次/归一化记录引用置空。
+     *
+     * @param templateFactId 模板事实 ID（合同既有任一 ACTIVE 新签事实）
+     * @param employeeId     新员工 ID
+     * @param employeeCode   新员工工号
+     * @param deptId         新部门 ID（null=跟随模板）
+     * @param roleType       角色类型
+     * @param amount         业绩金额
+     * @param shareRatio     角色占比（可空）
+     * @param operatorId     操作人 ID
+     * @param adjustId       调整单 ID（写入新事实 adjust_id 与 sourceKey 幂等键）
+     * @return 新事实 ID
+     */
+    Long createMemberFact(Long templateFactId, Long employeeId, String employeeCode, Long deptId,
+                          String roleType, BigDecimal amount, BigDecimal shareRatio, Long operatorId, Long adjustId);
+
+    /**
      * 明细级业绩冲销：单条事实冲销（结佣调整 VOID 用）。
      *
      * @param factId     事实 ID

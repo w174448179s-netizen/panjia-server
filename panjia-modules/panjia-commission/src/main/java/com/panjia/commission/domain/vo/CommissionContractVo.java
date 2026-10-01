@@ -116,4 +116,13 @@ public class CommissionContractVo implements Serializable {
 
     /** 创建时间 */
     private LocalDateTime createTime;
+
+    /** 存在审批中的合同级结佣调整单（列表「调整审批中」标记） */
+    private Boolean adjustPending;
+
+    /** 审批中调整类型 AMOUNT / ADD_MEMBER */
+    private String adjustPendingType;
+
+    /** 审批中调整后结佣合计（AMOUNT 预演；ADD_MEMBER 为新人金额，前端仅展示标记） */
+    private BigDecimal adjustPendingAmount;
 }

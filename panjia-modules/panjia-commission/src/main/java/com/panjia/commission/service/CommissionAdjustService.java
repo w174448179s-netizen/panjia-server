@@ -12,29 +12,36 @@ import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
 import com.panjia.commission.domain.bo.CommissionAdjustCreateBo;
 import com.panjia.commission.domain.bo.CommissionAdjustBo;
+import com.panjia.commission.domain.bo.CommissionAdjustPayload;
+import com.panjia.commission.domain.vo.CommissionItemDetailVo;
 import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -85,6 +92,8 @@ public class CommissionAdjustService {
     private final ApprovalPort approvalPort;
     /** 业绩事实跨域端口：结佣调整直接操作 PERF_REAL + PERF_EXPECT 事实 */
     private final CommissionPerformanceQueryPort performanceQueryPort;
+    /** 员工主数据端口：增加角色人时回填新人工号/部门 */
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
     private static final String FACT_TYPE_REAL = "PERF_REAL";
     private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
@@ -143,6 +152,17 @@ public class CommissionAdjustService {
             if (dto.getTargetDeptId() == null) {
                 throw new ServiceException("部门划转必须指定目标部门");
             }
+        } else if (adjustType == AdjustType.ADD_MEMBER) {
+            if (detailScope) {
+                throw new ServiceException("增加角色人仅支持合同级调整");
+            }
+            if (dto.getNewMember() == null || dto.getNewMember().getEmployeeId() == null) {
+                throw new ServiceException("增加角色人必须指定新员工");
+            }
+            if (dto.getNewMember().getAmount() == null
+                || dto.getNewMember().getAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                throw new ServiceException("新角色人业绩金额必须大于 0");
+            }
         }
 
         // ③ 同一对象无未完成调整单（明细级按 itemId，合同级按 applicationId）
@@ -169,9 +189,29 @@ public class CommissionAdjustService {
             // 结佣金额口径=新签（PERF_EXPECT），调整基准取新签合计；实收仅为门控不参与金额
             originalAmount = sumFacts(application.getPeriod(), application.getContractNo(), FACT_TYPE_EXPECT);
         }
+
+        // 合同级可编辑表格模式（镜像新签调整）：detailTargets/newMember 快照入 payload_json，
+        // 执行端按指定值逐行精确落库；ADD_MEMBER 的 newAmount 存新人金额（targetAmount 语义对新人类型不适用）
+        String payloadJson = null;
         BigDecimal targetAmount = dto.getTargetAmount();
-        BigDecimal deltaAmount = targetAmount == null ? null
-            : targetAmount.subtract(originalAmount == null ? BigDecimal.ZERO : originalAmount);
+        BigDecimal deltaAmount;
+        if (!detailScope && adjustType == AdjustType.AMOUNT
+            && dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty()) {
+            payloadJson = prepareContractTargets(application, dto);
+            deltaAmount = targetAmount == null ? null
+                : targetAmount.subtract(originalAmount == null ? BigDecimal.ZERO : originalAmount);
+        } else if (!detailScope && adjustType == AdjustType.ADD_MEMBER) {
+            payloadJson = prepareAddMemberPayload(application, dto);
+            // newAmount 存新人金额；diffAmount 存合同总额变化（默认总额不变 = 0，混合金额调整时 = afterTotal − 原合计）
+            targetAmount = dto.getNewMember().getAmount();
+            CommissionAdjustPayload payload = JsonUtils.parseObject(payloadJson, CommissionAdjustPayload.class);
+            BigDecimal afterTotal = payload != null && payload.getAfterTotal() != null
+                ? payload.getAfterTotal() : originalAmount;
+            deltaAmount = afterTotal.subtract(originalAmount == null ? BigDecimal.ZERO : originalAmount);
+        } else {
+            deltaAmount = targetAmount == null ? null
+                : targetAmount.subtract(originalAmount == null ? BigDecimal.ZERO : originalAmount);
+        }
 
         CommissionAdjust adjust = new CommissionAdjust();
         adjust.setAdjustNo("CADJ" + LocalDateTime.now().format(ADJUST_NO_FORMATTER));
@@ -179,7 +219,7 @@ public class CommissionAdjustService {
         adjust.setItemId(detailScope ? item.getId() : null);
         adjust.setPeriod(application.getPeriod());
         adjust.setAdjustType(adjustType);
-        adjust.setNewAmount(targetAmount);            // 复用 new_amount 列：调整后金额
+        adjust.setNewAmount(targetAmount);            // 复用 new_amount 列：调整后金额（ADD_MEMBER=新人金额）
         adjust.setDiffAmount(deltaAmount);            // 复用 diff_amount 列：调整差额
         adjust.setOriginalAmount(originalAmount);
         adjust.setContractNo(application.getContractNo());
@@ -187,6 +227,7 @@ public class CommissionAdjustService {
         adjust.setAdjustScope(dto.getAdjustScope());
         adjust.setFactId(factId);
         adjust.setTargetDeptId(dto.getTargetDeptId());
+        adjust.setPayloadJson(payloadJson);
         adjust.setReason(dto.getReason());
         adjust.setStatus(AdjustStatus.SUBMITTED);
         adjust.setApplicantId(operatorId);
@@ -229,6 +270,129 @@ public class CommissionAdjustService {
         return facts.stream()
             .map(f -> f.getAmount() == null ? BigDecimal.ZERO : f.getAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /**
+     * 合同级金额调整·指定值模式：校验并快照「调整后金额/角色占比」入 payload_json。
+     */
+    private String prepareContractTargets(CommissionApplication app, CommissionAdjustCreateBo dto) {
+        List<CommissionItem> items = listActiveItems(app.getId());
+        Map<Long, CommissionItem> itemById = items.stream()
+            .collect(Collectors.toMap(CommissionItem::getId, i -> i));
+
+        List<CommissionAdjustPayload.DetailTarget> validTargets = new ArrayList<>();
+        Set<Long> coveredIds = new HashSet<>();
+        BigDecimal coveredSum = BigDecimal.ZERO;
+        for (CommissionAdjustCreateBo.DetailTarget t : dto.getDetailTargets()) {
+            if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+            if (itemById.get(t.getItemId()) == null) {
+                throw new ServiceException("指定调整行不在该合同结佣明细中：itemId=" + t.getItemId());
+            }
+            if (t.getShareRatio() != null && t.getShareRatio().signum() <= 0) {
+                throw new ServiceException("角色占比必须大于 0：itemId=" + t.getItemId());
+            }
+            validTargets.add(toPayloadTarget(t));
+            coveredIds.add(t.getItemId());
+            coveredSum = coveredSum.add(t.getTargetAmount());
+        }
+        BigDecimal uncoveredSum = items.stream()
+            .filter(i -> !coveredIds.contains(i.getId()))
+            .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (dto.getTargetAmount() == null
+            || round2(coveredSum.add(uncoveredSum)).compareTo(round2(dto.getTargetAmount())) != 0) {
+            throw new ServiceException("明细调整后金额合计(" + round2(coveredSum.add(uncoveredSum))
+                + ")与目标金额(" + dto.getTargetAmount() + ")不一致，请检查录入或刷新数据后重试");
+        }
+
+        CommissionAdjustPayload payload = new CommissionAdjustPayload();
+        payload.setDetailTargets(validTargets);
+        payload.setContractTotal(round2(items.stream()
+            .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add)));
+        payload.setAfterTotal(round2(dto.getTargetAmount()));
+        return JsonUtils.toJsonString(payload);
+    }
+
+    /**
+     * 增加角色人·payload 快照构建：校验新人 + 既有行分摊预演。
+     * 允许同时混合金额调整（detailTargets 非空时按指定值模式，否则按等比让出）。
+     */
+    private String prepareAddMemberPayload(CommissionApplication app, CommissionAdjustCreateBo dto) {
+        List<CommissionItem> items = listActiveItems(app.getId());
+        BigDecimal total = items.stream()
+            .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        CommissionAdjustCreateBo.NewMember nm = dto.getNewMember();
+        if (nm.getAmount().compareTo(total) > 0) {
+            throw new ServiceException("新角色人业绩金额超过合同当前结佣合计，会导致负数");
+        }
+        Long newEmpId = nm.getEmployeeId();
+        for (CommissionItem it : items) {
+            if (newEmpId.equals(it.getEmployeeId())) {
+                throw new ServiceException("该员工已在此合同结佣明细中，不能重复增加");
+            }
+        }
+
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByEmployeeId(newEmpId);
+        BigDecimal afterTotal = total;
+        CommissionAdjustPayload payload = new CommissionAdjustPayload();
+        payload.setNewMember(toPayloadNewMember(nm, emp));
+        payload.setContractTotal(round2(total));
+
+        if (dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty()) {
+            // 指定值模式：既有行按用户录入目标精确调整，不再等比让出
+            List<CommissionAdjustPayload.DetailTarget> validTargets = new ArrayList<>();
+            Map<Long, CommissionItem> itemById = items.stream()
+                .collect(Collectors.toMap(CommissionItem::getId, i -> i));
+            BigDecimal coveredSum = BigDecimal.ZERO;
+            Set<Long> coveredIds = new HashSet<>();
+            for (CommissionAdjustCreateBo.DetailTarget t : dto.getDetailTargets()) {
+                if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+                if (itemById.get(t.getItemId()) == null) {
+                    throw new ServiceException("指定调整行不在该合同结佣明细中：itemId=" + t.getItemId());
+                }
+                validTargets.add(toPayloadTarget(t));
+                coveredIds.add(t.getItemId());
+                coveredSum = coveredSum.add(t.getTargetAmount());
+            }
+            BigDecimal uncoveredSum = items.stream()
+                .filter(i -> !coveredIds.contains(i.getId()))
+                .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            afterTotal = round2(coveredSum.add(uncoveredSum).add(nm.getAmount()));
+            payload.setDetailTargets(validTargets);
+        }
+        payload.setAfterTotal(round2(afterTotal));
+        return JsonUtils.toJsonString(payload);
+    }
+
+    private CommissionAdjustPayload.DetailTarget toPayloadTarget(CommissionAdjustCreateBo.DetailTarget t) {
+        CommissionAdjustPayload.DetailTarget p = new CommissionAdjustPayload.DetailTarget();
+        p.setItemId(t.getItemId());
+        p.setTargetAmount(round2(t.getTargetAmount()));
+        if (t.getShareRatio() != null) p.setShareRatio(round6(t.getShareRatio()));
+        return p;
+    }
+
+    private CommissionAdjustPayload.NewMember toPayloadNewMember(
+        CommissionAdjustCreateBo.NewMember nm, EmployeeMainDataDTO emp) {
+        CommissionAdjustPayload.NewMember p = new CommissionAdjustPayload.NewMember();
+        p.setEmployeeId(nm.getEmployeeId());
+        p.setEmployeeCode(emp != null ? emp.getEmployeeCode() : null);
+        p.setEmployeeName(emp != null ? emp.getEmployeeName() : null);
+        p.setDeptId(nm.getDeptId() != null ? nm.getDeptId() : (emp != null ? emp.getDeptId() : null));
+        p.setRoleType(StringUtils.isBlank(nm.getRoleType()) ? "合作人" : nm.getRoleType().trim());
+        p.setAmount(round2(nm.getAmount()));
+        if (nm.getShareRatio() != null) p.setShareRatio(round6(nm.getShareRatio()));
+        return p;
+    }
+
+    private static BigDecimal round2(BigDecimal v) {
+        return v == null ? null : v.setScale(2, RoundingMode.HALF_UP);
+    }
+    private static BigDecimal round6(BigDecimal v) {
+        return v == null ? null : v.setScale(6, RoundingMode.HALF_UP);
     }
 
     // ==================== 工作流回调 ====================
@@ -327,6 +491,7 @@ public class CommissionAdjustService {
             case AMOUNT -> executeAmountAdjust(adjust, approverId);
             case VOID -> executeVoidAdjust(adjust, approverId);
             case TRANSFER -> executeTransferAdjust(adjust, approverId);
+            case ADD_MEMBER -> executeAddMemberAdjust(adjust, approverId);
             default -> throw new ServiceException("非法调整类型：" + type);
         }
         log.info("[结佣-调整] 调整单已执行：adjustNo={}, type={}, scope={}",
@@ -431,7 +596,156 @@ public class CommissionAdjustService {
             throw new ServiceException("结佣调整单不存在：" + adjustId);
         }
         fillConvertedAmounts(List.of(adjust));
+        fillAdjustDetail(adjust);
         return adjust;
+    }
+
+    /**
+     * 填充调整单详情展示字段（合同信息 + 受影响明细预演，不入库）。
+     * <p>
+     * 对齐新签调整详情（AdjustDetailPanel）三段式：基础信息 / 合同信息 / 受影响明细。
+     * 受影响明细行取申请单下全部结佣明细，按调整类型/范围预演每行 变动额/调整后金额：
+     * <ul>
+     *   <li>AMOUNT 明细级：仅目标行变动（delta=diffAmount，after=newAmount）；</li>
+     *   <li>AMOUNT 合同级：按金额占比分摊，尾差归最后一行使 Σ调整后 = newAmount；</li>
+     *   <li>VOID：冲销行 after=0；TRANSFER/旧类型（DISCOUNT/DIFF）：金额不变仅标记。</li>
+     * </ul>
+     * 注意：EXECUTED 单回看时明细已是调整后金额，预演以单据快照（original/diff/newAmount）为准。
+     */
+    private void fillAdjustDetail(CommissionAdjust adjust) {
+        CommissionApplication app = adjust.getApplicationId() == null
+            ? null : applicationMapper.selectById(adjust.getApplicationId());
+        if (app != null) {
+            adjust.setOrderNo(app.getOrderNo());
+            adjust.setPropertyAddress(app.getPropertyAddress());
+        }
+        if (adjust.getAdjustType() == AdjustType.TRANSFER && adjust.getTargetDeptId() != null) {
+            adjust.setTargetDeptName(adjustMapper.selectDeptName(adjust.getTargetDeptId()));
+        }
+        if (adjust.getApplicationId() == null) {
+            adjust.setDetails(List.of());
+            adjust.setDetailCount(0);
+            return;
+        }
+        List<CommissionItemDetailVo> rows = itemMapper.selectItemDetails(adjust.getApplicationId());
+        boolean detailScope = SCOPE_DETAIL.equals(adjust.getAdjustScope());
+        AdjustType type = adjust.getAdjustType();
+        BigDecimal delta = adjust.getDiffAmount() != null ? adjust.getDiffAmount()
+            : (adjust.getNewAmount() != null && adjust.getOriginalAmount() != null
+                ? adjust.getNewAmount().subtract(adjust.getOriginalAmount()) : null);
+
+        // 指定值模式（payload.detailTargets 非空）：按快照逐行精确预演，不再等比分摊；
+        // ADD_MEMBER 追加新角色人虚拟行（amount=0、afterAmount=新人金额、target=true）。
+        CommissionAdjustPayload payload = (!detailScope
+            && (type == AdjustType.AMOUNT || type == AdjustType.ADD_MEMBER))
+            ? parsePayload(adjust.getPayloadJson()) : null;
+        Map<Long, CommissionAdjustPayload.DetailTarget> targetByItemId = new HashMap<>();
+        if (payload != null && payload.getDetailTargets() != null) {
+            for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
+                if (t != null && t.getItemId() != null) {
+                    targetByItemId.put(t.getItemId(), t);
+                }
+            }
+        }
+
+        BigDecimal sum = BigDecimal.ZERO;
+        for (CommissionItemDetailVo row : rows) {
+            if (row.getAmount() != null) {
+                sum = sum.add(row.getAmount());
+            }
+        }
+        int lastIdx = rows.size() - 1;
+        for (int i = 0; i < rows.size(); i++) {
+            CommissionItemDetailVo row = rows.get(i);
+            boolean target = detailScope
+                ? row.getItemId() != null && row.getItemId().equals(adjust.getItemId())
+                : true;
+            row.setTarget(target);
+            BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
+            if (type == AdjustType.VOID) {
+                row.setDeltaAmount(amount.negate());
+                row.setAfterAmount(BigDecimal.ZERO);
+            } else if (!detailScope && !targetByItemId.isEmpty()) {
+                // 合同级指定值模式（AMOUNT / ADD_MEMBER）：指定行 after=快照目标，未指定行不变
+                CommissionAdjustPayload.DetailTarget t = targetByItemId.get(row.getItemId());
+                if (t != null && t.getTargetAmount() != null) {
+                    if (adjust.getStatus() == AdjustStatus.EXECUTED) {
+                        // 审批后回看：行金额已是调整后值，取事实链最早值作为「调整前」展示真实变化
+                        BigDecimal before = row.getOriginalAmount() != null ? row.getOriginalAmount() : amount;
+                        row.setAfterAmount(amount);
+                        row.setDeltaAmount(amount.subtract(before));
+                    } else {
+                        row.setAfterAmount(t.getTargetAmount());
+                        row.setDeltaAmount(t.getTargetAmount().subtract(amount));
+                    }
+                } else if (adjust.getStatus() == AdjustStatus.EXECUTED && type == AdjustType.ADD_MEMBER
+                    && row.getOriginalAmount() == null) {
+                    // ADD_MEMBER 审批后：新人行（本单新建明细，无事实链原值）展示 0 → X
+                    row.setDeltaAmount(amount);
+                    row.setAfterAmount(amount);
+                } else {
+                    row.setDeltaAmount(BigDecimal.ZERO);
+                    row.setAfterAmount(amount);
+                }
+            } else if (type == AdjustType.ADD_MEMBER) {
+                // ADD_MEMBER 无指定值快照（旧单兼容）：既有行金额不变，仅末尾追加新人虚拟行
+                row.setDeltaAmount(BigDecimal.ZERO);
+                row.setAfterAmount(amount);
+            } else if (type == AdjustType.AMOUNT && delta != null) {
+                if (detailScope) {
+                    if (target) {
+                        row.setDeltaAmount(delta);
+                        row.setAfterAmount(amount.add(delta));
+                    } else {
+                        row.setDeltaAmount(BigDecimal.ZERO);
+                        row.setAfterAmount(amount);
+                    }
+                } else {
+                    // 合同级按金额占比分摊；尾差归最后一行，保证 Σ调整后 = newAmount
+                    BigDecimal after = sum.signum() == 0
+                        ? amount.add(delta.divide(BigDecimal.valueOf(rows.size()), 2, java.math.RoundingMode.HALF_UP))
+                        : amount.add(delta.multiply(amount).divide(sum, 2, java.math.RoundingMode.HALF_UP));
+                    if (i == lastIdx && adjust.getNewAmount() != null) {
+                        BigDecimal prevSum = BigDecimal.ZERO;
+                        for (int j = 0; j < i; j++) {
+                            prevSum = prevSum.add(rows.get(j).getAfterAmount() == null
+                                ? BigDecimal.ZERO : rows.get(j).getAfterAmount());
+                        }
+                        after = adjust.getNewAmount().subtract(prevSum);
+                    }
+                    row.setAfterAmount(after);
+                    row.setDeltaAmount(after.subtract(amount));
+                }
+            } else {
+                // TRANSFER / 旧类型（DISCOUNT/DIFF）：金额不变
+                row.setDeltaAmount(BigDecimal.ZERO);
+                row.setAfterAmount(amount);
+            }
+            if (detailScope && target) {
+                adjust.setEmployeeName(row.getEmployeeName());
+                adjust.setEmployeeCode(row.getEmployeeCode());
+            }
+        }
+        // ADD_MEMBER：末尾追加新角色人虚拟行（未执行时明细中尚无该行）
+        if (!detailScope && type == AdjustType.ADD_MEMBER && payload != null && payload.getNewMember() != null
+            && adjust.getStatus() != AdjustStatus.EXECUTED) {
+            CommissionAdjustPayload.NewMember nm = payload.getNewMember();
+            CommissionItemDetailVo virtualRow = new CommissionItemDetailVo();
+            virtualRow.setEmployeeId(nm.getEmployeeId());
+            virtualRow.setEmployeeCode(nm.getEmployeeCode());
+            virtualRow.setEmployeeName(nm.getEmployeeName());
+            virtualRow.setRoleType(nm.getRoleType());
+            virtualRow.setShareRatio(nm.getShareRatio());
+            virtualRow.setAmount(BigDecimal.ZERO);
+            virtualRow.setDeltaAmount(nm.getAmount());
+            virtualRow.setAfterAmount(nm.getAmount());
+            virtualRow.setTarget(true);
+            rows.add(virtualRow);
+            adjust.setEmployeeName(nm.getEmployeeName());
+            adjust.setEmployeeCode(nm.getEmployeeCode());
+        }
+        adjust.setDetails(rows);
+        adjust.setDetailCount(rows.size());
     }
 
     /**
@@ -455,6 +769,9 @@ public class CommissionAdjustService {
         for (CommissionAdjust r : records) {
             String bizType = r.getItemId() == null ? null : bizTypeByItem.get(r.getItemId());
             BigDecimal factor = conversionFactorPort.factorOf(bizType);
+            if (r.getOriginalAmount() != null) {
+                r.setConvertedOriginalAmount(conversionFactorPort.convert(r.getOriginalAmount(), factor));
+            }
             if (r.getNewAmount() != null) {
                 r.setConvertedNewAmount(conversionFactorPort.convert(r.getNewAmount(), factor));
             }
@@ -496,6 +813,11 @@ public class CommissionAdjustService {
         BigDecimal targetAmount = adjust.getNewAmount();
         BigDecimal delta = adjust.getDiffAmount();
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
+            CommissionAdjustPayload payload = parsePayload(adjust.getPayloadJson());
+            if (payload != null && payload.getDetailTargets() != null && !payload.getDetailTargets().isEmpty()) {
+                executeContractAmountByTargets(adjust, payload, approverId);
+                return;
+            }
             // 结佣金额口径=新签（PERF_EXPECT）：合同级调整只 supersede 新签事实，不动实收（实收仅门控）。
             // 以明细合计为基准，差额由当期新签事实按金额占比分摊（跨月新签事实不动）。
             BigDecimal currentDetailSum = listActiveItems(adjust.getApplicationId()).stream()
@@ -563,6 +885,171 @@ public class CommissionAdjustService {
             applicationService.recalcAggregates(adjust.getApplicationId(), null);
             log.info("[结佣-调整-AMOUNT-明细级] 完成：adjustId={}, itemId={}, delta={}",
                 adjust.getId(), item.getId(), delta);
+        }
+    }
+
+    /**
+     * 合同级金额调整·指定值模式执行：既有行按 payload.detailTargets 精确 supersede（金额 + 可选角色占比）。
+     * <p>
+     * 完整性校验：Σ指定行目标 + 未指定行当前金额 = 单据目标金额；执行时合计被其他调整单抢先变化则拒绝执行。
+     */
+    private void executeContractAmountByTargets(CommissionAdjust adjust, CommissionAdjustPayload payload, Long approverId) {
+        List<CommissionItem> items = listActiveItems(adjust.getApplicationId());
+        Map<Long, CommissionItem> itemById = items.stream()
+            .collect(Collectors.toMap(CommissionItem::getId, i -> i));
+
+        // 完整性校验：指定行必须全部存在，且目标合计 + 未指定行当前金额 = 单据目标金额
+        BigDecimal coveredSum = BigDecimal.ZERO;
+        Set<Long> coveredIds = new HashSet<>();
+        for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
+            if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+            if (itemById.get(t.getItemId()) == null) {
+                throw new ServiceException("执行失败：指定调整行在执行时已不存在（可能被其他调整单抢先执行），"
+                    + "adjustId=" + adjust.getId() + ", itemId=" + t.getItemId());
+            }
+            coveredIds.add(t.getItemId());
+            coveredSum = coveredSum.add(t.getTargetAmount());
+        }
+        BigDecimal uncoveredSum = items.stream()
+            .filter(i -> !coveredIds.contains(i.getId()))
+            .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (round2(coveredSum.add(uncoveredSum)).compareTo(round2(adjust.getNewAmount())) != 0) {
+            throw new ServiceException("执行失败：执行时合同结佣合计已变化（Σ指定值" + round2(coveredSum)
+                + " + 未指定行" + round2(uncoveredSum) + " ≠ 目标金额" + round2(adjust.getNewAmount())
+                + "），为避免金额错乱终止执行：adjustId=" + adjust.getId());
+        }
+
+        int affected = applyDetailTargets(adjust, itemById, payload.getDetailTargets(), approverId);
+        applicationService.recalcAggregates(adjust.getApplicationId(), null);
+        log.info("[结佣-调整-AMOUNT-合同级-指定值] 完成：adjustId={}, 明细数={}, 实际调整条数={}, 目标金额={}",
+            adjust.getId(), items.size(), affected, round2(adjust.getNewAmount()));
+    }
+
+    /**
+     * 逐行执行指定值调整：金额或占比有变化才 supersede 绑定的新签事实，回写明细 amount/performance_fact_id。
+     *
+     * @return 实际调整条数
+     */
+    private int applyDetailTargets(CommissionAdjust adjust, Map<Long, CommissionItem> itemById,
+                                   List<CommissionAdjustPayload.DetailTarget> targets, Long approverId) {
+        int affected = 0;
+        for (CommissionAdjustPayload.DetailTarget t : targets) {
+            if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+            CommissionItem item = itemById.get(t.getItemId());
+            BigDecimal current = item.getAmount() == null ? BigDecimal.ZERO : item.getAmount();
+            BigDecimal target = round2(t.getTargetAmount());
+            boolean amountChanged = target.compareTo(current) != 0;
+            if (!amountChanged && t.getShareRatio() == null) {
+                continue;
+            }
+            Long newFactId = performanceQueryPort.adjustFactAmount(
+                item.getPerformanceFactId(), target, t.getShareRatio(), approverId, adjust.getId());
+            item.setAmount(target);
+            if (newFactId != null) {
+                item.setPerformanceFactId(newFactId);
+            }
+            item.setAdjustId(adjust.getId());
+            itemMapper.updateById(item);
+            affected++;
+        }
+        return affected;
+    }
+
+    /**
+     * 增加角色人（ADD_MEMBER，合同级）：既有行按 payload.detailTargets 精确 supersede，再插入新事实 + 新明细。
+     * <p>
+     * 默认不变量：执行后合同结佣合计 = 执行前（新事实 +X，既有事实合计 -X）；
+     * 混合金额调整（payload.afterTotal ≠ 执行前合计）时以快照 afterTotal 为准做完整性校验。
+     */
+    private void executeAddMemberAdjust(CommissionAdjust adjust, Long approverId) {
+        CommissionAdjustPayload payload = parsePayload(adjust.getPayloadJson());
+        if (payload == null || payload.getNewMember() == null) {
+            throw new ServiceException("增加角色人调整缺少新角色人快照：adjustId=" + adjust.getId());
+        }
+        CommissionAdjustPayload.NewMember nm = payload.getNewMember();
+        BigDecimal newAmount = nm.getAmount();
+        if (newAmount == null || newAmount.signum() <= 0) {
+            throw new ServiceException("增加角色人调整缺少新角色人业绩金额：adjustId=" + adjust.getId());
+        }
+
+        List<CommissionItem> items = listActiveItems(adjust.getApplicationId());
+        if (items.isEmpty()) {
+            throw new ServiceException("申请单下未找到有效结佣明细：applicationId=" + adjust.getApplicationId());
+        }
+        Map<Long, CommissionItem> itemById = items.stream()
+            .collect(Collectors.toMap(CommissionItem::getId, i -> i));
+        for (CommissionItem it : items) {
+            if (nm.getEmployeeId().equals(it.getEmployeeId())) {
+                throw new ServiceException("该员工已在此合同结佣明细中，不能重复增加：adjustId=" + adjust.getId()
+                    + ", employeeId=" + nm.getEmployeeId());
+            }
+        }
+
+        // 既有行指定值执行 + 完整性校验：Σ指定行目标 + 未指定行现值 + 新人金额 = 发起时快照 afterTotal
+        if (payload.getDetailTargets() != null && !payload.getDetailTargets().isEmpty()) {
+            BigDecimal coveredSum = BigDecimal.ZERO;
+            Set<Long> coveredIds = new HashSet<>();
+            for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
+                if (t == null || t.getItemId() == null || t.getTargetAmount() == null) continue;
+                if (itemById.get(t.getItemId()) == null) {
+                    throw new ServiceException("执行失败：指定调整行在执行时已不存在（可能被其他调整单抢先执行），"
+                        + "adjustId=" + adjust.getId() + ", itemId=" + t.getItemId());
+                }
+                coveredIds.add(t.getItemId());
+                coveredSum = coveredSum.add(t.getTargetAmount());
+            }
+            BigDecimal uncoveredSum = items.stream()
+                .filter(i -> !coveredIds.contains(i.getId()))
+                .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal actualAfterTotal = round2(coveredSum.add(uncoveredSum).add(newAmount));
+            if (payload.getAfterTotal() != null && actualAfterTotal.compareTo(round2(payload.getAfterTotal())) != 0) {
+                throw new ServiceException("执行失败：执行时合同结佣合计已变化（既有行指定值" + round2(coveredSum)
+                    + " + 未指定行" + round2(uncoveredSum) + " + 新人" + round2(newAmount)
+                    + " ≠ 发起时调整后总额" + round2(payload.getAfterTotal())
+                    + "），为避免金额错乱终止执行：adjustId=" + adjust.getId());
+            }
+            applyDetailTargets(adjust, itemById, payload.getDetailTargets(), approverId);
+        }
+
+        // 新事实 + 新结佣明细（模板=申请单首条明细绑定的事实，期间/合同/业务类型等基础字段沿用）
+        CommissionItem templateItem = items.get(0);
+        Long newFactId = performanceQueryPort.createMemberFact(
+            templateItem.getPerformanceFactId(), nm.getEmployeeId(), nm.getEmployeeCode(), nm.getDeptId(),
+            nm.getRoleType(), newAmount, nm.getShareRatio(), approverId, adjust.getId());
+
+        CommissionItem newItem = new CommissionItem();
+        newItem.setApplicationId(adjust.getApplicationId());
+        newItem.setPerformanceFactId(newFactId);
+        newItem.setContractNo(templateItem.getContractNo());
+        newItem.setPeriod(templateItem.getPeriod());
+        newItem.setApprovedMonth(templateItem.getApprovedMonth());
+        newItem.setEmployeeId(nm.getEmployeeId());
+        newItem.setDeptId(nm.getDeptId() != null ? nm.getDeptId() : templateItem.getDeptId());
+        newItem.setBizType(templateItem.getBizType());
+        newItem.setRoleType(nm.getRoleType());
+        newItem.setFeeItem(templateItem.getFeeItem());
+        newItem.setAmount(newAmount);
+        newItem.setStatus(ItemStatus.APPROVED);
+        newItem.setAdjustId(adjust.getId());
+        itemMapper.insert(newItem);
+
+        applicationService.recalcAggregates(adjust.getApplicationId(), null);
+        log.info("[结佣-调整-ADD_MEMBER] 执行完成：adjustId={}, applicationId={}, newEmployeeId={}, newAmount={}",
+            adjust.getId(), adjust.getApplicationId(), nm.getEmployeeId(), round2(newAmount));
+    }
+
+    /** 解析调整单快照，解析失败返回 null（合同级旧单无快照时走原分摊逻辑兜底）。 */
+    private CommissionAdjustPayload parsePayload(String payloadJson) {
+        if (StringUtils.isBlank(payloadJson)) {
+            return null;
+        }
+        try {
+            return JsonUtils.parseObject(payloadJson, CommissionAdjustPayload.class);
+        } catch (Exception e) {
+            log.warn("[结佣-调整] 快照解析失败，按原分摊逻辑兜底：payload={}", payloadJson, e);
+            return null;
         }
     }
 

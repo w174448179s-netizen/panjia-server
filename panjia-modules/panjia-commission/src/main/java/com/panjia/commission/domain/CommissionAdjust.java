@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.panjia.commission.domain.vo.CommissionItemDetailVo;
 import lombok.Data;
 import org.dromara.common.translation.annotation.Translation;
 import org.dromara.common.translation.constant.TransConstant;
@@ -12,6 +13,7 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 结佣调整单（对应 pj_commission_adjust 表）。
@@ -129,4 +131,38 @@ public class CommissionAdjust implements Serializable {
 
     /** 更新时间（DB 默认填充） */
     private LocalDateTime updateTime;
+
+    // ==================== 详情展示（非入库字段，getAdjust 填充） ====================
+
+    /** 订单号（申请单冗余，展示用） */
+    @TableField(exist = false)
+    private String orderNo;
+
+    /** 房源地址（申请单冗余，展示用） */
+    @TableField(exist = false)
+    private String propertyAddress;
+
+    /** 受影响明细条数 */
+    @TableField(exist = false)
+    private Integer detailCount;
+
+    /** 明细级调整目标员工姓名 */
+    @TableField(exist = false)
+    private String employeeName;
+
+    /** 明细级调整目标员工工号 */
+    @TableField(exist = false)
+    private String employeeCode;
+
+    /** 部门划转目标部门名（TRANSFER 展示用） */
+    @TableField(exist = false)
+    private String targetDeptName;
+
+    /** 折算后调整前金额（originalAmount × 当前生效折算因子，展示用，不入库） */
+    @TableField(exist = false)
+    private BigDecimal convertedOriginalAmount;
+
+    /** 受影响明细行（含调整前/变动/调整后预演，展示用，不入库） */
+    @TableField(exist = false)
+    private List<CommissionItemDetailVo> details;
 }

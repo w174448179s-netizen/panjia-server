@@ -90,4 +90,32 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 状态 DRAFT/PENDING/APPROVED/REVERSED */
     private String status;
+
+    // ==================== 结佣调整详情预演（普通查询为 null） ====================
+
+    /** 预演变动额（调整后 − 调整前，正增负减） */
+    private BigDecimal deltaAmount;
+
+    /** 预演调整后金额 */
+    private BigDecimal afterAmount;
+
+    /** 是否本单调整目标行（true=调整行，红色高亮） */
+    private Boolean target;
+
+    // ==================== 在途调整预演（审批中 SUBMITTED/APPROVED 调整单回填） ====================
+
+    /** 存在审批中的结佣调整单（执行前预演标记） */
+    private Boolean adjustPending;
+
+    /** 审批中调整类型 AMOUNT / ADD_MEMBER */
+    private String adjustPendingType;
+
+    /** 审批中调整后金额（预演） */
+    private BigDecimal adjustPendingAmount;
+
+    /** 审批中调整变动额（= adjustPendingAmount − amount，正增负减） */
+    private BigDecimal adjustPendingDelta;
+
+    /** 增加角色人虚拟行标记（审批中新角色人尚无明细行，由 payload 快照合成展示） */
+    private Boolean newMemberPending;
 }

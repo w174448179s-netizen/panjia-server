@@ -9,6 +9,7 @@ import com.panjia.contracts.port.ReceivedRealFactPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
+import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.ReceivedAlignmentService;
@@ -396,6 +397,55 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         newFact.setAdjustId(adjustId);
         PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
         return created.getId();
+    }
+
+    @Override
+    public Long adjustFactAmount(Long factId, BigDecimal targetAmount, BigDecimal shareRatio,
+                                 Long operatorId, Long adjustId) {
+        PerformanceFact oldFact = factMapper.selectById(factId);
+        if (oldFact == null) {
+            return null;
+        }
+        PerformanceFact newFact = copyFactBase(oldFact);
+        newFact.setPerformanceAmount(MoneyUtil.round2(targetAmount));
+        if (shareRatio != null) {
+            newFact.setShareRatio(shareRatio);
+        }
+        newFact.setAdjustId(adjustId);
+        PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
+        return created.getId();
+    }
+
+    @Override
+    public Long createMemberFact(Long templateFactId, Long employeeId, String employeeCode, Long deptId,
+                                 String roleType, BigDecimal amount, BigDecimal shareRatio,
+                                 Long operatorId, Long adjustId) {
+        PerformanceFact template = factMapper.selectById(templateFactId);
+        if (template == null) {
+            return null;
+        }
+        PerformanceFact newFact = copyFactBase(template);
+        newFact.setEmployeeId(employeeId);
+        newFact.setEmployeeExternalCode(employeeCode);
+        if (deptId != null) {
+            newFact.setDeptId(deptId);
+        }
+        newFact.setRoleType(roleType);
+        newFact.setRoleName(roleType);
+        // 新角色人占比：显式指定则落库，未指定保持 null（不继承模板行占比）
+        newFact.setShareRatio(shareRatio);
+        newFact.setPerformanceAmount(MoneyUtil.round2(amount));
+        newFact.setAdjustId(adjustId);
+        newFact.setBatchId(null);
+        newFact.setNormalizedRecordId(null);
+        newFact.setSource(PerformanceSource.MANUAL);
+        // sourceKey 对齐导入格式，角色人系统号用 MANUAL-CADJ-{adjustId} 虚拟值避开导入幂等键
+        newFact.setSourceKey(StringUtils.defaultString(template.getOrderNo()) + "|"
+            + StringUtils.defaultString(template.getContractNo()) + "|MANUAL-CADJ-" + adjustId
+            + "|" + StringUtils.defaultString(template.getFeeItem()) + "|"
+            + StringUtils.defaultString(roleType));
+        factMapper.insert(newFact);
+        return newFact.getId();
     }
 
     @Override
