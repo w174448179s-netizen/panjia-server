@@ -1,0 +1,19 @@
+# Docker 本地运行时覆盖配置（--spring.profiles.active=dev,docker-local）
+# 容器内通过 host.docker.internal 连接宿主机上 docker-compose 跑的中間件
+
+spring:
+  datasource:
+    dynamic:
+      datasource:
+        master:
+          url: jdbc:postgresql://host.docker.internal:5432/postgres?useUnicode=true&characterEncoding=utf8&useSSL=true&autoReconnect=true&reWriteBatchedInserts=true&stringtype=unspecified
+  data:
+    redis:
+      host: host.docker.internal
+      port: 6379
+
+# MinIO（panjia-server/script/docker/docker-compose.yml 已暴露 9000 到宿主机）
+panjia:
+  import:
+    minio:
+      endpoint: http://host.docker.internal:9000

@@ -1,0 +1,14 @@
+# 本地开发专用：后端打包为 Docker 镜像，与 IDE 的 8080 互不干扰
+# 用法见 panjia-console/bin/frp/run-local-backend.sh
+
+FROM eclipse-temurin:21-jre-alpine
+
+WORKDIR /app
+
+# 复制 Maven 打包产物（要求先执行 mvn package）
+COPY ruoyi-admin/target/ruoyi-admin.jar app.jar
+
+EXPOSE 8080
+
+# 激活 dev + docker-local 双 profile，后者覆盖 localhost 为 host.docker.internal
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar --spring.profiles.active=dev,docker-local"]
