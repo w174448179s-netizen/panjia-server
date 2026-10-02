@@ -27,6 +27,10 @@ import java.util.stream.Collectors;
  *   <li>结佣调整单存在未作废记录（EXECUTED 已改数据 / SUBMITTED 审批中 / REJECTED 驳回）→ 禁止；</li>
  *   <li>DRAFT 草稿单、历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截。</li>
  * </ol>
+ * <p>
+ * 注意：匹配只按合同/订单业务键，<b>不按批次期间过滤</b>——结佣单 period 落的是
+ * 实收月，而其明细可引用更早月份的新签事实；撤新签批次时若按期间过滤，跨月锁定单
+ * 会漏检，撤销将物理删除被 LOCKED 单引用的事实。
  */
 @Component
 @RequiredArgsConstructor
@@ -41,13 +45,15 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
                                             Collection<String> orderNos) {
         List<String> contracts = sanitize(contractNos);
         List<String> orders = sanitize(orderNos);
-        if ((contracts.isEmpty() && orders.isEmpty()) || period == null || period.isBlank()) {
+        if (contracts.isEmpty() && orders.isEmpty()) {
             return RevokeCheckResult.ok();
         }
 
-        // 校验①：已进入正式审批链路的结佣单（有流程实例的提交/通过/锁定，或已驳回）
+        // 校验①：已进入正式审批链路的结佣单（有流程实例的提交/通过，或已锁定，或已驳回）。
+        // 不按期间过滤：结佣单挂实收月，明细可引用更早月份的新签事实，跨月也必须拦截。
+        // LOCKED 不判断 process_instance_id：实收审批通过后自动建 DRAFT → 提交 → 直落 LOCKED
+        // 的链路无流程实例，但业务上已审批通过并锁定，必须拦截。
         LambdaQueryWrapper<CommissionApplication> appQuery = new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
             .and(bizKey -> {
                 if (!contracts.isEmpty() && !orders.isEmpty()) {
                     bizKey.in(CommissionApplication::getContractNo, contracts)
@@ -61,8 +67,9 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
             .and(w -> w
                 .nested(x -> x
                     .in(CommissionApplication::getStatus,
-                        ApplicationStatus.SUBMITTED, ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
+                        ApplicationStatus.SUBMITTED, ApplicationStatus.APPROVED)
                     .isNotNull(CommissionApplication::getProcessInstanceId))
+                .or().eq(CommissionApplication::getStatus, ApplicationStatus.LOCKED)
                 .or().eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED));
         Long activeAppCount = applicationMapper.selectCount(appQuery);
         if (activeAppCount != null && activeAppCount > 0) {
@@ -71,11 +78,10 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
                     + " 张），禁止撤销，请先在结佣模块作废结佣单");
         }
 
-        // 校验②：存在未作废的结佣调整单（EXECUTED 已改写事实/金额，SUBMITTED 审批中，REJECTED 可能重提）
-        // 结佣调整单 contract_no 存业务键（合同号优先，为空时落订单号），故事实侧只拿到订单号
-        // 的合同也要按订单号命中
+        // 校验②：存在未作废的结佣调整单（EXECUTED 已改写事实/金额，SUBMITTED 审批中，REJECTED 可能重提）。
+        // 调整单 contract_no 存业务键（合同号优先，为空时落订单号），事实侧只拿到订单号也要命中；
+        // 同样不按期间过滤，跨月引用场景必须拦截
         LambdaQueryWrapper<CommissionAdjust> adjustQuery = new LambdaQueryWrapper<CommissionAdjust>()
-            .eq(CommissionAdjust::getPeriod, period)
             .ne(CommissionAdjust::getStatus, AdjustStatus.CANCELLED);
         if (!contracts.isEmpty() && !orders.isEmpty()) {
             adjustQuery.and(k -> k.in(CommissionAdjust::getContractNo, contracts)

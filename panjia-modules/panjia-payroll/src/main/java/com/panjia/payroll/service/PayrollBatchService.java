@@ -125,7 +125,8 @@ public class PayrollBatchService {
 
     @Transactional(rollbackFor = Exception.class)
     public PayrollBatch calculate(Long batchId, Long operatorId) {
-        PayrollBatch batch = batchMapper.selectById(batchId);
+        // 行锁串行化：并发连点/重试时后到请求阻塞重读，状态已翻转而快速失败，不再并发重算
+        PayrollBatch batch = batchMapper.selectByIdForUpdate(batchId);
         if (batch == null) throw new ServiceException("批次不存在");
         batch.assertCanCalculate();
 
