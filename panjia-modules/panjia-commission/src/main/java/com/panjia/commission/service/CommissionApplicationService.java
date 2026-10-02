@@ -1297,6 +1297,11 @@ public class CommissionApplicationService {
         return PageResult.build(page.getRecords(), page.getTotal());
     }
 
+    /** 有结佣申请单的期间（YYYY-MM，倒序），供前端默认选中最新有数据期间 */
+    public java.util.List<String> listPeriods() {
+        return applicationMapper.selectDistinctPeriods();
+    }
+
     /**
      * 按「合同」维度分页查询结佣申请（与业绩明细页合同维度对齐）。
      */

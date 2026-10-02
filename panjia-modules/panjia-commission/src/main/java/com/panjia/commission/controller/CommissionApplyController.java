@@ -73,6 +73,13 @@ public class CommissionApplyController extends BaseController {
         return R.ok(applicationService.listContracts(query, pageQuery));
     }
 
+    /** 有结佣申请单的期间（倒序），供前端默认选中最新有数据期间 */
+    @SaCheckPermission("commission:apply:list")
+    @GetMapping("/periods")
+    public R<java.util.List<String>> listPeriods() {
+        return R.ok(applicationService.listPeriods());
+    }
+
     /**
      * 申请单详情（含明细）。
      *

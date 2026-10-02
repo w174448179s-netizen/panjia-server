@@ -1218,6 +1218,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return PageResult.build(records, page.getTotal());
     }
 
+    @Override
+    public List<String> listPeriods() {
+        return applyMapper.selectDistinctPeriods();
+    }
+
     /**
      * 回填实收明细列表的补充字段（涉及人数、应收合计）。
      * <p>

@@ -52,6 +52,13 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(receivedApplyService.list(query, pageQuery));
     }
 
+    /** 有实收审批单的期间（倒序），供前端默认选中最新有数据期间 */
+    @SaCheckPermission("perf:received:list")
+    @GetMapping("/periods")
+    public R<java.util.List<String>> listPeriods() {
+        return R.ok(receivedApplyService.listPeriods());
+    }
+
     /** 详情（含合同下每人实收事实） */
     @SaCheckPermission("perf:received:query")
     @GetMapping("/{id}")

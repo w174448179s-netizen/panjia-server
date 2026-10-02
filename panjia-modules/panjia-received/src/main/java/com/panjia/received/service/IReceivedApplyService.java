@@ -122,6 +122,9 @@ public interface IReceivedApplyService {
     /** 分页查询 */
     PageResult<ReceivedApply> list(ReceivedApplyBo query, PageQuery pageQuery);
 
+    /** 有实收审批单的期间（YYYY-MM，倒序），供前端默认选中最新有数据期间 */
+    List<String> listPeriods();
+
     /** 详情（含合同下每人实收明细，列口径对齐合同业绩明细） */
     ReceivedApplyDetail getDetail(Long id);
 
