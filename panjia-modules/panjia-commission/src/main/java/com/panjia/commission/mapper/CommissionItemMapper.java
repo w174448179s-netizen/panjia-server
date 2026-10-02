@@ -76,7 +76,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         dangling_expect AS (
             -- 行级精确配对：明细金额快照 = 事实金额，逐行还原「一对一」的新签金额与归属月
             SELECT DISTINCT ON (di.item_id) di.item_id,
-                   pe.performance_amount AS exp_amt, pe.period AS exp_period
+                   pe.performance_amount AS exp_amt, pe.period AS exp_period,
+                   pe.share_ratio, pe.role_name
             FROM dangling_items di
             JOIN pj_perf_fact pe
               ON pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
@@ -201,8 +202,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
                COALESCE(f.role_type, rd2.role_type, ci.role_type) AS "roleType",
-               COALESCE(f.role_name, rd2.role_name) AS "roleName",
-               COALESCE(f.share_ratio, rd2.share_ratio) AS "shareRatio",
+               COALESCE(f.role_name, rd2.role_name, de.role_name) AS "roleName",
+               COALESCE(f.share_ratio, rd2.share_ratio, de.share_ratio) AS "shareRatio",
                ci.biz_type AS "bizType",
                COALESCE(ae.performance_amount, de.exp_amt, rae.exp_amt, dae.exp_amt) AS "expectedAmount",
                COALESCE(ae.exp_period, de.exp_period, rae.exp_period, dae.exp_period,
