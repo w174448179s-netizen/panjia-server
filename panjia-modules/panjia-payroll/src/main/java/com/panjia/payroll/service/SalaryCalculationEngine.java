@@ -57,8 +57,10 @@ public class SalaryCalculationEngine {
          * 扫描结佣明细预先构建，engine 按期间精确命中；key 缺失时回退到主 snapshot。
          */
         public Map<String, RuleService.ParsedSnapshot> periodSnapshots = Map.of();
-        /** employeeId -> 手工收入（奖金+其他收入） */
-        public Map<Long, BigDecimal> manualIncome;
+        /** employeeId -> 奖金（手工项 itemType=BONUS） */
+        public Map<Long, BigDecimal> bonusIncome;
+        /** employeeId -> 其他收入（手工项 itemType=OTHER_INCOME） */
+        public Map<Long, BigDecimal> otherIncomeMap;
         /** employeeId -> 手工支出 */
         public Map<Long, BigDecimal> manualDeduct;
         /** employeeId -> 负工资结转待扣 */
@@ -344,16 +346,20 @@ public class SalaryCalculationEngine {
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
-            // 奖金 / 其他收入
-            BigDecimal bonus = input.manualIncome.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            // 奖金 / 其他收入（手工录入按 itemType 分流，分别落工资明细列）
+            BigDecimal bonus = input.bonusIncome == null ? BigDecimal.ZERO
+                : input.bonusIncome.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
+            BigDecimal otherIncome = input.otherIncomeMap == null ? BigDecimal.ZERO
+                : input.otherIncomeMap.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setBonus(MoneyUtil.round2(bonus));
-            d.setOtherIncome(BigDecimal.ZERO);
+            d.setOtherIncome(MoneyUtil.round2(otherIncome));
 
-            // 应发 = 提成 + 团队 + 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 全勤奖（不含个人新签递延）
+            // 应发 = 提成 + 团队 + 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖（不含个人新签递延）
             BigDecimal fullAttendance = d.getFullAttendance() == null
                 ? BigDecimal.ZERO : d.getFullAttendance();
             BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
-                .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus).add(fullAttendance);
+                .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus).add(otherIncome)
+                .add(fullAttendance);
             // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
             if (role == EmployeeRole.MANAGER && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
                 BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();

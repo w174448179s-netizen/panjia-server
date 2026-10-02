@@ -17,6 +17,7 @@ import com.panjia.contracts.port.PeriodCloseQueryPort;
 import com.panjia.contracts.dto.ScoreApprovalStatusDTO;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.payroll.domain.BatchStatus;
+import com.panjia.payroll.domain.ManualItemType;
 import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.PayrollEmployeeSnapshot;
@@ -367,13 +368,17 @@ public class PayrollBatchService {
         }
         input.deptNames = allDeptIds.isEmpty() ? Map.of() : peopleQueryPort.findDeptNames(allDeptIds);
 
-        // 手工项
-        input.manualIncome = new HashMap<>();
+        // 手工项：奖金 / 其他收入 / 其他支出 三类分流（工资明细分列展示，不再混算）
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         manualItemService.loadApprovedForPeriod(period).forEach((empId, items) -> {
             for (var item : items) {
-                if (item.getItemType() != null && item.getItemType().isIncome()) {
-                    input.manualIncome.merge(empId, item.getAmount(), BigDecimal::add);
+                var type = item.getItemType();
+                if (type == ManualItemType.BONUS) {
+                    input.bonusIncome.merge(empId, item.getAmount(), BigDecimal::add);
+                } else if (type == ManualItemType.OTHER_INCOME) {
+                    input.otherIncomeMap.merge(empId, item.getAmount(), BigDecimal::add);
                 } else {
                     input.manualDeduct.merge(empId, item.getAmount(), BigDecimal::add);
                 }
