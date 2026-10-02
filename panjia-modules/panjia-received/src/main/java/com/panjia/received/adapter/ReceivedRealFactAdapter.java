@@ -125,6 +125,14 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
+    public long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys) {
+        if (period == null || period.isBlank() || bizKeys == null || bizKeys.isEmpty()) {
+            return 0L;
+        }
+        return realMapper.selectDistinctEmployeeCountByKeys(period, bizKeys);
+    }
+
+    @Override
     public Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, Collection<String> bizKeys) {
         if (period == null || period.isBlank() || bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyMap();

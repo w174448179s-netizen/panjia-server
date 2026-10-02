@@ -22,7 +22,7 @@ public class CommissionApplyBo implements Serializable {
     /** 门店 ID */
     private Long deptId;
 
-    /** 状态（ApplicationStatus code；NONE=未发起） */
+    /** 状态（ApplicationStatus code：DRAFT/SUBMITTED/LOCKED/REJECTED/CANCELLED） */
     private String status;
 
     /** 关键字（合同号 / 订单号 / 房源地址） */

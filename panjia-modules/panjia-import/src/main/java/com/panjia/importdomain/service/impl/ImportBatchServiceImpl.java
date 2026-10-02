@@ -38,7 +38,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 导入批次服务实现。
@@ -354,10 +356,12 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     }
 
     /**
-     * 汇总本批次及被恢复旧批次归一化记录中的合同号（去重、去空白）。
+     * 汇总本批次及被恢复旧批次归一化记录中的业务键（合同号 + 订单号，去重、去空白）。
      * <p>仅贝壳新签/实收批次需要：结佣域撤销处理器据此删除实收自动通过时产生的
      * DRAFT 结佣草稿单（无论是否存在旧批次，本批连锁产生的草稿都要删）；
-     * 其他来源类型返回空列表。必须在本批归一化记录删除前调用。
+     * 一手房/房产金融/家装荐客等无合同号的行以订单号为业务键（结佣单 contract_no
+     * 落库时也兜底为订单号），故合同号与订单号都要收集；其他来源类型返回空列表。
+     * 必须在本批归一化记录删除前调用。
      */
     private List<String> collectContractNos(Long batchId, ImportSourceType sourceType,
                                             List<Long> supersededIds) {
@@ -370,14 +374,22 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         batchIds.addAll(supersededIds);
         List<com.panjia.importdomain.domain.NormalizedRecord> records = normalizedRecordMapper.selectList(
             new LambdaQueryWrapper<com.panjia.importdomain.domain.NormalizedRecord>()
-                .select(com.panjia.importdomain.domain.NormalizedRecord::getContractNo)
+                .select(com.panjia.importdomain.domain.NormalizedRecord::getContractNo,
+                    com.panjia.importdomain.domain.NormalizedRecord::getOrderNo)
                 .in(com.panjia.importdomain.domain.NormalizedRecord::getBatchId, batchIds));
-        return records.stream()
-            .map(com.panjia.importdomain.domain.NormalizedRecord::getContractNo)
-            .filter(c -> c != null && !c.isBlank())
-            .map(String::trim)
-            .distinct()
-            .toList();
+        Set<String> bizNos = new LinkedHashSet<>();
+        for (com.panjia.importdomain.domain.NormalizedRecord r : records) {
+            // MyBatis 默认 returnInstanceForEmptyRow=false：所选两列全为 NULL 的行会映射成 null 实体
+            if (r == null) {
+                continue;
+            }
+            for (String c : new String[]{r.getContractNo(), r.getOrderNo()}) {
+                if (c != null && !c.isBlank()) {
+                    bizNos.add(c.trim());
+                }
+            }
+        }
+        return new ArrayList<>(bizNos);
     }
 
     /**

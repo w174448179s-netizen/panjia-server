@@ -53,6 +53,16 @@ public interface ReceivedRealFactPort {
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId);
 
     /**
+     * 按期间 + 业务键集合（合同号/订单号）统计去重员工数（结佣明细列表跨合同合计用）。
+     * 员工键口径与 {@link #listContractSummaries} 的 employeeCount 一致：
+     * COALESCE(rd.employee_id, 工号兜底员工 e.employee_id, rd.employee_external_code)；
+     * 仅统计 ACTIVE 明细，任一业务键（order_no 或 contract_no）命中即计入。
+     *
+     * @return 去重员工数；无匹配返回 0
+     */
+    long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys);
+
+    /**
      * 批量查合同维度「调整前」实收金额合计。
      * <p>
      * 口径：以各业务键当前 ACTIVE rd 的 sourceKey 集合为准，沿明细链（同 source_key，

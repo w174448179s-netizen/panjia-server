@@ -111,9 +111,6 @@ public class CommissionApplicationService {
     /** 配置开关：实收应收无差异时跳过财务节点（默认开启）。 */
     private static final String CONFIG_SKIP_FINANCE_WHEN_MATCH = "panjia.commission.skip_finance_when_match";
 
-    /** 列表行虚拟状态：未发起（业绩存在但无申请单） */
-    public static final String ROW_STATUS_NONE = "NONE";
-
     private final CommissionApplicationMapper applicationMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionConsumeLogMapper consumeLogMapper;
@@ -1199,74 +1196,6 @@ public class CommissionApplicationService {
             application == null ? "?" : application.getStatus(), operatorId);
     }
 
-    /**
-     * 作废未发起的合同结佣（本期不再发起）。
-     * <p>
-     * 结佣无独立草稿态（发起即提交），可作废状态映射为：未发起 / 审批中 / 已驳回。
-     * 未发起（无申请单）时创建一条 CANCELLED 空单占位：不生成明细、金额清零，
-     * 后续仍可重新发起（CANCELLED 不占 uk_capp_period_contract 部分唯一索引）；
-     * 已有单（审批中/已驳回等）时转 {@link #cancel(Long, Long)}，与单据作废同口径；
-     * 最新单已是 CANCELLED 时幂等返回。
-     * <p>
-     * 权限：超管任意；其他用户仅可作废本人发起的单据，未发起单按发起口径校验门店权限。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void cancelUnapplied(String period, String contractNo, Long operatorId) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
-            throw new ServiceException("结算月与合同号不能为空");
-        }
-        checkPeriodOpen(period, "作废未发起结佣");
-        String no = contractNo.trim();
-        CommissionApplication existing = applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
-            .and(w -> w.eq(CommissionApplication::getContractNo, no)
-                .or().eq(CommissionApplication::getOrderNo, no))
-            .orderByDesc(CommissionApplication::getCreateTime)
-            .last("LIMIT 1"));
-        if (existing != null) {
-            if (existing.getStatus() == ApplicationStatus.CANCELLED) {
-                log.info("[结佣-作废] 合同已是作废状态，幂等跳过：period={}, contractNo={}", period, no);
-                return;
-            }
-            cancel(existing.getId(), operatorId);
-            return;
-        }
-        // 无单：按发起口径校验门店权限（非超管仅可操作本部门链路上的合同）
-        Long contractDeptId = resolveContractDeptId(period, no);
-        if (contractDeptId != null) {
-            checkContractDeptScope(contractDeptId);
-        }
-        PerformanceContractSummaryDTO summary = performanceQueryPort
-            .listContractSummaries(period, null, FACT_TYPE_REAL, null).stream()
-            .filter(c -> no.equals(c.getContractNo()) || no.equals(c.getOrderNo()))
-            .findFirst()
-            .orElse(null);
-        if (summary == null) {
-            throw new ServiceException("合同 " + no + " 在 " + period + " 无实收业绩，无需作废");
-        }
-        CommissionApplication application = new CommissionApplication();
-        application.setApplyNo("CAPP" + LocalDateTime.now().format(APPLY_NO_FORMATTER));
-        application.setPeriod(period);
-        application.setContractNo(summary.getContractNo() != null ? summary.getContractNo() : no);
-        application.setOrderNo(summary.getOrderNo());
-        application.setPropertyAddress(summary.getPropertyAddress());
-        application.setBusinessDate(summary.getBusinessDate());
-        // 占位单 dept_id 留空：列表部门过滤基于合同实收事实，不依赖单据部门
-        application.setStatus(ApplicationStatus.CANCELLED);
-        application.setApplicantId(operatorId);
-        application.setItemCount(0);
-        application.setTotalAmount(BigDecimal.ZERO);
-        application.setExpectedAmount(BigDecimal.ZERO);
-        application.setAligned(false);
-        try {
-            applicationMapper.insert(application);
-        } catch (DuplicateKeyException e) {
-            throw new ServiceException("合同 " + no + " " + period + " 月申请单已由他人发起，请刷新");
-        }
-        log.info("[结佣-作废] 未发起合同已置作废占位单：applyNo={}, period={}, contractNo={}, operator={}",
-            application.getApplyNo(), period, no, operatorId);
-    }
-
     // ==================== 工作流回调 ====================
 
     /**
@@ -1413,18 +1342,19 @@ public class CommissionApplicationService {
             if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
                 app = appMap.get(c.getOrderNo());
             }
-            String status = app != null && app.getStatus() != null ? app.getStatus().getCode() : ROW_STATUS_NONE;
-            if (app == null && !"APPROVED".equals(c.getReceivedStatus())) {
+            // 实收审批通过后系统自动生成结佣草稿单，无申请单的合同不在结佣明细展示
+            if (app == null || app.getStatus() == null) {
                 continue;
             }
+            String status = app.getStatus().getCode();
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
             }
             // 审批节点数据隔离：审批中（SUBMITTED）单据仅「本人角色对应节点」或「申请人本人」可见；
             // 财务→FINANCE、总监→DIRECTOR，店长/经纪人看不到他人审批中的单据但能看到自己发起的，超管看全部
             if (!nodeScopeAll && ApplicationStatus.SUBMITTED.getCode().equals(status)
-                && (app == null || (!myNodes.contains(app.getCurrentNode())
-                    && !Objects.equals(app.getApplicantId(), LoginHelper.getUserId())))) {
+                && (!myNodes.contains(app.getCurrentNode())
+                    && !Objects.equals(app.getApplicantId(), LoginHelper.getUserId()))) {
                 continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
@@ -1463,7 +1393,32 @@ public class CommissionApplicationService {
         fillContractPendingAdjust(pageRows);
         // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
         fillAddMemberMark(period, pageRows);
-        return PageResult.build(pageRows, (long) total);
+
+        // 跨页全局汇总（统计栏不随分页变化）：合同/明细条数/金额按过滤后全集内存聚合；
+        // 涉及人数须跨合同去重（同一员工可能在多个合同），走实收事实 COUNT(DISTINCT 员工键)
+        Set<String> summaryKeys = new HashSet<>();
+        long summaryDetailCount = 0L;
+        BigDecimal summaryTotalAmount = BigDecimal.ZERO;
+        for (CommissionContractVo vo : all) {
+            if (StringUtils.isNotBlank(vo.getContractNo())) {
+                summaryKeys.add(vo.getContractNo());
+            }
+            if (StringUtils.isNotBlank(vo.getOrderNo())) {
+                summaryKeys.add(vo.getOrderNo());
+            }
+            summaryDetailCount += vo.getDetailCount();
+            if (vo.getAmount() != null) {
+                summaryTotalAmount = summaryTotalAmount.add(vo.getAmount());
+            }
+        }
+        PageResult<CommissionContractVo> result = PageResult.build(pageRows, (long) total);
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("contractCount", total);
+        summary.put("employeeCount", performanceQueryPort.countDistinctEmployeesByKeys(period, summaryKeys, FACT_TYPE_REAL));
+        summary.put("detailCount", summaryDetailCount);
+        summary.put("totalAmount", summaryTotalAmount);
+        result.setSummary(summary);
+        return result;
     }
 
     /**

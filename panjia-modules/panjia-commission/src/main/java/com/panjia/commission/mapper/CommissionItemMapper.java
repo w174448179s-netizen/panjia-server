@@ -58,6 +58,21 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND ci3.status != 'REVERSED'
               AND rd3.source_key IS NOT NULL
         ),
+        dangling_keys AS (
+            -- 悬空事实兜底：批次撤销会物理删除业绩事实，重新导入生成新 ID，
+            -- 既有 DRAFT 明细的 performance_fact_id 指向已删除行（f/rd2 双双 miss）；
+            -- 此类行按「申请单合同键 + 员工工号 + 角色」降级到聚合配对（同 rd 口径）
+            SELECT DISTINCT a4.period, a4.order_no, a4.contract_no,
+                   e4.employee_code AS emp_code, ci4.role_type
+            FROM pj_commission_item ci4
+            JOIN pj_commission_application a4 ON a4.id = ci4.application_id
+            LEFT JOIN pj_people_employee e4 ON e4.employee_id = ci4.employee_id
+            WHERE ci4.application_id = #{applicationId}
+              AND ci4.status != 'REVERSED'
+              AND ci4.performance_fact_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM pj_perf_fact f4 WHERE f4.id = ci4.performance_fact_id)
+              AND NOT EXISTS (SELECT 1 FROM pj_received_detail rd4 WHERE rd4.id = ci4.performance_fact_id)
+        ),
         reversed_expect AS (
             SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount, pe.period AS exp_period
             FROM src_keys sk
@@ -74,8 +89,10 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         ),
         rd_pair AS (
             -- 配对键去重：同合同同人同角色当月可能有多条 rd（多到账日），应收额只能计一次
-            SELECT DISTINCT period, order_no, contract_no, emp_code, role_type
-            FROM rd_keys
+            -- 同时并入悬空事实行（dangling_keys），让撤销重导后仍能按合同+工号+角色配对
+            SELECT period, order_no, contract_no, emp_code, role_type FROM rd_keys
+            UNION
+            SELECT period, order_no, contract_no, emp_code, role_type FROM dangling_keys
         ),
         rd_active_expect AS (
             SELECT rp.period, rp.order_no, rp.contract_no, rp.emp_code, rp.role_type,
@@ -174,8 +191,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                COALESCE(f.role_name, rd2.role_name) AS "roleName",
                COALESCE(f.share_ratio, rd2.share_ratio) AS "shareRatio",
                ci.biz_type AS "bizType",
-               COALESCE(ae.performance_amount, rae.exp_amt) AS "expectedAmount",
-               COALESCE(ae.exp_period, rae.exp_period, re.exp_period, roe.orig_period,
+               COALESCE(ae.performance_amount, rae.exp_amt, dae.exp_amt) AS "expectedAmount",
+               COALESCE(ae.exp_period, rae.exp_period, dae.exp_period, re.exp_period, roe.orig_period,
                         f.period, rd2.period) AS "expectPeriod",
                CASE
                    -- 增加角色人（ADD_MEMBER）产生的新人事实：无 REVERSED 前序事实，
@@ -183,7 +200,7 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                    WHEN f.source = 'MANUAL'
                         AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%') THEN 0
                    ELSE COALESCE(re.performance_amount, roe.orig_amt,
-                        ae.performance_amount, rae.exp_amt)
+                        ae.performance_amount, rae.exp_amt, dae.exp_amt)
                END AS "originalExpectedAmount",
                (re.source_key IS NOT NULL OR roe.orig_amt IS NOT NULL
                 OR (f.source = 'MANUAL'
@@ -235,6 +252,14 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND roe.emp_code IS NOT DISTINCT FROM rd2.employee_external_code
               AND roe.role_type IS NOT DISTINCT FROM rd2.role_type
         LEFT JOIN pj_people_employee e ON e.employee_id = ci.employee_id
+        -- 悬空事实兜底配对：f/rd2 双双 miss 时，按申请单合同键 + 员工工号 + 角色聚合取应收
+        LEFT JOIN pj_commission_application app ON app.id = ci.application_id
+        LEFT JOIN rd_active_expect dae
+               ON f.id IS NULL AND rd2.id IS NULL
+              AND dae.period IS NOT DISTINCT FROM app.period
+              AND (dae.order_no = app.order_no OR dae.contract_no = app.contract_no)
+              AND dae.emp_code IS NOT DISTINCT FROM e.employee_code
+              AND dae.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN sys_dept d ON d.dept_id = ci.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id

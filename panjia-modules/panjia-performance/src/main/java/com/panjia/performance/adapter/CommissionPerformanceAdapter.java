@@ -220,6 +220,18 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public long countDistinctEmployeesByKeys(String period, java.util.Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return 0L;
+        }
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? 0L : port.countDistinctEmployeesByKeys(period, bizKeys);
+        }
+        return factMapper.selectDistinctEmployeeCountByKeys(period, factType, bizKeys);
+    }
+
+    @Override
     public Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, java.util.Collection<String> bizKeys, String factType) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyMap();

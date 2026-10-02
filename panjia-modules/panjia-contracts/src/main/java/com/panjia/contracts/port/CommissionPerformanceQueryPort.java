@@ -96,6 +96,16 @@ public interface CommissionPerformanceQueryPort {
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId);
 
     /**
+     * 按期间 + 业务键集合（合同号/订单号）统计跨合同去重员工数（结佣明细列表合计用）。
+     *
+     * @param period   归属期间 YYYY-MM
+     * @param bizKeys  合同号/订单号业务键集合（不可为空）
+     * @param factType 事实口径（FactType code：PERF_REAL 走实收拆表，其余走 pj_perf_fact）
+     * @return 去重员工数；无匹配返回 0
+     */
+    long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys, String factType);
+
+    /**
      * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
      * <p>
      * 口径：以各合同当前 ACTIVE 事实的 sourceKey 集合为准，沿事实链（同 sourceKey，

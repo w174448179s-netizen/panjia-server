@@ -7,6 +7,7 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Map;
 
 /**
  * 表格分页数据对象
@@ -29,6 +30,11 @@ public class PageResult<T> implements Serializable {
      * 列表数据
      */
     private Collection<T> rows;
+
+    /**
+     * 跨页全局汇总（可选）：与过滤条件一致、不随分页变化，供列表页统计栏展示。
+     */
+    private Map<String, Object> summary;
 
     /**
      * 分页

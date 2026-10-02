@@ -882,6 +882,30 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                                  @Param("employeeId") Long employeeId);
 
     /**
+     * 跨合同去重员工数：指定期间/口径下，业务键（合同号或订单号）命中集合的 ACTIVE 事实
+     * 中 COUNT(DISTINCT employee_id)（结佣明细列表合计口径，与 selectManageSummary 一致）。
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(DISTINCT f.employee_id)
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period = #{period}
+          AND f.fact_type = #{factType}
+          AND f.employee_id IS NOT NULL
+          AND (
+            f.contract_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+            OR f.order_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+          )
+        </script>
+        """)
+    long selectDistinctEmployeeCountByKeys(@Param("period") String period,
+                                           @Param("factType") String factType,
+                                           @Param("keys") Collection<String> keys);
+
+    /**
      * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。
      * <p>
      * 纯订单号匹配，一条事实对一个键只计一次。

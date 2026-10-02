@@ -176,22 +176,6 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废未发起的合同结佣（本期不再发起）：无申请单时创建 CANCELLED 占位单，
-     * 后续仍可重新发起；已有单时与 {@link #cancel} 同口径处理。
-     *
-     * @param period     结算月 YYYY-MM
-     * @param contractNo 合同号（或订单号）
-     * @return 操作结果
-     */
-    @SaCheckPermission("commission:apply:cancel")
-    @Log(title = "结佣未发起合同作废", businessType = BusinessType.UPDATE)
-    @PostMapping("/cancel-unapplied")
-    public R<Void> cancelUnapplied(@RequestParam String period, @RequestParam String contractNo) {
-        applicationService.cancelUnapplied(period, contractNo, LoginHelper.getUserId());
-        return R.ok();
-    }
-
-    /**
      * 业务明细直接审批（双入口 §三）：从结佣申请单详情页直接审批，与「我的待办」共用同一审批服务。
      * <p>设计文档 §3.3 三条底线：
      * <ol>

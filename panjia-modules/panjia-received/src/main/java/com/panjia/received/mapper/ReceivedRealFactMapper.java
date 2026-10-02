@@ -255,6 +255,33 @@ public interface ReceivedRealFactMapper {
                                                                 @Param("employeeId") Long employeeId);
 
     /**
+     * 跨合同去重员工数：员工键口径与 {@link #selectContractSummaries} 一致
+     * （COALESCE(rd.employee_id, 工号兜底 e.employee_id, rd.employee_external_code)），
+     * 业务键命中 rc.contract_no 或 rc.order_no 即计入；仅 ACTIVE 明细。
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(DISTINCT COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code))
+        FROM pj_received_detail rd
+        JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        LEFT JOIN pj_people_employee e
+               ON (e.employee_id = rd.employee_id
+                   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
+        WHERE rd.detail_status = 'ACTIVE'
+          AND rd.period = #{period}
+          AND COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code) IS NOT NULL
+          AND (
+            rc.contract_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+            OR rc.order_no IN
+              <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
+          )
+        </script>
+        """)
+    long selectDistinctEmployeeCountByKeys(@Param("period") String period,
+                                           @Param("keys") Collection<String> keys);
+
+    /**
      * 批量查合同维度「调整前」实收金额合计：以各业务键当前 ACTIVE rd 的 sourceKey 为准，
      * 沿明细链（同 source_key，含历史 REVERSED rd）取 id 最早一条金额求和。
      */
