@@ -58,6 +58,15 @@ public enum BatchStatus {
         return this == LOCKED;
     }
 
+    /**
+     * 是否允许解锁（反结账联动）。
+     * <p>
+     * 仅 LOCKED 可解锁回 CALCULATED；PAID（已发放）为资金终态，禁止反结账解锁。
+     */
+    public boolean canUnlock() {
+        return this == LOCKED;
+    }
+
     public boolean isLocked() {
         return this == LOCKED || this == PAID;
     }

@@ -527,6 +527,55 @@ public class PayrollBatchService {
         return b;
     }
 
+    // ==================== 解锁（期间反结账联动） ====================
+
+    /**
+     * 解锁指定期间所有已锁定的工资批次（方案 B：解封联动解锁）。
+     * <p>
+     * 由 {@code panjia-performance} 期间反结账（{@code PeriodReopenedEvent}）触发，
+     * 与期间解封在同一事务内执行。解锁后：
+     * <ul>
+     *   <li>状态 LOCKED → CALCULATED：{@link BatchStatus#canCalculate()} 允许重算、
+     *       {@link BatchStatus#canSubmit()} 允许重新走审批；</li>
+     *   <li>清空 processInstanceId：工作流实例已随锁定节点 finish 结束，
+     *       重新提交时需发起新流程（否则 currentTaskId 查不到任务）；</li>
+     *   <li>清空 lockedBy / lockedAt：解除锁定人/时间留痕。</li>
+     * </ul>
+     * PAID（已发放）为资金终态，{@link PayrollBatch#assertCanUnlock()} 会拒绝。
+     *
+     * @param period     业绩期间 = 工资归属月 YYYY-MM
+     * @param reason     反结账原因（透传留痕日志）
+     * @param operatorId 解封操作人 ID
+     * @return 实际解锁的批次数量
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int unlockByPeriod(String period, String reason, Long operatorId) {
+        if (period == null || period.isBlank()) {
+            throw new ServiceException("期间不能为空");
+        }
+        List<PayrollBatch> locked = batchMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PayrollBatch>()
+                .eq(PayrollBatch::getPeriod, period)
+                .eq(PayrollBatch::getStatus, BatchStatus.LOCKED));
+        int count = 0;
+        for (PayrollBatch b : locked) {
+            b.assertCanUnlock();
+            b.setStatus(BatchStatus.CALCULATED);
+            b.setProcessInstanceId(null);
+            b.setLockedBy(null);
+            b.setLockedAt(null);
+            b.setOperatorId(operatorId);
+            batchMapper.updateById(b);
+            count++;
+            log.info("[薪酬反结账] 批次解锁：batchId={}, period={}, operator={}, reason={}",
+                b.getId(), period, operatorId, reason);
+        }
+        if (count == 0) {
+            log.info("[薪酬反结账] 期间 {} 无 LOCKED 批次，跳过解锁", period);
+        }
+        return count;
+    }
+
     // ==================== 工作流回调（PayrollBatchWorkflowListener 调用） ====================
 
     /**

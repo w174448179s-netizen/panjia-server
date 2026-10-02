@@ -81,6 +81,16 @@ public class PayrollBatch implements Serializable {
         }
     }
 
+    /**
+     * 断言可解锁（期间反结账联动）。
+     * 仅 LOCKED 可解锁；PAID 已发放为资金终态，禁止反结账。
+     */
+    public void assertCanUnlock() {
+        if (status == null || !status.canUnlock()) {
+            throw new ServiceException("当前状态「" + statusName() + "」不允许解锁（仅已锁定可反结账解锁）");
+        }
+    }
+
     public void assertNotLocked() {
         if (status != null && status.isLocked()) {
             throw new ServiceException("批次已锁定，不可修改");

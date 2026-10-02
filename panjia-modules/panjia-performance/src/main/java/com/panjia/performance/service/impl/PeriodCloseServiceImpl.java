@@ -1,6 +1,7 @@
 package com.panjia.performance.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.event.PeriodReopenedEvent;
 import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformancePeriodClose;
 import com.panjia.performance.domain.PeriodCloseStatus;
@@ -10,11 +11,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 
 /**
  * 期间封账服务实现。
@@ -28,6 +31,7 @@ public class PeriodCloseServiceImpl implements IPeriodCloseService {
     private static final Long SYSTEM_OPERATOR_ID = 0L;
 
     private final PerformancePeriodCloseMapper periodCloseMapper;
+    private final ApplicationEventPublisher eventPublisher;
 
     /** 按期间取封账记录（内部使用；无记录返回 null） */
     private PerformancePeriodClose getPeriod(String period) {
@@ -110,6 +114,17 @@ public class PeriodCloseServiceImpl implements IPeriodCloseService {
         record.setOperatorId(operatorId);
         record.setCloseReason(auditReason);
         periodCloseMapper.updateById(record);
+
+        // 方案 B：解封联动解锁工资批次。
+        // 同步发布 PeriodReopenedEvent，panjia-payroll 监听器在同一事务内把该期间
+        // 所有 LOCKED 批次解锁回 CALCULATED，使用户可重算 → 重审 → 再锁。
+        // 监听器异常会回滚本事务，保证期间与工资批次状态一致（不会出现"期间开了但工资还锁着"）。
+        PeriodReopenedEvent event = new PeriodReopenedEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setPeriod(period);
+        event.setReason(reason.trim());
+        event.setOperatorId(operatorId);
+        eventPublisher.publishEvent(event);
 
         log.info("[期间封账] 反结账完成：period={}, operatorId={}, reason={}", period, operatorId, reason);
     }
