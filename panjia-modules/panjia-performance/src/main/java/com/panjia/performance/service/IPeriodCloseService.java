@@ -1,33 +1,16 @@
 package com.panjia.performance.service;
 
-import com.panjia.performance.domain.PerformancePeriodClose;
-
-import java.util.List;
-
 /**
  * 期间封账服务。
  * <p>
- * 管理业绩期间的封账/反结账操作，封账后该期间的业绩事实不再允许新增、修改或冲销。
+ * 封账由算薪批次「总监锁定」自动触发（PayrollEventListener），无手工封账入口；
+ * 解封（反结账）保留给结佣明细页的总监/财务纠错入口（§3.5 留痕审计）。
+ * 封账后该期间的业绩事实不再允许新增、修改或冲销。
  */
 public interface IPeriodCloseService {
 
     /**
-     * 查询所有期间（按期间倒序）。
-     *
-     * @return 期间封账记录列表
-     */
-    List<PerformancePeriodClose> listPeriods();
-
-    /**
-     * 查询单个期间。
-     *
-     * @param period 期间（YYYY-MM）
-     * @return 期间封账记录；不存在时返回 null
-     */
-    PerformancePeriodClose getPeriod(String period);
-
-    /**
-     * 封账。
+     * 封账（系统内部调用：工资批次锁定自动封账）。
      * <p>
      * 状态流转：OPEN → CLOSED。
      * 如果期间记录不存在则先创建（OPEN 状态），然后改为 CLOSED。

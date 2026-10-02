@@ -15,7 +15,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
 
 /**
  * 期间封账服务实现。
@@ -25,17 +24,13 @@ import java.util.List;
 @RequiredArgsConstructor
 public class PeriodCloseServiceImpl implements IPeriodCloseService {
 
+    /** 系统操作人占位 ID：pj_perf_period_close.operator_id 为 NOT NULL，无人工上下文的自动动作用 0 */
+    private static final Long SYSTEM_OPERATOR_ID = 0L;
+
     private final PerformancePeriodCloseMapper periodCloseMapper;
 
-    @Override
-    public List<PerformancePeriodClose> listPeriods() {
-        return periodCloseMapper.selectList(
-            new LambdaQueryWrapper<PerformancePeriodClose>()
-                .orderByDesc(PerformancePeriodClose::getPeriod));
-    }
-
-    @Override
-    public PerformancePeriodClose getPeriod(String period) {
+    /** 按期间取封账记录（内部使用；无记录返回 null） */
+    private PerformancePeriodClose getPeriod(String period) {
         if (StringUtils.isBlank(period)) {
             return null;
         }
@@ -51,12 +46,16 @@ public class PeriodCloseServiceImpl implements IPeriodCloseService {
             throw new ServiceException("期间不能为空");
         }
 
+        // operator_id NOT NULL：系统自动调用且未携带操作人时兜底系统账号
+        Long effectiveOperatorId = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
+
         PerformancePeriodClose record = getPeriod(period);
         if (record == null) {
             // 不存在则先创建（OPEN 状态）
             record = new PerformancePeriodClose();
             record.setPeriod(period);
             record.setStatus(PeriodCloseStatus.OPEN);
+            record.setOperatorId(effectiveOperatorId);
             periodCloseMapper.insert(record);
         }
 
@@ -69,7 +68,7 @@ public class PeriodCloseServiceImpl implements IPeriodCloseService {
         // 执行封账
         record.setStatus(PeriodCloseStatus.CLOSED);
         record.setCloseReason(reason);
-        record.setOperatorId(operatorId);
+        record.setOperatorId(effectiveOperatorId);
         record.setCloseTime(LocalDateTime.now());
         periodCloseMapper.updateById(record);
 

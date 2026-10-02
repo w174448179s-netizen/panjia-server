@@ -563,6 +563,7 @@ public class PayrollBatchService {
                 event.setEventId(java.util.UUID.randomUUID().toString());
                 event.setPeriod(batch.getPeriod());
                 event.setBatchId(batchId);
+                event.setLockedBy(batch.getLockedBy());
                 event.setItemIds(itemIds);
                 event.setDeptCosts(deptCosts);
                 eventPublisher.publishEvent(event);

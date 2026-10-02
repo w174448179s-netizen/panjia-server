@@ -45,6 +45,14 @@ public class PayrollLockedEvent implements DomainEvent {
     /** 工资批次 ID（业务主键） */
     private Long batchId;
 
+    /**
+     * 锁定操作人 ID（执行「总监锁定」的用户）。
+     * <p>
+     * performance 域自动封账时作为封账记录的 operator_id 留痕；
+     * 自动封账是系统动作但由该操作人触发，不留 0/空，审计可追溯到具体总监。
+     */
+    private Long lockedBy;
+
     /** 本批次锁定的工资明细 ID 列表（ledger 如需穿透再调 PayrollQueryPort 拉取） */
     private List<Long> itemIds;
 

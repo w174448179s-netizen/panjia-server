@@ -44,8 +44,10 @@ public class PayrollEventListener {
                         period, event.getEventId(), event.getBatchId());
                 return;
             }
+            // operator_id 为 NOT NULL：透传执行锁定的总监作为封账操作人留痕；
+            // 事件异常缺失时由 closePeriod 兜底系统账号，避免 NOT NULL 违例毒化锁定主事务
             periodCloseService.closePeriod(period,
-                    "工资批次锁定自动封账 batchId=" + event.getBatchId(), null);
+                    "工资批次锁定自动封账 batchId=" + event.getBatchId(), event.getLockedBy());
             log.info("[期间自动封账] 自动封账完成：period={}, eventId={}, batchId={}",
                     period, event.getEventId(), event.getBatchId());
         } catch (Exception e) {
