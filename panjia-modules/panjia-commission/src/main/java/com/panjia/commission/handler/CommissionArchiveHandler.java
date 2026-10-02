@@ -178,8 +178,20 @@ public class CommissionArchiveHandler implements DomainEventHandler {
                 CommissionItem item = new CommissionItem();
                 item.setApplicationId(applicationId);
                 item.setPerformanceFactId(f.getFactId());
+                item.setFactType("PERF_REAL");
                 item.setPeriod(period);
                 item.setContractNo(contractNo);
+                // 冻结实收事实快照（历史导入 LOCKED 单）
+                item.setOrderNo(f.getOrderNo());
+                item.setBusinessDate(f.getBusinessDate());
+                item.setPropertyAddress(f.getPropertyAddress());
+                item.setShareRatio(f.getShareRatio());
+                item.setEmployeeCode(f.getEmployeeCode());
+                item.setRoleName(f.getRoleName());
+                item.setSourceKey(f.getSourceKey());
+                item.setBatchId(f.getBatchId());
+                item.setSource("IMPORT");
+                item.setReceivedApplyId(f.getReceivedApplyId());
                 item.setApprovedMonth(period);
                 item.setEmployeeId(f.getEmployeeId());
                 item.setDeptId(f.getDeptId());

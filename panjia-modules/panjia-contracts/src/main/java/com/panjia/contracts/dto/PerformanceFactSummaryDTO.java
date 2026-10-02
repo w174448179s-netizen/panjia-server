@@ -55,6 +55,12 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 角色类型 */
     private String roleType;
 
+    /** 角色名称（快照展示用） */
+    private String roleName;
+
+    /** 事实来源（IMPORT 导入 / MANUAL 手工调整） */
+    private String source;
+
     /** 业绩金额（业绩域原样值，不折算） */
     private BigDecimal amount;
 

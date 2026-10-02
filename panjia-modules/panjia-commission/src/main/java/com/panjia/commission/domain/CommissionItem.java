@@ -45,8 +45,41 @@ public class CommissionItem implements Serializable {
     /** 关联业绩事实 ID（只存 ID 不建 FK；DIFF 差额行为 NULL） */
     private Long performanceFactId;
 
+    /** 绑定事实类型（PERF_EXPECT 新签 / PERF_REAL 实收；冻结快照） */
+    private String factType;
+
     /** 合同号（冻结快照；DIFF 差额行沿用源明细合同号） */
     private String contractNo;
+
+    /** 订单号（冻结快照，建单时自业绩事实冗余；列表/导出直接取本表，免跨域 JOIN） */
+    private String orderNo;
+
+    /** 签约/认购日期（冻结快照，自业绩事实冗余） */
+    private LocalDateTime businessDate;
+
+    /** 房源地址（冻结快照，自业绩事实冗余） */
+    private String propertyAddress;
+
+    /** 角色占比（冻结快照，自业绩事实冗余） */
+    private BigDecimal shareRatio;
+
+    /** 签约人工号（冻结快照，自事实 employee_external_code 冗余；员工表对不上时仍可展示） */
+    private String employeeCode;
+
+    /** 角色名称（冻结快照，自业绩事实冗余） */
+    private String roleName;
+
+    /** 源数据唯一键（冻结快照，溯源/撤销对账用） */
+    private String sourceKey;
+
+    /** 来源导入批次 ID（冻结快照，溯源用） */
+    private Long batchId;
+
+    /** 事实来源（IMPORT 导入 / MANUAL 手工调整；冻结快照） */
+    private String source;
+
+    /** 实收申请单 ID（冻结快照，实收链路溯源） */
+    private Long receivedApplyId;
 
     /** 业绩归属月（YYYY-MM）；DIFF 差额行为补发目标月 */
     private String period;

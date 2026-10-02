@@ -36,6 +36,7 @@ public interface ReceivedRealFactMapper {
             fd.dept_name AS "deptName",
             rc.biz_type AS "bizType",
             rd.role_type AS "roleType",
+            rd.role_name AS "roleName",
             rd.performance_amount AS "amount",
             rd.source_batch_id AS "batchId",
             rd.normalized_record_id AS "normalizedRecordId",
@@ -325,9 +326,14 @@ public interface ReceivedRealFactMapper {
                rc.biz_type AS "bizType",
                COALESCE(rd.dept_id, rc.dept_id, e.dept_id) AS "deptId",
                COALESCE(rd.employee_id, e.employee_id) AS "employeeId",
+               rd.employee_external_code AS "employeeCode",
                rd.role_type AS "roleType",
+               rd.role_name AS "roleName",
                rd.fee_item AS "feeItem",
-               rd.performance_amount AS "amount"
+               rd.performance_amount AS "amount",
+               rd.share_ratio AS "shareRatio",
+               rd.source_batch_id AS "batchId",
+               rd.received_apply_id AS "receivedApplyId"
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
         LEFT JOIN pj_people_employee e

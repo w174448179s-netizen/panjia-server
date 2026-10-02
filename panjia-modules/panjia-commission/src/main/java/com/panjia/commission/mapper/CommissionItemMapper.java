@@ -22,126 +22,89 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
     /**
      * 查询申请单下每人结佣明细详情（列口径对齐实收明细详情）。
      * <p>
-     * 拆表后 {@code ci.performance_fact_id} 可能指向两类事实：
-     * 新签口径绑定 {@code pj_perf_fact} 的 PERF_EXPECT 行；历史/实收口径绑定
-     * {@code pj_received_detail(rd2)}（JOIN {@code pj_received_contract(rc2)} 取合同键）。
-     * 主查双 LEFT JOIN 后各展示列 COALESCE 两侧取值。
-     * <p>
-     * 应收配对两套口径：fact 绑定项沿 source_key 链配对 PERF_EXPECT
-     * （active/reversed CTE）；rd 绑定项因 rd.source_key（order|工号|期间|日期）与
-     * PERF_EXPECT source_key 不同源，按「合同（订单号/合同号）+ 员工工号 + 角色」
-     * 聚合配对（与 selectReceivedFactDetails 同口径）。
-     * rd 绑定项的实收调整链沿 rd.source_key 取最早 REVERSED 行（reversed_real）。
-     * DIFF 差额行（performance_fact_id 为空）仅展示结佣明细基础字段。
+     * 展示字段（工号/角色/角色名/占比/订单号/source_key 等）全部取自 pj_commission_item
+     * 冻结快照，主查不再为取展示列 JOIN 事实表；事实表只用于「调整链」还原：
+     * <ul>
+     *   <li>PERF_EXPECT 绑定项（fact_type=PERF_EXPECT）：沿 ci.source_key 链取当前
+     *       ACTIVE（新签业绩）与最早 REVERSED（调整前原值）事实；</li>
+     *   <li>PERF_REAL 历史绑定项：PERF_EXPECT 与 rd 的 source_key 不同源，按
+     *       「合同（订单号/合同号）+ 工号 + 角色 + 当月优先」聚合配对（rd_* CTE），
+     *       配对键同样全部取自 ci 快照；</li>
+     *   <li>悬空行（撤销重导后 fact_id 指向已删事实）：ci.source_key 已随重导事实回填，
+     *       自然走 source_key 链配对，无需专门的悬空重配 CTE；</li>
+     *   <li>DIFF 差额行（source_key 为空）仅展示结佣明细基础字段。</li>
+     * </ul>
      *
      * @param applicationId 申请单 ID
      * @return 明细详情列表
      */
     @Select("""
         <script>
-        WITH src_keys AS (
-            SELECT DISTINCT f.source_key
-            FROM pj_commission_item ci2
-            JOIN pj_perf_fact f ON f.id = ci2.performance_fact_id
-            WHERE ci2.application_id = #{applicationId}
-              AND ci2.status != 'REVERSED'
-              AND f.source_key IS NOT NULL
+        WITH item_src AS (
+            -- 本单非冲销明细的事实 source_key（ci 快照）
+            SELECT DISTINCT source_key
+            FROM pj_commission_item
+            WHERE application_id = #{applicationId}
+              AND status != 'REVERSED'
+              AND source_key IS NOT NULL
         ),
         rd_keys AS (
-            SELECT DISTINCT rd3.source_key, rd3.period,
-                   rc3.order_no, rc3.contract_no,
-                   rd3.employee_external_code AS emp_code, rd3.role_type
-            FROM pj_commission_item ci3
-            JOIN pj_received_detail rd3 ON rd3.id = ci3.performance_fact_id
-            JOIN pj_received_contract rc3 ON rc3.id = rd3.contract_id
-            WHERE ci3.application_id = #{applicationId}
-              AND ci3.status != 'REVERSED'
-              AND rd3.source_key IS NOT NULL
-        ),
-        dangling_items AS (
-            -- 悬空事实兜底：批次撤销物理删除业绩事实、重导生成新 ID，
-            -- 既有 DRAFT 明细的 performance_fact_id 指向已删除行（f/rd2 双双 miss）；
-            -- 此类行按「申请单合同键 + 员工工号 + 角色」降级配对（行级精确优先，聚合兜底）
-            SELECT ci4.id AS item_id, ci4.amount, a4.period, a4.order_no, a4.contract_no,
-                   e4.employee_code AS emp_code, ci4.role_type
-            FROM pj_commission_item ci4
-            JOIN pj_commission_application a4 ON a4.id = ci4.application_id
-            LEFT JOIN pj_people_employee e4 ON e4.employee_id = ci4.employee_id
-            WHERE ci4.application_id = #{applicationId}
-              AND ci4.status != 'REVERSED'
-              AND ci4.performance_fact_id IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM pj_perf_fact f4 WHERE f4.id = ci4.performance_fact_id)
-              AND NOT EXISTS (SELECT 1 FROM pj_received_detail rd4 WHERE rd4.id = ci4.performance_fact_id)
-        ),
-        dangling_expect AS (
-            -- 行级精确配对：明细金额快照 = 事实金额，逐行还原「一对一」的新签金额与归属月
-            SELECT DISTINCT ON (di.item_id) di.item_id,
-                   pe.performance_amount AS exp_amt, pe.period AS exp_period,
-                   pe.share_ratio, pe.role_name
-            FROM dangling_items di
-            JOIN pj_perf_fact pe
-              ON pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-             AND (pe.order_no = di.order_no OR pe.contract_no = di.contract_no)
-             AND pe.employee_external_code IS NOT DISTINCT FROM di.emp_code
-             AND pe.role_type IS NOT DISTINCT FROM di.role_type
-             AND pe.performance_amount = di.amount
-            ORDER BY di.item_id, pe.id
-        ),
-        reversed_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount, pe.period AS exp_period
-            FROM src_keys sk
-            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
-               AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
-            ORDER BY sk.source_key, pe.id ASC
+            -- PERF_REAL 历史绑定项的应收配对键（全部取 ci 快照）；
+            -- cur_nonzero：当月是否存在非零新签，当月优先/历史回退只算一次
+            SELECT ci.period, ci.order_no, ci.contract_no,
+                   ci.employee_code AS emp_code, ci.role_type,
+                   EXISTS (
+                       SELECT 1 FROM pj_perf_fact pc
+                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
+                         AND pc.period = ci.period
+                         AND pc.performance_amount &lt;&gt; 0
+                         AND (pc.order_no = ci.order_no OR pc.contract_no = ci.contract_no)
+                   ) AS cur_nonzero
+            FROM pj_commission_item ci
+            WHERE ci.application_id = #{applicationId}
+              AND ci.status != 'REVERSED'
+              AND ci.fact_type = 'PERF_REAL'
         ),
         active_expect AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, pe.performance_amount, pe.period AS exp_period
-            FROM src_keys sk
+            -- source_key 链当前 ACTIVE 新签事实（含撤销重导后悬空行按回填链命中）
+            SELECT DISTINCT ON (sk.source_key) sk.source_key,
+                   pe.performance_amount, pe.period AS exp_period
+            FROM item_src sk
             JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
                AND pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
             ORDER BY sk.source_key, pe.id
         ),
-        rd_pair AS (
-            -- 配对键去重：同合同同人同角色当月可能有多条 rd（多到账日），应收额只能计一次
-            -- 同时并入悬空事实行（dangling_items），让撤销重导后仍能按合同+工号+角色聚合兜底
-            SELECT period, order_no, contract_no, emp_code, role_type FROM rd_keys
-            UNION
-            SELECT period, order_no, contract_no, emp_code, role_type FROM dangling_items
+        reversed_expect AS (
+            -- source_key 链最早 REVERSED 新签事实（调整前原值）
+            SELECT DISTINCT ON (sk.source_key) sk.source_key,
+                   pe.performance_amount, pe.period AS exp_period
+            FROM item_src sk
+            JOIN pj_perf_fact pe ON pe.source_key = sk.source_key
+               AND pe.fact_status = 'REVERSED' AND pe.fact_type = 'PERF_EXPECT'
+            ORDER BY sk.source_key, pe.id ASC
         ),
         rd_active_expect AS (
-            SELECT rp.period, rp.order_no, rp.contract_no, rp.emp_code, rp.role_type,
+            -- PERF_REAL 行应收聚合配对：当月有非零新签只取当月，否则取历史（实收月之前）
+            SELECT rk.period, rk.order_no, rk.contract_no, rk.emp_code, rk.role_type,
                    SUM(pe.performance_amount) AS exp_amt,
                    STRING_AGG(DISTINCT pe.period, ',' ORDER BY pe.period) AS exp_period
-            FROM rd_pair rp
+            FROM rd_keys rk
             JOIN pj_perf_fact pe
               ON pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-             AND (pe.order_no = rp.order_no OR pe.contract_no = rp.contract_no)
-             AND pe.employee_external_code IS NOT DISTINCT FROM rp.emp_code
-             AND pe.role_type IS NOT DISTINCT FROM rp.role_type
-             -- 当月优先口径：当月有非零新签 → 只取当月；当月为 0/无 → 取历史（实收月之前）
-             AND (
-                   (pe.period = rp.period AND EXISTS (
-                       SELECT 1 FROM pj_perf_fact pc
-                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                         AND pc.period = rp.period
-                         AND pc.performance_amount != 0
-                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
-                OR (pe.period &lt; rp.period AND NOT EXISTS (
-                       SELECT 1 FROM pj_perf_fact pc
-                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                         AND pc.period = rp.period
-                         AND pc.performance_amount != 0
-                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
-                 )
+             AND (pe.order_no = rk.order_no OR pe.contract_no = rk.contract_no)
+             AND pe.employee_external_code IS NOT DISTINCT FROM rk.emp_code
+             AND pe.role_type IS NOT DISTINCT FROM rk.role_type
+             AND ((rk.cur_nonzero AND pe.period = rk.period)
+                  OR (NOT rk.cur_nonzero AND pe.period &lt; rk.period))
             GROUP BY 1, 2, 3, 4, 5
         ),
         rd_original_expect AS (
-            SELECT rp.period, rp.order_no, rp.contract_no, rp.emp_code, rp.role_type,
+            -- PERF_REAL 行调整前原值：ACTIVE 链取同链最早 REVERSED 金额，当月/历史口径同上
+            SELECT rk.period, rk.order_no, rk.contract_no, rk.emp_code, rk.role_type,
                    SUM(chain.orig_amt) AS orig_amt,
                    STRING_AGG(DISTINCT chain.period, ',' ORDER BY chain.period) AS orig_period
-            FROM rd_pair rp
+            FROM rd_keys rk
             JOIN (
-                -- 每条 ACTIVE 应收 sourceKey 链取最早一条 REVERSED 金额（同 selectReceivedFactDetails）
                 SELECT DISTINCT ON (a.source_key)
                        a.source_key, a.period, a.order_no, a.contract_no,
                        a.employee_external_code AS emp_code, a.role_type,
@@ -152,42 +115,26 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                 WHERE a.fact_status = 'ACTIVE' AND a.fact_type = 'PERF_EXPECT'
                 ORDER BY a.source_key, b.id ASC
             ) chain
-              ON (chain.order_no = rp.order_no OR chain.contract_no = rp.contract_no)
-             AND chain.emp_code IS NOT DISTINCT FROM rp.emp_code
-             AND chain.role_type IS NOT DISTINCT FROM rp.role_type
-             -- 与 rd_active_expect 同口径：当月有非零新签取当月链，否则取历史链
-             AND (
-                   (chain.period = rp.period AND EXISTS (
-                       SELECT 1 FROM pj_perf_fact pc
-                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                         AND pc.period = rp.period
-                         AND pc.performance_amount != 0
-                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
-                OR (chain.period &lt; rp.period AND NOT EXISTS (
-                       SELECT 1 FROM pj_perf_fact pc
-                       WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                         AND pc.period = rp.period
-                         AND pc.performance_amount != 0
-                         AND (pc.order_no = rp.order_no OR pc.contract_no = rp.contract_no)))
-                 )
+              ON (chain.order_no = rk.order_no OR chain.contract_no = rk.contract_no)
+             AND chain.emp_code IS NOT DISTINCT FROM rk.emp_code
+             AND chain.role_type IS NOT DISTINCT FROM rk.role_type
+             AND ((rk.cur_nonzero AND chain.period = rk.period)
+                  OR (NOT rk.cur_nonzero AND chain.period &lt; rk.period))
             GROUP BY 1, 2, 3, 4, 5
         ),
         reversed_real AS (
-            SELECT DISTINCT ON (k.source_key) k.source_key, rdr.performance_amount
-            FROM (
-                SELECT source_key FROM src_keys
-                UNION
-                SELECT source_key FROM rd_keys
-            ) k
-            JOIN pj_received_detail rdr ON rdr.source_key = k.source_key
+            -- source_key 链最早 REVERSED 实收明细（历史口径结佣金额调整前原值）
+            SELECT DISTINCT ON (sk.source_key) sk.source_key, rdr.performance_amount
+            FROM item_src sk
+            JOIN pj_received_detail rdr ON rdr.source_key = sk.source_key
                AND rdr.detail_status = 'REVERSED'
-            ORDER BY k.source_key, rdr.id ASC
+            ORDER BY sk.source_key, rdr.id ASC
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
                ci.employee_id AS "employeeId",
                ci.dept_id AS "deptId",
-               COALESCE(e.employee_code, f.employee_external_code, rd2.employee_external_code) AS "employeeCode",
+               COALESCE(ci.employee_code, e.employee_code) AS "employeeCode",
                e.employee_name AS "employeeName",
                CASE
                    WHEN array_length(string_to_array(d.ancestors, ','), 1) &gt;= 3 THEN
@@ -201,21 +148,21 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                            NULLIF(p.dept_name, 'tenant_name'),
                            NULLIF(d.dept_name, 'tenant_name'))
                END AS "deptPath",
-               COALESCE(f.role_type, rd2.role_type, ci.role_type) AS "roleType",
-               COALESCE(f.role_name, rd2.role_name, de.role_name) AS "roleName",
-               COALESCE(f.share_ratio, rd2.share_ratio, de.share_ratio) AS "shareRatio",
+               ci.role_type AS "roleType",
+               ci.role_name AS "roleName",
+               ci.share_ratio AS "shareRatio",
                ci.biz_type AS "bizType",
-               COALESCE(ae.performance_amount, de.exp_amt, rae.exp_amt, dae.exp_amt) AS "expectedAmount",
-               COALESCE(ae.exp_period, de.exp_period, rae.exp_period, dae.exp_period,
+               COALESCE(ae.performance_amount, rae.exp_amt) AS "expectedAmount",
+               COALESCE(ae.exp_period, rae.exp_period,
                         re.exp_period, roe.orig_period,
-                        f.period, rd2.period) AS "expectPeriod",
+                        f.period,
+                        CASE WHEN ci.fact_type = 'PERF_REAL' THEN ci.period END) AS "expectPeriod",
                CASE
-                   -- 增加角色人（ADD_MEMBER）产生的新人事实：无 REVERSED 前序事实，
-                   -- 调整前新签业绩按 0 展示（0 → X），与新签明细行口径一致
+                   -- 增加角色人（ADD_MEMBER）新人事实：无 REVERSED 前序，调整前新签业绩按 0 展示
                    WHEN f.source = 'MANUAL'
                         AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%') THEN 0
                    ELSE COALESCE(re.performance_amount, roe.orig_amt,
-                        ae.performance_amount, de.exp_amt, rae.exp_amt, dae.exp_amt)
+                        ae.performance_amount, rae.exp_amt)
                END AS "originalExpectedAmount",
                (re.source_key IS NOT NULL OR roe.orig_amt IS NOT NULL
                 OR (f.source = 'MANUAL'
@@ -225,11 +172,10 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                 AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%')) AS "manualAdjust",
                ci.amount AS "amount",
                -- 结佣金额「调整前」只认结佣调整（不认新签调整）：
-               -- ① 新口径（ci 绑 PERF_EXPECT 事实）：当前事实 adjust_id 命中结佣调整单
-               --    （pj_commission_adjust）即为结佣调整所改，原额取同 sourceKey 链上紧邻前驱
-               --    事实金额（结佣侧增加角色人链无前驱，按 0）；
-               -- ② 历史口径（ci 绑 rd）：沿 rd.source_key 存在 REVERSED 行；
-               -- ③ 其余（含纯新签金额调整/新签侧增加角色人）：原额=当前金额，前端只显示单值。
+               -- ① 当前事实 adjust_id 命中结佣调整单：原额取同 sourceKey 链上紧邻前驱事实金额
+               --    （增加角色人链无前驱，按 0）；
+               -- ② sourceKey 链存在 REVERSED 实收明细（历史 rd 口径）；
+               -- ③ 其余：原额=当前金额，前端只显示单值。
                CASE
                    WHEN caj.id IS NOT NULL THEN
                        COALESCE((SELECT x.performance_amount
@@ -246,43 +192,33 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ci.fee_item AS "feeItem",
                ci.status AS "status"
         FROM pj_commission_item ci
+        -- 绑定事实仅用于调整链：f.adjust_id 判结佣调整、同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
-        -- 当前事实由结佣调整单产生（adjust_id = pj_commission_adjust.id）：结佣金额列才显示「原值 → 调整后」
         LEFT JOIN pj_commission_adjust caj ON caj.id = f.adjust_id
-        LEFT JOIN pj_received_detail rd2 ON rd2.id = ci.performance_fact_id
-        LEFT JOIN pj_received_contract rc2 ON rc2.id = rd2.contract_id
-        LEFT JOIN active_expect ae ON ae.source_key = f.source_key
-        LEFT JOIN reversed_expect re ON re.source_key = f.source_key
-        LEFT JOIN reversed_real rr ON rr.source_key = COALESCE(rd2.source_key, f.source_key)
+        LEFT JOIN active_expect ae ON ci.fact_type = 'PERF_EXPECT'
+              AND ae.source_key = ci.source_key
+        LEFT JOIN reversed_expect re ON ci.fact_type = 'PERF_EXPECT'
+              AND re.source_key = ci.source_key
+        LEFT JOIN reversed_real rr ON rr.source_key = ci.source_key
         LEFT JOIN rd_active_expect rae
-               ON rae.period IS NOT DISTINCT FROM rd2.period
-              AND rd2.contract_id IS NOT NULL
-              AND (rae.order_no = rc2.order_no OR rae.contract_no = rc2.contract_no)
-              AND rae.emp_code IS NOT DISTINCT FROM rd2.employee_external_code
-              AND rae.role_type IS NOT DISTINCT FROM rd2.role_type
+               ON ci.fact_type = 'PERF_REAL'
+              AND rae.period IS NOT DISTINCT FROM ci.period
+              AND (rae.order_no = ci.order_no OR rae.contract_no = ci.contract_no)
+              AND rae.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND rae.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN rd_original_expect roe
-               ON roe.period IS NOT DISTINCT FROM rd2.period
-              AND rd2.contract_id IS NOT NULL
-              AND (roe.order_no = rc2.order_no OR roe.contract_no = rc2.contract_no)
-              AND roe.emp_code IS NOT DISTINCT FROM rd2.employee_external_code
-              AND roe.role_type IS NOT DISTINCT FROM rd2.role_type
+               ON ci.fact_type = 'PERF_REAL'
+              AND roe.period IS NOT DISTINCT FROM ci.period
+              AND (roe.order_no = ci.order_no OR roe.contract_no = ci.contract_no)
+              AND roe.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND roe.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN pj_people_employee e ON e.employee_id = ci.employee_id
-        -- 悬空事实兜底配对：f/rd2 双双 miss 时，先按「金额相等」行级精确还原，
-        -- 无精确命中（重导金额变了）再退到「合同键 + 工号 + 角色」聚合口径
-        LEFT JOIN dangling_expect de ON de.item_id = ci.id
-        LEFT JOIN pj_commission_application app ON app.id = ci.application_id
-        LEFT JOIN rd_active_expect dae
-               ON f.id IS NULL AND rd2.id IS NULL
-              AND dae.period IS NOT DISTINCT FROM app.period
-              AND (dae.order_no = app.order_no OR dae.contract_no = app.contract_no)
-              AND dae.emp_code IS NOT DISTINCT FROM e.employee_code
-              AND dae.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN sys_dept d ON d.dept_id = ci.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
         WHERE ci.application_id = #{applicationId}
           AND ci.status != 'REVERSED'
-        ORDER BY e.employee_name, d.dept_id, COALESCE(f.role_type, rd2.role_type), ci.id
+        ORDER BY e.employee_name, d.dept_id, ci.role_type, ci.id
         </script>
         """)
     List<CommissionItemDetailVo> selectItemDetails(@Param("applicationId") Long applicationId);

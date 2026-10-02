@@ -1117,10 +1117,36 @@ public class CommissionAdjustService {
             templateItem.getPerformanceFactId(), nm.getEmployeeId(), nm.getEmployeeCode(), nm.getDeptId(),
             nm.getRoleType(), newAmount, nm.getShareRatio(), approverId, adjust.getId());
 
+        // 查回新事实完整快照写入明细（ADD_MEMBER 事实为 PERF_EXPECT）
+        com.panjia.contracts.dto.PerformanceFactSummaryDTO newFact =
+            performanceQueryPort.getByFactId(newFactId);
         CommissionItem newItem = new CommissionItem();
         newItem.setApplicationId(adjust.getApplicationId());
         newItem.setPerformanceFactId(newFactId);
+        newItem.setFactType("PERF_EXPECT");
         newItem.setContractNo(templateItem.getContractNo());
+        if (newFact != null) {
+            newItem.setOrderNo(newFact.getOrderNo());
+            newItem.setBusinessDate(newFact.getBusinessDate());
+            newItem.setPropertyAddress(newFact.getPropertyAddress());
+            newItem.setShareRatio(newFact.getShareRatio());
+            newItem.setEmployeeCode(newFact.getEmployeeCode());
+            newItem.setRoleName(newFact.getRoleName());
+            newItem.setSourceKey(newFact.getSourceKey());
+            newItem.setBatchId(newFact.getBatchId());
+            newItem.setSource(newFact.getSource() != null ? newFact.getSource() : "IMPORT");
+            newItem.setReceivedApplyId(newFact.getReceivedApplyId());
+        } else {
+            // 兜底：事实查不到时从模板明细继承展示快照（新人占比取调整指定值）
+            newItem.setOrderNo(templateItem.getOrderNo());
+            newItem.setBusinessDate(templateItem.getBusinessDate());
+            newItem.setPropertyAddress(templateItem.getPropertyAddress());
+            newItem.setShareRatio(nm.getShareRatio());
+            newItem.setEmployeeCode(nm.getEmployeeCode());
+            newItem.setRoleName(nm.getRoleType());
+            newItem.setSource(templateItem.getSource());
+            newItem.setReceivedApplyId(templateItem.getReceivedApplyId());
+        }
         newItem.setPeriod(templateItem.getPeriod());
         newItem.setApprovedMonth(templateItem.getApprovedMonth());
         newItem.setEmployeeId(nm.getEmployeeId());

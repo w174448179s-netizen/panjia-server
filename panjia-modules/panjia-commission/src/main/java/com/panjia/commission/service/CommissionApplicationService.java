@@ -2165,7 +2165,19 @@ public class CommissionApplicationService {
         CommissionItem item = new CommissionItem();
         item.setApplicationId(application.getId());
         item.setPerformanceFactId(fact.getFactId());
+        item.setFactType(fact.getFactType());
         item.setContractNo(application.getContractNo());
+        // 冻结事实展示快照：工资明细/导出直接取本表，免跨域 JOIN 事实表
+        item.setOrderNo(fact.getOrderNo());
+        item.setBusinessDate(fact.getBusinessDate());
+        item.setPropertyAddress(fact.getPropertyAddress());
+        item.setShareRatio(fact.getShareRatio());
+        item.setEmployeeCode(fact.getEmployeeCode());
+        item.setRoleName(fact.getRoleName());
+        item.setSourceKey(fact.getSourceKey());
+        item.setBatchId(fact.getBatchId());
+        item.setSource(fact.getSource() != null ? fact.getSource() : "IMPORT");
+        item.setReceivedApplyId(fact.getReceivedApplyId());
         item.setPeriod(application.getPeriod());
         item.setEmployeeId(fact.getEmployeeId());
         item.setDeptId(fact.getDeptId());

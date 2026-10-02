@@ -352,12 +352,17 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         dto.setDeptId(fact.getDeptId());
         dto.setBizType(fact.getBizType());
         dto.setRoleType(fact.getRoleType());
+        dto.setRoleName(fact.getRoleName());
+        dto.setSource(fact.getSource() != null ? fact.getSource().getCode() : null);
         dto.setAmount(fact.getPerformanceAmount());
         dto.setBatchId(fact.getBatchId());
         dto.setNormalizedRecordId(fact.getNormalizedRecordId());
         dto.setSourceKey(fact.getSourceKey());
         dto.setReceivedApplyId(fact.getReceivedApplyId());
         dto.setShareRatio(fact.getShareRatio());
+        dto.setContractNo(fact.getContractNo());
+        dto.setOrderNo(fact.getOrderNo());
+        dto.setPropertyAddress(fact.getPropertyAddress());
         return dto;
     }
 

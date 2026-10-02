@@ -16,8 +16,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -125,7 +123,7 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
             .stream().map(this::toDTO).toList();
     }
 
-    /** 结佣明细 → DTO */
+    /** 结佣明细 → DTO（展示字段全部取本表冻结快照，不再跨域关联事实表） */
     private CommissionItemDTO toDTO(CommissionItem item) {
         CommissionItemDTO dto = new CommissionItemDTO();
         dto.setItemId(item.getId());
@@ -135,6 +133,11 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         dto.setEmployeeId(item.getEmployeeId());
         dto.setDeptId(item.getDeptId());
         dto.setContractNo(item.getContractNo());
+        dto.setOrderNo(item.getOrderNo());
+        dto.setBusinessDate(item.getBusinessDate());
+        dto.setPropertyAddress(item.getPropertyAddress());
+        dto.setShareRatio(item.getShareRatio());
+        dto.setEmployeeCode(item.getEmployeeCode());
         dto.setBizType(item.getBizType());
         dto.setRoleType(item.getRoleType());
         dto.setFeeItem(item.getFeeItem());
@@ -144,20 +147,12 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         return dto;
     }
 
-    /** 批量 enrich 结佣明细 with 业绩事实的合同/房源/比例信息 + 员工主数据姓名/门店/工号 */
+    /**
+     * 结佣明细批量补员工主数据（姓名/门店名实时翻译；工号已在明细快照中，仅在快照缺失时兜底）。
+     * 签约日期/订单号/房源地址/角色占比等展示字段均为本表冻结快照，无需再查事实表。
+     */
     private List<CommissionItemDTO> enrichWithFacts(List<CommissionItem> items) {
         if (items.isEmpty()) return Collections.emptyList();
-        List<Long> factIds = items.stream()
-            .map(CommissionItem::getPerformanceFactId)
-            .filter(Objects::nonNull)
-            .distinct()
-            .toList();
-        Map<Long, PerformanceFactSummaryDTO> factMap = Collections.emptyMap();
-        if (!factIds.isEmpty()) {
-            factMap = performanceQueryPort.findActiveByFacts(factIds).stream()
-                .collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, Function.identity(), (a, b) -> a));
-        }
-        // 批量查员工主数据，填充 employeeName/deptName/employeeCode（导出与列表展示用，避免 N+1）
         java.util.Set<Long> empIds = items.stream()
             .map(CommissionItem::getEmployeeId)
             .filter(Objects::nonNull)
@@ -165,78 +160,19 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         Map<Long, com.panjia.contracts.dto.EmployeeMainDataDTO> empMap = empIds.isEmpty()
             ? Collections.emptyMap()
             : employeeMainDataQueryPort.listByIds(empIds);
-        // 悬空兜底：批次撤销物理删事实后，已锁定单的明细 performance_fact_id 会悬空（contract_no
-        // 等业务键仍在）。按「合同键 + 员工 + 角色 + 金额相等」重配 ACTIVE 事实，补回签约日期/
-        // 房源地址/角色占比等展示字段；新签与实收两种事实源都查
-        Map<Long, PerformanceFactSummaryDTO> danglingMatch = matchDanglingFacts(items, factMap, empMap);
         List<CommissionItemDTO> result = new ArrayList<>(items.size());
         for (CommissionItem item : items) {
             CommissionItemDTO dto = toDTO(item);
-            PerformanceFactSummaryDTO fact = factMap.get(item.getPerformanceFactId());
-            if (fact == null) {
-                fact = danglingMatch.get(item.getId());
-            }
-            if (fact != null) {
-                dto.setBusinessDate(fact.getBusinessDate());
-                dto.setOrderNo(fact.getOrderNo());
-                dto.setPropertyAddress(fact.getPropertyAddress());
-                dto.setShareRatio(fact.getShareRatio());
-                if (dto.getContractNo() == null) dto.setContractNo(fact.getContractNo());
-            }
             com.panjia.contracts.dto.EmployeeMainDataDTO emp =
                 item.getEmployeeId() == null ? null : empMap.get(item.getEmployeeId());
             if (emp != null) {
-                dto.setEmployeeCode(emp.getEmployeeCode());
+                if (dto.getEmployeeCode() == null) dto.setEmployeeCode(emp.getEmployeeCode());
                 dto.setEmployeeName(emp.getEmployeeName());
                 dto.setDeptName(emp.getDeptName());
             }
             result.add(dto);
         }
         return result;
-    }
-
-    /**
-     * 悬空明细重配：批次撤销物理删除事实后，已锁定结佣单的明细 performance_fact_id 悬空。
-     * 按「合同/订单业务键 + 员工 + 角色 + 金额相等」从当前 ACTIVE 事实中找回对应行，
-     * 用于补回展示字段（签约日期/房源地址/角色占比）。正常行不参与，零影响。
-     */
-    private Map<Long, PerformanceFactSummaryDTO> matchDanglingFacts(
-            List<CommissionItem> items,
-            Map<Long, PerformanceFactSummaryDTO> factMap,
-            Map<Long, com.panjia.contracts.dto.EmployeeMainDataDTO> empMap) {
-        List<CommissionItem> dangling = items.stream()
-            .filter(it -> it.getPerformanceFactId() != null && !factMap.containsKey(it.getPerformanceFactId()))
-            .toList();
-        if (dangling.isEmpty()) return Collections.emptyMap();
-        java.util.Set<String> bizKeys = dangling.stream()
-            .map(CommissionItem::getContractNo)
-            .filter(k -> k != null && !k.isBlank())
-            .collect(Collectors.toSet());
-        if (bizKeys.isEmpty()) return Collections.emptyMap();
-        List<PerformanceFactSummaryDTO> candidates = new ArrayList<>();
-        candidates.addAll(performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT));
-        candidates.addAll(performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_REAL));
-        if (candidates.isEmpty()) return Collections.emptyMap();
-        Map<Long, PerformanceFactSummaryDTO> matched = new java.util.HashMap<>();
-        for (CommissionItem item : dangling) {
-            String empCode = item.getEmployeeId() == null ? null
-                : Optional.ofNullable(empMap.get(item.getEmployeeId()))
-                    .map(com.panjia.contracts.dto.EmployeeMainDataDTO::getEmployeeCode).orElse(null);
-            for (PerformanceFactSummaryDTO cand : candidates) {
-                boolean keyHit = item.getContractNo() != null
-                    && (item.getContractNo().equals(cand.getContractNo()) || item.getContractNo().equals(cand.getOrderNo()));
-                if (!keyHit) continue;
-                if (!Objects.equals(item.getRoleType(), cand.getRoleType())) continue;
-                if (item.getAmount() == null || cand.getAmount() == null
-                    || item.getAmount().compareTo(cand.getAmount()) != 0) continue;
-                boolean empHit = Objects.equals(item.getEmployeeId(), cand.getEmployeeId())
-                    || (empCode != null && empCode.equals(cand.getEmployeeCode()));
-                if (!empHit) continue;
-                matched.put(item.getId(), cand);
-                break;
-            }
-        }
-        return matched;
     }
 
     /** 业绩事实 → DTO（★ 原样透传，不折算） */

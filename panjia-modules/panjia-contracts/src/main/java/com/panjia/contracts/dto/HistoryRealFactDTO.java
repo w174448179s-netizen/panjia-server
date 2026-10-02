@@ -47,12 +47,27 @@ public class HistoryRealFactDTO implements Serializable {
     /** 员工 ID */
     private Long employeeId;
 
+    /** 员工外部工号 */
+    private String employeeCode;
+
     /** 角色类型 */
     private String roleType;
+
+    /** 角色名称 */
+    private String roleName;
 
     /** 费用项 */
     private String feeItem;
 
     /** 业绩金额（performance_amount） */
     private BigDecimal amount;
+
+    /** 角色占比 */
+    private BigDecimal shareRatio;
+
+    /** 来源导入批次 ID */
+    private Long batchId;
+
+    /** 实收申请单 ID */
+    private Long receivedApplyId;
 }
