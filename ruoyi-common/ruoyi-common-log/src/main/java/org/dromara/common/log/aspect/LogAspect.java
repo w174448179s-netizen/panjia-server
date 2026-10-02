@@ -19,12 +19,16 @@ import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessStatus;
 import org.dromara.common.log.event.OperLogEvent;
+import org.dromara.common.log.handler.MultipartFileLogSerializer;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.model.LoginUser;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.http.HttpMethod;
 import org.springframework.validation.BindingResult;
 import org.springframework.web.multipart.MultipartFile;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.module.SimpleModule;
 
 import java.lang.reflect.Array;
 import java.util.*;
@@ -53,6 +57,38 @@ public class LogAspect {
      * 日志内容最大记录长度
      */
     private static final int MAX_CONTENT_LENGTH = 3800;
+
+    /**
+     * 日志专用 JSON 映射器（懒加载）。
+     * <p>
+     * 在全局 JsonMapper 基础上注册 {@link MultipartFileLogSerializer}：操作日志入参可能是
+     * 包裹 MultipartFile 字段的普通 POJO（如员工导入 EmployeeImportQuery），默认 Bean 序列化
+     * 会展开 resource/inputStream 并在 MultipartFileResource#getURI() 处抛
+     * "cannot be resolved to URL"，导致整条操作日志丢失。懒加载避免类初始化早于
+     * Spring 上下文就绪（全局 mapper 经 SpringUtils.getBean 获取）。
+     */
+    private volatile JsonMapper logJsonMapper;
+
+    /**
+     * 获取日志专用 JsonMapper（双重检查懒加载）。
+     *
+     * @return 注册了 MultipartFile 摘要序列化器的 JsonMapper
+     */
+    private JsonMapper logMapper() {
+        JsonMapper mapper = logJsonMapper;
+        if (mapper == null) {
+            synchronized (this) {
+                mapper = logJsonMapper;
+                if (mapper == null) {
+                    SimpleModule multipartModule = new SimpleModule();
+                    multipartModule.addSerializer(MultipartFile.class, MultipartFileLogSerializer.INSTANCE);
+                    mapper = JsonUtils.getJsonMapper().rebuild().addModule(multipartModule).build();
+                    logJsonMapper = mapper;
+                }
+            }
+        }
+        return mapper;
+    }
 
     /**
      * 执行目标方法并记录操作日志。
@@ -157,7 +193,7 @@ public class LogAspect {
         }
         // 是否需要保存response，参数和值
         if (log.isSaveResponseData() && ObjectUtil.isNotNull(jsonResult)) {
-            operLog.setJsonResult(limit(JsonUtils.toJsonString(jsonResult), MAX_CONTENT_LENGTH));
+            operLog.setJsonResult(limit(logMapper().writeValueAsString(jsonResult), MAX_CONTENT_LENGTH));
         }
     }
 
@@ -205,13 +241,19 @@ public class LogAspect {
 
     /**
      * 序列化单个方法参数，并移除排除字段。
+     * <p>
+     * 必须使用日志专用 mapper（注册了 MultipartFile 摘要序列化器）：
+     * 先用安全 mapper 生成 JSON 树（文件字段不再抛 URI 解析异常），再递归摘除
+     * excludeParamNames 指定的字段（排除在树阶段做，不能依赖序列化期过滤）。
      *
      * @param arg     参数对象
      * @param exclude 排除字段名
      * @return 参数日志字符串
      */
     private String serializeArg(Object arg, String[] exclude) {
-        return JsonUtils.toJsonStringExcludeFields(arg, exclude);
+        JsonNode node = logMapper().valueToTree(arg);
+        JsonUtils.removeFields(node, exclude);
+        return logMapper().writeValueAsString(node);
     }
 
     /**

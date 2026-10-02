@@ -40,6 +40,26 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     int markBatchRevoked(@Param("batchId") Long batchId, @Param("factType") String factType, @Param("reason") String reason);
 
     /**
+     * 保底撤销：恢复被冲销旧批次的业绩事实（REVERSED/SUPERSEDE → ACTIVE）。
+     * <p>误导入批次被撤销时，它曾通过批次 supersede 冲销的旧批次事实需要翻回生效。
+     * 仅恢复 reversed_reason='SUPERSEDE' 的行——调整冲销（ADJUST）、重归一化
+     * （RENORMALIZE）、撤销（BATCH_REVOKE）等其他原因的 REVERSED 行不受影响。
+     *
+     * @param batchIds 被恢复的旧批次 ID 列表
+     * @return 恢复生效的事实条数
+     */
+    @Update("""
+        <script>
+        UPDATE pj_perf_fact
+        SET fact_status = 'ACTIVE', reversed_reason = NULL, update_time = NOW()
+        WHERE fact_status = 'REVERSED' AND reversed_reason = 'SUPERSEDE'
+          AND batch_id IN
+          <foreach collection='batchIds' item='oldBatchId' open='(' separator=',' close=')'>#{oldBatchId}</foreach>
+        </script>
+        """)
+    int restoreSupersededFacts(@Param("batchIds") List<Long> batchIds);
+
+    /**
      * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、金额合计。
      */
     @Select("""

@@ -5,6 +5,7 @@ import com.panjia.contracts.constant.BizType;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 审批端口：业务域经此依赖工作流能力，禁止直接依赖 ruoyi-workflow。
@@ -87,6 +88,22 @@ public interface ApprovalPort {
      * 批量撤销流程实例（按 businessId，系统级）。用于导入撤销等级联删除场景。
      */
     void cancelBatch(List<Long> bizIds);
+
+    /**
+     * 批量识别「已被审批人办理过」的业务单。
+     * <p>
+     * 判定口径：流程历史（flow_his_task）中存在<b>非发起人审批节点</b>的办理记录
+     * （节点权限标识不是 {@code ${initiator}} 的角色节点，如财务/总监/核验），
+     * 即已经产生人工审批动作（通过/驳回/退回）。开始节点与申请人提交节点不算。
+     * <p>
+     * 用于导入撤销的保底回滚：贝壳实收/新签导入时系统会自动发起审批
+     * （到账不足新签额时），这类「自动发起、尚无任何审批人触碰」的流程单
+     * 允许随误导入批次一并作废回滚；一旦审批人办理过，必须先走人工驳回/作废。
+     *
+     * @param bizIds 业务单据 ID（businessId 雪花 ID）
+     * @return 已存在人工审批办理记录的业务单 ID 子集；入参为空时返回空集合
+     */
+    Set<Long> findApproverTouchedBizIds(Collection<Long> bizIds);
 
     /**
      * 按业务 ID 查当前待办任务 ID（业务明细入口用，设计文档 §3.2）。

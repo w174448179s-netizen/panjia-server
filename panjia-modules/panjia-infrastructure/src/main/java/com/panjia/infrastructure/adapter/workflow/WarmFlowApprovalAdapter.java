@@ -19,9 +19,13 @@ import org.dromara.workflow.mapper.FlwInstanceMapper;
 import org.dromara.workflow.mapper.FlwUserMapper;
 import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwTaskService;
+import org.dromara.warm.flow.orm.entity.FlowHisTask;
 import org.dromara.warm.flow.orm.entity.FlowInstance;
+import org.dromara.warm.flow.orm.entity.FlowNode;
 import org.dromara.warm.flow.orm.entity.FlowTask;
 import org.dromara.warm.flow.orm.entity.FlowUser;
+import org.dromara.warm.flow.orm.mapper.FlowHisTaskMapper;
+import org.dromara.warm.flow.orm.mapper.FlowNodeMapper;
 import org.springframework.stereotype.Component;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -30,6 +34,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,6 +58,14 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
     private final IFlwInstanceService flwInstanceService;
     private final FlwUserMapper flwUserMapper;
     private final FlwInstanceMapper flwInstanceMapper;
+    /**
+     * Warm-Flow 原生历史任务 Mapper（查审批办理痕迹）。
+     */
+    private final FlowHisTaskMapper flowHisTaskMapper;
+    /**
+     * Warm-Flow 原生节点定义 Mapper（识别 ${initiator} 申请人节点）。
+     */
+    private final FlowNodeMapper flowNodeMapper;
 
     @Override
     public Long start(String bizType, Long bizId, ApprovalStartCmd cmd) {
@@ -104,6 +117,9 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
         log.info("[审批适配器] 撤销流程实例：bizType={}, bizId={}", bizType, bizId);
     }
 
+    /** 流程发起人权限标识（Warm-Flow SpEL），节点 permission_flag 为此值表示申请人自办节点。 */
+    private static final String INITIATOR_PERMISSION = "${initiator}";
+
     @Override
     public void cancelBatch(List<Long> bizIds) {
         if (bizIds == null || bizIds.isEmpty()) {
@@ -114,6 +130,72 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
             .collect(Collectors.toList());
         workflowService.deleteInstanceSys(businessIds);
         log.info("[审批适配器] 批量撤销流程实例：count={}", businessIds.size());
+    }
+
+    @Override
+    public Set<Long> findApproverTouchedBizIds(Collection<Long> bizIds) {
+        if (bizIds == null || bizIds.isEmpty()) {
+            return Set.of();
+        }
+        // ① 业务 ID → 流程实例
+        List<String> bizIdStrs = bizIds.stream().map(String::valueOf).distinct().toList();
+        List<FlowInstance> instances = flwInstanceMapper.selectList(
+            Wrappers.lambdaQuery(FlowInstance.class)
+                .in(FlowInstance::getBusinessId, bizIdStrs));
+        if (instances.isEmpty()) {
+            return Set.of();
+        }
+        Map<Long, Long> bizIdByInstanceId = new HashMap<>(instances.size() * 2);
+        List<Long> instanceIds = new ArrayList<>(instances.size());
+        Set<Long> definitionIds = new HashSet<>();
+        for (FlowInstance inst : instances) {
+            instanceIds.add(inst.getId());
+            definitionIds.add(inst.getDefinitionId());
+            Long bizId = parseBizId(inst.getBusinessId());
+            if (bizId != null) {
+                bizIdByInstanceId.put(inst.getId(), bizId);
+            }
+        }
+        // ② 这些实例上已办理的审批节点任务（node_type=1；开始=0/结束=2 自然排除）
+        List<FlowHisTask> hisTasks = flowHisTaskMapper.selectList(
+            org.dromara.common.mybatis.core.query.QueryBuilder.lambda(FlowHisTask.class)
+                .in(FlowHisTask::getInstanceId, instanceIds)
+                .eq(FlowHisTask::getNodeType, 1)
+                .build());
+        if (hisTasks.isEmpty()) {
+            return Set.of();
+        }
+        // ③ 批量取节点定义，识别申请人节点（permission_flag=${initiator}）
+        Set<String> nodeCodes = hisTasks.stream()
+            .map(FlowHisTask::getNodeCode)
+            .filter(StringUtils::isNotBlank)
+            .collect(Collectors.toSet());
+        Set<String> initiatorNodeKeys = new HashSet<>();
+        if (!nodeCodes.isEmpty()) {
+            List<FlowNode> nodes = flowNodeMapper.selectList(
+                org.dromara.common.mybatis.core.query.QueryBuilder.lambda(FlowNode.class)
+                    .in(FlowNode::getDefinitionId, definitionIds)
+                    .in(FlowNode::getNodeCode, nodeCodes)
+                    .build());
+            for (FlowNode node : nodes) {
+                if (INITIATOR_PERMISSION.equals(StringUtils.trimToEmpty(node.getPermissionFlag()))) {
+                    initiatorNodeKeys.add(node.getDefinitionId() + "|" + node.getNodeCode());
+                }
+            }
+        }
+        // ④ 历史任务命中非申请人节点 → 该单已被审批人办理
+        Set<Long> touched = new HashSet<>();
+        for (FlowHisTask his : hisTasks) {
+            String key = his.getDefinitionId() + "|" + his.getNodeCode();
+            if (initiatorNodeKeys.contains(key)) {
+                continue;
+            }
+            Long bizId = bizIdByInstanceId.get(his.getInstanceId());
+            if (bizId != null) {
+                touched.add(bizId);
+            }
+        }
+        return touched;
     }
 
     @Override

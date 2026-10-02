@@ -36,6 +36,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -309,6 +310,17 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         } catch (Exception ignored) {
         }
 
+        // 0. 保底恢复准备：查出曾被本批冲销的旧批次（撤销后需恢复生效）。
+        //    贝壳新签/实收有完整的下游恢复链路（事实/明细翻回 + 事件重放），旧批次随撤销恢复；
+        //    考勤/积分/历史工资等来源为 upsert 覆盖语义、旧数据无法精确回滚，仅解除悬空外键，
+        //    旧批次保持失效状态，避免「批次显示生效但下游数据已失」的不一致。
+        ImportSourceType sourceType = batch.getSourceType();
+        boolean restoreSupported = sourceType == ImportSourceType.KE_SIGNED
+            || sourceType == ImportSourceType.KE_RECEIVED;
+        List<Long> supersededIds = batchMapper.selectSupersededBatchIds(batchId);
+        // 合同号在删归一化记录前快照（本批+旧批），供结佣域删除自动产生的 DRAFT 草稿单
+        List<String> contractNos = collectContractNos(batchId, sourceType, supersededIds);
+
         // 1. 硬删问题清单
         issueMapper.delete(new LambdaQueryWrapper<ImportIssue>()
             .eq(ImportIssue::getBatchId, batchId));
@@ -316,26 +328,73 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         normalizedRecordMapper.delete(new LambdaQueryWrapper<com.panjia.importdomain.domain.NormalizedRecord>()
             .eq(com.panjia.importdomain.domain.NormalizedRecord::getBatchId, batchId));
         // 3. 硬删原始解析数据（按来源类型删对应 raw 表，解除外键约束后才能删批次）
-        deleteRawData(batchId, batch.getSourceType());
-        // 4. 硬删导入批次本身（原始上传文件保留在文件存储中，storage_path 指向的归档文件不删）
+        deleteRawData(batchId, sourceType);
+        // 4. 删除本批前先把旧批次对本批的自引用 FK 改指向旧批自身（FK 不可延迟，
+        //    直接删会被外键阻止；直接置 NULL 又会与本批撞部分唯一索引）
+        if (!supersededIds.isEmpty()) {
+            int detached = batchMapper.detachSupersededReferences(batchId);
+            log.info("[导入撤销] 旧批次引用已解除：batchId={}, count={}", batchId, detached);
+        }
+        // 5. 硬删导入批次本身（原始上传文件保留在文件存储中，storage_path 指向的归档文件不删）
         batchMapper.deleteById(batchId);
+        // 6. 贝壳新签/实收：旧批次恢复生效（本批已删，不再撞唯一索引）
+        List<Long> restoredBatchIds = Collections.emptyList();
+        if (restoreSupported && !supersededIds.isEmpty()) {
+            int restored = batchMapper.restoreSupersededBatches(supersededIds);
+            restoredBatchIds = supersededIds;
+            log.info("[导入撤销] 被冲销旧批次已恢复生效：batchId={}, restoredBatchIds={}, count={}",
+                batchId, supersededIds, restored);
+        }
 
-        // 5. 发布撤销事件（Outbox，与事务原子提交），下游级联删除
-        emitRevokedEvent(batch, operatorId);
+        // 7. 发布撤销事件（Outbox，与事务原子提交），下游级联删除/恢复
+        emitRevokedEvent(batch, operatorId, restoredBatchIds, contractNos);
 
-        log.info("[导入撤销] 批次已删除，事件已发布：batchId={}, sourceType={}, period={}, operatorId={}",
-            batchId, batch.getSourceType(), batch.getPeriod(), operatorId);
+        log.info("[导入撤销] 批次已删除，事件已发布：batchId={}, sourceType={}, period={}, operatorId={}, restoredBatchIds={}",
+            batchId, sourceType, batch.getPeriod(), operatorId, restoredBatchIds);
+    }
+
+    /**
+     * 汇总本批次及被恢复旧批次归一化记录中的合同号（去重、去空白）。
+     * <p>仅贝壳新签/实收批次需要：结佣域撤销处理器据此删除实收自动通过时产生的
+     * DRAFT 结佣草稿单（无论是否存在旧批次，本批连锁产生的草稿都要删）；
+     * 其他来源类型返回空列表。必须在本批归一化记录删除前调用。
+     */
+    private List<String> collectContractNos(Long batchId, ImportSourceType sourceType,
+                                            List<Long> supersededIds) {
+        if (sourceType != ImportSourceType.KE_SIGNED
+            && sourceType != ImportSourceType.KE_RECEIVED) {
+            return Collections.emptyList();
+        }
+        List<Long> batchIds = new ArrayList<>(supersededIds.size() + 1);
+        batchIds.add(batchId);
+        batchIds.addAll(supersededIds);
+        List<com.panjia.importdomain.domain.NormalizedRecord> records = normalizedRecordMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.importdomain.domain.NormalizedRecord>()
+                .select(com.panjia.importdomain.domain.NormalizedRecord::getContractNo)
+                .in(com.panjia.importdomain.domain.NormalizedRecord::getBatchId, batchIds));
+        return records.stream()
+            .map(com.panjia.importdomain.domain.NormalizedRecord::getContractNo)
+            .filter(c -> c != null && !c.isBlank())
+            .map(String::trim)
+            .distinct()
+            .toList();
     }
 
     /**
      * 构造并发布 ImportBatchRevokedEvent。
+     *
+     * @param restoredBatchIds 随本次撤销恢复生效的旧批次 ID（无恢复时为空列表）
+     * @param contractNos      本批及旧批涉及合同号集合（贝壳新签/实收，供结佣域删 DRAFT 草稿）
      */
-    private void emitRevokedEvent(ImportBatch batch, Long operatorId) {
+    private void emitRevokedEvent(ImportBatch batch, Long operatorId,
+                                  List<Long> restoredBatchIds, List<String> contractNos) {
         ImportBatchRevokedEvent event = new ImportBatchRevokedEvent();
         event.setBatchId(batch.getId());
         event.setSourceType(batch.getSourceType() == null ? null : batch.getSourceType().getCode());
         event.setPeriod(batch.getPeriod());
         event.setOperatorId(operatorId);
+        event.setRestoredBatchIds(restoredBatchIds.stream().map(String::valueOf).toList());
+        event.setContractNos(contractNos == null ? Collections.emptyList() : contractNos);
         eventPort.emit(event);
     }
 
