@@ -204,4 +204,19 @@ public class CommissionApplyController extends BaseController {
         applicationService.approve(id, action, comment);
         return R.ok();
     }
+
+    /**
+     * 前端预检：指定合同当月是否存在审批中的结佣申请单（SUBMITTED）。
+     * <p>结佣申请按「合同 + 月」粒度唯一，前端单行提交/批量发起前调用，
+     * 存在在途单时禁用对应合同的提交入口。
+     *
+     * @param period     业绩归属月
+     * @param contractNo 合同号或订单号
+     */
+    @SaCheckPermission("commission:apply:list")
+    @GetMapping("/in-flight-check")
+    public R<Boolean> checkInFlight(@RequestParam String period,
+                                    @RequestParam String contractNo) {
+        return R.ok(applicationService.hasInFlightApplication(period, contractNo));
+    }
 }

@@ -81,6 +81,27 @@ public interface IPerformanceAdjustService {
     void markCallbackFailure(Long adjustId, String errorSummary);
 
     /**
+     * 申请人撤回审批中的调整单（仅 SUBMITTED、仅发起人本人）。
+     * <p>
+     * 删除工作流在途实例（任务/历史/授权一并清理），调整单置 CANCELLED、清空流程实例 ID。
+     * 典型场景：审批期间合同明细被其他操作改变导致指定行无法执行，发起人撤回后按最新明细重新发起。
+     *
+     * @param id         调整单 ID
+     * @param operatorId 操作人 ID（必须等于申请人）
+     */
+    void withdraw(Long id, Long operatorId);
+
+    /**
+     * 前端预检：该合同是否存在审批中的业绩调整单（SUBMITTED/APPROVED）。
+     *
+     * @param contractNo 合同号
+     * @param period     调整生效月
+     * @param factType   事实口径
+     * @return true=存在在途调整单
+     */
+    boolean hasInFlightAdjust(String contractNo, String period, String factType);
+
+    /**
      * 执行调整单（审批通过后由工作流回调自动触发，一般不手动调用）。
      * <p>
      * 状态流转：SUBMITTED → EXECUTED。

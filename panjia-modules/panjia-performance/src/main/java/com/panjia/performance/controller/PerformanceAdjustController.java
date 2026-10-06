@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -71,6 +72,39 @@ public class PerformanceAdjustController extends BaseController {
     public R<Long> add(@Validated @RequestBody PerformanceAdjustCreateBo dto) {
         PerformanceAdjust adjust = adjustService.createAdjust(dto, LoginHelper.getUserId());
         return R.ok("发起成功，已提交审批", adjust.getId());
+    }
+
+    /**
+     * 申请人撤回审批中的调整单。
+     * <p>
+     * 仅 SUBMITTED 状态、仅发起人本人可撤回；工作流在途实例一并删除，单据置 CANCELLED。
+     * 撤回后可按最新合同明细重新发起（同一合同再次发起时不再受该单在途互斥限制）。
+     *
+     * @param id 调整单 ID
+     */
+    @SaCheckPermission("perf:adjust:add")
+    @Log(title = "业绩调整单", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/withdraw")
+    public R<Void> withdraw(@PathVariable Long id) {
+        adjustService.withdraw(id, LoginHelper.getUserId());
+        return R.ok("已撤回");
+    }
+
+    /**
+     * 前端预检：指定合同是否存在审批中的业绩调整单。
+     * <p>发起调整单选完业绩事实后调用，存在在途单时前端禁用提交按钮，
+     * 避免用户提交后才被后端在途互斥拦截。
+     *
+     * @param contractNo 合同号
+     * @param period     调整生效月
+     * @param factType   事实口径（默认 PERF_EXPECT）
+     */
+    @SaCheckPermission("perf:adjust:list")
+    @GetMapping("/in-flight-check")
+    public R<Boolean> checkInFlight(@RequestParam String contractNo,
+                                    @RequestParam String period,
+                                    @RequestParam(defaultValue = "PERF_EXPECT") String factType) {
+        return R.ok(adjustService.hasInFlightAdjust(contractNo, period, factType));
     }
 
 }

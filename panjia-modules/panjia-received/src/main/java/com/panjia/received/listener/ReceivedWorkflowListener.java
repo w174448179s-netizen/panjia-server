@@ -6,6 +6,7 @@ import com.panjia.contracts.event.ApprovalTaskEvent;
 import com.panjia.received.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -18,6 +19,9 @@ import java.util.Map;
  * <p>
  * 任务级 {@link ApprovalTaskEvent}（语义：代表任务创建、亦代表上一节点已完成）：
  * 流转进入 rcv_director（即财务节点已办理）→ 回填最近审批人/审批时间。
+ * <p>
+ * 异常处理：回调失败时必须重抛异常，否则与外层 completeTask 共享的事务已被标记
+ * rollback-only，提交时会抛出 UnexpectedRollbackException 掩盖真实业务错误。
  */
 @Slf4j
 @Component
@@ -31,8 +35,9 @@ public class ReceivedWorkflowListener {
 
     @EventListener(condition = "#approvalEvent.bizType == '" + BizType.REAL_CONFIRM + "'")
     public void onApprovalEvent(ApprovalEvent approvalEvent) {
+        Long applyId = null;
         try {
-            Long applyId = approvalEvent.getBizId();
+            applyId = approvalEvent.getBizId();
             if (applyId == null) {
                 log.warn("[实收审批工作流] bizId 为空，跳过：{}", approvalEvent);
                 return;
@@ -50,7 +55,13 @@ public class ReceivedWorkflowListener {
                 applyId, approvalEvent.getStatus(), approvalEvent.getNodeCode());
             receivedApplyService.handleWorkflowEvent(applyId, approvalEvent.getStatus(), handler, message);
         } catch (Exception e) {
-            log.error("[实收审批工作流] 回调处理失败：{}", approvalEvent, e);
+            log.error("[实收审批工作流] 回调处理失败，事务将回滚：applyId={}, event={}",
+                applyId, approvalEvent, e);
+            if (e instanceof ServiceException serviceException) {
+                throw serviceException;
+            }
+            throw new IllegalStateException("实收审批工作流回调失败：applyId=" + applyId
+                + ", status=" + approvalEvent.getStatus(), e);
         }
     }
 
@@ -63,8 +74,9 @@ public class ReceivedWorkflowListener {
     @EventListener(condition = "#approvalTaskEvent.bizType == '" + BizType.REAL_CONFIRM
         + "' && #approvalTaskEvent.nodeCode == '" + NODE_DIRECTOR + "'")
     public void onDirectorTaskCreated(ApprovalTaskEvent approvalTaskEvent) {
+        Long applyId = null;
         try {
-            Long applyId = approvalTaskEvent.getBizId();
+            applyId = approvalTaskEvent.getBizId();
             if (applyId == null) {
                 log.warn("[实收审批工作流] 任务事件 bizId 为空，跳过：{}", approvalTaskEvent);
                 return;
@@ -85,7 +97,12 @@ public class ReceivedWorkflowListener {
                 applyId, handlerId);
             receivedApplyService.stampApproverOnDirectorNode(applyId, handlerId);
         } catch (Exception e) {
-            log.error("[实收审批工作流] 回填审批人失败：{}", approvalTaskEvent, e);
+            log.error("[实收审批工作流] 回填审批人失败，事务将回滚：applyId={}, event={}",
+                applyId, approvalTaskEvent, e);
+            if (e instanceof ServiceException serviceException) {
+                throw serviceException;
+            }
+            throw new IllegalStateException("实收审批回填审批人失败：applyId=" + applyId, e);
         }
     }
 }

@@ -1698,10 +1698,18 @@ public class CommissionApplicationService {
      * </ul>
      */
     private void fillItemDetailPendingAdjust(List<CommissionItemDetailVo> rows, Long applicationId) {
-        List<CommissionAdjust> pendings = adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
-            .eq(CommissionAdjust::getApplicationId, applicationId)
+        // 按合同号查询在途调整单（同合同任意在途调整单，含其他期间申请单，均会改共享 PERF_EXPECT 事实）
+        CommissionApplication app = applicationMapper.selectById(applicationId);
+        String contractNo = app == null ? null : app.getContractNo();
+        LambdaQueryWrapper<CommissionAdjust> pendingWrapper = new LambdaQueryWrapper<CommissionAdjust>()
             .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
-            .orderByDesc(CommissionAdjust::getId));
+            .orderByDesc(CommissionAdjust::getId);
+        if (StringUtils.isNotBlank(contractNo)) {
+            pendingWrapper.eq(CommissionAdjust::getContractNo, contractNo);
+        } else {
+            pendingWrapper.eq(CommissionAdjust::getApplicationId, applicationId);
+        }
+        List<CommissionAdjust> pendings = adjustMapper.selectList(pendingWrapper);
         if (pendings.isEmpty()) {
             return;
         }
@@ -1806,34 +1814,36 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 合同列表在途调整标记：当前页申请单存在审批中（SUBMITTED/APPROVED）的合同级调整单时，
+     * 合同列表在途调整标记：当前页合同存在审批中（SUBMITTED/APPROVED）的结佣调整单时，
      * 回填 adjustPending / adjustPendingType / adjustPendingAmount（AMOUNT=调整后合计），
      * 前端据此展示「调整审批中」标签。
+     * <p>2026-10-02 起按合同号互斥（同合同任意在途调整单，含明细级/其他期间申请单），
+     * 故查询条件从 applicationId + itemId IS NULL 放宽为 contractNo。
      */
     private void fillContractPendingAdjust(List<CommissionContractVo> rows) {
         if (rows == null || rows.isEmpty()) {
             return;
         }
-        Set<Long> applicationIds = rows.stream()
-            .map(CommissionContractVo::getApplicationId)
-            .filter(Objects::nonNull)
+        Set<String> contractNos = rows.stream()
+            .map(CommissionContractVo::getContractNo)
+            .filter(StringUtils::isNotBlank)
             .collect(Collectors.toSet());
-        if (applicationIds.isEmpty()) {
+        if (contractNos.isEmpty()) {
             return;
         }
         List<CommissionAdjust> pendings = adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
-            .in(CommissionAdjust::getApplicationId, applicationIds)
-            .isNull(CommissionAdjust::getItemId)
+            .in(CommissionAdjust::getContractNo, contractNos)
             .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
         if (pendings.isEmpty()) {
             return;
         }
-        Map<Long, CommissionAdjust> pendingByApp = new HashMap<>();
+        Map<String, CommissionAdjust> pendingByContract = new HashMap<>();
         for (CommissionAdjust p : pendings) {
-            pendingByApp.putIfAbsent(p.getApplicationId(), p);
+            pendingByContract.putIfAbsent(p.getContractNo(), p);
         }
         for (CommissionContractVo row : rows) {
-            CommissionAdjust pending = row.getApplicationId() == null ? null : pendingByApp.get(row.getApplicationId());
+            CommissionAdjust pending = StringUtils.isBlank(row.getContractNo()) ? null
+                : pendingByContract.get(row.getContractNo());
             if (pending == null) {
                 continue;
             }
@@ -2071,6 +2081,26 @@ public class CommissionApplicationService {
             .eq(CommissionApplication::getPeriod, period)
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
+    }
+
+    /**
+     * 前端预检：该合同当月是否存在审批中的结佣申请单（SUBMITTED）。
+     * <p>结佣申请按「合同 + 业绩归属月」粒度唯一，同期间同合同只允许一张在途单。
+     *
+     * @param period     业绩归属月
+     * @param contractNo 合同号或订单号
+     * @return true=存在在途申请单，前端应禁用提交
+     */
+    public boolean hasInFlightApplication(String period, String contractNo) {
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+            return false;
+        }
+        Long count = applicationMapper.selectCount(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(CommissionApplication::getPeriod, period)
+            .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
+                .or().eq(CommissionApplication::getOrderNo, contractNo))
+            .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED));
+        return count != null && count > 0;
     }
 
     private CommissionApplication findActiveApplication(String period, String contractNo) {

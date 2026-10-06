@@ -527,6 +527,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             assertCommissionNotLocked(gatePeriod, dto.getContractNo());
         }
 
+        // 2.6 在途互斥：同合同存在审批中（SUBMITTED/APPROVED）调整单时拒绝发起。
+        // 调整单 payload 快照 factId，在途期间事实被先执行的单 supersede 后，
+        // 后执行单会因指定行失效而卡死；同合同调整必须串行（撤回或等审批完结再发起）。
+        assertNoInFlightAdjust(scope, dto.getContractNo(), dto.getPeriod(),
+            dto.getOriginalPeriod(), dto.getFactType(), dto.getFactId());
+
         // 3. 构建调整单
         PerformanceAdjust adjust = new PerformanceAdjust();
         adjust.setAdjustNo(generateAdjustNo());
@@ -638,6 +644,79 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .orElse(dto.getContractNo());
     }
 
+    /**
+     * 在途互斥校验：同一合同（期间口径重叠 + 同事实口径）已存在 SUBMITTED/APPROVED 调整单时，
+     * 禁止再发起新的调整单。
+     * <p>
+     * 必要性：调整单 payload 按 factId 快照明细，supersede 后旧事实置 REVERSED、新事实换 ID。
+     * 两张在途单无论谁先执行，后执行单的快照 factId 都会失效（加人/合同金额指定值模式直接拒绝执行，
+     * 单据永久卡死）。跨月调整同时涉及原月与目标月，故期间按 period/originalPeriod 重叠判定。
+     * <p>
+     * 明细级发起时 dto 可能不带合同号，则按 factId 本身或该事实所属合同号判定互斥范围。
+     *
+     * @param scope          调整范围（CONTRACT/DETAIL）
+     * @param contractNo     合同号（合同级已归一化为事实表真实合同号；明细级可能为空）
+     * @param period         调整生效月
+     * @param originalPeriod 原业绩归属月（跨月调整）
+     * @param factType       事实口径
+     * @param factId         明细级调整关联事实 ID（合同级为空）
+     */
+    private void assertNoInFlightAdjust(String scope, String contractNo, String period,
+                                        String originalPeriod, String factType, Long factId) {
+        String originPeriod = StringUtils.isNotBlank(originalPeriod) ? originalPeriod : period;
+        LambdaQueryWrapper<PerformanceAdjust> qw = new LambdaQueryWrapper<>();
+        qw.eq(PerformanceAdjust::getFactType, factType)
+            .in(PerformanceAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .and(w -> w.eq(PerformanceAdjust::getPeriod, originPeriod)
+                .or().eq(PerformanceAdjust::getOriginalPeriod, originPeriod)
+                .or().eq(PerformanceAdjust::getPeriod, period)
+                .or().eq(PerformanceAdjust::getOriginalPeriod, period));
+        if (StringUtils.isNotBlank(contractNo)) {
+            qw.eq(PerformanceAdjust::getContractNo, contractNo);
+        } else if (factId != null) {
+            PerformanceFact ref = factMapper.selectById(factId);
+            String refContractNo = ref == null ? null : ref.getContractNo();
+            // 同 factId 的在途单，或同一事实上合同号下的在途单，均互斥
+            qw.and(w -> w.eq(PerformanceAdjust::getFactId, factId)
+                .or(StringUtils.isNotBlank(refContractNo),
+                    x -> x.eq(PerformanceAdjust::getContractNo, refContractNo)));
+        } else {
+            // 无合同键也无 factId 无法判定互斥范围，后续必填校验会拦截，这里不阻断
+            return;
+        }
+        Long count = adjustMapper.selectCount(qw);
+        if (count != null && count > 0) {
+            log.warn("[调整单] 在途互斥拦截：scope={}, contractNo={}, period={}, originalPeriod={}, factId={}, 在途单数={}",
+                scope, contractNo, period, originalPeriod, factId, count);
+            throw new ServiceException("该合同存在审批中的业绩调整单，请待其审批完成或撤回后再发起新调整");
+        }
+    }
+
+    /**
+     * 前端预检：该合同是否存在审批中的业绩调整单（SUBMITTED/APPROVED）。
+     * <p>与 {@link #assertNoInFlightAdjust} 同口径（期间重叠 + 同口径 + 同合同），
+     * 供前端在选完业绩事实后即时禁用提交按钮，避免提交后才被后端拒绝。
+     *
+     * @param contractNo 合同号
+     * @param period     调整生效月
+     * @param factType   事实口径
+     * @return true=存在在途调整单，前端应禁用提交
+     */
+    @Override
+    public boolean hasInFlightAdjust(String contractNo, String period, String factType) {
+        if (StringUtils.isBlank(contractNo) || StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
+            return false;
+        }
+        LambdaQueryWrapper<PerformanceAdjust> qw = new LambdaQueryWrapper<>();
+        qw.eq(PerformanceAdjust::getFactType, factType)
+            .in(PerformanceAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .eq(PerformanceAdjust::getContractNo, contractNo)
+            .and(w -> w.eq(PerformanceAdjust::getPeriod, period)
+                .or().eq(PerformanceAdjust::getOriginalPeriod, period));
+        Long count = adjustMapper.selectCount(qw);
+        return count != null && count > 0;
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void handleWorkflowEvent(Long adjustId, String status, String handler, String message) {
@@ -742,6 +821,35 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setReason(newReason);
         adjustMapper.updateById(adjust);
         log.warn("[调整单] 已追加回调失败摘要：adjustId={}, reason={}", adjustId, failureMark);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void withdraw(Long id, Long operatorId) {
+        PerformanceAdjust adjust = adjustMapper.selectById(id);
+        if (adjust == null) {
+            throw new ServiceException("调整单不存在：id={}", id);
+        }
+        if (adjust.getStatus() != AdjustStatus.SUBMITTED) {
+            throw new ServiceException("仅审批中的调整单允许撤回，当前状态：{}",
+                adjust.getStatus() == null ? "未知" : adjust.getStatus().getCode());
+        }
+        if (!Objects.equals(adjust.getApplicantId(), operatorId)) {
+            throw new ServiceException("仅调整单发起人本人可撤回");
+        }
+        // 删除工作流实例（任务/历史/授权一并清理）。失败则整单回滚，不能出现业务已取消但流程仍在审批
+        try {
+            approvalPort.cancel(BizType.PERF_ADJUST, id);
+        } catch (Exception e) {
+            log.error("[调整单] 撤回审批流程失败：adjustId={}", id, e);
+            throw new ServiceException("撤回审批流程失败：{}", e.getMessage());
+        }
+        adjust.setStatus(AdjustStatus.CANCELLED);
+        adjust.setProcessInstanceId(null);
+        adjust.setOperatorId(operatorId);
+        adjustMapper.updateById(adjust);
+        log.info("[调整单] 申请人撤回：adjustId={}, adjustNo={}, operatorId={}",
+            id, adjust.getAdjustNo(), operatorId);
     }
 
     @Override
@@ -1018,6 +1126,56 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
+     * 指定值模式目标行解析：快照 factId 仍是执行时 ACTIVE 行则直接返回；
+     * 若该行在单据审批期间已被其他操作冲销（REVERSED，supersede 时员工/角色/业务类型/费项/
+     * 业务日期原样继承到后继行，见 {@link #copyFactBase}），则在当前 ACTIVE 集合中按身份键
+     * 定位唯一后继行自动续接，并把入参 target 的 factId 改写为后继行 ID。
+     * <p>
+     * 无法安全续接时抛业务异常提示撤回重发：找不到事实、行仍 ACTIVE 但已不在本合同当期
+     * （归属变化）、或匹配出 0 条/多条候选。金额完整性不由本方法保证——调用方的
+     * 「Σ指定行目标 + 未指定行现值 = 单据快照总额」校验会继续兜底拦截金额错乱。
+     */
+    private PerformanceFact resolveTargetFactOrSuccessor(Map<Long, PerformanceFact> activeById,
+                                                         AdjustDetailTargetBo target,
+                                                         PerformanceAdjust adjust) {
+        Long factId = target.getFactId();
+        PerformanceFact current = activeById.get(factId);
+        if (current != null) {
+            return current;
+        }
+        PerformanceFact snapshot = factMapper.selectById(factId);
+        if (snapshot == null) {
+            throw new ServiceException("执行失败：指定调整行已不存在（数据可能已被清理），"
+                + "请撤回该调整单后按最新明细重新发起：adjustId={}, factId={}", adjust.getId(), factId);
+        }
+        if (snapshot.getFactStatus() == FactStatus.ACTIVE) {
+            // 行仍有效但不在本次加载的期间/合同集合中：归属已被改变，不能猜配
+            throw new ServiceException("执行失败：指定调整行的归属期间/合同已变化，"
+                + "请撤回该调整单后按最新明细重新发起：adjustId={}, factId={}", adjust.getId(), factId);
+        }
+        List<PerformanceFact> successors = activeById.values().stream()
+            .filter(f -> Objects.equals(f.getEmployeeId(), snapshot.getEmployeeId())
+                && Objects.equals(f.getRoleType(), snapshot.getRoleType())
+                && Objects.equals(f.getBizType(), snapshot.getBizType())
+                && Objects.equals(f.getFeeItem(), snapshot.getFeeItem())
+                && Objects.equals(f.getBusinessDate(), snapshot.getBusinessDate()))
+            .toList();
+        if (successors.size() == 1) {
+            PerformanceFact successor = successors.get(0);
+            log.warn("[调整单] 指定行已被冲销，自动续接到当前 ACTIVE 后继行：adjustId={}, oldFactId={}, "
+                    + "newFactId={}, oldStatus={}, reversedReason={}",
+                adjust.getId(), factId, successor.getId(), snapshot.getFactStatus().getCode(),
+                snapshot.getReversedReason() == null ? null : snapshot.getReversedReason().getCode());
+            // 改写内存中的 factId：后续 coveredIds 去重与 supersede 均按后继行执行
+            target.setFactId(successor.getId());
+            return successor;
+        }
+        throw new ServiceException("执行失败：指定调整行已被其他操作替换且无法唯一匹配当前明细（候选 {} 条），"
+                + "请撤回该调整单后按最新明细重新发起：adjustId={}, factId={}",
+            successors.size(), adjust.getId(), factId);
+    }
+
+    /**
      * 指定值模式执行：既有行按 payload.detailTargets 精确 supersede（金额 + 可选角色占比）。
      * <p>
      * 完整性校验：执行时 Σ指定行目标金额 + 未指定行当前金额 = 单据 targetAmount；
@@ -1037,11 +1195,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (t == null || t.getFactId() == null || t.getTargetAmount() == null) {
                 continue;
             }
-            if (factById.get(t.getFactId()) == null) {
-                throw new ServiceException("执行失败：指定调整行在执行时已不存在（可能被其他调整单抢先执行），"
-                    + "adjustId={}, factId={}", adjust.getId(), t.getFactId());
+            // 快照 factId 在审批期间被 supersede 时自动续接唯一后继行（失败则抛业务异常提示撤回重发）
+            resolveTargetFactOrSuccessor(factById, t, adjust);
+            if (!coveredIds.add(t.getFactId())) {
+                throw new ServiceException("执行失败：多条指定行续接到了同一条当前明细，"
+                    + "请撤回该调整单后重新编辑发起：adjustId={}, factId={}", adjust.getId(), t.getFactId());
             }
-            coveredIds.add(t.getFactId());
             coveredSum = coveredSum.add(t.getTargetAmount());
         }
         BigDecimal uncoveredSum = facts.stream()
@@ -1768,11 +1927,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (t == null || t.getFactId() == null || t.getTargetAmount() == null) {
                 continue;
             }
-            if (factById.get(t.getFactId()) == null) {
-                throw new ServiceException("执行失败：指定调整行在执行时已不存在（可能被其他调整单抢先执行），"
-                    + "adjustId={}, factId={}", adjust.getId(), t.getFactId());
+            // 快照 factId 在审批期间被 supersede 时自动续接唯一后继行（失败则抛业务异常提示撤回重发）
+            resolveTargetFactOrSuccessor(factById, t, adjust);
+            if (!coveredIds.add(t.getFactId())) {
+                throw new ServiceException("执行失败：多条指定行续接到了同一条当前明细，"
+                    + "请撤回该调整单后重新编辑发起：adjustId={}, factId={}", adjust.getId(), t.getFactId());
             }
-            coveredIds.add(t.getFactId());
             coveredSum = coveredSum.add(t.getTargetAmount());
         }
         BigDecimal uncoveredSum = facts.stream()

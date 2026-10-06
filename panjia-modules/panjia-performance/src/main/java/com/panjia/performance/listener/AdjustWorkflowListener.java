@@ -5,6 +5,7 @@ import com.panjia.contracts.event.ApprovalEvent;
 import com.panjia.performance.service.IPerformanceAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -28,14 +29,15 @@ import java.util.Map;
  * 触发上层告警；handleWorkflowEvent 的 @Transactional 会回滚，
  * 避免出现工作流已 finish 但调整单卡在 SUBMITTED 的"半完成"状态。
  * 同时在独立事务中把错误摘要追加到 reason 字段，供运维排查。
+ * <p>
+ * 业务异常（{@link ServiceException}，如执行期事实失效、合计对不上）必须原样抛出：
+ * 全局异常处理器会把明确的业务原因返回给审批人前端；若包装成 IllegalStateException，
+ * 前端只能收到「发生未知异常，请联系管理员」，审批人无法得知失败原因与处置方式。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class AdjustWorkflowListener {
-
-    /** reason 字段中追加的失败摘要最大长度（避免截断原 reason） */
-    private static final int FAILURE_REASON_MAX = 500;
 
     private final IPerformanceAdjustService adjustService;
 
@@ -75,6 +77,11 @@ public class AdjustWorkflowListener {
                 } catch (Exception markEx) {
                     log.error("[业绩调整工作流] 追加失败摘要到 reason 也失败：adjustId={}", adjustId, markEx);
                 }
+            }
+            // 业务异常原样抛：真实原因（哪行失效、合计差异、如何处置）经全局异常处理器直达审批人前端；
+            // 非业务异常才包装，事务回滚行为两者一致
+            if (e instanceof ServiceException serviceException) {
+                throw serviceException;
             }
             throw new IllegalStateException(
                 "业绩调整工作流回调失败：adjustId=" + adjustId + ", status=" + approvalEvent.getStatus(), e);

@@ -5,6 +5,7 @@ import com.panjia.contracts.event.ApprovalEvent;
 import com.panjia.people.service.ScoreApprovalService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -20,6 +21,9 @@ import java.util.Map;
  * <p>
  * 审批动作全部经「我的待办」由引擎按 flow_user 名单判权办理，
  * 不存在业务接口直改状态的业务直批路径。
+ * <p>
+ * 异常处理：回调失败时必须重抛异常，否则与外层 completeTask 共享的事务已被标记
+ * rollback-only，提交时会抛出 UnexpectedRollbackException 掩盖真实业务错误。
  */
 @Slf4j
 @Component
@@ -30,8 +34,9 @@ public class ScoreWorkflowListener {
 
     @EventListener(condition = "#approvalEvent.bizType == '" + BizType.SCORE_APPROVAL + "'")
     public void onApprovalEvent(ApprovalEvent approvalEvent) {
+        Long bizId = null;
         try {
-            Long bizId = approvalEvent.getBizId();
+            bizId = approvalEvent.getBizId();
             if (bizId == null) {
                 log.warn("[积分工作流] bizId 为空，跳过：{}", approvalEvent);
                 return;
@@ -49,7 +54,12 @@ public class ScoreWorkflowListener {
                 bizId, approvalEvent.getStatus(), approvalEvent.getNodeCode());
             approvalService.handleWorkflowEvent(bizId, approvalEvent.getStatus(), handler, message);
         } catch (Exception e) {
-            log.error("[积分工作流] 回调处理失败：{}", approvalEvent, e);
+            log.error("[积分工作流] 回调处理失败，事务将回滚：bizId={}, event={}", bizId, approvalEvent, e);
+            if (e instanceof ServiceException serviceException) {
+                throw serviceException;
+            }
+            throw new IllegalStateException("积分审批工作流回调失败：bizId=" + bizId
+                + ", status=" + approvalEvent.getStatus(), e);
         }
     }
 }

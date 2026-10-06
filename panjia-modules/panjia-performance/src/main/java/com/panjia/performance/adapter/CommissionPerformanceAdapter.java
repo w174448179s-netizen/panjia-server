@@ -22,6 +22,8 @@ import com.panjia.performance.service.ReceivedAlignmentService;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.json.utils.JsonUtils;
 import org.springframework.beans.factory.ObjectProvider;
@@ -49,6 +51,7 @@ import java.util.Set;
  * getByFactId 不限状态（溯源需能看到已冲销事实）。
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class CommissionPerformanceAdapter implements CommissionPerformanceQueryPort {
 
@@ -414,7 +417,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         if (port != null && port.getById(factId) != null) {
             return port.adjustDetailAmount(factId, targetAmount, operatorId, adjustId);
         }
-        PerformanceFact oldFact = factMapper.selectById(factId);
+        PerformanceFact oldFact = resolveActiveFactOrSuccessor(factId);
         if (oldFact == null) {
             return null;
         }
@@ -428,7 +431,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     @Override
     public Long adjustFactAmount(Long factId, BigDecimal targetAmount, BigDecimal shareRatio,
                                  Long operatorId, Long adjustId) {
-        PerformanceFact oldFact = factMapper.selectById(factId);
+        PerformanceFact oldFact = resolveActiveFactOrSuccessor(factId);
         if (oldFact == null) {
             return null;
         }
@@ -440,6 +443,46 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         newFact.setAdjustId(adjustId);
         PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
         return created.getId();
+    }
+
+    /**
+     * 解析待冲销事实：若 factId 仍 ACTIVE 则直接返回；
+     * 若已被其他操作冲销（REVERSED），按身份键（员工+角色+业务类型+费项+业务日期+期间+合同）
+     * 定位唯一 ACTIVE 后继行自动续接。
+     * <p>
+     * 典型场景：结佣调整审批期间，同一合同另一张调整单抢先执行、把明细绑定的事实冲销并换了 ID；
+     * 本张调整单执行时若直接 supersede 旧 factId 会触发「事实状态不可冲销」。此处自动续接到
+     * 当前 ACTIVE 后继行，避免并发调整互相卡死。
+     * <p>
+     * 无法唯一续接（0 条或多条候选）时抛业务异常，提示撤回重发。
+     */
+    private PerformanceFact resolveActiveFactOrSuccessor(Long factId) {
+        PerformanceFact fact = factMapper.selectById(factId);
+        if (fact == null) {
+            return null;
+        }
+        if (fact.getFactStatus() == FactStatus.ACTIVE) {
+            return fact;
+        }
+        // 已冲销：按身份键找唯一 ACTIVE 后继（supersede 时这些键原样继承，见 copyFactBase）
+        List<PerformanceFact> successors = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getFactType, fact.getFactType())
+            .eq(PerformanceFact::getPeriod, fact.getPeriod())
+            .eq(PerformanceFact::getContractNo, fact.getContractNo())
+            .eq(PerformanceFact::getEmployeeId, fact.getEmployeeId())
+            .eq(PerformanceFact::getRoleType, fact.getRoleType())
+            .eq(PerformanceFact::getBizType, fact.getBizType())
+            .eq(PerformanceFact::getFeeItem, fact.getFeeItem())
+            .eq(PerformanceFact::getBusinessDate, fact.getBusinessDate()));
+        if (successors.size() == 1) {
+            PerformanceFact successor = successors.get(0);
+            log.warn("[结佣适配] 事实已被冲销，自动续接到后继 ACTIVE 行：oldFactId={}, newFactId={}, oldStatus={}",
+                factId, successor.getId(), fact.getFactStatus());
+            return successor;
+        }
+        throw new ServiceException("执行失败：结佣明细绑定的业绩事实已被其他调整替换且无法唯一匹配当前明细"
+            + "（候选 " + successors.size() + " 条），请撤回该调整单后按最新明细重新发起：factId=" + factId);
     }
 
     @Override

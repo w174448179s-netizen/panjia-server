@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -77,5 +78,18 @@ public class CommissionAdjustController extends BaseController {
     public R<Long> add(@Validated @RequestBody CommissionAdjustCreateBo dto) {
         CommissionAdjust adjust = adjustService.create(dto, LoginHelper.getUserId());
         return R.ok("发起成功", adjust.getId());
+    }
+
+    /**
+     * 前端预检：指定合同是否存在审批中的结佣调整单。
+     * <p>结佣调整按合同级互斥（同合同任意在途调整单都会改共享 PERF_EXPECT 事实），
+     * 前端打开调整弹窗前调用，存在在途单时禁用提交。
+     *
+     * @param contractNo 合同号
+     */
+    @SaCheckPermission("commission:adjust:list")
+    @GetMapping("/in-flight-check")
+    public R<Boolean> checkInFlight(@RequestParam String contractNo) {
+        return R.ok(adjustService.hasInFlightAdjust(contractNo));
     }
 }

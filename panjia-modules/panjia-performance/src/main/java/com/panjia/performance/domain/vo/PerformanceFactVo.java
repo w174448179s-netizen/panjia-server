@@ -48,6 +48,12 @@ public class PerformanceFactVo {
     /** 来源单号 */
     private String sourceKey;
 
+    /** 合同号（冗余自归一化记录；前端发起调整时用于在途互斥预检） */
+    private String contractNo;
+
+    /** 订单号（冗余自归一化记录） */
+    private String orderNo;
+
     /** 分摊比例（仅展示用，不参与计算） */
     private BigDecimal shareRatio;
 

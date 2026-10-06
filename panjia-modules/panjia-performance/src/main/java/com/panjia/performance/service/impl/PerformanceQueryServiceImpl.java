@@ -329,6 +329,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // deptName 后续补充
         dto.setBizType(fact.getBizType());
         dto.setSourceKey(fact.getSourceKey());
+        dto.setContractNo(fact.getContractNo());
+        dto.setOrderNo(fact.getOrderNo());
         dto.setShareRatio(fact.getShareRatio());
         dto.setPerformanceAmount(fact.getPerformanceAmount());
         dto.setFactStatus(fact.getFactStatus() != null ? fact.getFactStatus().getCode() : null);

@@ -5,6 +5,7 @@ import com.panjia.contracts.event.ApprovalEvent;
 import com.panjia.commission.service.CommissionAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -22,6 +23,11 @@ import java.util.Map;
  *   <li>invalid / termination（作废/终止）→ 状态 REJECTED</li>
  *   <li>cancel（撤销）→ 状态 CANCELLED</li>
  * </ul>
+ * <p>
+ * 异常处理：回调失败时必须重新抛出异常。handleWorkflowEvent 的 @Transactional(REQUIRED)
+ * 与外层 completeTask 共享事务，若内部抛异常会将事务标记为 rollback-only；若此处 catch 后
+ * 不重抛，外层事务提交时会抛出 {@code UnexpectedRollbackException: Transaction rolled back
+ * because it has been marked as rollback-only}，掩盖真实业务错误。
  */
 @Slf4j
 @Component
@@ -32,8 +38,9 @@ public class CommissionAdjustWorkflowListener {
 
     @EventListener(condition = "#approvalEvent.bizType == '" + BizType.COMMISSION_ADJUST + "'")
     public void onApprovalEvent(ApprovalEvent approvalEvent) {
+        Long adjustId = null;
         try {
-            Long adjustId = approvalEvent.getBizId();
+            adjustId = approvalEvent.getBizId();
             if (adjustId == null) {
                 log.warn("[结佣调整工作流] bizId 为空，跳过：{}", approvalEvent);
                 return;
@@ -55,7 +62,15 @@ public class CommissionAdjustWorkflowListener {
 
             adjustService.handleWorkflowEvent(adjustId, status, handler, message);
         } catch (Exception e) {
-            log.error("[结佣调整工作流] 回调处理失败：{}", approvalEvent, e);
+            log.error("[结佣调整工作流] 回调处理失败，事务将回滚：adjustId={}, event={}",
+                adjustId, approvalEvent, e);
+            // 业务异常原样抛：真实原因经全局异常处理器直达审批人前端；
+            // 非业务异常包装后抛，事务回滚行为两者一致
+            if (e instanceof ServiceException serviceException) {
+                throw serviceException;
+            }
+            throw new IllegalStateException(
+                "结佣调整工作流回调失败：adjustId=" + adjustId + ", status=" + approvalEvent.getStatus(), e);
         }
     }
 }

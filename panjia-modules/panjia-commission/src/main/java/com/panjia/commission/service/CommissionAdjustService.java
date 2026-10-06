@@ -157,18 +157,15 @@ public class CommissionAdjustService {
             }
         }
 
-        // ③ 同一对象无未完成调整单（明细级按 itemId，合同级按 applicationId）
+        // ③ 同一合同无未完成调整单（合同级互斥：结佣调整直接改 PERF_EXPECT 事实，
+        //    同合同任意在途调整单（含明细级/合同级/其他期间申请单）都会改变共享事实，
+        //    并发执行会互相覆盖，故按合同号拦截，粒度粗于 applicationId/itemId）
         LambdaQueryWrapper<CommissionAdjust> unfinishedWrapper = new LambdaQueryWrapper<CommissionAdjust>()
-            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED);
-        if (detailScope) {
-            unfinishedWrapper.eq(CommissionAdjust::getItemId, item.getId());
-        } else {
-            unfinishedWrapper.eq(CommissionAdjust::getApplicationId, application.getId())
-                .isNull(CommissionAdjust::getItemId);
-        }
+            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .eq(CommissionAdjust::getContractNo, application.getContractNo());
         Long unfinished = adjustMapper.selectCount(unfinishedWrapper);
         if (unfinished != null && unfinished > 0) {
-            throw new ServiceException("该对象已有未完成调整单，请先完成审批后再发起新调整");
+            throw new ServiceException("该合同已有审批中的结佣调整单，请待其审批完成后再发起新调整");
         }
 
         // 计算调整前金额与差额
@@ -250,6 +247,23 @@ public class CommissionAdjustService {
         log.info("[结佣-调整] 调整单已发起并提交审批：adjustNo={}, type={}, scope={}, applicantId={}",
             adjust.getAdjustNo(), adjustType.getCode(), dto.getAdjustScope(), operatorId);
         return adjust;
+    }
+
+    /**
+     * 前端预检：该合同是否存在审批中的结佣调整单（SUBMITTED/APPROVED）。
+     * <p>结佣调整直接修改 PERF_EXPECT 事实，同合同并发调整会互相覆盖，故按合同号互斥。
+     *
+     * @param contractNo 合同号
+     * @return true=存在在途调整单，前端应禁用提交
+     */
+    public boolean hasInFlightAdjust(String contractNo) {
+        if (StringUtils.isBlank(contractNo)) {
+            return false;
+        }
+        Long count = adjustMapper.selectCount(new LambdaQueryWrapper<CommissionAdjust>()
+            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .eq(CommissionAdjust::getContractNo, contractNo));
+        return count != null && count > 0;
     }
 
     /** 按期间+合同号求指定口径 ACTIVE 事实金额合计。 */
