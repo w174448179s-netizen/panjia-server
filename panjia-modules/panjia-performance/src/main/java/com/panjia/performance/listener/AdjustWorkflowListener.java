@@ -70,14 +70,10 @@ public class AdjustWorkflowListener {
             // 不再吞异常：记录详细错误后重新抛出，触发上层告警/重试
             log.error("[业绩调整工作流] 回调处理失败，调整单将保留 SUBMITTED 待人工介入："
                 + "adjustId={}, event={}", adjustId, approvalEvent, e);
-            // 独立事务把失败摘要追加到 reason 字段，便于运维在列表页直接看到
-            if (adjustId != null) {
-                try {
-                    adjustService.markCallbackFailure(adjustId, e.getMessage());
-                } catch (Exception markEx) {
-                    log.error("[业绩调整工作流] 追加失败摘要到 reason 也失败：adjustId={}", adjustId, markEx);
-                }
-            }
+            // 注意：不能在此处调用 markCallbackFailure（REQUIRES_NEW 更新同一行）——
+            // handleWorkflowEvent 已通过 updateById 持有 adjust 行锁，REQUIRES_NEW 新事务
+            // 会等待该锁直到 innodb_lock_wait_timeout（默认 50s），导致前端长时间转圈。
+            // 失败原因已由日志 + 重抛的 ServiceException 直达审批人前端，足够定位。
             // 业务异常原样抛：真实原因（哪行失效、合计差异、如何处置）经全局异常处理器直达审批人前端；
             // 非业务异常才包装，事务回滚行为两者一致
             if (e instanceof ServiceException serviceException) {

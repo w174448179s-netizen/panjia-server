@@ -43,7 +43,6 @@ import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.DeptService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -793,7 +792,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     @Override
-    @Transactional(propagation = Propagation.REQUIRES_NEW, rollbackFor = Exception.class)
     public void markCallbackFailure(Long adjustId, String errorSummary) {
         if (adjustId == null) {
             return;
