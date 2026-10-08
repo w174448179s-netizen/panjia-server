@@ -408,6 +408,11 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Collection<Long> findActiveEmployeeIdsWithLevel(LocalDate pointInMonth) {
+        return salaryFactMapper.selectActiveEmployeeIdsByFactType(FactType.LEVEL, monthEnd(pointInMonth));
+    }
+
+    @Override
     public Map<Long, List<Long>> findDeptAndChildren(Collection<Long> deptIds) {
         if (deptIds == null || deptIds.isEmpty()) {
             return Map.of();

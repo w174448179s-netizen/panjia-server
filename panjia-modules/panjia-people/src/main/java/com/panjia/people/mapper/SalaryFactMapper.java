@@ -109,6 +109,28 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
                                             @Param("point") LocalDate point);
 
     /**
+     * 查指定时点持有某类事实（如 LEVEL）且未离职的全体员工 ID（不按事实值过滤）。
+     * <p>算薪名单基线用：当月持有效职级事实的在职员工全员入名单，挂靠新签的虚拟
+     * 角色人无 LEVEL 事实，天然排除。
+     *
+     * @param factType 事实类型（通常为 LEVEL）
+     * @param point    取数时点
+     * @return 员工 ID 列表（去重）
+     */
+    @Select("""
+        SELECT DISTINCT ON (f.employee_id) f.employee_id
+        FROM pj_people_salary_fact f
+        JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        WHERE f.fact_type = #{factType}
+          AND f.effective_date &lt;= #{point}
+          AND (f.expire_date IS NULL OR #{point} &lt; f.expire_date)
+          AND e.status IN ('ACTIVE', 'PARTTIME')
+        ORDER BY f.employee_id
+        """)
+    List<Long> selectActiveEmployeeIdsByFactType(@Param("factType") FactType factType,
+                                                 @Param("point") LocalDate point);
+
+    /**
      * 闭合旧区间：将覆盖指定生效日的开放事实记录 expire_date 置为 effect 日。
      *
      * @param employeeId 员工 ID

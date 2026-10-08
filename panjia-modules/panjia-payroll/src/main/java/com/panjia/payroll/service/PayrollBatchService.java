@@ -155,12 +155,11 @@ public class PayrollBatchService {
             Map<Long, List<RateAdjustItem>> rateAdjustItems = rateAdjustService.loadEffectiveForPeriod(period);
             empIds.addAll(rateAdjustItems.keySet());
 
-            // 名单扩展②：职级含底薪/保底的在职员工（店长保底、带底薪职级，
-            // 无业绩也应入名单走保底/底薪计算）
-            Set<String> baseLevels = ruleService.levelsWithBaseOrMin();
-            if (!baseLevels.isEmpty()) {
-                empIds.addAll(peopleQueryPort.findEmployeeIdsByLevels(baseLevels, pointInMonth));
-            }
+            // 名单扩展②（基线）：当月全体在职（ACTIVE/PARTTIME）且持有效职级事实的员工。
+            // 无底薪/保底职级（A1~A5/C1~C3 等）零业绩时也必须入名单——否则其个人社保
+            // 代扣/考勤等当月应扣项会整月漏算（2026-08 实测漏 12/63 人，如何方方）。
+            // 挂靠贝壳新签空经纪人行的虚拟角色人无 LEVEL 事实，天然不在此列。
+            empIds.addAll(peopleQueryPort.findActiveEmployeeIdsWithLevel(pointInMonth));
 
             // 名单扩展③：当期有员工级政策覆盖的人（个人社保/公积金固定额等），
             // 仅有代扣类政策覆盖的员工同样需要进名单完成当月结算

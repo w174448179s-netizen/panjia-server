@@ -49,22 +49,6 @@ public class RuleService {
     }
 
     /**
-     * 取含底薪（base_salary &gt; 0）或保底（min_salary &gt; 0）的职级编码。
-     * <p>算薪名单扩展用：这些职级的在职员工即使当月无业绩也应进入算薪名单。
-     */
-    public Set<String> levelsWithBaseOrMin() {
-        Set<String> codes = new HashSet<>();
-        for (RankRule r : rankRuleMapper.selectList(null)) {
-            boolean hasBase = r.getBaseSalary() != null && r.getBaseSalary().compareTo(java.math.BigDecimal.ZERO) > 0;
-            boolean hasMin = r.getMinSalary() != null && r.getMinSalary().compareTo(java.math.BigDecimal.ZERO) > 0;
-            if (hasBase || hasMin) {
-                codes.add(r.getLevelCode());
-            }
-        }
-        return codes;
-    }
-
-    /**
      * 取当前生效的员工级政策覆盖（EMPLOYEE scope）涉及的员工工号集合。
      * <p>算薪名单扩展用：仅有社保/公积金等个人政策覆盖的员工（当月无业绩、
      * 无手工项）也应进名单完成当月结算，否则个人代扣会整月漏算。

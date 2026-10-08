@@ -93,6 +93,17 @@ public interface PeopleQueryPort {
     Collection<Long> findEmployeeIdsByLevels(Collection<String> levelCodes, LocalDate pointInMonth);
 
     /**
+     * 查指定月份持有有效职级（LEVEL）事实的全体在职（ACTIVE/PARTTIME）员工 ID。
+     * <p>算薪名单基线：凡当月在册且持有效职级事实的员工，即使无底薪/保底、当月
+     * 零业绩，也必须进入算薪名单完成社保代扣/考勤等当月结算，否则会整月漏算。
+     * 挂靠贝壳新签空经纪人行的虚拟角色人无 LEVEL 事实，天然不在此列。
+     *
+     * @param pointInMonth 算薪月份内任意一天
+     * @return 当月持有有效 LEVEL 事实且未离职的员工 ID
+     */
+    Collection<Long> findActiveEmployeeIdsWithLevel(LocalDate pointInMonth);
+
+    /**
      * 批量取多个部门及其所有下级部门 ID（含自身，递归到叶子）。
      * <p>算薪时总监提成按管辖门店分别跳点：总监 deptId 下所有子孙门店的新签/社保
      * 各自独立计薪，汇总提成金额。
