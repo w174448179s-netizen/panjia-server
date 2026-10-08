@@ -110,6 +110,40 @@ class PerformanceDualFactTest {
     }
 
     @Test
+    void newHouseExpectTakesMonthlyReceivedWhileOthersTakeReceivable() {
+        // 一手房：新签金额（PERF_EXPECT）取当月实收，即使当月应收有值也不取
+        NormalizedRecordDTO newHouse = new NormalizedRecordDTO();
+        newHouse.setRecordType("SIGNED");
+        newHouse.setBizType("一手房");
+        newHouse.setReceivableAmount(new BigDecimal("200000.00"));
+        newHouse.setReceivedAmount(new BigDecimal("100000.00"));
+
+        assertEquals(new BigDecimal("100000.00"),
+            PerformanceEngine.resolveFactCurrentAmount(newHouse, FactType.PERF_EXPECT),
+            "一手房新签金额必须取当月实收，不得取当月应收");
+
+        // 其他业务类型：新签金额仍取当月应收
+        NormalizedRecordDTO secondHand = new NormalizedRecordDTO();
+        secondHand.setRecordType("SIGNED");
+        secondHand.setBizType("二手买卖");
+        secondHand.setReceivableAmount(new BigDecimal("200000.00"));
+        secondHand.setReceivedAmount(new BigDecimal("100000.00"));
+        assertEquals(new BigDecimal("200000.00"),
+            PerformanceEngine.resolveFactCurrentAmount(secondHand, FactType.PERF_EXPECT),
+            "非一手房新签金额仍取当月应收");
+
+        // 一手房当月实收列为空（null）：dualCaliber 空列按 0，禁止回退应收/origin
+        NormalizedRecordDTO blank = new NormalizedRecordDTO();
+        blank.setRecordType("SIGNED");
+        blank.setBizType("一手房");
+        blank.setReceivableAmount(new BigDecimal("200000.00"));
+        blank.setOriginAmount(new BigDecimal("888.00"));
+        assertEquals(BigDecimal.ZERO,
+            PerformanceEngine.resolveFactCurrentAmount(blank, FactType.PERF_EXPECT),
+            "一手房当月实收列为空按 0，禁止回退应收/origin");
+    }
+
+    @Test
     void receivableRecognizedOnlyOnceAcrossMonths() {
         // 1) 首次出现：全额认列
         assertEquals(new BigDecimal("446.25"),

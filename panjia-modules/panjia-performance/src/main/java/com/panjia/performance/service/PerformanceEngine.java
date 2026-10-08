@@ -454,11 +454,9 @@ public class PerformanceEngine {
         EmployeeSnapshot employeeSnapshot = employeeQueryPort.getByEmployeeCode(record.getEmployeeCode());
 
         // ========== 2. 计算业绩金额 ==========
-        // ★ 金额口径由 factType 决定：
-        //  PERF_REAL   → 总实收 totalReceivedAmount（结佣计薪业绩，签约月后续月份总实收不变）
-        //  PERF_EXPECT → 当月应收 receivableAmount（新签业绩，签约月后续月份为 0，扣款为负）
-        // 贝壳导入的金额就是折后金额（performance_amount 口径），直接使用，不再乘以分摊比例；
-        // 分摊比例仅作展示用，不参与计算
+        // ★ 金额口径由 factType 决定（业绩域仅落 PERF_EXPECT 新签金额；PERF_REAL 实收已拆至实收域）：
+        //  PERF_EXPECT → 一手房取当月实收 receivedAmount；其余业务取当月应收 receivableAmount
+        //  （贝壳导入的金额就是折后金额，直接使用，不再乘以分摊比例；分摊比例仅展示用）
         BigDecimal performanceAmount = MoneyUtil.round2(currentAmount);
 
         // ========== 3. 幂等检查 ==========
@@ -747,6 +745,14 @@ public class PerformanceEngine {
     public static final String RECORD_TYPE_KE_RECEIVED = "KE_RECEIVED";
 
     /**
+     * 业务类型·一手房（贝壳 Excel「业务类型」列原值，中文原样落库；与 PerformanceFactMapper
+     * 中 {@code biz_type IN ('一手房',…)} 的聚合分派口径同源）。
+     * <p>
+     * PERF_REAL 取数例外：一手房按当月实收（receivedAmount）认列，不使用合同累计总实收。
+     */
+    public static final String BIZ_TYPE_NEW_HOUSE = "一手房";
+
+    /**
      * 按归一化记录类型决定本条记录要生成的事实口径集合（纯函数）。
      * <p>
      * <ul>
@@ -782,7 +788,13 @@ public class PerformanceEngine {
 
     /**
      * 解析事实口径对应的贝壳「当前金额」（折算后原值，未还原）。
-     * PERF_EXPECT 取当月应收 receivableAmount，PERF_REAL 及其余口径取当月实收 receivedAmount。
+     * <p>
+     * <b>PERF_EXPECT（新签业绩）</b>：
+     * <ul>
+     *   <li>一手房：取当月实收 {@code receivedAmount}（贝壳「当月实收业绩」列）；</li>
+     *   <li>其他业务类型：取当月应收 {@code receivableAmount}（贝壳「当月应收业绩」列）。</li>
+     * </ul>
+     * 实收业绩（PERF_REAL）已拆表至实收域（理房通到账 KE_RECEIVED 导入），业绩域不再处理。
      * <p>
      * ★ 空列口径（§双口径契约）：SIGNED 行应收/实收两列并存，某列为空（null）表示
      * 「当月该口径无发生额」，按 0 处理，<b>禁止回退另一口径金额</b>。
@@ -803,12 +815,16 @@ public class PerformanceEngine {
             || RECORD_TYPE_HIST_EXPECT.equals(record.getRecordType())
             || RECORD_TYPE_HIST_REAL.equals(record.getRecordType());
         if (factType == FactType.PERF_EXPECT) {
-            if (record.getReceivableAmount() != null) {
-                return record.getReceivableAmount();
+            // 新签金额：一手房取当月实收（贝壳「当月实收业绩」列），其余取当月应收
+            BigDecimal newSignAmount = BIZ_TYPE_NEW_HOUSE.equals(record.getBizType())
+                ? record.getReceivedAmount()
+                : record.getReceivableAmount();
+            if (newSignAmount != null) {
+                return newSignAmount;
             }
             return dualCaliber ? BigDecimal.ZERO : record.getOriginAmount();
         }
-        // PERF_REAL：优先取总实收（贝壳「总实收业绩」列），签约月之后当月实收为 0 但总实收不变
+        // PERF_REAL：已拆表至实收域，业绩域不再处理；保留原取数逻辑供历史/红冲兜底调用
         if (record.getTotalReceivedAmount() != null) {
             return record.getTotalReceivedAmount();
         }

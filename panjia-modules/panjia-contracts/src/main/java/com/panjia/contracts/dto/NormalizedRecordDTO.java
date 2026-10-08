@@ -80,7 +80,12 @@ public class NormalizedRecordDTO {
     /** 当月应收金额（PERF_EXPECT 新签业绩口径，SIGNED 行有值） */
     private BigDecimal receivableAmount;
 
-    /** 当月实收金额（PERF_REAL 结佣计薪业绩口径，SIGNED 行有值） */
+    /**
+     * 当月实收金额（贝壳「当月实收业绩」列）。
+     * <p>
+     * 实收业绩（PERF_REAL）已拆至实收域由理房通到账导入处理；业绩域中<b>一手房新签金额
+     * （PERF_EXPECT）取本字段</b>，其余业务新签取 receivableAmount。
+     */
     private BigDecimal receivedAmount;
 
     /**
@@ -94,7 +99,7 @@ public class NormalizedRecordDTO {
     /**
      * 合同累计实收金额（贝壳「总实收业绩」列）。
      * <p>
-     * PERF_REAL 按总实收落库，不取当月实收，避免签约月之后的月份实收为 0 的问题。
+     * 实收业绩（PERF_REAL）已拆至实收域，业绩域不再使用本字段认列；仅作数据留痕。
      */
     private BigDecimal totalReceivedAmount;
 
