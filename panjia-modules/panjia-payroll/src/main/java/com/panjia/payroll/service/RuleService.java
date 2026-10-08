@@ -208,6 +208,30 @@ public class RuleService {
             }
         }
 
+        // dept overrides merged into policy.deptOverride（key=deptId；门店社保扣减标准 socialStandard 等）
+        ObjectNode deptOverride = policyNode.has("deptOverride")
+            ? (ObjectNode) policyNode.get("deptOverride") : policyNode.putObject("deptOverride");
+        for (PolicyRule p : policies) {
+            if (!"DEPT".equals(p.getScopeType()) || p.getScopeKey() == null) {
+                continue;
+            }
+            if (p.getEffectiveFrom() != null && p.getEffectiveFrom().isAfter(refDate)) {
+                continue;
+            }
+            if (p.getEffectiveTo() != null && p.getEffectiveTo().isBefore(refDate)) {
+                continue;
+            }
+            try {
+                ObjectNode merged = deptOverride.has(p.getScopeKey())
+                    ? (ObjectNode) deptOverride.get(p.getScopeKey()) : objectMapper.createObjectNode();
+                JsonNode incoming = objectMapper.readTree(p.getRuleContent() == null ? "{}" : p.getRuleContent());
+                merged.setAll((ObjectNode) incoming);
+                deptOverride.set(p.getScopeKey(), merged);
+            } catch (Exception e) {
+                log.warn("dept policy rule content parse failed, scopeKey={}", p.getScopeKey(), e);
+            }
+        }
+
         // conversion: bizType -> factor
         ObjectNode convNode = root.putObject("conversion");
         for (ConversionRule c : conversions) {
@@ -253,6 +277,24 @@ public class RuleService {
 
         public JsonNode employeeOverride(String employeeCode) {
             return root.path("policy").path("employeeOverride").path(employeeCode);
+        }
+
+        /**
+         * 门店级政策覆盖（policy.deptOverride[deptId]），如门店社保扣减标准。
+         */
+        public JsonNode deptOverride(Long deptId) {
+            return root.path("policy").path("deptOverride").path(String.valueOf(deptId));
+        }
+
+        /**
+         * 门店社保扣减标准（每人每月固定额，DEPT 政策 socialStandard），未配置返回 0。
+         */
+        public java.math.BigDecimal deptSocialStandard(Long deptId) {
+            JsonNode n = deptOverride(deptId).path("socialStandard");
+            if (n.isMissingNode() || n.isNull()) {
+                return java.math.BigDecimal.ZERO;
+            }
+            return new java.math.BigDecimal(n.asText("0"));
         }
 
         public java.math.BigDecimal conversionFactor(String bizType) {

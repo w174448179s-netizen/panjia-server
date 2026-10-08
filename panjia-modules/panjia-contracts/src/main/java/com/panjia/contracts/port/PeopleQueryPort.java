@@ -104,6 +104,26 @@ public interface PeopleQueryPort {
     Collection<Long> findActiveEmployeeIdsWithLevel(LocalDate pointInMonth);
 
     /**
+     * 批量解析部门所属的「门店级」锚点部门。
+     * <p>组织约定：顶级根（parent_id=0）→ 门店 → 店组。门店自身锚点为自身；
+     * 店组锚点为其祖先链上的门店；顶级根无锚点（不在结果中）。
+     * <p>算薪门店级聚合用：店长可能挂门店或店组、业绩事实落在店组，统一归一到
+     * 门店后再做新签/社保/差额汇总。
+     *
+     * @param deptIds 待解析的部门 ID 集合
+     * @return 部门 ID → 门店锚点 ID（顶级根与不存在的部门不在结果中）
+     */
+    Map<Long, Long> findStoreAnchors(Collection<Long> deptIds);
+
+    /**
+     * 查全部门店级部门（顶级根的直接子部门）ID → 部门名。
+     * <p>门店社保标准、门店月度差额配置页面枚举门店用。
+     *
+     * @return 门店 deptId → 部门名
+     */
+    Map<Long, String> findStoreDepts();
+
+    /**
      * 批量取多个部门及其所有下级部门 ID（含自身，递归到叶子）。
      * <p>算薪时总监提成按管辖门店分别跳点：总监 deptId 下所有子孙门店的新签/社保
      * 各自独立计薪，汇总提成金额。

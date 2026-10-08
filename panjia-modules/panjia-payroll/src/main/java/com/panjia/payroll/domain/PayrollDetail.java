@@ -73,8 +73,14 @@ public class PayrollDetail implements Serializable {
     // 店长/总监 sheet 展示字段（V160012 落地，对齐天街工资表 2026.08 列结构）
     /** 门店当月新签计薪业绩合计（折算后，店长/总监展示用） */
     private BigDecimal deptNewSignTotal;
-    /** 门店社保业绩扣款（门店全员公司承担社保合计，店长/总监「社保业绩扣款」列） */
+    /** 门店社保业绩扣款（门店社保扣减标准 × 计缴参保人数，店长/总监「社保业绩扣款」列） */
     private BigDecimal deptEmployerSocialTotal;
+    /** 门店社保扣减标准（每人每月固定额，DEPT 政策 socialStandard） */
+    private BigDecimal deptSocialStandard;
+    /** 门店计缴参保人数（非兼职 + 参保 + 个人社保比例>30%，按门店及下属组别人数合计） */
+    private Integer deptInsuredCount;
+    /** 新签与结佣差额（门店当月配置值，团队计薪业绩直接扣减） */
+    private BigDecimal deptDiffAmount;
     /** 店长团队提成比例（职级 teamRate，如 0.10） */
     private BigDecimal teamRate;
     /** 总监门店提成比例（跳点命中档 rate） */

@@ -413,6 +413,16 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Map<Long, Long> findStoreAnchors(Collection<Long> deptIds) {
+        return deptPort.findStoreAnchors(deptIds);
+    }
+
+    @Override
+    public Map<Long, String> findStoreDepts() {
+        return deptPort.findStoreDepts();
+    }
+
+    @Override
     public Map<Long, List<Long>> findDeptAndChildren(Collection<Long> deptIds) {
         if (deptIds == null || deptIds.isEmpty()) {
             return Map.of();

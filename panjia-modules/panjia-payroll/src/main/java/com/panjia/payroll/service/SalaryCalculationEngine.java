@@ -34,6 +34,10 @@ public class SalaryCalculationEngine {
     /** 招聘加点上限 +10% */
     private static final BigDecimal MENTOR_CAP = new BigDecimal("0.10");
 
+    /** 门店计缴参保人数比例阈值（个人社保比例严格 > 30% 才计入） */
+    private static final BigDecimal HUNDRED = new BigDecimal("100");
+    private static final BigDecimal THIRTY = new BigDecimal("30");
+
     /**
      * 算薪输入。
      */
@@ -45,8 +49,16 @@ public class SalaryCalculationEngine {
         public Map<Long, List<CommissionItemDTO>> newsignByEmp;
         /** deptId -> 门店新签计薪业绩合计（已折算） */
         public Map<Long, BigDecimal> deptNewSignTotal;
-        /** deptId -> 门店社保业绩扣款（门店全员公司承担社保合计，店长/总监提成计薪基数扣减项） */
+        /** deptId -> 门店社保业绩扣款（门店社保扣减标准 × 计缴参保人数，店长/总监计薪基数扣减项） */
         public Map<Long, BigDecimal> deptEmployerSocialTotal;
+        /** deptId -> 门店社保扣减标准（每人每月固定额，DEPT 政策 socialStandard） */
+        public Map<Long, BigDecimal> deptSocialStandard;
+        /** deptId -> 门店计缴参保人数（非兼职+参保+个人社保比例>30%） */
+        public Map<Long, Integer> deptInsuredCount;
+        /** deptId -> 门店当月新签与结佣差额（门店月度配置，未配置=0，计薪基数直接扣减项） */
+        public Map<Long, BigDecimal> deptDiffTotal;
+        /** deptId(员工/业绩归属) -> 门店锚点 deptId（组别向上归一到门店；顶级根无映射） */
+        public Map<Long, Long> deptStoreAnchor;
         /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
         /**
@@ -251,16 +263,20 @@ public class SalaryCalculationEngine {
             if (role == EmployeeRole.MANAGER) {
                 // finalRate 已在上方用 personalRate 口径计算，这里只保留非提成的逻辑
 
-                // 团队提成 = (门店新签合计 - 店长本人新签 - 门店社保业绩扣款) × teamRate
-                // 口径：团队业绩 = 他本店及他店下所有子部门新签合计，排除店长本人的新签
-                // 社保业绩扣款 = 门店全员公司承担社保合计（对齐天街工资表 2026.08 列结构）
+                // 团队提成 = (门店新签合计 - 店长本人新签 - 门店社保业绩扣款 - 新签与结佣差额) × teamRate
+                // 口径：团队业绩 = 本店及店下所有子部门新签合计，排除店长本人的新签
+                // 社保业绩扣款 = 门店社保扣减标准 × 计缴参保人数（非兼职+参保+个人比例>30%）
+                // 新签与结佣差额 = 门店当月配置值（不再用新签−结佣现算）
                 BigDecimal teamRate = bd(rank.path("teamRate").asText("0.10"));
-                BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
+                Long storeDeptId = resolveStoreDeptId(input, emp.getDeptId());
+                BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
                 // 排除店长本人的新签（personalNewsignPerfCommon 已在上方用同 snap 折算，口径与 deptNewSignTotal 一致）
                 deptTotal = deptTotal.subtract(personalNewsignPerfCommon);
                 BigDecimal deptSocial = input.deptEmployerSocialTotal == null
-                    ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
-                BigDecimal billableBase = deptTotal.subtract(deptSocial);
+                    ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                BigDecimal deptDiff = input.deptDiffTotal == null
+                    ? BigDecimal.ZERO : input.deptDiffTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                BigDecimal billableBase = deptTotal.subtract(deptSocial).subtract(deptDiff);
                 teamIncome = MoneyUtil.round2(billableBase.multiply(teamRate));
                 d.setTeamIncome(teamIncome);
 
@@ -282,9 +298,16 @@ public class SalaryCalculationEngine {
                 }
                 d.setGuaranteeFill(guaranteeFill);
 
-                // 落地：店长 sheet 展示字段（门店新签/社保业绩扣款/团队提成比例/保底）
+                // 落地：店长 sheet 展示字段（门店新签/社保标准/参保人数/社保业绩扣款/差额/团队提成比例/保底）
+                BigDecimal deptStandard = input.deptSocialStandard == null
+                    ? BigDecimal.ZERO : input.deptSocialStandard.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                int insuredCount = input.deptInsuredCount == null
+                    ? 0 : input.deptInsuredCount.getOrDefault(storeDeptId, 0);
                 d.setDeptNewSignTotal(MoneyUtil.round2(deptTotal));
+                d.setDeptSocialStandard(MoneyUtil.round2(deptStandard));
+                d.setDeptInsuredCount(insuredCount);
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(deptSocial));
+                d.setDeptDiffAmount(MoneyUtil.round2(deptDiff));
                 d.setTeamRate(teamRate);
                 d.setMinSalary(minSalary);
 
@@ -306,14 +329,18 @@ public class SalaryCalculationEngine {
                 JsonNode brackets = rank.path("ruleContent").path("brackets");
                 BigDecimal sumNewSign = BigDecimal.ZERO;
                 BigDecimal sumSocial = BigDecimal.ZERO;
+                BigDecimal sumDiff = BigDecimal.ZERO;
                 BigDecimal sumIncome = BigDecimal.ZERO;
                 List<DirectorStoreItem> storeItems = new ArrayList<>();
                 for (Long deptId : managedDepts) {
                     BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(deptId, BigDecimal.ZERO);
                     BigDecimal deptSocial = input.deptEmployerSocialTotal == null
                         ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(deptId, BigDecimal.ZERO);
-                    if (deptTotal.signum() == 0 && deptSocial.signum() == 0) continue;
-                    BigDecimal billable = deptTotal.subtract(deptSocial);
+                    BigDecimal deptDiff = input.deptDiffTotal == null
+                        ? BigDecimal.ZERO : input.deptDiffTotal.getOrDefault(deptId, BigDecimal.ZERO);
+                    if (deptTotal.signum() == 0 && deptSocial.signum() == 0 && deptDiff.signum() == 0) continue;
+                    // 合计（计薪业绩）= 新签 - 社保业绩扣款 - 新签与结佣差额
+                    BigDecimal billable = deptTotal.subtract(deptSocial).subtract(deptDiff);
                     BigDecimal dirRate = BigDecimal.ZERO;
                     if (brackets.isArray()) {
                         for (JsonNode b : brackets) {
@@ -326,9 +353,10 @@ public class SalaryCalculationEngine {
                     BigDecimal income = MoneyUtil.round2(billable.multiply(dirRate));
                     sumNewSign = sumNewSign.add(deptTotal);
                     sumSocial = sumSocial.add(deptSocial);
+                    sumDiff = sumDiff.add(deptDiff);
                     sumIncome = sumIncome.add(income);
                     String deptName = input.deptNames == null ? null : input.deptNames.get(deptId);
-                    storeItems.add(new DirectorStoreItem(deptId, deptName, deptTotal, deptSocial, billable, dirRate, income));
+                    storeItems.add(new DirectorStoreItem(deptId, deptName, deptTotal, deptSocial, deptDiff, billable, dirRate, income));
                 }
                 storeIncome = MoneyUtil.round2(sumIncome);
                 d.setStoreIncome(storeIncome);
@@ -337,6 +365,7 @@ public class SalaryCalculationEngine {
                 // 落地：汇总值（一行展示）+ JSON 明细（导出按门店分行）
                 d.setDeptNewSignTotal(MoneyUtil.round2(sumNewSign));
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(sumSocial));
+                d.setDeptDiffAmount(MoneyUtil.round2(sumDiff));
                 d.setStoreRate(BigDecimal.ZERO);
                 d.setFullAttendance(bd(snap.policy().path("fullAttendance").asText("500")));
                 d.setDirectorStoreItems(storeItems.isEmpty() ? null : writeStoreItemsJson(storeItems));
@@ -539,20 +568,64 @@ public class SalaryCalculationEngine {
         public String deptName;
         public BigDecimal newSign;
         public BigDecimal social;
+        /** 新签与结佣差额（门店当月配置） */
+        public BigDecimal diff;
         public BigDecimal billable;
         public BigDecimal rate;
         public BigDecimal income;
         public DirectorStoreItem() {}
         public DirectorStoreItem(Long deptId, String deptName, BigDecimal newSign, BigDecimal social,
-                                 BigDecimal billable, BigDecimal rate, BigDecimal income) {
+                                 BigDecimal diff, BigDecimal billable, BigDecimal rate, BigDecimal income) {
             this.deptId = deptId;
             this.deptName = deptName;
             this.newSign = newSign;
             this.social = social;
+            this.diff = diff;
             this.billable = billable;
             this.rate = rate;
             this.income = income;
         }
+    }
+
+    /**
+     * 员工/业绩归属部门 → 门店锚点解析：有归一映射用映射（组别挂店长也能取到门店级聚合），
+     * 无映射时回退原 deptId（兼容单测直接按 deptId 注入门店聚合的口径）。
+     */
+    private static Long resolveStoreDeptId(CalcInput input, Long deptId) {
+        if (deptId == null) {
+            return null;
+        }
+        if (input.deptStoreAnchor != null) {
+            Long anchor = input.deptStoreAnchor.get(deptId);
+            if (anchor != null) {
+                return anchor;
+            }
+        }
+        return deptId;
+    }
+
+    /**
+     * 门店计缴参保人数判定：非兼职 + 已参保 + 个人社保缴纳比例 > 30%。
+     * <p>个人金额取值与个人社保扣款一致：员工核定 socialFee &gt; 职级固定额 socialFixedFee
+     * &gt; 职级比例 socialSettlementRatio × baseSocial；A0=30% 不计入，C/S 系比例 0 不计入。
+     */
+    static boolean isInsuredHeadcount(EmployeeSnapshot emp, RuleService.ParsedSnapshot snap) {
+        if (Boolean.TRUE.equals(emp.getIsPartTime()) || !Boolean.TRUE.equals(emp.getSocialInsured())) {
+            return false;
+        }
+        String level = emp.getLevelCode() == null ? "A0" : emp.getLevelCode();
+        BigDecimal baseSocial = bd(snap.policy().path("baseSocial").asText("1637.15"));
+        BigDecimal personalFee;
+        if (emp.getSocialFee() != null) {
+            personalFee = emp.getSocialFee();
+        } else if (snap.policy().path("socialFixedFee").has(level)) {
+            personalFee = bd(snap.policy().path("socialFixedFee").path(level).asText("0"));
+        } else {
+            personalFee = baseSocial.multiply(bd(snap.socialRatio().path(level).asText("0.30")));
+        }
+        // 严格 > 30%：personalFee/baseSocial > 0.30（交叉相乘避免除零，baseSocial 为 0 时不计入）
+        return baseSocial.signum() > 0
+            && personalFee.multiply(HUNDRED).compareTo(baseSocial.multiply(THIRTY)) > 0;
     }
 
     private EmployeeRole resolveRole(EmployeeSnapshot emp) {
@@ -761,28 +834,4 @@ public class SalaryCalculationEngine {
         return new BigDecimal(s);
     }
 
-    /**
-     * 计算员工公司承担社保金额（employerSocial），用于门店级聚合 deptEmployerSocialTotal。
-     * 与引擎内 socialFee/employerSocial 计算同口径（L243-260 现有逻辑的复用版本），
-     * 供 {@link PayrollBatchService#buildCalcInput} 在引擎外预聚合门店社保业绩扣款使用。
-     * <p>
-     * 口径：兼职或不参保返回 0；员工级自定义 socialFee 优先，否则走 socialFixedFee / socialRatio。
-     */
-    static BigDecimal calcEmployerSocial(EmployeeSnapshot emp, RuleService.ParsedSnapshot snap) {
-        if (Boolean.TRUE.equals(emp.getIsPartTime()) || !Boolean.TRUE.equals(emp.getSocialInsured())) {
-            return BigDecimal.ZERO;
-        }
-        BigDecimal baseSocial = bd(snap.policy().path("baseSocial").asText("1637.15"));
-        if (emp.getSocialFee() != null) {
-            return baseSocial.subtract(emp.getSocialFee()).max(BigDecimal.ZERO);
-        }
-        JsonNode policy = snap.policy();
-        String level = emp.getLevelCode() == null ? "A0" : emp.getLevelCode();
-        if (policy.path("socialFixedFee").has(level)) {
-            BigDecimal sf = bd(policy.path("socialFixedFee").path(level).asText("0"));
-            return baseSocial.subtract(sf).max(BigDecimal.ZERO);
-        }
-        BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
-        return baseSocial.multiply(BigDecimal.ONE.subtract(ratio));
-    }
 }

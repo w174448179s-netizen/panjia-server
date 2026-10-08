@@ -277,4 +277,56 @@ public class RuoYiDeptAdapter implements DeptPort {
         });
         return result;
     }
+
+    @Override
+    public Map<Long, Long> findStoreAnchors(Collection<Long> deptIds) {
+        if (deptIds == null || deptIds.isEmpty()) {
+            return Map.of();
+        }
+        List<SysDept> depts = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .in(SysDept::getDeptId, deptIds));
+        Map<Long, Long> result = new LinkedHashMap<>();
+        for (SysDept d : depts) {
+            // 顶级根（parent_id=0）无门店锚点
+            if (d.getParentId() == null || d.getParentId() == 0L) {
+                continue;
+            }
+            // ancestors 约定：门店="0,{rootId}"两段；店组="0,{rootId},{storeId}"三段及以上
+            String[] chain = d.getAncestors() == null ? new String[0] : d.getAncestors().split(ANCESTORS_SEPARATOR);
+            if (chain.length <= 2) {
+                // 自身即门店
+                result.put(d.getDeptId(), d.getDeptId());
+            } else {
+                // 第 3 段（下标 2）= 门店 ID
+                try {
+                    result.put(d.getDeptId(), Long.valueOf(chain[2].trim()));
+                } catch (NumberFormatException e) {
+                    log.warn("[部门端口] ancestors 非法，无法解析门店锚点：deptId={}, ancestors={}",
+                        d.getDeptId(), d.getAncestors());
+                }
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public Map<Long, String> findStoreDepts() {
+        // 门店 = 顶级根（parent_id=0）的直接子部门
+        List<SysDept> roots = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .select(SysDept::getDeptId)
+            .eq(SysDept::getParentId, 0L));
+        if (roots.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> rootIds = roots.stream().map(SysDept::getDeptId).toList();
+        List<SysDept> stores = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .in(SysDept::getParentId, rootIds)
+            .eq(SysDept::getStatus, UserStatus.OK.getCode())
+            .orderByAsc(SysDept::getOrderNum));
+        Map<Long, String> result = new LinkedHashMap<>();
+        for (SysDept s : stores) {
+            result.put(s.getDeptId(), s.getDeptName());
+        }
+        return result;
+    }
 }

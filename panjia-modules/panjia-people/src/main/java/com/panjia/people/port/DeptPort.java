@@ -73,4 +73,20 @@ public interface DeptPort {
      *         未配置/无正常状态部门的编码不在结果中；入参为空返回空 Map
      */
     Map<String, Long> findActiveDeptIdsByCategories(Collection<String> categories);
+
+    /**
+     * 批量解析部门所属的门店级锚点（顶级根的直接子部门为门店）。
+     * <p>门店返回自身；店组返回祖先链中的门店；顶级根与不存在的部门不包含在结果中。
+     *
+     * @param deptIds 待解析部门 ID
+     * @return 部门 ID → 门店锚点 ID
+     */
+    Map<Long, Long> findStoreAnchors(Collection<Long> deptIds);
+
+    /**
+     * 查全部门店级部门（顶级根的直接子部门）ID → 部门名。
+     *
+     * @return 门店 deptId → 部门名
+     */
+    Map<Long, String> findStoreDepts();
 }

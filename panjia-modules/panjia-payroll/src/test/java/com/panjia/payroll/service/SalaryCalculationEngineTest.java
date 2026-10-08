@@ -512,4 +512,78 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("170.00").compareTo(d2.getAttendanceFee()));
         assertEquals(0, new BigDecimal("670.69").compareTo(d0.getAttendanceFee()));
     }
+
+    /** S-19: 店长团队提成 = (门店新签 - 社保标准×计缴人数 - 新签与结佣差额) × teamRate；
+     *  店长挂组别（deptId=10），通过 deptStoreAnchor 归一到门店（deptId=1）取门店级聚合。 */
+    @Test
+    void testManagerTeamIncomeDeductsSocialStandardAndDiff() {
+        EmployeeSnapshot mgr = emp("M020", "S1", "店长");
+        mgr.setDeptId(10L); // 挂组别级
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(mgr);
+        input.lockedByEmp = Map.of(mgr.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        // 门店级聚合（key=门店 1）
+        input.deptNewSignTotal = Map.of(1L, new BigDecimal("90000"));
+        input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000")); // 标准500×2人
+        input.deptSocialStandard = Map.of(1L, new BigDecimal("500"));
+        input.deptInsuredCount = Map.of(1L, 2);
+        input.deptDiffTotal = Map.of(1L, new BigDecimal("500"));
+        input.deptStoreAnchor = Map.of(10L, 1L); // 组别 → 门店
+        input.snapshot = buildSnapshot();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // 团队提成 = (90000 - 1000 - 500) × 10% = 8850
+        assertEquals(0, new BigDecimal("8850.00").compareTo(d.getTeamIncome()));
+        // 落地展示字段
+        assertEquals(0, new BigDecimal("90000.00").compareTo(d.getDeptNewSignTotal()));
+        assertEquals(0, new BigDecimal("500.00").compareTo(d.getDeptSocialStandard()));
+        assertEquals(2, d.getDeptInsuredCount());
+        assertEquals(0, new BigDecimal("1000.00").compareTo(d.getDeptEmployerSocialTotal()));
+        assertEquals(0, new BigDecimal("500.00").compareTo(d.getDeptDiffAmount()));
+    }
+
+    /** S-20: 总监门店提成扣减新签与结佣差额 — 差额后计薪业绩 99000 < 10万，落 6% 档 */
+    @Test
+    void testDirectorStoreIncomeDeductsDiff() {
+        EmployeeSnapshot dir = emp("D030", "D", "总监");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.employees = List.of(dir);
+        input.lockedByEmp = Map.of(dir.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        // 新签 120000 - 社保 1000 - 差额 20000 = 99000 < 100000 → 6%
+        input.deptNewSignTotal = Map.of(1L, new BigDecimal("120000"));
+        input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000"));
+        input.deptDiffTotal = Map.of(1L, new BigDecimal("20000"));
+        input.snapshot = buildSnapshot();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        // 门店提成 = (120000 - 1000 - 20000) × 6% = 5940
+        assertEquals(0, new BigDecimal("5940.00").compareTo(d.getStoreIncome()));
+        assertEquals(0, new BigDecimal("20000.00").compareTo(d.getDeptDiffAmount()));
+        // JSON 明细含差额与计薪业绩
+        assertNotNull(d.getDirectorStoreItems());
+        assertTrue(d.getDirectorStoreItems().contains("20000"));
+        assertTrue(d.getDirectorStoreItems().contains("99000"));
+    }
 }
