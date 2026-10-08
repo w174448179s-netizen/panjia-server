@@ -251,10 +251,13 @@ public class SalaryCalculationEngine {
             if (role == EmployeeRole.MANAGER) {
                 // finalRate 已在上方用 personalRate 口径计算，这里只保留非提成的逻辑
 
-                // 团队提成 = (门店新签合计 - 门店社保业绩扣款) × teamRate
+                // 团队提成 = (门店新签合计 - 店长本人新签 - 门店社保业绩扣款) × teamRate
+                // 口径：团队业绩 = 他本店及他店下所有子部门新签合计，排除店长本人的新签
                 // 社保业绩扣款 = 门店全员公司承担社保合计（对齐天街工资表 2026.08 列结构）
                 BigDecimal teamRate = bd(rank.path("teamRate").asText("0.10"));
                 BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
+                // 排除店长本人的新签（personalNewsignPerfCommon 已在上方用同 snap 折算，口径与 deptNewSignTotal 一致）
+                deptTotal = deptTotal.subtract(personalNewsignPerfCommon);
                 BigDecimal deptSocial = input.deptEmployerSocialTotal == null
                     ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(emp.getDeptId(), BigDecimal.ZERO);
                 BigDecimal billableBase = deptTotal.subtract(deptSocial);

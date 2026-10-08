@@ -105,7 +105,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -142,7 +143,8 @@ class SalaryCalculationEngineTest {
         // 门店新签合计 90000 → ×10% = 9000
         input.deptNewSignTotal = Map.of(1L, new BigDecimal("90000"));
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -155,14 +157,14 @@ class SalaryCalculationEngineTest {
         PayrollDetail d = engine.calculate(input).get(0);
         // 店长 finalRate = personalRate 0.70（非 baseRate 0.30）
         assertEquals(0, new BigDecimal("0.70").compareTo(d.getFinalRate()));
-        // 团队提成 = 90000 × 10% = 9000
-        assertEquals(0, new BigDecimal("9000.00").compareTo(d.getTeamIncome()));
+        // 团队提成 = (90000 - 店长本人新签折算 3000×0.96=2880) × 10% = 8712
+        assertEquals(0, new BigDecimal("8712.00").compareTo(d.getTeamIncome()));
         // 个人新签折算后：3000 × 0.96 × 70% = 2016（递延，不进 gross）
         assertEquals(0, new BigDecimal("2016.00").compareTo(d.getPersonalNewsignIncome()));
-        // 保底补足 = MAX(8000, 9000+2016) - 2016 - 9000 = 11016 - 11016 = 0
+        // 保底补足 = MAX(8000, 8712+2016) - 2016 - 8712 = 10728 - 10728 = 0
         assertEquals(0, BigDecimal.ZERO.compareTo(d.getGuaranteeFill()));
-        // 应发 = 团队 + 保底 = 9000 + 0 = 9000
-        assertEquals(0, new BigDecimal("9000.00").compareTo(d.getGross()));
+        // 应发 = 团队 + 保底 = 8712 + 0 = 8712
+        assertEquals(0, new BigDecimal("8712.00").compareTo(d.getGross()));
     }
 
     /** S-7: 店长保底触发 — 团队 2000 + 个人新签 1000 = 3000 < 8000 → 补足 5000，当月发 7000 */
@@ -175,7 +177,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = Map.of(mgr.getEmployeeId(), List.of(item(mgr.getEmployeeId(), new BigDecimal("1000"), "SECOND_HAND")));
         input.deptNewSignTotal = Map.of(1L, new BigDecimal("20000")); // 20000×10% = 2000
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -186,13 +189,13 @@ class SalaryCalculationEngineTest {
         input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
-        // 团队 = 2000, 个人新签折算后递延 = 1000×0.96×70% = 672
-        assertEquals(0, new BigDecimal("2000.00").compareTo(d.getTeamIncome()));
+        // 团队 = (20000 - 店长本人新签折算 1000×0.96=960) × 10% = 1904, 个人新签折算后递延 = 672
+        assertEquals(0, new BigDecimal("1904.00").compareTo(d.getTeamIncome()));
         assertEquals(0, new BigDecimal("672.00").compareTo(d.getPersonalNewsignIncome()));
-        // 保底补足 = MAX(8000, 2000+672) - 672 - 2000 = 8000 - 2672 = 5328
-        assertEquals(0, new BigDecimal("5328.00").compareTo(d.getGuaranteeFill()));
-        // 应发 = 2000 + 5328 = 7328
-        assertEquals(0, new BigDecimal("7328.00").compareTo(d.getGross()));
+        // 保底补足 = MAX(8000, 1904+672) - 672 - 1904 = 8000 - 2576 = 5424
+        assertEquals(0, new BigDecimal("5424.00").compareTo(d.getGuaranteeFill()));
+        // 应发 = 1904 + 5424 = 7328，保底兜底至 minSalary+commissionIncome = 8000
+        assertEquals(0, new BigDecimal("8000.00").compareTo(d.getGross()));
     }
 
     /** S-19: 店长结佣提成用 personalRate 70% — 结佣 100000 × 0.96 × 70% = 67200 */
@@ -207,7 +210,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -237,7 +241,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = new HashMap<>();
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -265,7 +270,8 @@ class SalaryCalculationEngineTest {
         // 门店新签 120000 → 跳点 7% → 8400
         input.deptNewSignTotal = Map.of(1L, new BigDecimal("120000"));
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -295,7 +301,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -325,7 +332,8 @@ class SalaryCalculationEngineTest {
         input.deptNewSignTotal = Map.of(1L, new BigDecimal("90000"));
         input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000"));
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -357,7 +365,8 @@ class SalaryCalculationEngineTest {
         input.deptNewSignTotal = Map.of(1L, new BigDecimal("120000"));
         input.deptEmployerSocialTotal = Map.of(1L, new BigDecimal("1000"));
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -400,7 +409,8 @@ class SalaryCalculationEngineTest {
         input.directorStoreDepts = Map.of(dir.getEmployeeId(), List.of(1L, 2L, 3L));
         input.deptNames = Map.of(1L, "龙湖店", 2L, "云庭店", 3L, "长庆店");
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -443,7 +453,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
@@ -469,7 +480,8 @@ class SalaryCalculationEngineTest {
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = new HashMap<>();
         input.snapshot = buildSnapshot();
-        input.manualIncome = new HashMap<>();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
         input.manualDeduct = new HashMap<>();
         input.negativeBalance = new HashMap<>();
         input.cumulativeTax = new HashMap<>();
