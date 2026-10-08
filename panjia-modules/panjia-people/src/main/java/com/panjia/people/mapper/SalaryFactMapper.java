@@ -122,8 +122,8 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
         FROM pj_people_salary_fact f
         JOIN pj_people_employee e ON e.employee_id = f.employee_id
         WHERE f.fact_type = #{factType}
-          AND f.effective_date &lt;= #{point}
-          AND (f.expire_date IS NULL OR #{point} &lt; f.expire_date)
+          AND f.effective_date <= #{point}
+          AND (f.expire_date IS NULL OR #{point} < f.expire_date)
           AND e.status IN ('ACTIVE', 'PARTTIME')
         ORDER BY f.employee_id
         """)
