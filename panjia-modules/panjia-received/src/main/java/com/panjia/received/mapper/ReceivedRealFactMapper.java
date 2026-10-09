@@ -183,6 +183,8 @@ public interface ReceivedRealFactMapper {
     /**
      * 按期间查实收「合同」维度汇总（结佣申请列表合并展示用）。
      * 按 COALESCE(rc.order_no,rc.contract_no) 聚合；deptId 非空含下级部门。
+     * <p>period 可空：空时跨全部期间聚合（仅录合同号不选期间场景），
+     * expectedAmount 对应取该合同全部期间 ACTIVE PERF_EXPECT 合计。
      */
     @Select("""
         <script>
@@ -197,6 +199,7 @@ public interface ReceivedRealFactMapper {
                    FROM pj_perf_fact pe
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                      AND (COALESCE(pe.order_no, pe.contract_no)) = s.biz_key
+                     <if test="period != null and period != ''">
                      AND (
                            (pe.period = #{period} AND EXISTS (
                                SELECT 1 FROM pj_perf_fact pc
@@ -211,6 +214,7 @@ public interface ReceivedRealFactMapper {
                                  AND pc.performance_amount != 0
                                  AND (COALESCE(pc.order_no, pc.contract_no)) = s.biz_key))
                          )
+                     </if>
                ), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
@@ -274,7 +278,7 @@ public interface ReceivedRealFactMapper {
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code) IS NOT NULL
           AND (
             rc.contract_no IN

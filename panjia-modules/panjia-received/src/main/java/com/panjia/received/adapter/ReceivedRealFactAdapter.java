@@ -119,15 +119,14 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
 
     @Override
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId) {
-        if (period == null || period.isBlank()) {
-            return Collections.emptyList();
-        }
+        // period 可空：结佣列表仅录合同号不选期间时跨期汇总（mapper 内期间条件化）
         return realMapper.selectContractSummaries(period, deptId, employeeId);
     }
 
     @Override
     public long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys) {
-        if (period == null || period.isBlank() || bizKeys == null || bizKeys.isEmpty()) {
+        // period 可空：跨期汇总时统计全部期间去重员工数（mapper 内期间条件化）
+        if (bizKeys == null || bizKeys.isEmpty()) {
             return 0L;
         }
         return realMapper.selectDistinctEmployeeCountByKeys(period, bizKeys);

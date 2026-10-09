@@ -49,6 +49,8 @@ public interface ReceivedRealFactPort {
     /**
      * 按期间查实收「合同」维度汇总（结佣申请列表合并展示用）。
      * 按 COALESCE(rc.order_no, rc.contract_no) 聚合；deptId 非空含下级部门。
+     *
+     * @param period 归属期间 YYYY-MM；可空，空时跨全部期间聚合（应收取该合同全部期间合计）
      */
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId);
 
@@ -58,6 +60,7 @@ public interface ReceivedRealFactPort {
      * COALESCE(rd.employee_id, 工号兜底员工 e.employee_id, rd.employee_external_code)；
      * 仅统计 ACTIVE 明细，任一业务键（order_no 或 contract_no）命中即计入。
      *
+     * @param period 归属期间 YYYY-MM；可空，空时统计全部期间
      * @return 去重员工数；无匹配返回 0
      */
     long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys);

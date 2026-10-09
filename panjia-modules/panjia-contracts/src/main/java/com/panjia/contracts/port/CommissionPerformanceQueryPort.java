@@ -88,7 +88,7 @@ public interface CommissionPerformanceQueryPort {
     /**
      * 按期间查「合同」维度业绩汇总（结佣申请列表与合同申请单合并展示用）。
      *
-     * @param period   归属期间 YYYY-MM
+     * @param period   归属期间 YYYY-MM；可空，空时跨全部期间汇总（结佣列表仅录合同号场景）
      * @param deptId   门店 ID（null 查全部；非 null 含下级部门，与业绩明细页口径一致）
      * @param factType 事实口径（FactType code）
      * @return 合同维度摘要列表（仅 contract_no 非空的合同，按签约时间倒序由调用方排序）
@@ -98,7 +98,7 @@ public interface CommissionPerformanceQueryPort {
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计跨合同去重员工数（结佣明细列表合计用）。
      *
-     * @param period   归属期间 YYYY-MM
+     * @param period   归属期间 YYYY-MM；可空，空时统计全部期间
      * @param bizKeys  合同号/订单号业务键集合（不可为空）
      * @param factType 事实口径（FactType code：PERF_REAL 走实收拆表，其余走 pj_perf_fact）
      * @return 去重员工数；无匹配返回 0

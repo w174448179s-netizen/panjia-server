@@ -335,19 +335,21 @@ public class CommissionApplicationService {
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐单处理）。
      * <p>去重合同号，逐张发起并提交审批。已有未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）跳过；
      * REJECTED 单自动重提。单合同失败不阻断整批。
-     * <p>期间口径（2026-10 调整）：结佣期间 = 发起月（period 为空时自动取当前月），
-     * 实收事实跨期查找——6 月实收 8 月发起即归属 8 月结佣，不按实收日期定期间。
+     * <p>期间口径：结佣期间由发起人在弹窗手动选择（必传 YYYY-MM），不再自动取当前月；
+     * 实收事实跨期查找——6 月实收 10 月发起即归属 10 月结佣，不按实收日期定期间。
      *
-     * @param period      结佣归属月（发起月）；空时自动取当前月
+     * @param period      结佣归属月（必传，发起人选择）
      * @param contractNos 合同号列表（允许重复，内部去重）
      * @param operatorId  发起人 ID
      * @return 批量发起结果
      */
     public CompletableFuture<CommissionBatchResultVo> batchApplyByContract(
             String period, List<String> contractNos, Long operatorId) {
-        // 结佣期间 = 发起月：未显式指定时自动取当前月
-        final String applyPeriod = StringUtils.isNotBlank(period)
-            ? period.trim() : LocalDateTime.now().format(PERIOD_FORMATTER);
+        // 结佣期间必选：由发起人显式选择归属月，不再默认当前月
+        final String applyPeriod = StringUtils.trimToNull(period);
+        if (applyPeriod == null) {
+            throw new ServiceException("请选择结佣期间");
+        }
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
