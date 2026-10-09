@@ -26,6 +26,7 @@ import org.dromara.system.domain.SysUser;
 import org.dromara.system.domain.vo.SysClientVo;
 import org.dromara.system.domain.vo.SysUserVo;
 import org.dromara.system.mapper.SysUserMapper;
+import org.dromara.system.service.ISysConfigService;
 import org.dromara.web.domain.vo.LoginVo;
 import org.dromara.web.service.IAuthStrategy;
 import org.dromara.web.service.SysLoginService;
@@ -44,6 +45,7 @@ public class PasswordAuthStrategy implements IAuthStrategy {
     private final CaptchaProperties captchaProperties;
     private final SysLoginService loginService;
     private final SysUserMapper userMapper;
+    private final ISysConfigService configService;
 
     /**
      * 执行账号密码登录，并按客户端配置生成访问令牌。
@@ -80,6 +82,10 @@ public class PasswordAuthStrategy implements IAuthStrategy {
         loginVo.setAccessToken(StpUtil.getTokenValue());
         loginVo.setExpireIn(StpUtil.getTokenTimeout());
         loginVo.setClientId(client.getClientId());
+        // 检测是否为初始密码（用户输入密码 == 系统配置 sys.user.initPassword），首登强制改密
+        String initPassword = configService.selectConfigByKey("sys.user.initPassword");
+        boolean isInitPwd = StringUtils.isNotBlank(initPassword) && StringUtils.equals(password, initPassword);
+        loginVo.setNeedChangePassword(isInitPwd);
         return loginVo;
     }
 

@@ -51,4 +51,10 @@ public class LoginVo {
      */
     private String openid;
 
+    /**
+     * 是否需要强制修改密码（true=当前密码仍为系统初始密码，首登必须改密）
+     */
+    @JsonProperty("need_change_password")
+    private Boolean needChangePassword;
+
 }
