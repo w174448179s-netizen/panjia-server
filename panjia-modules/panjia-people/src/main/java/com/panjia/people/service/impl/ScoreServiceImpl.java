@@ -22,6 +22,7 @@ import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -52,6 +53,15 @@ public class ScoreServiceImpl implements ScoreService {
 
     /** 数据来源：积分日报导入同步 */
     private static final String DATA_SOURCE_IMPORT = "IMPORT";
+
+    /** 超级管理员角色键（全量数据权限） */
+    private static final String ROLE_KEY_SUPERADMIN = "superadmin";
+
+    /** 总监角色键（全量数据权限） */
+    private static final String ROLE_KEY_DIRECTOR = "director";
+
+    /** 店长角色键（本门店数据权限） */
+    private static final String ROLE_KEY_MANAGER = "manager";
 
     private final PerformanceScoreMapper scoreMapper;
     private final EmployeeMapper employeeMapper;
@@ -223,6 +233,99 @@ public class ScoreServiceImpl implements ScoreService {
         ScoreVO vo = toVO(record, scoreGradePolicy.currentRule());
         enrich(List.of(vo));
         return vo;
+    }
+
+    // ==================== 本人/组织视角查询（综合查询→积分查询） ====================
+
+    @Override
+    public PageResult<ScoreVO> pageMy(Long userId, ScoreQuery query, PageQuery pageQuery) {
+        Long myEmployeeId = findEmployeeIdByUserId(userId);
+        if (myEmployeeId == null) {
+            return PageResult.build(List.of(), 0L);
+        }
+
+        LambdaQueryWrapper<PerformanceScore> wrapper = new LambdaQueryWrapper<>();
+        applyMonthRange(wrapper, query);
+
+        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
+            // 超管/总监：全量，支持部门/员工/姓名工号筛选
+            wrapper.eq(query.getEmployeeId() != null, PerformanceScore::getEmployeeId, query.getEmployeeId());
+            if (StringUtils.isNotBlank(query.getEmployeeName()) || StringUtils.isNotBlank(query.getEmployeeCode())) {
+                List<Long> matchedIds = findEmployeeIds(query.getEmployeeName(), query.getEmployeeCode());
+                if (matchedIds.isEmpty()) {
+                    return PageResult.build(List.of(), 0L);
+                }
+                wrapper.in(PerformanceScore::getEmployeeId, matchedIds);
+            }
+            if (query.getDeptId() != null) {
+                List<Long> deptIds = deptPort.findDeptAndChildIds(query.getDeptId());
+                List<Long> employeeIds = employeeMapper.selectList(
+                        new LambdaQueryWrapper<Employee>().in(Employee::getDeptId, deptIds))
+                    .stream().map(Employee::getEmployeeId).toList();
+                if (employeeIds.isEmpty()) {
+                    return PageResult.build(List.of(), 0L);
+                }
+                wrapper.in(PerformanceScore::getEmployeeId, employeeIds);
+            }
+        } else if (hasRole(ROLE_KEY_MANAGER)) {
+            // 店长：本门店子树
+            Employee me = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+                .eq(Employee::getEmployeeId, myEmployeeId)
+                .select(Employee::getDeptId)
+                .last("limit 1"));
+            if (me == null || me.getDeptId() == null) {
+                return PageResult.build(List.of(), 0L);
+            }
+            List<Long> deptIds = deptPort.findDeptAndChildIds(me.getDeptId());
+            List<Long> employeeIds = employeeMapper.selectList(
+                    new LambdaQueryWrapper<Employee>().in(Employee::getDeptId, deptIds))
+                .stream().map(Employee::getEmployeeId).toList();
+            if (employeeIds.isEmpty()) {
+                return PageResult.build(List.of(), 0L);
+            }
+            wrapper.in(PerformanceScore::getEmployeeId, employeeIds);
+        } else {
+            // 员工/经纪人/人事等：仅本人
+            wrapper.eq(PerformanceScore::getEmployeeId, myEmployeeId);
+        }
+
+        wrapper.orderByDesc(PerformanceScore::getScoreMonth)
+            .orderByDesc(PerformanceScore::getId);
+
+        Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
+        PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule)).toList();
+        enrich(vos);
+        return PageResult.build(vos, page.getTotal());
+    }
+
+    /**
+     * 按登录用户 ID 解析员工 ID（无员工档案返回 null）。
+     */
+    private Long findEmployeeIdByUserId(Long loginUserId) {
+        if (loginUserId == null) {
+            return null;
+        }
+        Employee employee = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+            .eq(Employee::getUserId, loginUserId)
+            .select(Employee::getEmployeeId)
+            .last("limit 1"));
+        return employee == null ? null : employee.getEmployeeId();
+    }
+
+    /**
+     * 判断当前登录用户是否拥有指定角色键。
+     */
+    private boolean hasRole(String roleKey) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoles() == null) {
+                return false;
+            }
+            return loginUser.getRoles().stream().anyMatch(r -> roleKey.equals(r.getRoleKey()));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ==================== 手工新增 / 删除 ====================

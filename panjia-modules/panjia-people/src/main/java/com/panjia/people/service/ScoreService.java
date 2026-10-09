@@ -46,6 +46,19 @@ public interface ScoreService extends PeopleScoreQueryPort {
     /** 管理端分页查询（人事/总监） */
     PageResult<ScoreVO> page(ScoreQuery query, PageQuery pageQuery);
 
+    /**
+     * 本人/组织视角积分查询（综合查询→积分查询菜单）。
+     * <p>
+     * 数据权限：超管/总监→全量；店长→本门店子树；其他（员工/经纪人/人事等）→仅本人。
+     * 员工身份由后端按登录态解析（LoginHelper），不接受前端 employeeId 参数。
+     *
+     * @param userId    登录用户 ID
+     * @param query     月份区间 + 可选部门/员工筛选（仅管理角色生效）
+     * @param pageQuery 分页参数
+     * @return 积分明细分页（含派生字段：平均积分/等级/扣点/扣款/锁定标记）
+     */
+    PageResult<ScoreVO> pageMy(Long userId, ScoreQuery query, PageQuery pageQuery);
+
     /** 明细查询 */
     ScoreVO getById(Long id);
 

@@ -12,6 +12,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.web.core.BaseController;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -54,6 +55,18 @@ public class ScoreController extends BaseController {
     @GetMapping("/{id}")
     public R<ScoreVO> getById(@PathVariable Long id) {
         return R.ok(scoreService.getById(id));
+    }
+
+    /**
+     * 本人/组织视角积分查询（综合查询→积分查询）。
+     * <p>
+     * 数据权限：超管/总监→全量；店长→本门店子树；其他→仅本人。
+     * 员工身份由后端按登录态解析，不接受前端 employeeId 参数。
+     */
+    @SaCheckPermission("people:score:my:query")
+    @GetMapping("/my/list")
+    public R<PageResult<ScoreVO>> myList(ScoreQuery query, PageQuery pageQuery) {
+        return R.ok(scoreService.pageMy(LoginHelper.getUserId(), query, pageQuery));
     }
 
     /**
