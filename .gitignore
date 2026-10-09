@@ -85,3 +85,8 @@ deploy/windows/build_nsi_upgrade/
 .workbuddy/
 .DS_Store
 
+######################################################################
+# 数据库备份产物（script/db/backup.sh 生成）
+backups/
+*.dump
+

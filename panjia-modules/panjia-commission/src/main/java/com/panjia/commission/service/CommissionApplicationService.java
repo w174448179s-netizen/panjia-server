@@ -335,17 +335,19 @@ public class CommissionApplicationService {
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐单处理）。
      * <p>去重合同号，逐张发起并提交审批。已有未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）跳过；
      * REJECTED 单自动重提。单合同失败不阻断整批。
+     * <p>期间口径（2026-10 调整）：结佣期间 = 发起月（period 为空时自动取当前月），
+     * 实收事实跨期查找——6 月实收 8 月发起即归属 8 月结佣，不按实收日期定期间。
      *
-     * @param period      业绩归属月
+     * @param period      结佣归属月（发起月）；空时自动取当前月
      * @param contractNos 合同号列表（允许重复，内部去重）
      * @param operatorId  发起人 ID
      * @return 批量发起结果
      */
     public CompletableFuture<CommissionBatchResultVo> batchApplyByContract(
             String period, List<String> contractNos, Long operatorId) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("结算月不能为空");
-        }
+        // 结佣期间 = 发起月：未显式指定时自动取当前月
+        final String applyPeriod = StringUtils.isNotBlank(period)
+            ? period.trim() : LocalDateTime.now().format(PERIOD_FORMATTER);
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
@@ -358,7 +360,7 @@ public class CommissionApplicationService {
         if (deduped.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
-        checkPeriodOpen(period, "批量发起结佣");
+        checkPeriodOpen(applyPeriod, "批量发起结佣");
         // 在 HTTP 线程捕获本次请求的 token：异步线程无 Sa-Token 上下文，
         // 需在线程内安装携带该 token 的 Mock 上下文（会话仍从 Redis 读取），
         // 否则流程发起人变量(initiator)为空、总监发起无法自动过总监节点、数据权限拦截报错
@@ -370,16 +372,17 @@ public class CommissionApplicationService {
         Map<Long, Long> deptParentMap = LoginHelper.isSuperAdmin() ? null : loadDeptParentMap();
         // 批量上下文：同步阶段缓存事实（避免 doApply 重复查）、预加载应收金额（避免逐单全表查）
         BatchApplyContext ctx = new BatchApplyContext();
-        // 应收金额一次性加载：全期间合同汇总按 contractNo 建 Map，doApply 直接取值（P0）
-        ctx.expectedAmounts.putAll(loadExpectedAmountMap(period));
+        // 应收金额一次性加载：跨月口径，以用户输入的业务键直接匹配（不依赖实收期间）
+        ctx.expectedAmounts.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(deduped));
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
         CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
         syncResult.setTotal(deduped.size());
         for (String contractNo : deduped) {
             try {
-                // 查实收事实并缓存，doApply 直接复用（P0：减少一半事实查询）
+                // 查实收事实并缓存，doApply 直接复用（P0：减少一半事实查询）；
+                // 跨期查找（period 传 null）：发起月不必与实收月一致
                 List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-                    .findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+                    .findActiveByContract(null, contractNo, FACT_TYPE_REAL);
                 ctx.factsMap.put(contractNo, facts);
                 Long contractDeptId = facts.stream()
                     .map(PerformanceFactSummaryDTO::getDeptId)
@@ -399,11 +402,11 @@ public class CommissionApplicationService {
         }
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
         log.info("[结佣-批量发起] period={}, total={}, myContracts={}, skipped={}, operator={}",
-            period, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
+            applyPeriod, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
         final CommissionBatchResultVo preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> runWithOperatorToken(tokenName, tokenValue, () -> {
-                CommissionBatchResultVo asyncResult = doBatchApply(period, myContracts, operatorId, ctx);
+                CommissionBatchResultVo asyncResult = doBatchApply(applyPeriod, myContracts, operatorId, ctx);
                 preResult.getSkippedContracts().forEach(asyncResult.getSkippedContracts()::add);
                 asyncResult.setTotal(preResult.getTotal());
                 asyncResult.setSkipped(asyncResult.getSkippedContracts().size());
@@ -531,14 +534,15 @@ public class CommissionApplicationService {
                 + " 月已存在" + existing.getStatus().getDesc() + "申请单（" + existing.getApplyNo() + "），请勿重复发起");
         }
 
-        // 拉取该合同 ACTIVE 实收事实：从 ctx 复用同步阶段缓存，避免重复查（P0）
+        // 拉取该合同 ACTIVE 实收事实：从 ctx 复用同步阶段缓存，避免重复查（P0）；
+        // 跨期查找（period 传 null）：实收月可与发起月不同（6 月实收 8 月发起）
         List<PerformanceFactSummaryDTO> facts = ctx != null && ctx.factsMap.containsKey(contractNo)
             ? ctx.factsMap.get(contractNo)
-            : performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+            : performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL);
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
-            throw new ServiceException("合同 " + contractNo + " " + period
-                + " 月无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
+            throw new ServiceException("合同 " + contractNo
+                + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
 
         // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣
@@ -633,11 +637,11 @@ public class CommissionApplicationService {
      */
     private void rebuildItems(CommissionApplication application, String period, String contractNo) {
         List<PerformanceFactSummaryDTO> facts =
-            performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_REAL);
+            performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL);
         List<PerformanceFactSummaryDTO> nonZeroFacts = filterNonZero(facts);
         if (nonZeroFacts.isEmpty()) {
-            throw new ServiceException("合同 " + contractNo + " " + period
-                + " 月无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
+            throw new ServiceException("合同 " + contractNo
+                + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
         List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts, period);
         if (itemFacts.isEmpty()) {
@@ -801,28 +805,6 @@ public class CommissionApplicationService {
     private BigDecimal resolveExpectedAmount(String period, String contractNo) {
         return performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(java.util.List.of(contractNo))
             .getOrDefault(contractNo, BigDecimal.ZERO);
-    }
-
-    /**
-     * 批量加载合同应收金额 Map（P0 优化，跨月口径）。
-     * <p>
-     * 以期间内实收合同清单为锚（listContractSummaries），单次调用
-     * {@link CommissionPerformanceQueryPort#sumExpectAmountsByKeysCrossPeriod}
-     * 跨月合计其应收（新签可能早于到账月），同时返回合同号与订单号双键，
-     * doApply 用用户输入（合同号或订单号）直接取值，避免逐合同全表查（N 次→1 次）。
-     */
-    private Map<String, BigDecimal> loadExpectedAmountMap(String period) {
-        List<PerformanceContractSummaryDTO> contracts = performanceQueryPort
-            .listContractSummaries(period, null, FACT_TYPE_REAL, null);
-        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
-        for (PerformanceContractSummaryDTO c : contracts) {
-            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
-            // sumExpectAmountsByKeysCrossPeriod 内部仍会对 contract_no 列做 OR 匹配兜底
-            if (c.getOrderNo() != null && !c.getOrderNo().isBlank()) {
-                bizKeys.add(c.getOrderNo());
-            }
-        }
-        return performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(bizKeys);
     }
 
     /**
@@ -2108,9 +2090,14 @@ public class CommissionApplicationService {
         return count != null && count > 0;
     }
 
+    /**
+     * 查询该合同（跨期间）最近一张活跃申请单，防重复结佣。
+     * <p>
+     * 跨期口径（2026-10）：结佣期间与实收月解耦后，同一合同任何期间的活跃单
+     * （DRAFT/SUBMITTED/APPROVED/LOCKED）都阻止再次发起——合同已结佣的追加走调整单。
+     */
     private CommissionApplication findActiveApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
             .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
                 .or().eq(CommissionApplication::getOrderNo, contractNo))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
@@ -2146,8 +2133,8 @@ public class CommissionApplicationService {
         if (contractNos.isEmpty()) {
             return;
         }
+        // 跨期间加载（2026-10）：结佣期间与实收月解耦，同合同任何期间的活跃/驳回单都参与幂等判断
         List<CommissionApplication> all = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
             .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
                 .or().in(CommissionApplication::getOrderNo, contractNos))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,

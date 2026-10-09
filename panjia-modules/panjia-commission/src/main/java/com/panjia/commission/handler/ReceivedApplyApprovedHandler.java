@@ -28,6 +28,10 @@ import tools.jackson.databind.ObjectMapper;
 @RequiredArgsConstructor
 public class ReceivedApplyApprovedHandler implements DomainEventHandler {
 
+    /** 结佣期间 = 发起月：yyyy-MM */
+    private static final java.time.format.DateTimeFormatter APPLY_PERIOD_FORMATTER =
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM");
+
     private final CommissionApplicationService applicationService;
     private final ObjectMapper objectMapper;
 
@@ -45,27 +49,29 @@ public class ReceivedApplyApprovedHandler implements DomainEventHandler {
             log.error("[结佣-实收通过] 事件反序列化失败：eventId={}", eventId, e);
             return;
         }
-        String period = event.getPeriod();
         // 合同号兜底订单号：实收行仅订单号时按订单号尝试（内部按事实真实合同号归一化）
         String contractNo = StringUtils.isNotBlank(event.getContractNo())
             ? event.getContractNo()
             : event.getOrderNo();
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
-            log.warn("[结佣-实收通过] 事件缺少期间/合同号，跳过：eventId={}, period={}, contractNo={}",
-                eventId, period, contractNo);
+        if (StringUtils.isBlank(contractNo)) {
+            log.warn("[结佣-实收通过] 事件缺少合同号，跳过：eventId={}, contractNo={}", eventId, contractNo);
             return;
         }
+        // 结佣期间 = 发起月（2026-10 调整）：实收审批通过的当月自动建 DRAFT 草稿单，
+        // 不再按实收期间归属——6 月实收 8 月审批通过即归属 8 月结佣（period 为空时
+        // createApplicationWithItems 的实收事实查找为跨期口径）
+        String applyPeriod = java.time.LocalDateTime.now().format(APPLY_PERIOD_FORMATTER);
         try {
             CommissionApplication application = applicationService.createApplicationWithItems(
-                period, contractNo, event.getOperatorId(), null);
-            log.info("[结佣-实收通过] 自动产生结佣记录（DRAFT 待提交）：applyNo={}, period={}, contractNo={}, "
+                applyPeriod, contractNo, event.getOperatorId(), null);
+            log.info("[结佣-实收通过] 自动产生结佣记录（DRAFT 待提交）：applyNo={}, period={}, receivedPeriod={}, contractNo={}, "
                     + "itemCount={}, amount={}, receivedApplyId={}",
-                application.getApplyNo(), period, contractNo,
+                application.getApplyNo(), applyPeriod, event.getPeriod(), contractNo,
                 application.getItemCount(), application.getTotalAmount(), event.getApplyId());
         } catch (ServiceException e) {
             // 业务拒绝（已有活跃单幂等冲突 / 新签业绩缺失等）：跳过不重试，人工发起兜底
             log.info("[结佣-实收通过] 自动建单跳过：eventId={}, period={}, contractNo={}, 原因={}",
-                eventId, period, contractNo, e.getMessage());
+                eventId, applyPeriod, contractNo, e.getMessage());
         }
     }
 }

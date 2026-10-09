@@ -102,8 +102,12 @@ public interface ReceivedRealFactMapper {
     List<PerformanceFactSummaryDTO> selectActiveByEmployee(@Param("period") String period,
                                                            @Param("employeeId") Long employeeId);
 
-    /** 按期间 + 合同号/订单号查 ACTIVE 实收明细。 */
+    /**
+     * 按合同号/订单号查 ACTIVE 实收明细。
+     * period 可空：空时查该合同全部期间（结佣发起月与实收月解耦，发起时跨期找实收）。
+     */
     @Select("""
+        <script>
         SELECT """ + SUMMARY_COLUMNS + """
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
@@ -113,9 +117,10 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ORDER BY rd.id
+        </script>
         """)
     List<PerformanceFactSummaryDTO> selectActiveByContract(@Param("period") String period,
                                                            @Param("contractNo") String contractNo);
