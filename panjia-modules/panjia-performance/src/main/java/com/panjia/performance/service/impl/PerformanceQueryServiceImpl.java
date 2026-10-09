@@ -62,8 +62,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
-    /** 经纪人角色 ID（仅本人业绩数据权限） */
-    private static final Long ROLE_AGENT = 1761300000000000014L;
+    /** 经纪人角色键（sys_role.role_key，跨环境稳定标识；登录时写入 LoginUser.roles） */
+    private static final String ROLE_KEY_AGENT = "agent";
 
     /** 员工下拉选项单次最大返回条数 */
     private static final int EMPLOYEE_OPTION_LIMIT = 20;
@@ -261,14 +261,19 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
      * 返回当前登录用户对应的员工 ID；非经纪人角色返回 null（不限制）。
      * 经纪人在合同列表中只看到自己参与的合同，但展开合同后可见该合同下所有人的分成
      * （{@link #listManageDetailsByContractNos} 不传 selfEmployeeId）。
+     * <p>
+     * 角色判定用 {@code LoginUser.roles} 的 roleKey（登录时已填充），不依赖
+     * {@code LoginUser.roleId}（"当前角色"字段在登录流程未赋值，恒为 null）。
      */
     private Long resolveSelfEmployeeId() {
         try {
             var loginUser = LoginHelper.getLoginUser();
-            if (loginUser == null || loginUser.getRoleId() == null) {
+            if (loginUser == null || loginUser.getRoles() == null || loginUser.getRoles().isEmpty()) {
                 return null;
             }
-            if (!ROLE_AGENT.equals(loginUser.getRoleId())) {
+            boolean isAgent = loginUser.getRoles().stream()
+                .anyMatch(r -> ROLE_KEY_AGENT.equals(r.getRoleKey()));
+            if (!isAgent) {
                 return null;
             }
             EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(loginUser.getUserId());
