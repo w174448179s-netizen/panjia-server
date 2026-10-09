@@ -86,7 +86,8 @@ deploy/windows/build_nsi_upgrade/
 .DS_Store
 
 ######################################################################
-# 数据库备份产物（script/db/backup.sh 生成）
+# 数据库备份产物（script/db/backup.sh / 系统内备份恢复 生成）
 backups/
+backup/
 *.dump
 

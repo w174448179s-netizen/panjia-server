@@ -154,6 +154,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-payroll</artifactId>
         </dependency>
+        <!-- 备份容灾域（数据库备份/还原/下载，系统管理 → 备份恢复） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-backup</artifactId>
+        </dependency>
         <!-- 导入域（导入模板） -->
         <dependency>
             <groupId>com.panjia</groupId>

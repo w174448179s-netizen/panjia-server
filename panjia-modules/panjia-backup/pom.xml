@@ -16,9 +16,47 @@
     </description>
 
     <dependencies>
+        <!-- 盘家公共模块（PanjiaAutoConfiguration：@ComponentScan("com.panjia") 扫描入口 / PanjiaBaseEntity / 异常处理） -->
         <dependency>
             <groupId>com.panjia</groupId>
             <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- 底座公共核心（R / ServiceException） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController / BaseController） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（@SaCheckPermission） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- 底座操作日志（@Log / BusinessType） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-log</artifactId>
+        </dependency>
+
+        <!-- 底座 Redis（@RepeatSubmit 防重复提交） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-redis</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 
