@@ -63,6 +63,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -1292,6 +1293,11 @@ public class CommissionApplicationService {
     public PageResult<CommissionContractVo> listContracts(CommissionApplyBo query, PageQuery pageQuery) {
         // period 可空：仅录合同号等关键字不选期间时跨期查询（与业绩明细列表口径一致）
         String period = StringUtils.trimToNull(query.getPeriod());
+        String keyword = StringUtils.trimToNull(query.getKeyword());
+        // 必须提供至少一个查询条件（期间或关键字），避免全表扫描导致超时
+        if (period == null && keyword == null) {
+            return PageResult.build(Collections.emptyList(), 0L);
+        }
 
         // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
@@ -1313,7 +1319,7 @@ public class CommissionApplicationService {
             }
         }
 
-        String keyword = StringUtils.trimToNull(query.getKeyword());
+        // keyword 已在方法开头提取，此处直接复用
         String bizType = StringUtils.trimToNull(query.getBizType());
         // 审批节点数据隔离：审批中单据仅本人角色对应节点可见（财务→FINANCE，总监→DIRECTOR），超管看全部
         boolean nodeScopeAll = LoginHelper.isSuperAdmin();
