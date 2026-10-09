@@ -9,6 +9,7 @@ import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.web.core.BaseController;
+import com.panjia.people.dto.AttendanceDetailVO;
 import com.panjia.people.dto.AttendanceQuery;
 import com.panjia.people.dto.AttendanceSaveDTO;
 import com.panjia.people.dto.AttendanceVO;
@@ -21,9 +22,11 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * 考勤明细（员工域）。
@@ -131,5 +134,19 @@ public class AttendanceController extends BaseController {
     @GetMapping("/my/{id}")
     public R<AttendanceVO> myGetInfo(@PathVariable Long id) {
         return R.ok(attendanceService.getMy(id, LoginHelper.getUserId()));
+    }
+
+    /**
+     * 本人考勤每日明细（综合查询→考勤查询→展开行）。
+     * <p>
+     * 强制仅返回登录用户对应员工的每日明细。
+     *
+     * @param attendMonth 考勤月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    @SaCheckPermission("people:attendance:my:query")
+    @GetMapping("/my/details")
+    public R<List<AttendanceDetailVO>> myDetails(@RequestParam String attendMonth) {
+        return R.ok(attendanceService.listMyDetails(LoginHelper.getUserId(), attendMonth));
     }
 }

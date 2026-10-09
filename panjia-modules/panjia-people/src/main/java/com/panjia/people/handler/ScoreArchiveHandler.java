@@ -1,5 +1,6 @@
 package com.panjia.people.handler;
 
+import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
@@ -66,6 +67,11 @@ public class ScoreArchiveHandler implements DomainEventHandler {
         }
         // 抛出异常交由 Dispatcher 重试（upsert 幂等，重投安全）
         scoreService.syncScoreSummaries(event.getPeriod(), summaries);
+        // 积分每日明细同步（先删后插，幂等）
+        List<ScoreDetailSyncDTO> details = event.getScoreDetails();
+        if (details != null && !details.isEmpty()) {
+            scoreService.syncScoreDetails(event.getPeriod(), details);
+        }
         log.info("[积分消费] 归档事件积分同步完成：batchId={}, period={}, 人数={}",
             event.getBatchId(), event.getPeriod(), summaries.size());
     }

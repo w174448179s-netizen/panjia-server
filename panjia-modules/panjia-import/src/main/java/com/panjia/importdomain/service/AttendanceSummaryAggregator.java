@@ -1,5 +1,6 @@
 package com.panjia.importdomain.service;
 
+import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
@@ -9,6 +10,7 @@ import com.panjia.importdomain.mapper.RawAttendanceMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -91,6 +93,66 @@ public class AttendanceSummaryAggregator {
             dto.setLeaveDays(firstNonNull(dto.getLeaveDays(), raw.getLeaveDays()));
         }
         return new ArrayList<>(byCode.values());
+    }
+
+    /**
+     * 聚合批次的考勤每日明细（从 rawJson.dailyStatus 解析），供员工域写 pj_people_attendance_detail。
+     * <p>
+     * dailyStatus 是 AttendanceDataSource 从 Excel Q+ 未映射列捕获的每日考勤状态 Map，
+     * key=ISO 日期(yyyy-MM-dd)，value=考勤状态原文(正常/迟到/缺卡/旷工/请假/休息)。
+     *
+     * @param batchId    已归档批次 ID
+     * @param sourceType 批次来源类型代码
+     * @param period     归属期间（YYYY-MM）
+     * @return 每日明细列表（非 ATTENDANCE 类型返回空列表）
+     */
+    public List<AttendanceDetailSyncDTO> aggregateDetailsIfAttendance(Long batchId, String sourceType, String period) {
+        if (!"ATTENDANCE".equals(sourceType)) {
+            return List.of();
+        }
+        LocalDate attendMonth = parseMonthStart(period);
+        if (attendMonth == null) {
+            return List.of();
+        }
+        List<RawAttendance> rows = rawAttendanceMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<RawAttendance>()
+                .eq(RawAttendance::getBatchId, batchId));
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        List<AttendanceDetailSyncDTO> details = new ArrayList<>();
+        for (RawAttendance raw : rows) {
+            String code = raw.getEmployeeCode() == null ? null : raw.getEmployeeCode().trim();
+            if (code == null || code.isEmpty()) {
+                continue;
+            }
+            JsonNode extra = readJson(raw.getRawJson());
+            JsonNode dailyStatus = extra.path("dailyStatus");
+            if (dailyStatus.isMissingNode() || !dailyStatus.isObject()) {
+                continue;
+            }
+            Map<String, String> dailyMap = JSON.convertValue(dailyStatus,
+                new TypeReference<Map<String, String>>() {});
+            for (Map.Entry<String, String> entry : dailyMap.entrySet()) {
+                String dateStr = entry.getKey();
+                String status = entry.getValue() == null ? null : entry.getValue().trim();
+                if (status == null || status.isEmpty()) {
+                    continue;
+                }
+                try {
+                    LocalDate attendDate = LocalDate.parse(dateStr);
+                    AttendanceDetailSyncDTO dto = new AttendanceDetailSyncDTO();
+                    dto.setEmployeeCode(code);
+                    dto.setAttendDate(attendDate);
+                    dto.setStatus(status);
+                    details.add(dto);
+                } catch (DateTimeParseException ignored) {
+                    // 非法日期跳过
+                }
+            }
+        }
+        return details;
     }
 
     /**

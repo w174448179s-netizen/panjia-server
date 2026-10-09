@@ -1,5 +1,6 @@
 package com.panjia.importdomain.service;
 
+import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
@@ -145,6 +146,71 @@ public class ScoreSummaryAggregator {
             byCode.get(e.getKey()).setAttendDays(e.getValue().size());
         }
         return new ArrayList<>(byCode.values());
+    }
+
+    /**
+     * 聚合批次的积分每日明细（一人一天一行），供员工域写 pj_people_score_detail。
+     * <p>
+     * 与 {@link #aggregateIfPoints} 同源数据（RawPoints），但产出每日明细而非月度汇总。
+     * 同 (employeeCode, pointDate) 去重：保留 submitTime 最晚的一条。
+     *
+     * @param batchId    已归档批次 ID
+     * @param sourceType 批次来源类型代码
+     * @param period     归属期间（YYYY-MM）
+     * @return 每日明细列表（非 POINTS 类型返回空列表）
+     */
+    public List<ScoreDetailSyncDTO> aggregateDetailsIfPoints(Long batchId, String sourceType, String period) {
+        if (!"POINTS".equals(sourceType)) {
+            return List.of();
+        }
+        LocalDate scoreMonth = parseMonthStart(period);
+        if (scoreMonth == null) {
+            return List.of();
+        }
+        List<RawPoints> rows = rawPointsMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<RawPoints>()
+                .eq(RawPoints::getBatchId, batchId));
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+
+        final LocalTime WINDOW_START = LocalTime.of(19, 30);
+        final LocalTime WINDOW_END = LocalTime.of(23, 0);
+
+        // 同 (employeeCode, pointDate) 去重：保留 submitTime 最晚的行
+        Map<String, ScoreDetailSyncDTO> byKey = new LinkedHashMap<>();
+        for (RawPoints raw : rows) {
+            String code = raw.getEmployeeCode() == null ? null : raw.getEmployeeCode().trim();
+            if (code == null || code.isEmpty()) {
+                continue;
+            }
+            LocalDateTime submitTime = raw.getSubmitTime();
+            LocalDate pointDay = raw.getPointDate() != null ? raw.getPointDate()
+                : (submitTime != null ? submitTime.toLocalDate() : null);
+            if (pointDay == null) {
+                continue;
+            }
+            String key = code + "|" + pointDay;
+            ScoreDetailSyncDTO existing = byKey.get(key);
+            if (existing != null && submitTime != null
+                && existing.getSubmitTime() != null
+                && !submitTime.isAfter(existing.getSubmitTime())) {
+                continue; // 已有更新的记录，跳过
+            }
+            ScoreDetailSyncDTO dto = new ScoreDetailSyncDTO();
+            dto.setEmployeeCode(code);
+            dto.setPointDate(pointDay);
+            dto.setSubmitTime(submitTime);
+            dto.setScore(raw.getScore());
+            boolean inWindow = submitTime == null
+                || (!submitTime.toLocalTime().isBefore(WINDOW_START)
+                    && !submitTime.toLocalTime().isAfter(WINDOW_END));
+            boolean late = submitTime != null && submitTime.toLocalTime().isAfter(WINDOW_END);
+            dto.setValid(inWindow || late);
+            dto.setLateSubmit(late);
+            byKey.put(key, dto);
+        }
+        return new ArrayList<>(byKey.values());
     }
 
     /**

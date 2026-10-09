@@ -25,6 +25,9 @@ public class ParsedRow implements Serializable {
     /** field → 原始字符串（审计/回溯锚点，业务域落 raw_json 用） */
     private Map<String, String> rawValues = new LinkedHashMap<>();
 
+    /** 未映射列的原始值（key=列头文本，value=单元格文本）；考勤 Q+ 每日列等动态列用 */
+    private Map<String, String> unmappedRawValues = new LinkedHashMap<>();
+
     /** 基础格式校验是否通过（类型转换 + 必填） */
     private boolean valid = true;
 

@@ -1,9 +1,11 @@
 package com.panjia.people.service;
 
+import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.port.PeopleAttendanceSyncPort;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import com.panjia.people.dto.AttendanceDetailVO;
 import com.panjia.people.dto.AttendanceQuery;
 import com.panjia.people.dto.AttendanceSaveDTO;
 import com.panjia.people.dto.AttendanceVO;
@@ -93,4 +95,21 @@ public interface AttendanceService extends PeopleAttendanceSyncPort {
      * @return 本人考勤明细
      */
     AttendanceVO getMy(Long id, Long loginUserId);
+
+    /**
+     * 导入同步：保存考勤每日明细（先删后插，同人同月覆盖，事件重投幂等）。
+     *
+     * @param period  归属期间（YYYY-MM）
+     * @param details 每日明细列表
+     */
+    void syncAttendanceDetails(String period, List<AttendanceDetailSyncDTO> details);
+
+    /**
+     * 查询当前登录用户在指定月份的考勤每日明细（强制仅本人）。
+     *
+     * @param userId     登录用户 ID
+     * @param attendMonth 考勤月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    List<AttendanceDetailVO> listMyDetails(Long userId, String attendMonth);
 }

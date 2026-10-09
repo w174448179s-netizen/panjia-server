@@ -13,7 +13,10 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 考勤数据源（ATTENDANCE）。
@@ -63,6 +66,23 @@ public class AttendanceDataSource extends AbstractDataSource {
             rawJson.put("leaveDays", leaveDays);
             raw.setRawJson(writeJson(rawJson));
 
+            // 从未映射列（Excel Q+ 每日考勤结果列）解析每日状态
+            Map<String, String> unmapped = row.getUnmappedRawValues();
+            if (unmapped != null && !unmapped.isEmpty() && monthStart != null) {
+                Map<String, String> dailyStatus = new LinkedHashMap<>();
+                YearMonth ym = YearMonth.from(monthStart);
+                for (Map.Entry<String, String> entry : unmapped.entrySet()) {
+                    LocalDate date = parseDailyHeader(entry.getKey(), ym);
+                    if (date != null) {
+                        dailyStatus.put(date.toString(), entry.getValue());
+                    }
+                }
+                if (!dailyStatus.isEmpty()) {
+                    rawJson.put("dailyStatus", dailyStatus);
+                    raw.setRawJson(writeJson(rawJson));
+                }
+            }
+
             result.addRow(raw);
         }
         return result;
@@ -86,5 +106,62 @@ public class AttendanceDataSource extends AbstractDataSource {
             return null;
         }
         return (a == null ? BigDecimal.ZERO : a).add(b == null ? BigDecimal.ZERO : b);
+    }
+
+    /** 钉钉列头日期解析模式：「N日」「M/D」「MM-DD」「YYYY-MM-DD」 */
+    private static final Pattern DAY_PATTERN = Pattern.compile("(\\d{1,2})日");
+    private static final Pattern SLASH_PATTERN = Pattern.compile("(\\d{1,2})/(\\d{1,2})");
+    private static final Pattern DASH_PATTERN = Pattern.compile("(\\d{1,2})-(\\d{1,2})");
+
+    /**
+     * 解析钉钉月度汇总 Excel 第 4 行的每日日期列头为 LocalDate。
+     * <p>
+     * 支持格式：{@code N日}（如"1日"）、{@code M/D}（如"10/1"）、
+     * {@code MM-DD}（如"10-01"）、{@code YYYY-MM-DD}（如"2026-10-01"）。
+     * 用 period 的年月补全缺失部分；解析失败返回 null（列跳过）。
+     *
+     * @param header 列头文本
+     * @param period 归属月（提供年/月上下文）
+     * @return 解析出的日期，失败返回 null
+     */
+    private LocalDate parseDailyHeader(String header, YearMonth period) {
+        if (header == null || header.isBlank()) {
+            return null;
+        }
+        String h = header.trim();
+        try {
+            // "2026-10-01" 标准格式
+            return LocalDate.parse(h);
+        } catch (DateTimeParseException ignored) {
+        }
+        // "N日" 格式：取日，用 period 的年月
+        Matcher m = DAY_PATTERN.matcher(h);
+        if (m.find()) {
+            int day = Integer.parseInt(m.group(1));
+            return safeDate(period, day);
+        }
+        // "M/D" 格式：月/日
+        m = SLASH_PATTERN.matcher(h);
+        if (m.find()) {
+            int month = Integer.parseInt(m.group(1));
+            int day = Integer.parseInt(m.group(2));
+            return safeDate(YearMonth.of(period.getYear(), month), day);
+        }
+        // "MM-DD" 格式
+        m = DASH_PATTERN.matcher(h);
+        if (m.find()) {
+            int month = Integer.parseInt(m.group(1));
+            int day = Integer.parseInt(m.group(2));
+            return safeDate(YearMonth.of(period.getYear(), month), day);
+        }
+        return null;
+    }
+
+    /** 安全构造日期：日超出月份范围时返回 null */
+    private LocalDate safeDate(YearMonth ym, int day) {
+        if (day < 1 || day > ym.lengthOfMonth()) {
+            return null;
+        }
+        return ym.atDay(day);
     }
 }

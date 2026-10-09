@@ -3,14 +3,18 @@ package com.panjia.people.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceMetricsDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.port.PeopleAttendanceMetricsQueryPort;
+import com.panjia.people.domain.AttendanceDetail;
 import com.panjia.people.domain.AttendanceRecord;
 import com.panjia.people.domain.Employee;
+import com.panjia.people.dto.AttendanceDetailVO;
 import com.panjia.people.dto.AttendanceQuery;
 import com.panjia.people.dto.AttendanceSaveDTO;
 import com.panjia.people.dto.AttendanceVO;
+import com.panjia.people.mapper.AttendanceDetailMapper;
 import com.panjia.people.mapper.AttendanceRecordMapper;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.port.DeptPort;
@@ -60,6 +64,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
     private static final String DATA_SOURCE_IMPORT = "IMPORT";
 
     private final AttendanceRecordMapper attendanceMapper;
+    private final AttendanceDetailMapper attendanceDetailMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
     private final AttendanceApprovalService approvalService;
@@ -231,6 +236,39 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         return vo;
     }
 
+    @Override
+    public List<AttendanceDetailVO> listMyDetails(Long userId, String attendMonth) {
+        LocalDate monthStart = parseMonth(attendMonth);
+        if (monthStart == null) {
+            return List.of();
+        }
+        Long myEmployeeId = findEmployeeIdByUserId(userId);
+        if (myEmployeeId == null) {
+            return List.of();
+        }
+        List<AttendanceDetail> details = attendanceDetailMapper.selectList(
+            new LambdaQueryWrapper<AttendanceDetail>()
+                .eq(AttendanceDetail::getEmployeeId, myEmployeeId)
+                .eq(AttendanceDetail::getAttendMonth, monthStart)
+                .orderByAsc(AttendanceDetail::getAttendDate));
+        if (details.isEmpty()) {
+            return List.of();
+        }
+        Employee me = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+            .eq(Employee::getEmployeeId, myEmployeeId)
+            .select(Employee::getEmployeeCode, Employee::getEmployeeName)
+            .last("limit 1"));
+        return details.stream().map(d -> {
+            AttendanceDetailVO vo = new AttendanceDetailVO();
+            BeanUtil.copyProperties(d, vo);
+            if (me != null) {
+                vo.setEmployeeCode(me.getEmployeeCode());
+                vo.setEmployeeName(me.getEmployeeName());
+            }
+            return vo;
+        }).toList();
+    }
+
     // ==================== 导入同步（PeopleAttendanceSyncPort） ====================
 
     @Override
@@ -265,6 +303,59 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
             .eq(AttendanceRecord::getDataSource, DATA_SOURCE_IMPORT));
         approvalService.deleteHistoryApproval(period);
         log.info("[考勤撤销] 历史导入数据已清理：period={}, 删除考勤 {} 条", period, rows);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncAttendanceDetails(String period, List<AttendanceDetailSyncDTO> details) {
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        LocalDate monthStart = parseMonth(period);
+        if (monthStart == null) {
+            log.warn("[考勤明细同步] 期间 {} 格式不合法，跳过", period);
+            return;
+        }
+        List<String> codes = details.stream()
+            .map(AttendanceDetailSyncDTO::getEmployeeCode)
+            .filter(StringUtils::isNotBlank)
+            .map(String::trim)
+            .distinct()
+            .toList();
+        if (codes.isEmpty()) {
+            return;
+        }
+        Map<String, Long> codeToEmployeeId = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+                .in(Employee::getEmployeeCode, codes)
+                .select(Employee::getEmployeeId, Employee::getEmployeeCode))
+            .stream()
+            .collect(Collectors.toMap(Employee::getEmployeeCode, Employee::getEmployeeId, (a, b) -> a));
+
+        // 先删后插：删除本月已匹配员工的明细，再批量插入
+        if (!codeToEmployeeId.isEmpty()) {
+            attendanceDetailMapper.delete(new LambdaQueryWrapper<AttendanceDetail>()
+                .in(AttendanceDetail::getEmployeeId, codeToEmployeeId.values())
+                .eq(AttendanceDetail::getAttendMonth, monthStart));
+        }
+
+        int inserted = 0;
+        int skipped = 0;
+        for (AttendanceDetailSyncDTO dto : details) {
+            String code = dto.getEmployeeCode() == null ? null : dto.getEmployeeCode().trim();
+            Long employeeId = code == null ? null : codeToEmployeeId.get(code);
+            if (employeeId == null || dto.getAttendDate() == null) {
+                skipped++;
+                continue;
+            }
+            AttendanceDetail detail = new AttendanceDetail();
+            detail.setEmployeeId(employeeId);
+            detail.setAttendMonth(monthStart);
+            detail.setAttendDate(dto.getAttendDate());
+            detail.setStatus(dto.getStatus());
+            attendanceDetailMapper.insert(detail);
+            inserted++;
+        }
+        log.info("[考勤明细同步] 期间 {} 完成：插入 {} 条，跳过 {} 条", period, inserted, skipped);
     }
 
     /** 汇总 upsert 公共段：按工号匹配员工后逐条覆盖写入，返回成功条数。 */

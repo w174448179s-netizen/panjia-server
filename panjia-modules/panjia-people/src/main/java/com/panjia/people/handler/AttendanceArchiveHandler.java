@@ -1,5 +1,6 @@
 package com.panjia.people.handler;
 
+import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
@@ -66,6 +67,11 @@ public class AttendanceArchiveHandler implements DomainEventHandler {
         }
         // 抛出异常交由 Dispatcher 重试（upsert 幂等，重投安全）
         attendanceService.syncAttendanceSummaries(event.getPeriod(), summaries);
+        // 考勤每日明细同步（先删后插，幂等）
+        List<AttendanceDetailSyncDTO> details = event.getAttendanceDetails();
+        if (details != null && !details.isEmpty()) {
+            attendanceService.syncAttendanceDetails(event.getPeriod(), details);
+        }
         log.info("[考勤消费] 归档事件考勤同步完成：batchId={}, period={}, 人数={}",
             event.getBatchId(), event.getPeriod(), summaries.size());
     }

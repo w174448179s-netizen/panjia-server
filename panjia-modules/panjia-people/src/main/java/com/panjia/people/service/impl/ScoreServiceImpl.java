@@ -4,14 +4,18 @@ import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.contracts.dto.PointsRuleDTO;
+import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreFactsDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.domain.PerformanceScore;
+import com.panjia.people.domain.ScoreDetail;
+import com.panjia.people.dto.ScoreDetailVO;
 import com.panjia.people.dto.ScoreQuery;
 import com.panjia.people.dto.ScoreVO;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.mapper.PerformanceScoreMapper;
+import com.panjia.people.mapper.ScoreDetailMapper;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.ScoreApprovalService;
 import com.panjia.people.service.ScoreGradePolicy;
@@ -64,6 +68,7 @@ public class ScoreServiceImpl implements ScoreService {
     private static final String ROLE_KEY_MANAGER = "manager";
 
     private final PerformanceScoreMapper scoreMapper;
+    private final ScoreDetailMapper scoreDetailMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
     private final ScoreApprovalService approvalService;
@@ -103,6 +108,62 @@ public class ScoreServiceImpl implements ScoreService {
             .eq(PerformanceScore::getDataSource, DATA_SOURCE_IMPORT));
         approvalService.deleteHistoryApproval(period);
         log.info("[积分撤销] 历史导入数据已清理：period={}, 删除积分 {} 条", period, rows);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details) {
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        LocalDate monthStart = parseMonthStart(period);
+        if (monthStart == null) {
+            log.warn("[积分明细同步] 期间 {} 格式不合法，跳过", period);
+            return;
+        }
+        List<String> codes = details.stream()
+            .map(ScoreDetailSyncDTO::getEmployeeCode)
+            .filter(StringUtils::isNotBlank)
+            .map(String::trim)
+            .distinct()
+            .toList();
+        if (codes.isEmpty()) {
+            return;
+        }
+        Map<String, Long> codeToEmployeeId = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+                .in(Employee::getEmployeeCode, codes)
+                .select(Employee::getEmployeeId, Employee::getEmployeeCode))
+            .stream()
+            .collect(Collectors.toMap(Employee::getEmployeeCode, Employee::getEmployeeId, (a, b) -> a));
+
+        // 先删后插：删除本月已匹配员工的明细，再批量插入
+        if (!codeToEmployeeId.isEmpty()) {
+            scoreDetailMapper.delete(new LambdaQueryWrapper<ScoreDetail>()
+                .in(ScoreDetail::getEmployeeId, codeToEmployeeId.values())
+                .eq(ScoreDetail::getScoreMonth, monthStart));
+        }
+
+        int inserted = 0;
+        int skipped = 0;
+        for (ScoreDetailSyncDTO dto : details) {
+            String code = dto.getEmployeeCode() == null ? null : dto.getEmployeeCode().trim();
+            Long employeeId = code == null ? null : codeToEmployeeId.get(code);
+            if (employeeId == null || dto.getPointDate() == null) {
+                skipped++;
+                continue;
+            }
+            ScoreDetail detail = new ScoreDetail();
+            detail.setEmployeeId(employeeId);
+            detail.setScoreMonth(monthStart);
+            detail.setPointDate(dto.getPointDate());
+            detail.setSubmitTime(dto.getSubmitTime());
+            detail.setScore(dto.getScore());
+            detail.setIsValid(dto.isValid());
+            detail.setIsLateSubmit(dto.isLateSubmit());
+            scoreDetailMapper.insert(detail);
+            inserted++;
+        }
+        log.info("[积分明细同步] 期间 {} 完成：插入 {} 条，跳过 {} 条", period, inserted, skipped);
     }
 
     /** 汇总 upsert 公共段：按工号匹配员工后逐条覆盖写入，返回成功条数。 */
@@ -326,6 +387,75 @@ public class ScoreServiceImpl implements ScoreService {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    // ==================== 每日明细查询（综合查询→积分查询→展开行） ====================
+
+    @Override
+    public List<ScoreDetailVO> listMyDetails(Long userId, String scoreMonth) {
+        LocalDate monthStart = parseMonthStart(scoreMonth);
+        if (monthStart == null) {
+            return List.of();
+        }
+        Long myEmployeeId = findEmployeeIdByUserId(userId);
+        if (myEmployeeId == null) {
+            return List.of();
+        }
+
+        LambdaQueryWrapper<ScoreDetail> wrapper = new LambdaQueryWrapper<ScoreDetail>()
+            .eq(ScoreDetail::getScoreMonth, monthStart);
+
+        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
+            // 超管/总监：全量
+        } else if (hasRole(ROLE_KEY_MANAGER)) {
+            // 店长：本门店子树
+            Employee me = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+                .eq(Employee::getEmployeeId, myEmployeeId)
+                .select(Employee::getDeptId)
+                .last("limit 1"));
+            if (me == null || me.getDeptId() == null) {
+                return List.of();
+            }
+            List<Long> deptIds = deptPort.findDeptAndChildIds(me.getDeptId());
+            List<Long> employeeIds = employeeMapper.selectList(
+                    new LambdaQueryWrapper<Employee>().in(Employee::getDeptId, deptIds))
+                .stream().map(Employee::getEmployeeId).toList();
+            if (employeeIds.isEmpty()) {
+                return List.of();
+            }
+            wrapper.in(ScoreDetail::getEmployeeId, employeeIds);
+        } else {
+            // 员工/经纪人/人事等：仅本人
+            wrapper.eq(ScoreDetail::getEmployeeId, myEmployeeId);
+        }
+
+        wrapper.orderByAsc(ScoreDetail::getEmployeeId)
+            .orderByAsc(ScoreDetail::getPointDate);
+
+        List<ScoreDetail> details = scoreDetailMapper.selectList(wrapper);
+        return enrichDetails(details);
+    }
+
+    /** 批量填充工号/姓名 */
+    private List<ScoreDetailVO> enrichDetails(List<ScoreDetail> details) {
+        if (details.isEmpty()) {
+            return List.of();
+        }
+        Set<Long> employeeIds = details.stream().map(ScoreDetail::getEmployeeId)
+            .filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<Long, Employee> employeeMap = employeeIds.isEmpty() ? Map.of()
+            : employeeMapper.selectByIds(employeeIds).stream()
+                .collect(Collectors.toMap(Employee::getEmployeeId, e -> e, (a, b) -> a));
+        return details.stream().map(d -> {
+            ScoreDetailVO vo = new ScoreDetailVO();
+            BeanUtil.copyProperties(d, vo);
+            Employee employee = employeeMap.get(d.getEmployeeId());
+            if (employee != null) {
+                vo.setEmployeeCode(employee.getEmployeeCode());
+                vo.setEmployeeName(employee.getEmployeeName());
+            }
+            return vo;
+        }).toList();
     }
 
     // ==================== 手工新增 / 删除 ====================

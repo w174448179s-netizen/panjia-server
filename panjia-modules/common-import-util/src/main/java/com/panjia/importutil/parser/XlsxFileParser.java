@@ -135,6 +135,11 @@ public class XlsxFileParser implements FileParser {
                         }
                     }
                     if (col == null) {
+                        // 未映射列：存入 unmappedRawValues（key=列头文本），供考勤 Q+ 每日列等动态列消费
+                        String unmappedRaw = data.get(i);
+                        if (unmappedRaw != null && !unmappedRaw.isBlank()) {
+                            row.getUnmappedRawValues().put(header, unmappedRaw.trim());
+                        }
                         continue;
                     }
                     String raw = data.get(i);

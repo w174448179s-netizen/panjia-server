@@ -1,6 +1,7 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.panjia.people.dto.ScoreDetailVO;
 import com.panjia.people.dto.ScoreQuery;
 import com.panjia.people.dto.ScoreVO;
 import com.panjia.people.service.ScoreService;
@@ -14,6 +15,7 @@ import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.web.core.BaseController;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -27,6 +29,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.math.BigDecimal;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -67,6 +70,20 @@ public class ScoreController extends BaseController {
     @GetMapping("/my/list")
     public R<PageResult<ScoreVO>> myList(ScoreQuery query, PageQuery pageQuery) {
         return R.ok(scoreService.pageMy(LoginHelper.getUserId(), query, pageQuery));
+    }
+
+    /**
+     * 本人/组织视角的积分每日明细（综合查询→积分查询→展开行）。
+     * <p>
+     * 数据权限同 /my/list：超管/总监全量、店长本门店子树、其他仅本人。
+     *
+     * @param scoreMonth 积分月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    @SaCheckPermission("people:score:my:query")
+    @GetMapping("/my/details")
+    public R<List<ScoreDetailVO>> myDetails(@RequestParam String scoreMonth) {
+        return R.ok(scoreService.listMyDetails(LoginHelper.getUserId(), scoreMonth));
     }
 
     /**

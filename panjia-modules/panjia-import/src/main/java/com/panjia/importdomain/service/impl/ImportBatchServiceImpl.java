@@ -192,6 +192,12 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         // 积分批次：日报按工号聚合月度汇总随事件 payload 投递，员工域 ScoreArchiveHandler 消费
         event.setScoreSummaries(scoreSummaryAggregator.aggregateIfPoints(
             batch.getId(), event.getSourceType(), batch.getPeriod()));
+        // 积分每日明细（一人一天一行），员工域写 pj_people_score_detail
+        event.setScoreDetails(scoreSummaryAggregator.aggregateDetailsIfPoints(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
+        // 考勤每日明细（从 Q+ 列解析），员工域写 pj_people_attendance_detail
+        event.setAttendanceDetails(attendanceSummaryAggregator.aggregateDetailsIfAttendance(
+            batch.getId(), event.getSourceType(), batch.getPeriod()));
         eventPort.emit(event);
 
         log.info("[导入归档事件] 发布 ImportBatchArchivedEvent: batchId={}, sourceType={}, period={}, operatorId={}, supersededBatchIds={}",

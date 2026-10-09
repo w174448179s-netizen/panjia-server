@@ -1,7 +1,9 @@
 package com.panjia.people.service;
 
+import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.contracts.port.PeopleScoreQueryPort;
+import com.panjia.people.dto.ScoreDetailVO;
 import com.panjia.people.dto.ScoreQuery;
 import com.panjia.people.dto.ScoreVO;
 import org.dromara.common.core.domain.PageResult;
@@ -58,6 +60,25 @@ public interface ScoreService extends PeopleScoreQueryPort {
      * @return 积分明细分页（含派生字段：平均积分/等级/扣点/扣款/锁定标记）
      */
     PageResult<ScoreVO> pageMy(Long userId, ScoreQuery query, PageQuery pageQuery);
+
+    /**
+     * 导入同步：保存积分每日明细（先删后插，同人同月覆盖，事件重投幂等）。
+     *
+     * @param period  归属期间（YYYY-MM）
+     * @param details 每日明细列表
+     */
+    void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details);
+
+    /**
+     * 查询当前登录用户在指定月份的积分每日明细。
+     * <p>
+     * 数据权限同 {@link #pageMy}：超管/总监全量、店长本门店子树、其他仅本人。
+     *
+     * @param userId    登录用户 ID
+     * @param scoreMonth 积分月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    List<ScoreDetailVO> listMyDetails(Long userId, String scoreMonth);
 
     /** 明细查询 */
     ScoreVO getById(Long id);
