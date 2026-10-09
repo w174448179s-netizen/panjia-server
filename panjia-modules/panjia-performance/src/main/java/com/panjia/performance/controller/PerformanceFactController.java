@@ -6,16 +6,20 @@ import com.panjia.performance.domain.bo.ContractVoidBo;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
+import com.panjia.performance.domain.bo.PerformanceRankBo;
+import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
+import com.panjia.performance.domain.bo.PerformanceSearchDetailBo;
+import com.panjia.performance.domain.bo.PerformanceSearchBo;
+import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
+import com.panjia.performance.domain.bo.PerformanceSummaryBo;
 import com.panjia.performance.domain.vo.PerformanceFactVo;
 import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
 import com.panjia.performance.domain.vo.PerformanceManageContractVo;
 import com.panjia.performance.domain.vo.PerformanceManageVo;
 import com.panjia.performance.domain.vo.PerformanceManagePageVo;
+import com.panjia.performance.domain.vo.PerformanceRankVo;
 import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
-import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
-import com.panjia.performance.domain.bo.PerformanceSearchDetailBo;
-import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
-import com.panjia.performance.domain.bo.PerformanceSearchBo;
+import com.panjia.performance.domain.vo.PerformanceSummaryVo;
 import com.panjia.performance.service.PerformanceFactVoidService;
 import com.panjia.performance.service.IPerformanceQueryService;
 import lombok.RequiredArgsConstructor;
@@ -140,5 +144,28 @@ public class PerformanceFactController extends BaseController {
     @GetMapping("/search/details")
     public R<List<PerformanceSearchDetailVo>> searchDetails(@Validated PerformanceSearchDetailBo query) {
         return R.ok(queryService.searchDetails(query.getBizNo()));
+    }
+
+    /**
+     * 业绩汇总报表（按月/季/年维度 + 员工聚合新签业绩）。
+     * <p>
+     * 数据权限：经纪人仅本人；总监不限制；店长/财务限本部门子树；超管不限制。
+     */
+    @SaCheckPermission("perf:summary:list")
+    @GetMapping("/summary")
+    public R<PageResult<PerformanceSummaryVo>> summary(PerformanceSummaryBo query, PageQuery pageQuery) {
+        return R.ok(queryService.pageSummary(query, pageQuery));
+    }
+
+    /**
+     * 业绩排行（按员工聚合新签业绩金额降序，分页）。
+     * <p>
+     * 数据权限：经纪人仅本人；总监不限制；店长/财务限本部门子树；超管不限制。
+     * rank 字段按分页序号连续填充。
+     */
+    @SaCheckPermission("perf:rank:list")
+    @GetMapping("/rank")
+    public R<PageResult<PerformanceRankVo>> rank(PerformanceRankBo query, PageQuery pageQuery) {
+        return R.ok(queryService.pageRank(query, pageQuery));
     }
 }

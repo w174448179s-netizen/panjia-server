@@ -4,12 +4,16 @@ import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
+import com.panjia.performance.domain.bo.PerformanceRankBo;
+import com.panjia.performance.domain.bo.PerformanceSummaryBo;
 import com.panjia.performance.domain.vo.PerformanceFactVo;
 import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
 import com.panjia.performance.domain.vo.PerformanceManageContractVo;
 import com.panjia.performance.domain.vo.PerformanceManageVo;
 import com.panjia.performance.domain.vo.PerformanceManagePageVo;
+import com.panjia.performance.domain.vo.PerformanceRankVo;
 import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
+import com.panjia.performance.domain.vo.PerformanceSummaryVo;
 import com.panjia.performance.domain.bo.PerformanceSearchBo;
 import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
 import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
@@ -74,4 +78,19 @@ public interface IPerformanceQueryService {
      * 完整业绩查询·按业务键查询合同下明细（查看详情弹窗数据源）。
      */
     List<PerformanceSearchDetailVo> searchDetails(String bizNo);
+
+    /**
+     * 业绩汇总报表分页（按期间维度月/季/年 + 员工聚合新签业绩）。
+     * <p>
+     * 数据权限：经纪人仅本人；总监不限制；店长/财务限本部门子树；超管不限制。
+     */
+    PageResult<PerformanceSummaryVo> pageSummary(PerformanceSummaryBo query, PageQuery pageQuery);
+
+    /**
+     * 业绩排行分页（按员工聚合新签业绩金额降序）。
+     * <p>
+     * 数据权限：经纪人仅本人；总监不限制；店长/财务限本部门子树；超管不限制。
+     * rank 字段按分页 offset 起始序号填充。
+     */
+    PageResult<PerformanceRankVo> pageRank(PerformanceRankBo query, PageQuery pageQuery);
 }

@@ -7,7 +7,9 @@ import com.panjia.performance.domain.vo.AdjustFactDetailVo;
 import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
 import com.panjia.performance.domain.vo.PerformanceManageContractVo;
 import com.panjia.performance.domain.vo.PerformanceManageVo;
+import com.panjia.performance.domain.vo.PerformanceRankVo;
 import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
+import com.panjia.performance.domain.vo.PerformanceSummaryVo;
 import com.panjia.performance.domain.vo.ReceivedContractMetricsVo;
 import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import org.apache.ibatis.annotations.Mapper;
@@ -1245,6 +1247,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             ORDER BY ca.id DESC
             LIMIT 1
         ) lc ON TRUE
+        <where>
+          <if test="settled != null and settled == true">
+            lc.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+          </if>
+          <if test="settled != null and settled == false">
+            (lc.status IS NULL OR lc.status NOT IN ('APPROVED', 'LOCKED', 'CLOSED'))
+          </if>
+        </where>
         ORDER BY fa."signDate" DESC, fa."contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
@@ -1255,6 +1265,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("bizType") String bizType,
             @Param("keyword") String keyword,
             @Param("employeeId") Long employeeId,
+            @Param("settled") Boolean settled,
             @Param("offset") long offset,
             @Param("pageSize") int pageSize);
 
@@ -1319,6 +1330,22 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               OR property_address ILIKE CONCAT('%', #{keyword}::text, '%')
             )
           </if>
+          <if test="settled != null and settled == true">
+            AND EXISTS (
+              SELECT 1 FROM pj_commission_application ca
+              WHERE ca.period = all_rows.period
+                AND ca.contract_no IN (all_rows.contract_no, all_rows.order_no)
+                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+            )
+          </if>
+          <if test="settled != null and settled == false">
+            AND NOT EXISTS (
+              SELECT 1 FROM pj_commission_application ca
+              WHERE ca.period = all_rows.period
+                AND ca.contract_no IN (all_rows.contract_no, all_rows.order_no)
+                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+            )
+          </if>
         </script>
         """)
     long countFactSearchByContract(
@@ -1326,7 +1353,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("deptId") Long deptId,
             @Param("bizType") String bizType,
             @Param("keyword") String keyword,
-            @Param("employeeId") Long employeeId);
+            @Param("employeeId") Long employeeId,
+            @Param("settled") Boolean settled);
 
     /**
      * 完整业绩查询的业务类型下拉选项：在与列表完全相同的数据范围（期间/部门子树/经纪人本人）
@@ -1524,5 +1552,211 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         </script>
         """)
     List<Map<String, Object>> selectSettledInfoByFactIds(@Param("factIds") Collection<Long> factIds);
+
+    /**
+     * 业绩汇总分页：按期间维度（月/季/年）+ 员工聚合新签业绩（PERF_EXPECT ACTIVE）。
+     * <p>
+     * periodType 决定期间标签：MONTH→YYYY-MM、QUARTER→YYYY-Qn、YEAR→YYYY。
+     * quarter 仅 periodType=QUARTER 时生效，过滤单季。
+     *
+     * @param periodType 统计维度 MONTH/QUARTER/YEAR
+     * @param year       年份 YYYY（必填）
+     * @param quarter    季度 1-4（可选，仅 QUARTER 生效）
+     * @param deptId     部门 ID（含子部门；null 不限）
+     * @param employeeId 员工 ID（经纪人本人；null 不限）
+     * @param bizType    业务类型（可选）
+     * @param offset     偏移
+     * @param pageSize    每页大小
+     */
+    @Select("""
+        <script>
+        WITH labeled AS (
+            SELECT
+                CASE
+                    WHEN #{periodType} = 'MONTH' THEN f.period
+                    WHEN #{periodType} = 'QUARTER' THEN SUBSTRING(f.period, 1, 4) || '-Q' || CAST((CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 AS VARCHAR)
+                    ELSE SUBSTRING(f.period, 1, 4)
+                END AS period_label,
+                f.employee_id, f.dept_id, f.contract_no, f.order_no, f.performance_amount
+            FROM pj_perf_fact f
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
+              AND f.period LIKE #{year} || '-%'
+              <if test="quarter != null">
+                AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
+              </if>
+              <if test="deptId != null">
+                AND (f.dept_id = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                                AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="employeeId != null">
+                AND f.employee_id = #{employeeId}
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND f.biz_type = #{bizType}
+              </if>
+        )
+        SELECT l.period_label AS "period",
+               l.employee_id AS "employeeId",
+               e.employee_name AS "employeeName",
+               e.employee_code AS "employeeCode",
+               d.dept_name AS "deptName",
+               l.dept_id AS "deptId",
+               COUNT(DISTINCT COALESCE(l.contract_no, l.order_no)) AS "contractCount",
+               COALESCE(SUM(l.performance_amount), 0) AS "totalAmount"
+        FROM labeled l
+        LEFT JOIN pj_people_employee e ON e.employee_id = l.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = l.dept_id
+        GROUP BY l.period_label, l.employee_id, e.employee_name, e.employee_code, d.dept_name, l.dept_id
+        ORDER BY l.period_label DESC, "totalAmount" DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+        </script>
+        """)
+    List<PerformanceSummaryVo> selectSummaryPage(
+            @Param("periodType") String periodType,
+            @Param("year") String year,
+            @Param("quarter") Integer quarter,
+            @Param("deptId") Long deptId,
+            @Param("employeeId") Long employeeId,
+            @Param("bizType") String bizType,
+            @Param("offset") long offset,
+            @Param("pageSize") int pageSize);
+
+    /**
+     * 业绩汇总行数（分页 total，按期间维度 + 员工去重）。
+     * <p>
+     * 条件口径与 {@link #selectSummaryPage} 完全一致。
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(*) FROM (
+            SELECT 1
+            FROM pj_perf_fact f
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
+              AND f.period LIKE #{year} || '-%'
+              <if test="quarter != null">
+                AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
+              </if>
+              <if test="deptId != null">
+                AND (f.dept_id = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                                AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="employeeId != null">
+                AND f.employee_id = #{employeeId}
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND f.biz_type = #{bizType}
+              </if>
+            GROUP BY
+                CASE
+                    WHEN #{periodType} = 'MONTH' THEN f.period
+                    WHEN #{periodType} = 'QUARTER' THEN SUBSTRING(f.period, 1, 4) || '-Q' || CAST((CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 AS VARCHAR)
+                    ELSE SUBSTRING(f.period, 1, 4)
+                END,
+                f.employee_id
+        ) t
+        </script>
+        """)
+    long countSummary(
+            @Param("periodType") String periodType,
+            @Param("year") String year,
+            @Param("quarter") Integer quarter,
+            @Param("deptId") Long deptId,
+            @Param("employeeId") Long employeeId,
+            @Param("bizType") String bizType);
+
+    /**
+     * 业绩排行分页：按员工聚合新签业绩（PERF_EXPECT ACTIVE），金额降序。
+     * <p>
+     * quarter 仅 periodType=QUARTER 时生效，过滤单季；periodType 仅供 service 层校验，
+     * SQL 本身按年份（+可选季度）聚合，与维度无关（行 = 员工，金额 = 该期间新签合计）。
+     *
+     * @param year     年份 YYYY（必填）
+     * @param quarter  季度 1-4（可选）
+     * @param deptId   部门 ID（含子部门；null 不限）
+     * @param bizType  业务类型（可选）
+     * @param offset   偏移
+     * @param pageSize  每页大小
+     */
+    @Select("""
+        <script>
+        SELECT f.employee_id AS "employeeId",
+               e.employee_name AS "employeeName",
+               e.employee_code AS "employeeCode",
+               d.dept_name AS "deptName",
+               f.dept_id AS "deptId",
+               COUNT(DISTINCT COALESCE(f.contract_no, f.order_no)) AS "contractCount",
+               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_EXPECT'
+          AND f.period LIKE #{year} || '-%'
+          <if test="quarter != null">
+            AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
+          </if>
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+          <if test="bizType != null and bizType != ''">
+            AND f.biz_type = #{bizType}
+          </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
+        GROUP BY f.employee_id, e.employee_name, e.employee_code, d.dept_name, f.dept_id
+        ORDER BY "totalAmount" DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+        </script>
+        """)
+    List<PerformanceRankVo> selectRankPage(
+            @Param("year") String year,
+            @Param("quarter") Integer quarter,
+            @Param("deptId") Long deptId,
+            @Param("bizType") String bizType,
+            @Param("employeeId") Long employeeId,
+            @Param("offset") long offset,
+            @Param("pageSize") int pageSize);
+
+    /**
+     * 业绩排行行数（分页 total，按员工去重）。
+     * <p>
+     * 条件口径与 {@link #selectRankPage} 完全一致。
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(DISTINCT f.employee_id)
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.fact_type = 'PERF_EXPECT'
+          AND f.period LIKE #{year} || '-%'
+          <if test="quarter != null">
+            AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
+          </if>
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+          <if test="bizType != null and bizType != ''">
+            AND f.biz_type = #{bizType}
+          </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
+        </script>
+        """)
+    long countRank(
+            @Param("year") String year,
+            @Param("quarter") Integer quarter,
+            @Param("deptId") Long deptId,
+            @Param("bizType") String bizType,
+            @Param("employeeId") Long employeeId);
 }
 

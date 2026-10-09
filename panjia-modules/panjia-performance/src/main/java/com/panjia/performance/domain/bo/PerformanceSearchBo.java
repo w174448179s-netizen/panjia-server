@@ -24,4 +24,14 @@ public class PerformanceSearchBo {
 
     /** 员工 ID（可选：员工筛选） */
     private Long employeeId;
+
+    /**
+     * 是否结佣（可选：结佣状态筛选）。
+     * <ul>
+     *   <li>true=已结佣（存在 status IN APPROVED/LOCKED/CLOSED 的结佣申请单）；</li>
+     *   <li>false=未结佣；</li>
+     *   <li>null=不过滤。</li>
+     * </ul>
+     */
+    private Boolean settled;
 }

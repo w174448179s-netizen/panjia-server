@@ -17,12 +17,16 @@ import com.panjia.performance.domain.bo.AddMemberPayload;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
+import com.panjia.performance.domain.bo.PerformanceRankBo;
+import com.panjia.performance.domain.bo.PerformanceSummaryBo;
 import com.panjia.performance.domain.vo.PerformanceFactVo;
 import com.panjia.performance.domain.vo.PerformanceFactSearchVo;
 import com.panjia.performance.domain.vo.PerformanceManageContractVo;
 import com.panjia.performance.domain.vo.PerformanceManageVo;
 import com.panjia.performance.domain.vo.PerformanceManagePageVo;
+import com.panjia.performance.domain.vo.PerformanceRankVo;
 import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
+import com.panjia.performance.domain.vo.PerformanceSummaryVo;
 import com.panjia.performance.domain.bo.PerformanceSearchBo;
 import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
 import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
@@ -64,6 +68,15 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     /** 经纪人角色键（sys_role.role_key，跨环境稳定标识；登录时写入 LoginUser.roles） */
     private static final String ROLE_KEY_AGENT = "agent";
+
+    /** 总监角色键（全量数据权限，汇总/排行不限制部门） */
+    private static final String ROLE_KEY_DIRECTOR = "director";
+
+    /** 店长角色键（本门店数据权限，汇总/排行限本部门子树） */
+    private static final String ROLE_KEY_MANAGER = "manager";
+
+    /** 超级管理员角色键（全量数据权限） */
+    private static final String ROLE_KEY_SUPERADMIN = "superadmin";
 
     /** 员工下拉选项单次最大返回条数 */
     private static final int EMPLOYEE_OPTION_LIMIT = 20;
@@ -365,11 +378,11 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         Long filterEmployeeId = resolveSearchEmployeeId(selfEmployeeId, employeeId, effectiveDeptId);
 
         long total = factMapper.countFactSearchByContract(period, effectiveDeptId,
-            StringUtils.trimToNull(bizType), keyword, filterEmployeeId);
+            StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled());
         List<PerformanceFactSearchVo> rows = total == 0
             ? List.of()
             : factMapper.selectFactSearchByContract(period, effectiveDeptId,
-                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, offset, pageSize);
+                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled(), offset, pageSize);
         fillSearchConversion(rows);
 
         return new PageResult<>(rows, total);
@@ -476,6 +489,137 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         assertSearchDetailInScope(rows);
         fillSearchDetailConversion(rows);
         return rows;
+    }
+
+    /**
+     * 业绩汇总报表：按期间维度（月/季/年）+ 员工聚合新签业绩。
+     * <p>
+     * 数据权限：经纪人仅本人（selfEmployeeId）；总监不限制；店长/财务限本部门子树；超管不限制。
+     */
+    @Override
+    public PageResult<PerformanceSummaryVo> pageSummary(PerformanceSummaryBo query, PageQuery pageQuery) {
+        String periodType = query.getPeriodType();
+        String year = query.getYear();
+        if (StringUtils.isBlank(periodType) || StringUtils.isBlank(year)) {
+            return new PageResult<>(List.of(), 0);
+        }
+        int pageNum = pageQuery.getPageNum() == null || pageQuery.getPageNum() < 1 ? 1 : pageQuery.getPageNum();
+        int pageSize = pageQuery.getPageSize() == null || pageQuery.getPageSize() < 1 ? 20 : pageQuery.getPageSize();
+        long offset = (long) (pageNum - 1) * pageSize;
+
+        // 数据权限：超管/总监→全量；店长→本门店子树；其他（员工/经纪人/财务/人事）→仅本人
+        Long currentEmployeeId = resolveCurrentEmployeeId();
+        Long effectiveDeptId;
+        Long filterEmployeeId;
+        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
+            // 超管/总监：全量数据权限
+            effectiveDeptId = query.getDeptId();
+            filterEmployeeId = query.getEmployeeId();
+        } else if (hasRole(ROLE_KEY_MANAGER)) {
+            // 店长：本门店（含下级子部门）
+            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "业绩汇总");
+            filterEmployeeId = query.getEmployeeId();
+        } else {
+            // 员工/经纪人/财务/人事等：仅本人；无员工关联则无数据（防越权）
+            effectiveDeptId = null;
+            filterEmployeeId = currentEmployeeId;
+            if (filterEmployeeId == null) {
+                return new PageResult<>(List.of(), 0);
+            }
+        }
+
+        String bizType = StringUtils.trimToNull(query.getBizType());
+        long total = factMapper.countSummary(periodType, year, query.getQuarter(), effectiveDeptId, filterEmployeeId, bizType);
+        List<PerformanceSummaryVo> rows = total == 0
+            ? List.of()
+            : factMapper.selectSummaryPage(periodType, year, query.getQuarter(), effectiveDeptId, filterEmployeeId, bizType, offset, pageSize);
+        return new PageResult<>(rows, total);
+    }
+
+    /**
+     * 业绩排行：按员工聚合新签业绩金额降序，分页返回。
+     * <p>
+     * 数据权限：经纪人仅本人（传 selfEmployeeId 过滤）；总监不限制；店长/财务限本部门子树。
+     * rank 字段按分页起始序号填充（offset + 1 起）。
+     */
+    @Override
+    public PageResult<PerformanceRankVo> pageRank(PerformanceRankBo query, PageQuery pageQuery) {
+        String periodType = query.getPeriodType();
+        String year = query.getYear();
+        if (StringUtils.isBlank(periodType) || StringUtils.isBlank(year)) {
+            return new PageResult<>(List.of(), 0);
+        }
+        int pageNum = pageQuery.getPageNum() == null || pageQuery.getPageNum() < 1 ? 1 : pageQuery.getPageNum();
+        int pageSize = pageQuery.getPageSize() == null || pageQuery.getPageSize() < 1 ? 20 : pageQuery.getPageSize();
+        long offset = (long) (pageNum - 1) * pageSize;
+
+        // 数据权限：超管/总监→全量；店长→本门店子树；其他（员工/经纪人/财务/人事）→仅本人
+        Long currentEmployeeId = resolveCurrentEmployeeId();
+        Long effectiveDeptId;
+        Long filterEmployeeId;
+        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
+            // 超管/总监：全量数据权限
+            effectiveDeptId = query.getDeptId();
+            filterEmployeeId = null;
+        } else if (hasRole(ROLE_KEY_MANAGER)) {
+            // 店长：本门店（含下级子部门）
+            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "业绩排行");
+            filterEmployeeId = null;
+        } else {
+            // 员工/经纪人/财务/人事等：仅本人；无员工关联则无数据（防越权）
+            effectiveDeptId = null;
+            filterEmployeeId = currentEmployeeId;
+            if (filterEmployeeId == null) {
+                return new PageResult<>(List.of(), 0);
+            }
+        }
+
+        String bizType = StringUtils.trimToNull(query.getBizType());
+        long total = factMapper.countRank(year, query.getQuarter(), effectiveDeptId, bizType, filterEmployeeId);
+        List<PerformanceRankVo> rows = total == 0
+            ? List.of()
+            : factMapper.selectRankPage(year, query.getQuarter(), effectiveDeptId, bizType, filterEmployeeId, offset, pageSize);
+        // rank 按当前页序号填充（跨页连续排名 = offset + 行号）
+        long seq = offset + 1;
+        for (PerformanceRankVo row : rows) {
+            row.setRank(seq++);
+        }
+        return new PageResult<>(rows, total);
+    }
+
+    /**
+     * 判断当前登录用户是否拥有指定角色键。
+     */
+    private boolean hasRole(String roleKey) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoles() == null) {
+                return false;
+            }
+            return loginUser.getRoles().stream().anyMatch(r -> roleKey.equals(r.getRoleKey()));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 解析当前登录用户关联的员工 ID（不限角色，任意登录用户均可解析）。
+     * <p>
+     * 用于汇总/排行数据权限：非管理角色（员工/经纪人/财务/人事等）仅查本人业绩。
+     * 解析失败返回 null（调用方应按"无数据"处理，防止越权）。
+     */
+    private Long resolveCurrentEmployeeId() {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getUserId() == null) {
+                return null;
+            }
+            EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(loginUser.getUserId());
+            return emp == null ? null : emp.getEmployeeId();
+        } catch (Exception e) {
+            log.warn("[performance] 解析当前用户员工ID失败", e);
+            return null;
+        }
     }
 
     /**
