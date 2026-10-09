@@ -3,9 +3,26 @@
 #
 # 基于本机已有的 panjia-server:latest（内含 Temurin 21 JDK，ENTRYPOINT 已就绪：
 #   java -Dserver.port=${SERVER_PORT} ${JAVA_OPTS} -jar /ruoyi/server/app.jar）
-# 离线可构建，无需访问 Docker Hub。仅需覆盖 jar + 激活 docker-local profile。
+# 无需访问 Docker Hub（基础镜像本地已存在）。仅需覆盖 jar + 激活 docker-local profile。
+# 注：构建时 apt 需要网络（Ubuntu/pgdg 源），用于安装 PostgreSQL 客户端。
 
 FROM panjia-server:latest
+
+# 安装 PostgreSQL 16 客户端（备份恢复功能 local 模式用）：
+# 容器内无 docker CLI，BackupServiceImpl 直接执行 pg_dump/pg_restore 经 TCP
+# 连 host.docker.internal 的 PG（见 application-docker-local.yml 的 panjia.backup）。
+# jammy 默认源只提供 client-14，旧客户端不能 dump 16.x 服务端，必须挂 pgdg 源装 16。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates gnupg lsb-release wget \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && wget -q -O /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/*
 
 # 复制 Maven 打包产物（要求先执行 mvn package）
 COPY ruoyi-admin/target/ruoyi-admin.jar /ruoyi/server/app.jar

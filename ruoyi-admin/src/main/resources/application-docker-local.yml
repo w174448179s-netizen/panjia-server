@@ -21,3 +21,12 @@ panjia:
   import-util:
     minio:
       endpoint: http://host.docker.internal:9000
+  # 备份恢复：容器内无 docker CLI，改用本机 postgresql-client 直连宿主机 PG；
+  # 镜像（Dockerfile.local）已内置 postgresql-client-16，备份/还原目标均为 panjia_test
+  backup:
+    mode: local
+    db-host: host.docker.internal
+    db-port: 5432
+    db-name: panjia_test
+    db-user: root
+    db-pass: root
