@@ -177,8 +177,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         String factStatus = query.getFactStatus();
         int pageNum = pageQuery.getPageNum() == null ? 1 : pageQuery.getPageNum();
         int pageSize = pageQuery.getPageSize() == null ? 20 : pageQuery.getPageSize();
+        String kw = StringUtils.trimToNull(keyword);
         PerformanceManagePageVo<PerformanceManageContractVo> vo = new PerformanceManagePageVo<>();
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)) {
+        // 口径：期间与关键字（合同号等）至少一项——仅录合同号不选期间时跨期查询
+        if (StringUtils.isBlank(factType) || (StringUtils.isBlank(period) && kw == null)) {
             vo.setTotal(0);
             vo.setRows(List.of());
             PerformanceManagePageVo.Summary empty = new PerformanceManagePageVo.Summary();
@@ -186,7 +188,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             vo.setSummary(empty);
             return vo;
         }
-        String kw = StringUtils.trimToNull(keyword);
         int page = Math.max(pageNum, 1);
         int size = Math.min(Math.max(pageSize, 1), 200);
         Long selfEmployeeId = resolveSelfEmployeeId();
@@ -227,8 +228,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         String period = query.getPeriod();
         String factType = query.getFactType();
         List<String> contractNos = query.getContractNos();
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(factType)
-            || contractNos == null || contractNos.isEmpty()) {
+        // period 可空：跨期合同号搜索后展开明细不限定期间
+        if (StringUtils.isBlank(factType) || contractNos == null || contractNos.isEmpty()) {
             return List.of();
         }
         // 拆表后 PERF_REAL 物理落在实收域 rd/rc：结佣业绩口径走实收明细表，
@@ -539,7 +540,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 业绩排行：按员工聚合新签业绩金额降序，分页返回。
      * <p>
-     * 数据权限：经纪人仅本人（传 selfEmployeeId 过滤）；总监不限制；店长/财务限本部门子树。
+     * 排行榜面向全员公开（所有员工都能看到全量排名，仅作激励展示）；部门条件仅作筛选，不做数据权限裁剪。
      * rank 字段按分页起始序号填充（offset + 1 起）。
      */
     @Override
@@ -553,26 +554,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         int pageSize = pageQuery.getPageSize() == null || pageQuery.getPageSize() < 1 ? 20 : pageQuery.getPageSize();
         long offset = (long) (pageNum - 1) * pageSize;
 
-        // 数据权限：超管/总监→全量；店长→本门店子树；其他（员工/经纪人/财务/人事）→仅本人
-        Long currentEmployeeId = resolveCurrentEmployeeId();
-        Long effectiveDeptId;
-        Long filterEmployeeId;
-        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
-            // 超管/总监：全量数据权限
-            effectiveDeptId = query.getDeptId();
-            filterEmployeeId = null;
-        } else if (hasRole(ROLE_KEY_MANAGER)) {
-            // 店长：本门店（含下级子部门）
-            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "业绩排行");
-            filterEmployeeId = null;
-        } else {
-            // 员工/经纪人/财务/人事等：仅本人；无员工关联则无数据（防越权）
-            effectiveDeptId = null;
-            filterEmployeeId = currentEmployeeId;
-            if (filterEmployeeId == null) {
-                return new PageResult<>(List.of(), 0);
-            }
-        }
+        Long effectiveDeptId = query.getDeptId();
+        Long filterEmployeeId = null;
 
         String bizType = StringUtils.trimToNull(query.getBizType());
         long total = factMapper.countRank(year, query.getQuarter(), effectiveDeptId, bizType, filterEmployeeId);

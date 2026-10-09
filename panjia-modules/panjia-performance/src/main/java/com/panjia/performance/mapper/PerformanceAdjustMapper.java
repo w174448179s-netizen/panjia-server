@@ -119,8 +119,8 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
                contract_no AS "bizKey",
                original_amount AS "originalAmount"
         FROM pj_perf_adjust
-        WHERE period = #{period}
-          AND status = 'EXECUTED'
+        WHERE status = 'EXECUTED'
+          <if test="period != null and period != ''">AND period = #{period}</if>
           AND contract_no IN
         <foreach collection="contractNos" item="k" open="(" separator="," close=")">#{k}</foreach>
         ORDER BY contract_no, id ASC
@@ -179,7 +179,8 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
                original_amount AS "originalAmount",
                payload_json AS "payloadJson"
         FROM pj_perf_adjust
-        WHERE period = #{period}
+        WHERE 1 = 1
+          <if test="period != null and period != ''">AND period = #{period}</if>
           AND fact_type = #{factType}
           AND status IN ('SUBMITTED', 'APPROVED')
           AND contract_no IN

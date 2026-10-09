@@ -1306,8 +1306,8 @@ public class CommissionApplicationService {
      * 按「合同」维度分页查询结佣申请（与业绩明细页合同维度对齐）。
      */
     public PageResult<CommissionContractVo> listContracts(CommissionApplyBo query, PageQuery pageQuery) {
-        String period = StringUtils.isNotBlank(query.getPeriod())
-            ? query.getPeriod() : LocalDateTime.now().format(PERIOD_FORMATTER);
+        // period 可空：仅录合同号等关键字不选期间时跨期查询（与业绩明细列表口径一致）
+        String period = StringUtils.trimToNull(query.getPeriod());
 
         // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
@@ -1316,7 +1316,7 @@ public class CommissionApplicationService {
             performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId());
 
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
+            .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
             .orderByDesc(CommissionApplication::getId));
         // 同时按 contractNo 和 orderNo 建索引，支持一手房/房产金融/家装荐客以订单号为准
         Map<String, CommissionApplication> appMap = new LinkedHashMap<>();
@@ -1340,8 +1340,9 @@ public class CommissionApplicationService {
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
         List<CommissionContractVo> all = new ArrayList<>(contracts.size());
-        // 列表所有合同同属一个 period，封账状态只查一次
-        boolean periodClosed = periodCloseQueryPort.isClosed(period);
+        // 封账判定：固定期间一次判定；跨期查询按行所属期间逐个判定（懒加载缓存，避免逐行回表）
+        Map<String, Boolean> closedCache = new HashMap<>();
+        Boolean fixedClosed = period != null ? periodCloseQueryPort.isClosed(period) : null;
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
             if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
@@ -1368,7 +1369,11 @@ public class CommissionApplicationService {
             if (bizType != null && !bizType.equals(c.getBizType())) {
                 continue;
             }
-            all.add(toContractVO(period, periodClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
+            // 行级期间/封账：固定期间直接用；跨期时行期间取申请单归属期间
+            String rowPeriod = period != null ? period : app.getPeriod();
+            boolean rowClosed = fixedClosed != null ? fixedClosed
+                : closedCache.computeIfAbsent(rowPeriod, p -> periodCloseQueryPort.isClosed(p));
+            all.add(toContractVO(rowPeriod, rowClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
         }
 
         // 三个业绩列表统一排序：签约/认购时间倒序 → 合同号(空取订单号)次序 → id 倒序兜底

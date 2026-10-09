@@ -235,7 +235,7 @@ public interface ReceivedRealFactMapper {
                        OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
             LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
             WHERE rd.detail_status = 'ACTIVE'
-              AND rd.period = #{period}
+            <if test="period != null and period != ''">AND rd.period = #{period}</if>
               AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
             <if test="deptId != null">
               AND (COALESCE(rd.dept_id, rc.dept_id, e.dept_id) = #{deptId}

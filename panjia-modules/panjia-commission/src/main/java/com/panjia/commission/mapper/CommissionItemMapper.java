@@ -260,14 +260,16 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         SELECT DISTINCT k.biz_key
         FROM (
             SELECT contract_no AS biz_key FROM pj_perf_fact
-            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT' AND period = #{period}
+            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT'
+              <if test="period != null and period != ''">AND period = #{period}</if>
               AND source = 'MANUAL'
               AND (source_key LIKE '%|MANUAL-ADJ%' OR source_key LIKE '%|MANUAL-CADJ%')
               AND contract_no IN
               <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>
             UNION
             SELECT order_no AS biz_key FROM pj_perf_fact
-            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT' AND period = #{period}
+            WHERE fact_status = 'ACTIVE' AND fact_type = 'PERF_EXPECT'
+              <if test="period != null and period != ''">AND period = #{period}</if>
               AND source = 'MANUAL'
               AND (source_key LIKE '%|MANUAL-ADJ%' OR source_key LIKE '%|MANUAL-CADJ%')
               AND order_no IN

@@ -77,7 +77,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
@@ -115,15 +115,18 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
 
     /**
      * 查询指定期间/口径下出现过的业务类型（去重排序），供筛选下拉使用。
+     * period 为空时查全部期间（跨期合同号搜索场景）。
      */
     @Select("""
+        <script>
         SELECT DISTINCT biz_type
         FROM pj_perf_fact
         WHERE fact_status = 'ACTIVE'
-          AND period = #{period}
+          <if test="period != null and period != ''">AND period = #{period}</if>
           AND fact_type = #{factType}
           AND biz_type IS NOT NULL
         ORDER BY 1
+        </script>
         """)
     List<String> selectManageBizTypes(@Param("period") String period,
                                       @Param("factType") String factType);
@@ -202,7 +205,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
           <if test="deptId != null">
@@ -257,7 +260,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
           <if test="deptId != null">
@@ -327,7 +330,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust"
         FROM pj_perf_fact f
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.order_no IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
@@ -377,7 +380,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND (rc.order_no IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
               OR rc.contract_no IN
@@ -866,7 +869,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact f
             LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
             WHERE f.fact_status = 'ACTIVE'
-              AND f.period = #{period}
+            <if test="period != null and period != ''">AND f.period = #{period}</if>
               AND f.fact_type = #{factType}
               AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
             <if test="deptId != null">
