@@ -238,7 +238,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
 
     @Override
     public List<AttendanceDetailVO> listMyDetails(Long userId, String attendMonth) {
-        LocalDate monthStart = parseMonth(attendMonth);
+        LocalDate monthStart = parseYearMonth(attendMonth);
         if (monthStart == null) {
             return List.of();
         }
@@ -294,7 +294,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void revokeHistoryImport(String period) {
-        LocalDate monthStart = parseMonth(period);
+        LocalDate monthStart = parseYearMonth(period);
         if (monthStart == null) {
             return;
         }
@@ -311,7 +311,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         if (details == null || details.isEmpty()) {
             return;
         }
-        LocalDate monthStart = parseMonth(period);
+        LocalDate monthStart = parseYearMonth(period);
         if (monthStart == null) {
             log.warn("[考勤明细同步] 期间 {} 格式不合法，跳过", period);
             return;
@@ -513,6 +513,18 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
             return LocalDate.parse(text.trim());
         } catch (DateTimeParseException e) {
             throw new ServiceException("月份格式不正确，应为 yyyy-MM-dd：{}", text);
+        }
+    }
+
+    /** 解析期间参数（yyyy-MM，返回当月 1 日；格式不合法返回 null） */
+    private LocalDate parseYearMonth(String text) {
+        if (StringUtils.isBlank(text)) {
+            return null;
+        }
+        try {
+            return java.time.YearMonth.parse(text.trim()).atDay(1);
+        } catch (DateTimeParseException e) {
+            return null;
         }
     }
 
