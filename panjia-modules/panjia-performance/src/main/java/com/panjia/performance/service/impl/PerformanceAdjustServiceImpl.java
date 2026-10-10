@@ -2000,8 +2000,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         long tsBase = System.currentTimeMillis();
         int count = 0;
         for (ManualOffsetItem item : items) {
-            PerformanceFact fact = new PerformanceFact();
-            fact.setFactType(FactType.PERF_EXPECT);
+            PerformanceFact fact = copyFactBase(template);
             fact.setFactStatus(FactStatus.ACTIVE);
             fact.setSource(PerformanceSource.MANUAL);
             fact.setSourceKey(template.getSourceKey() + "|MANUAL-OFFSET-" + tsBase + "-" + count);
@@ -2010,13 +2009,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             fact.setEffectiveDate(periodStart);
             fact.setBatchId(null);
             fact.setPerformanceAmount(item.getAmount());
-            // 模板复制
-            fact.setBizType(template.getBizType());
-            fact.setPropertyAddress(template.getPropertyAddress());
-            fact.setOrderNo(template.getOrderNo());
-            fact.setContractNo(template.getContractNo());
-            fact.setFeeItem(template.getFeeItem());
-            fact.setDeptId(template.getDeptId());
             // 入参覆盖
             fact.setEmployeeId(item.getEmployeeId());
             fact.setRoleType(item.getRoleType());
