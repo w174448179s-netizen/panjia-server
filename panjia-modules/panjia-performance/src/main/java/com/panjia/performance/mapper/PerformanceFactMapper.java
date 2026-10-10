@@ -490,6 +490,38 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                          @Param("contractNo") String contractNo);
 
     /**
+     * 按订单号+合同号双键精确查询已作废（VOIDED）业绩事实（合同级恢复用）。
+     * <p>
+     * 同合同号挂多订单时，按合同号（双键 OR）会把多订单的作废明细混在一起：
+     * 恢复/作废校验会跨订单误判。双键同时满足才精确唯一；
+     * contract_no 条件兼容业务键（传订单号时走 order_no 等值分支）。
+     *
+     * @param period     归属期间
+     * @param factType   事实口径
+     * @param orderNo    订单号
+     * @param contractNo 合同号（或历史业务键；为空时仅按订单号匹配）
+     * @return 该订单下全部 VOIDED 事实列表
+     */
+    @Select("""
+        <script>
+        SELECT f.*
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'VOIDED'
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
+          AND f.fact_type = #{factType}
+          AND f.order_no = #{orderNo}
+          <if test="contractNo != null and contractNo != ''">
+            AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+          </if>
+        ORDER BY f.id
+        </script>
+        """)
+    List<PerformanceFact> selectVoidedFactsByOrderAndContract(@Param("period") String period,
+                                                               @Param("factType") String factType,
+                                                               @Param("orderNo") String orderNo,
+                                                               @Param("contractNo") String contractNo);
+
+    /**
      * 统计指定事实同合同（同期间/口径/业务键）下已作废（VOIDED）事实数量。
      * <p>
      * 用于明细级调整前的合同状态校验：合同存在已作废明细时禁止调整。
@@ -1096,10 +1128,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     java.util.Map<String, Object> selectContractInfoByFactId(@Param("factId") Long factId);
 
     /**
-     * 按期间 + 合同号查询合同基本信息（调整单详情展示用）。
+     * 按期间 + 订单号/合同号查询合同基本信息（调整单详情展示用）。
+     * <p>
+     * 同合同号挂多订单时按订单号精确限定，避免 MAX 聚合把两个订单的
+     * 订单号/房源地址/签约时间串行展示；订单号为空（历史调整单）退化原双键 OR 口径。
      *
      * @param period     归属期间
-     * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
+     * @param contractNo 合同号（或历史业务键）
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
@@ -1112,20 +1148,24 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           <if test="period != null and period != ''">AND f.period = #{period}</if>
+          <if test="orderNo != null and orderNo != ''">AND f.order_no = #{orderNo}</if>
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         </script>
         """)
     java.util.Map<String, Object> selectContractInfoByContractNo(
-        @Param("period") String period, @Param("contractNo") String contractNo);
+        @Param("period") String period, @Param("orderNo") String orderNo, @Param("contractNo") String contractNo);
 
     /**
-     * 按期间 + 合同号 + 事实口径查询该合同下全部有效明细（调整单详情展示用）。
+     * 按期间 + 订单号/合同号 + 事实口径查询该订单下全部有效明细（调整单详情展示用）。
      * <p>
      * 只查 ACTIVE 状态的事实，过滤掉已冲销/已替代的历史行。
      * 应收金额与实收金额按 source_key 交叉配对，与业绩明细页口径一致。
+     * 同合同号挂多订单时按订单号精确限定（详情明细不跨订单混排）；
+     * 订单号为空（历史调整单）退化原双键 OR 口径。
      *
      * @param period     归属期间
-     * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
+     * @param contractNo 合同号（或历史业务键）
      * @param factType   事实口径（PERF_EXPECT / PERF_REAL）
      * @return 明细列表
      */
@@ -1193,11 +1233,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
+          <if test="orderNo != null and orderNo != ''">AND f.order_no = #{orderNo}</if>
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
         </script>
         """)
     List<AdjustFactDetailVo> selectAdjustFactDetails(@Param("period") String period,
+                                                       @Param("orderNo") String orderNo,
                                                        @Param("contractNo") String contractNo,
                                                        @Param("factType") String factType);
 

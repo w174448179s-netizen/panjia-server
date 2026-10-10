@@ -158,7 +158,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType) {
         if (isReal(factType)) {
             ReceivedRealFactPort port = realPort();
-            return port == null ? Collections.emptyList() : port.findActiveByContract(period, contractNo);
+            return port == null ? Collections.emptyList() : port.findActiveByContract(period, null, contractNo);
         }
         List<PerformanceFactSummaryDTO> list = factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
         enrichWithEmployeeData(list);
@@ -168,9 +168,9 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByBizKey(String period, String orderNo, String contractNo, String factType) {
         if (isReal(factType)) {
-            // 实收口径维持合同号/订单号双键匹配（实收明细无单订单精确查询需求）
+            // 实收口径同走订单号+合同号双键精确匹配（orderNo 为空退化合同号/订单号双键 OR）
             ReceivedRealFactPort port = realPort();
-            return port == null ? Collections.emptyList() : port.findActiveByContract(period, contractNo);
+            return port == null ? Collections.emptyList() : port.findActiveByContract(period, orderNo, contractNo);
         }
         if (StringUtils.isNotBlank(orderNo)) {
             List<PerformanceFactSummaryDTO> list = factMapper.selectActiveFactSummariesByOrderAndContract(period, factType, orderNo, contractNo);
@@ -420,10 +420,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     public Map<Long, Long> adjustContractFactsAmount(String period, String orderNo, String contractNo, String factType,
                                                       BigDecimal targetAmount, Long operatorId, Long adjustId) {
         if (isReal(factType)) {
-            // PERF_REAL 合同级调整落实收域 rd（分摊 + supersede 由实收端口实现）
+            // PERF_REAL 合同级调整落实收域 rd（分摊 + supersede 由实收端口实现），订单号双键精确限定
             ReceivedRealFactPort port = realPort();
             return port == null ? new HashMap<>()
-                : port.adjustContractDetailsAmount(period, contractNo, targetAmount, operatorId, adjustId);
+                : port.adjustContractDetailsAmount(period, orderNo, contractNo, targetAmount, operatorId, adjustId);
         }
         // 订单号+合同号双键精确匹配：订单号也可能重复（不同合同挂同订单号），避免跨订单/跨合同混排分摊
         List<PerformanceFact> facts;

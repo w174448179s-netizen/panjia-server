@@ -32,8 +32,12 @@ public interface ReceivedRealFactPort {
     /** 按期间 + 员工查 ACTIVE 实收明细（rd.employee_id 为空时按员工工号关联兜底）。 */
     List<PerformanceFactSummaryDTO> findActiveByEmployee(String period, Long employeeId);
 
-    /** 按期间 + 合同号/订单号查 ACTIVE 实收明细。 */
-    List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo);
+    /**
+     * 按期间 + 订单号/合同号查 ACTIVE 实收明细。
+     * <p>orderNo 非空时与 contractNo 双键精确限定（同合同号挂多订单防串单）；
+     * 为空时退化 contract_no/order_no 双键 OR 口径。
+     */
+    List<PerformanceFactSummaryDTO> findActiveByContract(String period, String orderNo, String contractNo);
 
     /**
      * 按业务键集合（订单号/合同号）查 ACTIVE 实收明细（<b>不限归属期间，跨月</b>）。
@@ -90,14 +94,14 @@ public interface ReceivedRealFactPort {
     List<HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId);
 
     /**
-     * 合同级实收金额调整：按合同下各 ACTIVE 明细当前金额占比分摊
+     * 合同级实收金额调整：按订单下各 ACTIVE 明细当前金额占比分摊
      * （targetAmount − 当前合计）差额，逐条 supersede 为新金额。
-     * <p>
+     * <p>orderNo 非空时与 contractNo 双键精确限定（同合同号挂多订单防跨订单分摊）；
      * 尾差补到金额绝对值最大的一条，保证 Σ新金额 = targetAmount 精确成立。
      *
      * @return 旧明细 ID → 新明细 ID 映射（供结佣域回写 CommissionItem.performance_fact_id）
      */
-    Map<Long, Long> adjustContractDetailsAmount(String period, String contractNo,
+    Map<Long, Long> adjustContractDetailsAmount(String period, String orderNo, String contractNo,
                                                  BigDecimal targetAmount, Long operatorId, Long adjustId);
 
     /** 明细级金额调整：单条实收明细 supersede 为 targetAmount。明细不存在返回 null。 */

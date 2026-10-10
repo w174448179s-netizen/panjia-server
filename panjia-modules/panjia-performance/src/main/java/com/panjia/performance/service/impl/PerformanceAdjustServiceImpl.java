@@ -288,7 +288,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             // 业绩冲正单的 period 是冲正目标月：发起审批时该月可能还没有事实行，
             // 必须跨期（period=null）查合同信息，否则订单号/房源地址/签约时间全空
             String contractInfoPeriod = adjust.getAdjustType() == AdjustType.MANUAL_OFFSET ? null : period;
-            contractInfo = factMapper.selectContractInfoByContractNo(contractInfoPeriod, contractNo);
+            contractInfo = factMapper.selectContractInfoByContractNo(contractInfoPeriod, adjust.getOrderNo(), contractNo);
         } else if (factId != null) {
             contractInfo = factMapper.selectContractInfoByFactId(factId);
             if (contractInfo != null) {
@@ -324,7 +324,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         if (StringUtils.isNotBlank(targetContractNo)) {
             List<AdjustFactDetailVo> details =
-                factMapper.selectAdjustFactDetails(period, targetContractNo, factType);
+                factMapper.selectAdjustFactDetails(period, adjust.getOrderNo(), targetContractNo, factType);
             // 增加角色人（ADD_MEMBER）：分摊展示语义与金额调整完全不同，独立处理后直接返回
             if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 applyAddMemberDetail(adjust, dto, details);
@@ -546,7 +546,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             // 实收调整作用于实收明细（pj_received_detail），不查 pj_perf_fact 作废明细
             if (adjustType != AdjustType.RECEIVED_AMOUNT) {
                 String voidedPeriod = adjustType == AdjustType.MANUAL_OFFSET ? null : dto.getPeriod();
-                if (!factMapper.selectVoidedFactsByContractNo(voidedPeriod, dto.getFactType(), dto.getContractNo()).isEmpty()) {
+                // 同合同号挂多订单时按订单号+合同号双键校验，避免跨订单误拦
+                if (!loadVoidedFactsForAdjust(voidedPeriod, dto.getFactType(), dto.getOrderNo(), dto.getContractNo()).isEmpty()) {
                     throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
                 }
             }
@@ -749,6 +750,24 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 orderNo, contractNo, period, factType);
         }
         return factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+    }
+
+    /**
+     * 调整链路统一装载 VOIDED 事实：口径同 {@link #loadActiveFactsForAdjust}（订单号+合同号
+     * 双键精确优先，未命中告警回退合同号双键 OR，订单号为空直接按合同号）。
+     * 用于合同级调整发起前的「存在已作废明细禁止调整」校验，防止跨订单误拦/漏拦。
+     */
+    private List<PerformanceFact> loadVoidedFactsForAdjust(String period, String factType,
+                                                            String orderNo, String contractNo) {
+        if (StringUtils.isNotBlank(orderNo)) {
+            List<PerformanceFact> byOrder = factMapper.selectVoidedFactsByOrderAndContract(period, factType, orderNo, contractNo);
+            if (byOrder != null && !byOrder.isEmpty()) {
+                return byOrder;
+            }
+            log.warn("[调整单] 按订单号+合同号双键未查到已作废事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                orderNo, contractNo, period, factType);
+        }
+        return factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
     }
 
     /**
@@ -1209,8 +1228,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 合计语义同业绩冲正：expectedTotal=调整前（originalAmount）、receivedTotal=调整后（targetAmount）。
      */
     private AdjustDetailVo applyReceivedAmountDetail(PerformanceAdjust adjust, AdjustDetailVo dto) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByContract(
-            adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_REAL);
+        // 同合同号挂多订单时按订单号+合同号双键装载（订单号优先，空退化合同号口径）
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByBizKey(
+            adjust.getPeriod(), adjust.getOrderNo(), adjust.getContractNo(), FACT_TYPE_REAL);
         AddMemberPayload payload = parseAddMemberPayload(adjust.getPayloadJson());
         Map<Long, AddMemberPayload.Alloc> allocByFact = new HashMap<>();
         Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
@@ -1801,8 +1821,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * @return 原始实收合计（调整前）
      */
     private BigDecimal prepareReceivedAmountAdjust(PerformanceAdjustCreateBo dto) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByContract(
-            dto.getPeriod(), dto.getContractNo(), FACT_TYPE_REAL);
+        // 同合同号挂多订单时按订单号+合同号双键装载（订单号优先，空退化合同号口径）
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByBizKey(
+            dto.getPeriod(), dto.getOrderNo(), dto.getContractNo(), FACT_TYPE_REAL);
         if (facts == null || facts.isEmpty()) {
             throw new ServiceException("该合同该期间无有效实收明细，无法发起实收调整：contractNo={}, period={}",
                 dto.getContractNo(), dto.getPeriod());
@@ -2679,7 +2700,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             period = null;
         }
         if (SCOPE_CONTRACT.equals(scope)) {
-            BigDecimal total = adjustMapper.selectContractTotalAmount(period, factType, dto.getContractNo());
+            // 同合同号挂多订单时按订单号+合同号双键汇总，避免跨订单混排虚增合同总额
+            BigDecimal total = adjustMapper.selectContractTotalAmount(period, factType, dto.getOrderNo(), dto.getContractNo());
             return total != null ? total : BigDecimal.ZERO;
         } else {
             PerformanceFact fact = factMapper.selectById(dto.getFactId());

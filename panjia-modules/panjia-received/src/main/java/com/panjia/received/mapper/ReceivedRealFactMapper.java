@@ -105,8 +105,9 @@ public interface ReceivedRealFactMapper {
                                                            @Param("employeeId") Long employeeId);
 
     /**
-     * 按合同号/订单号查 ACTIVE 实收明细。
+     * 按订单号/合同号查 ACTIVE 实收明细。
      * period 可空：空时查该合同全部期间（结佣发起月与实收月解耦，发起时跨期找实收）。
+     * orderNo 非空时与 contractNo 双键精确限定（同合同号挂多订单防串单）。
      */
     @Select("""
         <script>
@@ -120,11 +121,13 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
           <if test="period != null and period != ''">AND rd.period = #{period}</if>
+          <if test="orderNo != null and orderNo != ''">AND rc.order_no = #{orderNo}</if>
           AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ORDER BY rd.id
         </script>
         """)
     List<PerformanceFactSummaryDTO> selectActiveByContract(@Param("period") String period,
+                                                           @Param("orderNo") String orderNo,
                                                            @Param("contractNo") String contractNo);
 
     /** 按业务键集合（订单号/合同号）跨期间查 ACTIVE 实收明细。 */
@@ -386,7 +389,7 @@ public interface ReceivedRealFactMapper {
     List<HistoryRealFactDTO> selectHistoryByBatch(@Param("period") String period,
                                                   @Param("batchId") Long batchId);
 
-    /** 按期间 + 合同号/订单号查 ACTIVE 实收明细实体（结佣调整/对齐写路径用）。 */
+    /** 按期间 + 订单号/合同号查 ACTIVE 实收明细实体（实收调整/对齐写路径用）；orderNo 非空双键精确限定。 */
     @Select("""
         <script>
         SELECT rd.*
@@ -394,10 +397,12 @@ public interface ReceivedRealFactMapper {
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
         WHERE rd.detail_status = 'ACTIVE'
           <if test="period != null and period != ''">AND rd.period = #{period}</if>
+          <if test="orderNo != null and orderNo != ''">AND rc.order_no = #{orderNo}</if>
           AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ORDER BY rd.id
         </script>
         """)
     List<ReceivedDetail> selectActiveDetailsByContract(@Param("period") String period,
+                                                        @Param("orderNo") String orderNo,
                                                         @Param("contractNo") String contractNo);
 }

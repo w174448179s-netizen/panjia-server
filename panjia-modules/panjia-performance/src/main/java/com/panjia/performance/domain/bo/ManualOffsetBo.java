@@ -15,6 +15,8 @@ import java.util.List;
 public class ManualOffsetBo {
     @NotBlank(message = "合同号不能为空")
     private String contractNo;
+    /** 订单号（同合同号挂多订单时与合同号双键精确匹配模板事实，防止串单；可空退化旧口径） */
+    private String orderNo;
     @NotBlank(message = "期间不能为空")
     private String period;
     @NotEmpty(message = "冲正明细不能为空")

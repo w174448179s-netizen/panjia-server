@@ -23,6 +23,9 @@ public class ContractVoidBo {
     @NotBlank(message = "合同号不能为空")
     private String contractNo;
 
+    /** 订单号（同合同号挂多订单时与合同号双键精确匹配，防止跨订单作废/恢复；可空退化旧口径） */
+    private String orderNo;
+
     /** 作废/恢复原因 */
     @NotBlank(message = "原因不能为空")
     private String reason;

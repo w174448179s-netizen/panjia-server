@@ -575,9 +575,23 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     @Override
     public int createManualOffset(ManualOffsetBo bo, Long operatorId) {
-        // 按 contractNo 跨期查 ACTIVE PERF_EXPECT 事实作为模板
-        List<PerformanceFact> templates = factMapper.selectActiveFactsByContractNo(
-            null, FactType.PERF_EXPECT.getCode(), bo.getContractNo());
+        // 按订单号+合同号双键跨期查 ACTIVE PERF_EXPECT 事实作为模板（同合同号挂多订单防串单；
+        // 订单号为空退化合同号口径），模板决定新事实归属的 contract_no/order_no
+        List<PerformanceFact> templates;
+        if (StringUtils.isNotBlank(bo.getOrderNo())) {
+            templates = factMapper.selectActiveFactsByOrderAndContract(
+                null, FactType.PERF_EXPECT.getCode(), bo.getOrderNo(), bo.getContractNo());
+            if (templates == null || templates.isEmpty()) {
+                log.warn("[手工冲正] 按订单号+合同号双键未查到模板事实，回退合同号匹配：orderNo={}, contractNo={}",
+                    bo.getOrderNo(), bo.getContractNo());
+            }
+        } else {
+            templates = null;
+        }
+        if (templates == null || templates.isEmpty()) {
+            templates = factMapper.selectActiveFactsByContractNo(
+                null, FactType.PERF_EXPECT.getCode(), bo.getContractNo());
+        }
         if (templates == null || templates.isEmpty()) {
             throw new ServiceException("合同下未找到有效业绩事实");
         }

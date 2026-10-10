@@ -102,11 +102,15 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
     List<Map<String, Object>> selectFactAmountsByIds(@Param("ids") List<Long> ids);
 
     /**
-     * 合同级调整：汇总该合同下全部 ACTIVE 事实的金额（performance_amount 口径）。
+     * 合同级调整：汇总该订单下全部 ACTIVE 事实的金额（performance_amount 口径）。
+     * <p>
+     * 同合同号挂多订单时按订单号精确限定（跨订单混排会虚增合同总额）；
+     * 订单号为空（历史数据）退化原双键 OR 口径。
      *
      * @param period     归属期间（跨月调整传原业绩归属月）
      * @param factType   事实口径
-     * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
+     * @param contractNo 合同号（或历史业务键）
      * @return 金额合计，无匹配事实时为 0
      */
     @Select("""
@@ -116,11 +120,13 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
         WHERE f.fact_status = 'ACTIVE'
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
+          <if test="orderNo != null and orderNo != ''">AND f.order_no = #{orderNo}</if>
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         </script>
         """)
     java.math.BigDecimal selectContractTotalAmount(@Param("period") String period,
                                                     @Param("factType") String factType,
+                                                    @Param("orderNo") String orderNo,
                                                     @Param("contractNo") String contractNo);
 
     /** 空集合安全 */

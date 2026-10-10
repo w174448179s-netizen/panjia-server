@@ -87,12 +87,12 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
-    public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo) {
+    public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String orderNo, String contractNo) {
         // period 可空：空时查该合同全部期间（结佣发起月与实收月解耦）
         if (contractNo == null || contractNo.isBlank()) {
             return Collections.emptyList();
         }
-        return realMapper.selectActiveByContract(period, contractNo);
+        return realMapper.selectActiveByContract(period, orderNo, contractNo);
     }
 
     @Override
@@ -180,9 +180,9 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public Map<Long, Long> adjustContractDetailsAmount(String period, String contractNo,
+    public Map<Long, Long> adjustContractDetailsAmount(String period, String orderNo, String contractNo,
                                                         BigDecimal targetAmount, Long operatorId, Long adjustId) {
-        List<ReceivedDetail> details = realMapper.selectActiveDetailsByContract(period, contractNo);
+        List<ReceivedDetail> details = realMapper.selectActiveDetailsByContract(period, orderNo, contractNo);
         Map<Long, Long> mapping = new LinkedHashMap<>();
         if (details.isEmpty()) {
             return mapping;
@@ -258,7 +258,7 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
-        List<ReceivedDetail> realDetails = realMapper.selectActiveDetailsByContract(period, contractNo);
+        List<ReceivedDetail> realDetails = realMapper.selectActiveDetailsByContract(period, null, contractNo);
         List<PerformanceFact> expectFacts = factMapper.selectActiveFactsByContractNo(
             period, FACT_TYPE_EXPECT, contractNo);
 
@@ -339,7 +339,7 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
             }
         }
 
-        BigDecimal after = sumDetails(realMapper.selectActiveDetailsByContract(period, contractNo));
+        BigDecimal after = sumDetails(realMapper.selectActiveDetailsByContract(period, null, contractNo));
         result.setReceivedTotalAfter(after);
         log.info("[实收对齐] 合同实收已对齐应收：period={}, contractNo={}, 对齐明细数={}, before={}, after={}, expect={}",
             period, contractNo, aligned, before, after, expectedTotal);
