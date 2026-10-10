@@ -166,6 +166,25 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public List<PerformanceFactSummaryDTO> findActiveByBizKey(String period, String orderNo, String contractNo, String factType) {
+        if (isReal(factType)) {
+            // 实收口径维持合同号/订单号双键匹配（实收明细无单订单精确查询需求）
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyList() : port.findActiveByContract(period, contractNo);
+        }
+        if (StringUtils.isNotBlank(orderNo)) {
+            List<PerformanceFactSummaryDTO> list = factMapper.selectActiveFactSummariesByOrderAndContract(period, factType, orderNo, contractNo);
+            if (list != null && !list.isEmpty()) {
+                enrichWithEmployeeData(list);
+                return list;
+            }
+            log.warn("[业绩端口] 按订单号+合同号双键未查到有效事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                orderNo, contractNo, period, factType);
+        }
+        return findActiveByContract(period, contractNo, factType);
+    }
+
+    @Override
     public List<PerformanceFactSummaryDTO> findActiveByBizKeys(java.util.Collection<String> bizKeys, String factType) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyList();
@@ -398,7 +417,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     // ==================== 结佣调整：事实变更（同 PerformanceAdjustServiceImpl 口径） ====================
 
     @Override
-    public Map<Long, Long> adjustContractFactsAmount(String period, String contractNo, String factType,
+    public Map<Long, Long> adjustContractFactsAmount(String period, String orderNo, String contractNo, String factType,
                                                       BigDecimal targetAmount, Long operatorId, Long adjustId) {
         if (isReal(factType)) {
             // PERF_REAL 合同级调整落实收域 rd（分摊 + supersede 由实收端口实现）
@@ -406,7 +425,18 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             return port == null ? new HashMap<>()
                 : port.adjustContractDetailsAmount(period, contractNo, targetAmount, operatorId, adjustId);
         }
-        List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+        // 订单号+合同号双键精确匹配：订单号也可能重复（不同合同挂同订单号），避免跨订单/跨合同混排分摊
+        List<PerformanceFact> facts;
+        if (StringUtils.isNotBlank(orderNo)) {
+            facts = factMapper.selectActiveFactsByOrderAndContract(period, factType, orderNo, contractNo);
+            if (facts == null || facts.isEmpty()) {
+                log.warn("[业绩端口] 按订单号+合同号双键未查到有效事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+            }
+        } else {
+            facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+        }
         Map<Long, Long> mapping = new HashMap<>();
         if (facts == null || facts.isEmpty()) {
             return mapping;
@@ -552,13 +582,14 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         adjust.setAdjustType(AdjustType.valueOf(mirror.getAdjustType()));
         adjust.setAdjustScope(mirror.getAdjustScope());
         adjust.setContractNo(mirror.getContractNo());
+        adjust.setOrderNo(mirror.getOrderNo());
         adjust.setFactType(FactType.PERF_EXPECT.name());
         adjust.setOriginalAmount(mirror.getOriginalAmount());
         // 合同级调整无单员工/单部门，从合同首条 ACTIVE 事实回填（两列 NOT NULL），与新签合同级调整一致；
         // 明细级调整从指定 factId 回填员工/部门
         if ("CONTRACT".equals(mirror.getAdjustScope())) {
-            List<PerformanceFactSummaryDTO> facts = findActiveByContract(
-                mirror.getPeriod(), mirror.getContractNo(), FactType.PERF_EXPECT.name());
+            List<PerformanceFactSummaryDTO> facts = findActiveByBizKey(
+                mirror.getPeriod(), mirror.getOrderNo(), mirror.getContractNo(), FactType.PERF_EXPECT.name());
             if (!facts.isEmpty()) {
                 adjust.setDeptId(facts.get(0).getDeptId());
             }

@@ -176,7 +176,8 @@ public class CommissionAdjustService {
             factId = item.getPerformanceFactId();
         } else {
             // 结佣金额口径=新签（PERF_EXPECT），调整基准取新签合计；实收仅为门控不参与金额
-            originalAmount = sumFacts(application.getPeriod(), application.getContractNo(), FACT_TYPE_EXPECT);
+            originalAmount = sumFacts(application.getPeriod(), application.getOrderNo(),
+                application.getContractNo(), FACT_TYPE_EXPECT);
         }
 
         // 合同级可编辑表格模式（镜像新签调整）：detailTargets/newMember 快照入 payload_json，
@@ -266,15 +267,27 @@ public class CommissionAdjustService {
         return count != null && count > 0;
     }
 
-    /** 按期间+合同号求指定口径 ACTIVE 事实金额合计。 */
-    private BigDecimal sumFacts(String period, String contractNo, String factType) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByContract(period, contractNo, factType);
+    /**
+     * 按期间+业务键求指定口径 ACTIVE 事实金额合计。
+     * <p>订单号优先精确匹配（同合同号挂多订单时避免跨订单混排），订单号为空/未命中回退合同号。
+     */
+    private BigDecimal sumFacts(String period, String orderNo, String contractNo, String factType) {
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByBizKey(period, orderNo, contractNo, factType);
         if (facts == null || facts.isEmpty()) {
             return BigDecimal.ZERO;
         }
         return facts.stream()
             .map(f -> f.getAmount() == null ? BigDecimal.ZERO : f.getAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /** 申请单订单号（订单号优先匹配用；查询失败/为空返回 null，回退合同号口径）。 */
+    private String orderNoOf(Long applicationId) {
+        if (applicationId == null) {
+            return null;
+        }
+        CommissionApplication app = applicationMapper.selectById(applicationId);
+        return app == null ? null : app.getOrderNo();
     }
 
     /**
@@ -910,10 +923,12 @@ public class CommissionAdjustService {
             BigDecimal currentDetailSum = listActiveItems(adjust.getApplicationId()).stream()
                 .map(i -> i.getAmount() == null ? BigDecimal.ZERO : i.getAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            BigDecimal currentExpect = sumFacts(adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT);
+            BigDecimal currentExpect = sumFacts(adjust.getPeriod(), orderNoOf(adjust.getApplicationId()),
+                adjust.getContractNo(), FACT_TYPE_EXPECT);
             BigDecimal targetExpect = currentExpect.add(targetAmount.subtract(currentDetailSum));
             Map<Long, Long> expectMapping = performanceQueryPort.adjustContractFactsAmount(
-                adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT, targetExpect, approverId, adjust.getId());
+                adjust.getPeriod(), orderNoOf(adjust.getApplicationId()), adjust.getContractNo(),
+                FACT_TYPE_EXPECT, targetExpect, approverId, adjust.getId());
             // 回写 CommissionItem：performance_fact_id 指向新事实，amount 从新事实回查
             List<CommissionItem> items = listActiveItems(adjust.getApplicationId());
             for (CommissionItem item : items) {
@@ -958,7 +973,7 @@ public class CommissionAdjustService {
                 Long newRealFactId = performanceQueryPort.adjustFactAmount(
                     item.getPerformanceFactId(), targetAmount, approverId, adjust.getId());
                 PerformanceFactSummaryDTO expectFact = findExpectByEmployee(
-                    adjust.getPeriod(), adjust.getContractNo(), item.getEmployeeId());
+                    adjust.getPeriod(), orderNoOf(adjust.getApplicationId()), adjust.getContractNo(), item.getEmployeeId());
                 if (expectFact != null) {
                     BigDecimal expectTarget = expectFact.getAmount().add(delta == null ? BigDecimal.ZERO : delta);
                     performanceQueryPort.adjustFactAmount(
@@ -1207,6 +1222,7 @@ public class CommissionAdjustService {
             mirror.setAdjustNo(adjust.getAdjustNo());
             mirror.setPeriod(adjust.getPeriod());
             mirror.setContractNo(adjust.getContractNo());
+            mirror.setOrderNo(orderNoOf(adjust.getApplicationId()));
             mirror.setAdjustScope(adjust.getAdjustScope());
             mirror.setAdjustType(adjust.getAdjustType() == null ? null : adjust.getAdjustType().name());
             mirror.setFactId(factId);
@@ -1278,12 +1294,12 @@ public class CommissionAdjustService {
         return map;
     }
 
-    /** 按同合同+同员工匹配 PERF_EXPECT 事实（明细级同步用）。 */
-    private PerformanceFactSummaryDTO findExpectByEmployee(String period, String contractNo, Long employeeId) {
+    /** 按同合同+同员工匹配 PERF_EXPECT 事实（明细级同步用；订单号优先精确匹配）。 */
+    private PerformanceFactSummaryDTO findExpectByEmployee(String period, String orderNo, String contractNo, Long employeeId) {
         if (employeeId == null) {
             return null;
         }
-        return performanceQueryPort.findActiveByContract(period, contractNo, FACT_TYPE_EXPECT).stream()
+        return performanceQueryPort.findActiveByBizKey(period, orderNo, contractNo, FACT_TYPE_EXPECT).stream()
             .filter(f -> employeeId.equals(f.getEmployeeId()))
             .findFirst().orElse(null);
     }

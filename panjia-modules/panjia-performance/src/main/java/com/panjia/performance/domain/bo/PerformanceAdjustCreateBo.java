@@ -34,6 +34,12 @@ public class PerformanceAdjustCreateBo {
     /** 合同号（合同级调整时必填，用于定位该合同下全部明细） */
     private String contractNo;
 
+    /**
+     * 订单号（可空）。同合同号可能挂多个订单号，调整链路按订单号优先精确匹配业绩明细，
+     * 订单号为空才退化按合同号装载；落库到 pj_perf_adjust.order_no 供执行端同口径定位。
+     */
+    private String orderNo;
+
     /** 事实口径：仅允许 PERF_EXPECT（§4.1 业绩调整只改应收） */
     private String factType;
 

@@ -31,6 +31,9 @@ public class CommissionAdjustMirrorDTO implements Serializable {
     /** 合同号 */
     private String contractNo;
 
+    /** 订单号（可空；同合同号多订单时订单号优先精确匹配，镜像落 pj_perf_adjust.order_no） */
+    private String orderNo;
+
     /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
     private String adjustScope;
 

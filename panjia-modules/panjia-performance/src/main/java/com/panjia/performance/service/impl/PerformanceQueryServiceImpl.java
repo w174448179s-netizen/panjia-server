@@ -239,7 +239,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 其余填充（员工/部门、结佣状态、折算）按 rd.id 与 rc.biz_type 同样适用
         List<PerformanceManageVo> rows = "PERF_REAL".equals(factType)
             ? factMapper.selectReceivedManageListByContractNos(period, contractNos)
-            : factMapper.selectManageListByContractNos(period, factType, contractNos);
+            : factMapper.selectManageListByContractNos(period, factType, contractNos, query.getOrderNos());
         fillManageDetailEmployeeAndDept(rows);
         fillManageDetailOriginalAmount(rows, period, factType, contractNos);
         fillManageDetailPendingAdjust(rows, period, factType, contractNos);
@@ -695,10 +695,38 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     // ==================== 折算填充（统一入口） ====================
 
     /**
+     * 调整单与列表行的订单号感知匹配（同合同号挂多订单时精确区分，防跨订单串标记/串快照）：
+     * <ul>
+     *   <li>调整单 order_no 非空：行的订单号必须相等（行的合同号命中 bizKey 或业务键=订单号均可）；</li>
+     *   <li>调整单 order_no 为空（历史单回填失败等）：退化按 bizKey 命中行合同号/订单号任一（旧口径）。</li>
+     * </ul>
+     *
+     * @param adj           调整单行（含 bizKey=调整单 contract_no / orderNo）
+     * @param rowContractNo 列表行合同号
+     * @param rowOrderNo    列表行订单号（可空）
+     */
+    private boolean matchesBizRow(Map<String, Object> adj, String rowContractNo, String rowOrderNo) {
+        String adjContract = adj.get("bizKey") == null ? null : adj.get("bizKey").toString();
+        String adjOrder = adj.get("orderNo") == null ? null : adj.get("orderNo").toString();
+        if (StringUtils.isNotBlank(adjOrder)) {
+            if (StringUtils.isBlank(rowOrderNo) || !adjOrder.equals(rowOrderNo)) {
+                return false;
+            }
+            return adjContract != null
+                && (adjContract.equals(rowContractNo) || adjContract.equals(rowOrderNo));
+        }
+        if (adjContract == null) {
+            return false;
+        }
+        return adjContract.equals(rowContractNo)
+            || (StringUtils.isNotBlank(rowOrderNo) && adjContract.equals(rowOrderNo));
+    }
+
+    /**
      * 合同管理列表：批量查调整前金额（originalAmount），直接查调整表的 original_amount 快照。
      * <p>
      * 调整单 contract_no 存的是提交时的展示键（合同号或订单号，随入口而异），
-     * 与 {@link #fillContractPendingAdjust} 同理按双键查询与匹配；
+     * 按订单号感知匹配（同合同号多订单时只命中本订单的在途/已执行单）；
      * 无调整的合同 originalAmount 为 null，前端据此只显示单值。
      */
     private void fillContractOriginalAmount(List<PerformanceManageContractVo> rows,
@@ -718,20 +746,18 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (keys.isEmpty()) {
             return;
         }
-        Map<String, BigDecimal> originalMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.doSelectOriginalAmounts(period, factType, keys)) {
-            Object key = row.get("bizKey");
-            Object val = row.get("originalAmount");
-            if (key != null && val != null) {
-                originalMap.put(key.toString(), new BigDecimal(val.toString()));
-            }
-        }
+        List<Map<String, Object>> originals = adjustMapper.doSelectOriginalAmounts(period, factType, keys);
         for (PerformanceManageContractVo row : rows) {
-            BigDecimal original = originalMap.get(row.getContractNo());
-            if (original == null && row.getOrderNo() != null) {
-                original = originalMap.get(row.getOrderNo());
+            for (Map<String, Object> original : originals) {
+                if (!matchesBizRow(original, row.getContractNo(), row.getOrderNo())) {
+                    continue;
+                }
+                Object val = original.get("originalAmount");
+                if (val != null) {
+                    row.setOriginalAmount(new BigDecimal(val.toString()));
+                }
+                break;
             }
-            row.setOriginalAmount(original);
         }
     }
 
@@ -739,7 +765,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
      * 合同管理列表：批量填充审批中的合同级调整单（SUBMITTED/APPROVED，执行前金额未变）。
      * <p>
      * 调整单 contract_no 存的是提交时的展示键（合同号或订单号，随入口而异），
-     * 故按两个键都查，命中任一即填充；前端据此显示「调整审批中」标记 + 目标金额。
+     * 按订单号感知匹配（同合同号多订单时只命中本订单的在途单），防跨订单串「调整审批中」标记；
+     * 前端据此显示「调整审批中」标记 + 目标金额。
      */
     private void fillContractPendingAdjust(List<PerformanceManageContractVo> rows,
                                            String period, String factType) {
@@ -758,20 +785,17 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (keys.isEmpty()) {
             return;
         }
-        Map<String, Map<String, Object>> pendingMap = new HashMap<>();
-        for (Map<String, Object> pending : adjustMapper.doSelectPendingByBizKeys(period, factType, keys)) {
-            Object key = pending.get("bizKey");
-            if (key != null) {
-                pendingMap.put(key.toString(), pending);
-            }
-        }
-        if (pendingMap.isEmpty()) {
+        List<Map<String, Object>> pendings = adjustMapper.doSelectPendingByBizKeys(period, factType, keys);
+        if (pendings.isEmpty()) {
             return;
         }
         for (PerformanceManageContractVo row : rows) {
-            Map<String, Object> pending = pendingMap.get(row.getContractNo());
-            if (pending == null && row.getOrderNo() != null) {
-                pending = pendingMap.get(row.getOrderNo());
+            Map<String, Object> pending = null;
+            for (Map<String, Object> p : pendings) {
+                if (matchesBizRow(p, row.getContractNo(), row.getOrderNo())) {
+                    pending = p;
+                    break;
+                }
             }
             if (pending != null) {
                 row.setAdjustPending(true);
@@ -828,12 +852,18 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
                 }
             }
         }
-        // 2. 合同级：按业务键查，delta 按金额占比分摊到各明细行
+        // 2. 合同级：按业务键查，delta 按金额占比分摊到各明细行；
+        //    同合同号多订单时按订单号过滤，只应用本订单的在途单（防跨订单串分摊）
         if (contractNos == null || contractNos.isEmpty()) {
             return;
         }
         List<Map<String, Object>> contractPendings =
             adjustMapper.doSelectPendingByBizKeys(period, factType, new HashSet<>(contractNos));
+        String rowOrderNo = rows.get(0).getOrderNo();
+        String rowContractNo = rows.get(0).getContractNo();
+        contractPendings = contractPendings.stream()
+            .filter(p -> matchesBizRow(p, rowContractNo, rowOrderNo))
+            .toList();
         if (contractPendings.size() != 1) {
             // 明细弹窗单合同场景应恰好命中 1 单；0 单无需分摊，多单口径不明跳过
             return;
@@ -1052,6 +1082,12 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         }
         List<Map<String, Object>> executed =
             adjustMapper.doSelectExecutedContractAdjusts(period, factType, contractNos);
+        // 同合同号多订单：按订单号过滤只还原本订单的已执行单（历史单 order_no 为空时退化按合同号）
+        String rowOrderNo = rows.isEmpty() ? null : rows.get(0).getOrderNo();
+        String rowContractNo = rows.isEmpty() ? null : rows.get(0).getContractNo();
+        executed = executed.stream()
+            .filter(adj -> matchesBizRow(adj, rowContractNo, rowOrderNo))
+            .toList();
         if (executed.isEmpty()) {
             return;
         }

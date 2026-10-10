@@ -75,6 +75,21 @@ public interface CommissionPerformanceQueryPort {
     List<PerformanceFactSummaryDTO> findActiveByContract(String period, String contractNo, String factType);
 
     /**
+     * 按期间 + 订单号/合同号查 ACTIVE 业绩事实（<b>订单号优先</b>，调整链路专用）。
+     * <p>
+     * 同一合同号可能挂多个订单号，按合同号双键装载会跨订单混排明细；本方法
+     * 订单号非空时按 {@code order_no} 精确匹配，未命中（数据修正/历史脏数据）回退
+     * 合同号双键口径，订单号为空直接按合同号。
+     *
+     * @param period     归属期间 YYYY-MM
+     * @param orderNo    订单号（可空）
+     * @param contractNo 合同号
+     * @param factType   事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return 事实摘要列表
+     */
+    List<PerformanceFactSummaryDTO> findActiveByBizKey(String period, String orderNo, String contractNo, String factType);
+
+    /**
      * 按业务键集合（订单号/合同号）查 ACTIVE 业绩事实（<b>不限归属期间，跨月</b>）。
      * <p>
      * 用途：新签可能早于到账月（如 7 月新签、8 月到账），结佣明细金额须取该人该合同
@@ -153,6 +168,7 @@ public interface CommissionPerformanceQueryPort {
      * 与 {@code PerformanceAdjustServiceImpl.executeContractAmountAdjust} 同口径。
      *
      * @param period       归属期间
+     * @param orderNo      订单号（可空；非空时订单号优先精确匹配）
      * @param contractNo   合同号
      * @param factType     事实口径（PERF_REAL / PERF_EXPECT）
      * @param targetAmount 调整后合计
@@ -160,7 +176,7 @@ public interface CommissionPerformanceQueryPort {
      * @param adjustId     调整单 ID（写入新事实 adjust_id 与冲销链）
      * @return 旧事实 ID → 新事实 ID 映射（供结佣域回写 CommissionItem.performance_fact_id）
      */
-    Map<Long, Long> adjustContractFactsAmount(String period, String contractNo, String factType,
+    Map<Long, Long> adjustContractFactsAmount(String period, String orderNo, String contractNo, String factType,
                                               BigDecimal targetAmount, Long operatorId, Long adjustId);
 
     /**

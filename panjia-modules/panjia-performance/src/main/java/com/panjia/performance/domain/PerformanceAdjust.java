@@ -57,6 +57,9 @@ public class PerformanceAdjust implements Serializable {
     /** 合同号（合同级调整时填，用于定位该合同下全部明细事实） */
     private String contractNo;
 
+    /** 订单号（可空；同合同号多订单时订单号优先精确匹配事实，执行端同口径定位） */
+    private String orderNo;
+
     /** 事实口径（§4.1 只允许 PERF_EXPECT 应收） */
     private String factType;
 

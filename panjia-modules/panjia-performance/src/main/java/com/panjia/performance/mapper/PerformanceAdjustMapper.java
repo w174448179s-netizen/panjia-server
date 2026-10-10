@@ -134,24 +134,26 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
 
 
     /**
-     * 批量查询已执行调整单的原始金额（按业务键聚合，取最早一条的 original_amount 快照）。
+     * 批量查询已执行调整单的原始金额（按业务键+订单号聚合，取最早一条的 original_amount 快照）。
+     * <p>同合同号挂多订单时按 (contract_no, order_no) 区分，避免跨订单串快照。
      *
      * @param period      归属期间
      * @param factType    事实口径
      * @param contractNos 业务键集合（合同号/订单号混合，调整单 contract_no 存的是提交时的展示键）
-     * @return 每行含 bizKey(contract_no) / originalAmount；空集合时返回空列表
+     * @return 每行含 bizKey(contract_no) / orderNo / originalAmount；空集合时返回空列表
      */
     @Select("""
         <script>
-        SELECT DISTINCT ON (contract_no)
+        SELECT DISTINCT ON (contract_no, order_no)
                contract_no AS "bizKey",
+               order_no AS "orderNo",
                original_amount AS "originalAmount"
         FROM pj_perf_adjust
         WHERE status = 'EXECUTED'
           <if test="period != null and period != ''">AND period = #{period}</if>
           AND contract_no IN
         <foreach collection="contractNos" item="k" open="(" separator="," close=")">#{k}</foreach>
-        ORDER BY contract_no, id ASC
+        ORDER BY contract_no, order_no, id ASC
         </script>
         """)
     List<Map<String, Object>> doSelectOriginalAmounts(@Param("period") String period,
@@ -186,20 +188,22 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
     List<Map<String, Object>> doSelectOriginalAmountsByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
 
     /**
-     * 批量查询审批中的合同级调整单（SUBMITTED/APPROVED，尚未执行，每合同取最新一单）。
+     * 批量查询审批中的合同级调整单（SUBMITTED/APPROVED，尚未执行，每合同+订单取最新一单）。
      * <p>
      * 用于列表/详情展示「调整审批中」标记 + 目标金额：执行前事实金额未变，
      * 仅靠 originalAmount（只取 EXECUTED）无法感知在途调整。
+     * <p>同合同号挂多订单时按 (contract_no, order_no) 区分，避免跨订单串标记。
      *
      * @param period    归属期间
      * @param factType  事实口径
      * @param keys      业务键集合（合同号/订单号混合，调整单 contract_no 存的是提交时的展示键）
-     * @return 每行含 bizKey / adjustType / targetAmount；空集合返回空列表
+     * @return 每行含 bizKey / orderNo / adjustType / targetAmount / originalAmount / payloadJson；空集合返回空列表
      */
     @Select("""
         <script>
-        SELECT DISTINCT ON (contract_no)
+        SELECT DISTINCT ON (contract_no, order_no)
                contract_no AS "bizKey",
+               order_no AS "orderNo",
                id AS "id",
                adjust_no AS "adjustNo",
                adjust_type AS "adjustType",
@@ -213,7 +217,7 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
           AND status IN ('SUBMITTED', 'APPROVED')
           AND contract_no IN
         <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
-        ORDER BY contract_no, id DESC
+        ORDER BY contract_no, order_no, id DESC
         </script>
         """)
     List<Map<String, Object>> doSelectPendingByBizKeys(@Param("period") String period,
@@ -255,13 +259,14 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
      * @param period    归属期间
      * @param factType  事实口径
      * @param keys      业务键集合（合同号/订单号混合）
-     * @return 每行含 id / adjustNo / bizKey / adjustType / targetAmount / originalAmount / payloadJson，按 id 倒序
+     * @return 每行含 id / adjustNo / bizKey / orderNo / adjustType / targetAmount / originalAmount / payloadJson，按 id 倒序
      */
     @Select("""
         <script>
         SELECT id AS "id",
                adjust_no AS "adjustNo",
                contract_no AS "bizKey",
+               order_no AS "orderNo",
                adjust_type AS "adjustType",
                target_amount AS "targetAmount",
                original_amount AS "originalAmount",

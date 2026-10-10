@@ -20,4 +20,10 @@ public class PerformanceManageContractDetailBo {
 
     /** 合同号集合 */
     private List<String> contractNos;
+
+    /**
+     * 订单号集合（可空）。同合同号挂多个订单号时传入以精确限定单订单明细，
+     * 与调整链路「订单号优先匹配」口径一致；为空时保持业务键（订单号/合同号）双列匹配。
+     */
+    private List<String> orderNos;
 }

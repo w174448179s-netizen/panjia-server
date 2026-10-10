@@ -308,6 +308,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 不能用 COALESCE IN ——否则传入合同号而该行 order_no 非空时 COALESCE 取 order_no 导致漏命中。
      *
      * @param contractNos 业务键集合（不能为空；列表行展示的合同号/订单号）
+     * @param orderNos    订单号集合（可空；非空时按 order_no 精确限定单订单，
+     *                    与调整链路「订单号优先匹配」口径一致，避免同合同号多订单明细混排）
      */
     @Select("""
         <script>
@@ -332,16 +334,25 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
-          AND (f.order_no IN
-          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
-              OR f.contract_no IN
-          <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>)
+          <choose>
+            <when test="orderNos != null and orderNos.size() > 0">
+              AND f.order_no IN
+              <foreach collection="orderNos" item="on" open="(" separator="," close=")">#{on}</foreach>
+            </when>
+            <otherwise>
+              AND (f.order_no IN
+              <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
+                  OR f.contract_no IN
+              <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>)
+            </otherwise>
+          </choose>
         ORDER BY f.contract_no, f.employee_id, businessDate, f.role_type
         </script>
         """)
     List<PerformanceManageVo> selectManageListByContractNos(@Param("period") String period,
                                                              @Param("factType") String factType,
-                                                             @Param("contractNos") List<String> contractNos);
+                                                             @Param("contractNos") List<String> contractNos,
+                                                             @Param("orderNos") List<String> orderNos);
 
     /**
      * 按业务键集合查询实收明细（结佣业绩口径，合同维度树表懒加载数据源）。
@@ -419,6 +430,39 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
                                                          @Param("factType") String factType,
                                                          @Param("contractNo") String contractNo);
+
+    /**
+     * 按订单号+合同号双键精确查询该订单下全部 ACTIVE 业绩事实。
+     * <p>
+     * 同一合同号可能挂多个订单号（跨月续签/改单等），按合同号装载会把多订单
+     * 明细混在一起，导致指定 factId 不在集合内而报「指定调整行不在该合同业绩明细中」；
+     * 订单号理论上也可能重复（不同合同挂同订单号），故双键同时满足才精确唯一。
+     * contract_no 条件兼容业务键（订单号优先的历史前端传参）：传订单号时走 order_no 等值分支。
+     *
+     * @param period     归属期间
+     * @param factType   事实口径
+     * @param orderNo    订单号
+     * @param contractNo 合同号（或历史业务键；为空时仅按订单号匹配）
+     * @return 该订单下全部 ACTIVE 事实列表
+     */
+    @Select("""
+        <script>
+        SELECT f.*
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
+          AND f.fact_type = #{factType}
+          AND f.order_no = #{orderNo}
+          <if test="contractNo != null and contractNo != ''">
+            AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+          </if>
+        ORDER BY f.id
+        </script>
+        """)
+    List<PerformanceFact> selectActiveFactsByOrderAndContract(@Param("period") String period,
+                                                              @Param("factType") String factType,
+                                                              @Param("orderNo") String orderNo,
+                                                              @Param("contractNo") String contractNo);
 
     /**
      * 查询指定合同号下全部已作废（VOIDED）业绩事实（合同级恢复用）。
@@ -601,6 +645,60 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
                                                                           @Param("factType") String factType,
                                                                           @Param("contractNo") String contractNo);
+
+    /**
+     * 按订单号+合同号双键精确查询 ACTIVE 事实摘要（结佣调整链路匹配用）。
+     * <p>
+     * 同一合同号挂多个订单号时，按合同号（双键 OR）装载会跨订单混排明细；
+     * 订单号也可能重复（不同合同挂同订单号），故双键同时满足才精确唯一。
+     * contract_no 条件兼容业务键（传订单号时走 order_no 等值分支）。
+     *
+     * @param period     归属期间（可空=不限期间）
+     * @param factType   事实口径
+     * @param orderNo    订单号
+     * @param contractNo 合同号（或历史业务键；为空时仅按订单号匹配）
+     * @return 事实摘要列表
+     */
+    @Select("""
+        <script>
+        SELECT f.id AS "factId",
+               f.fact_type AS "factType",
+               f.fact_status AS "factStatus",
+               f.period AS "period",
+               f.business_date AS "businessDate",
+               f.employee_id AS "employeeId",
+               f.employee_external_code AS "employeeCode",
+               f.dept_id AS "deptId",
+               f.biz_type AS "bizType",
+               f.role_type AS "roleType",
+               f.role_name AS "roleName",
+               f.source AS "source",
+               f.performance_amount AS "amount",
+               f.batch_id AS "batchId",
+               f.normalized_record_id AS "normalizedRecordId",
+               f.source_key AS "sourceKey",
+               f.received_apply_id AS "receivedApplyId",
+               ra.status AS "receivedStatus",
+               f.contract_no AS "contractNo",
+               f.order_no AS "orderNo",
+               f.property_address AS "propertyAddress",
+               f.share_ratio AS "shareRatio"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
+        WHERE f.fact_status = 'ACTIVE'
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
+          AND f.fact_type = #{factType}
+          AND f.order_no = #{orderNo}
+          <if test="contractNo != null and contractNo != ''">
+            AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+          </if>
+        ORDER BY f.id
+        </script>
+        """)
+    List<PerformanceFactSummaryDTO> selectActiveFactSummariesByOrderAndContract(@Param("period") String period,
+                                                                                @Param("factType") String factType,
+                                                                                @Param("orderNo") String orderNo,
+                                                                                @Param("contractNo") String contractNo);
 
     /**
      * 按期间 + 合同号查询实收审批单详情明细（每人一行，含应收/实收双口径）。
