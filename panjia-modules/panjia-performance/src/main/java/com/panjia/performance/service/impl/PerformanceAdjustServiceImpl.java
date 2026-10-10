@@ -1449,6 +1449,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (facts == null || facts.isEmpty()) {
             throw new ServiceException("合同下未找到有效业绩事实，无法增加角色人：{}", dto.getContractNo());
         }
+        // period 为空时从查到的既有事实取期间（ADD_MEMBER 新事实必然挂到合同既有事实所在期间）
+        if (StringUtils.isBlank(dto.getPeriod())) {
+            dto.setPeriod(facts.get(0).getPeriod());
+        }
         // 新角色人须不在合同既有有效事实中（已在的人直接走明细级金额调整）
         for (PerformanceFact f : facts) {
             if (dto.getNewEmployeeId().equals(f.getEmployeeId())) {

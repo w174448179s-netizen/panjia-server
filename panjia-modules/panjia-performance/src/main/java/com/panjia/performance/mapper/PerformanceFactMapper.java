@@ -566,6 +566,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 事实摘要列表（含 amount = 0 的行，过滤由结佣域处理）
      */
     @Select("""
+        <script>
         SELECT f.id AS "factId",
                f.fact_type AS "factType",
                f.fact_status AS "factStatus",
@@ -591,10 +592,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         FROM pj_perf_fact f
         LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
+        </script>
         """)
     List<PerformanceFactSummaryDTO> selectActiveFactSummariesByContractNo(@Param("period") String period,
                                                                           @Param("factType") String factType,
@@ -623,16 +625,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WITH rc AS (
             SELECT rc.id, rc.order_no, rc.contract_no
             FROM pj_received_contract rc
-            WHERE rc.period = #{period}
-              AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
-        ),
+            WHERE (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
+              <if test="period != null and period != ''">AND rc.period = #{period}</if>
+        },
         expect_scope AS (
             -- 新签金额口径：当月有非零新签 → 只取当月；
             -- 当月为 0/无 → 不参与当月计算，取历史（实收月之前），与建单/结佣口径一致
             SELECT EXISTS (
                 SELECT 1 FROM pj_perf_fact pc
                 WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                  AND pc.period = #{period}
+                  <if test="period != null and period != ''">AND pc.period = #{period}</if>
                   AND pc.performance_amount != 0
                   AND (pc.contract_no = #{contractNo} OR pc.order_no = #{contractNo})
             ) AS has_current
@@ -644,8 +646,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
               AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
+              <if test="period != null and period != ''">
               AND ((es.has_current AND pe.period = #{period})
                    OR (NOT es.has_current AND pe.period &lt; #{period}))
+              </if>
             GROUP BY pe.employee_external_code, pe.role_type
         ),
         reversed_chain AS (
@@ -660,8 +664,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             WHERE a.fact_status = 'ACTIVE'
               AND a.fact_type = 'PERF_EXPECT'
               AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
+              <if test="period != null and period != ''">
               AND ((es.has_current AND a.period = #{period})
                    OR (NOT es.has_current AND a.period &lt; #{period}))
+              </if>
             ORDER BY a.source_key, b.id ASC
         ),
         original_expect AS (
@@ -742,6 +748,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    FROM pj_perf_fact pe
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                      AND (pe.contract_no = k.key OR pe.order_no = k.key)
+                     <if test="period != null and period != ''">
                      AND (
                            (pe.period = #{period} AND EXISTS (
                                SELECT 1 FROM pj_perf_fact pc
@@ -756,14 +763,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                  AND pc.performance_amount != 0
                                  AND (pc.contract_no = k.key OR pc.order_no = k.key)))
                          )
+                     </if>
                ), 0) AS "expectedAmount"
         FROM (VALUES
           <foreach collection="contractNos" item="cn" separator=",">(#{cn})</foreach>
         ) AS k(key)
-        JOIN pj_received_contract rc ON rc.period = #{period}
-                                    AND (rc.contract_no = k.key OR rc.order_no = k.key)
+        JOIN pj_received_contract rc ON (rc.contract_no = k.key OR rc.order_no = k.key)
         JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+        WHERE 1=1
+        <if test="period != null and period != ''">AND rc.period = #{period}</if>
         GROUP BY k.key
         </script>
         """)
@@ -797,7 +806,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             ) AS k(key)
             JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
                                AND f.fact_type = #{factType}
-                               AND f.period = #{period}
+                               <if test="period != null and period != ''">AND f.period = #{period}</if>
                                AND (f.contract_no = k.key OR f.order_no = k.key)
         ),
         orig AS (
@@ -810,7 +819,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM sk
             JOIN pj_perf_fact x ON x.source_key = sk.source_key
                                AND x.fact_type = #{factType}
-                               AND x.period = #{period}
+                               <if test="period != null and period != ''">AND x.period = #{period}</if>
             ORDER BY sk.source_key, x.id ASC
         )
         SELECT sk.key AS "bizKey",
@@ -849,7 +858,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    SELECT SUM(e.performance_amount)
                    FROM pj_perf_fact e
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
-                     AND e.period = #{period}
+                     <if test="period != null and period != ''">AND e.period = #{period}</if>
                      AND (COALESCE(e.order_no, e.contract_no)) = s.biz_key
                ), 0) AS "expectedAmount",
                CASE
@@ -909,7 +918,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT COUNT(DISTINCT f.employee_id)
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND f.employee_id IS NOT NULL
           AND (
@@ -946,7 +955,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           ON f.order_no = kv.biz_key
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
         GROUP BY kv.biz_key
         </script>
         """)
@@ -979,6 +988,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 合同摘要；查不到返回 null
      */
     @Select("""
+        <script>
         SELECT COALESCE(MAX(f.contract_no),MAX(f.order_no)) AS "contractNo",
                MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
@@ -986,8 +996,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(f.business_date) AS "businessDate"
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        </script>
         """)
     java.util.Map<String, Object> selectContractInfoByContractNo(
         @Param("period") String period, @Param("contractNo") String contractNo);
@@ -1004,6 +1015,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 明细列表
      */
     @Select("""
+        <script>
         SELECT f.id AS "factId",
                f.employee_id AS "employeeId",
                COALESCE(e.employee_code, f.employee_external_code) AS "employeeCode",
@@ -1064,10 +1076,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY e.employee_name, d.dept_id, f.role_type, f.id
+        </script>
         """)
     List<AdjustFactDetailVo> selectAdjustFactDetails(@Param("period") String period,
                                                        @Param("contractNo") String contractNo,
@@ -1529,13 +1542,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return bizType；查不到返回 null
      */
     @Select("""
+        <script>
         SELECT f2.biz_type
         FROM pj_perf_fact f2
         WHERE f2.fact_status = 'ACTIVE'
-          AND f2.period = #{period}
+          <if test="period != null and period != ''">AND f2.period = #{period}</if>
           AND f2.fact_type = #{factType}
           AND (f2.contract_no = #{contractNo} OR f2.order_no = #{contractNo})
         LIMIT 1
+        </script>
     """)
     String selectBizTypeByContract(@Param("period") String period,
                                    @Param("contractNo") String contractNo,

@@ -84,12 +84,14 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
      * @return 金额合计，无匹配事实时为 0
      */
     @Select("""
+        <script>
         SELECT COALESCE(SUM(f.performance_amount), 0)
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        </script>
         """)
     java.math.BigDecimal selectContractTotalAmount(@Param("period") String period,
                                                     @Param("factType") String factType,
@@ -239,7 +241,8 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
                original_amount AS "originalAmount",
                payload_json AS "payloadJson"
         FROM pj_perf_adjust
-        WHERE period = #{period}
+        WHERE 1=1
+          <if test="period != null and period != ''">AND period = #{period}</if>
           AND fact_type = #{factType}
           AND status = 'EXECUTED'
           AND adjust_scope = 'CONTRACT'

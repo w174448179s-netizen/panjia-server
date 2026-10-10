@@ -33,10 +33,12 @@ public interface NormalizedRecordMapper extends BaseMapper<NormalizedRecord> {
      * @param period 归属月
      * @return 归一化记录列表
      */
-    @Select("SELECT n.* FROM pj_normalized_record n " +
+    @Select("<script>SELECT n.* FROM pj_normalized_record n " +
         "JOIN pj_import_batch b ON n.batch_id = b.id " +
-        "WHERE n.period = #{period} " +
-        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL")
+        "WHERE 1=1 " +
+        "<if test=\"period != null and period != ''\">AND n.period = #{period} </if>" +
+        "AND b.status = 3 AND b.superseded_by_batch_id IS NULL" +
+        "</script>")
     List<NormalizedRecord> selectActiveByPeriod(@Param("period") String period);
 
     /**

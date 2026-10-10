@@ -179,8 +179,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         int pageSize = pageQuery.getPageSize() == null ? 20 : pageQuery.getPageSize();
         String kw = StringUtils.trimToNull(keyword);
         PerformanceManagePageVo<PerformanceManageContractVo> vo = new PerformanceManagePageVo<>();
-        // 口径：期间与关键字（合同号等）至少一项——仅录合同号不选期间时跨期查询
-        if (StringUtils.isBlank(factType) || (StringUtils.isBlank(period) && kw == null)) {
+        // factType 必填（决定查新签/实收表）；其余条件可任意组合，period 可空时跨期间查询
+        if (StringUtils.isBlank(factType)) {
             vo.setTotal(0);
             vo.setRows(List.of());
             PerformanceManagePageVo.Summary empty = new PerformanceManagePageVo.Summary();

@@ -71,7 +71,7 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
         <if test="deptId != null">
           AND (COALESCE(rd.dept_id, rc.dept_id, e.dept_id) = #{deptId}
                OR EXISTS (SELECT 1 FROM sys_dept sd
@@ -86,6 +86,7 @@ public interface ReceivedRealFactMapper {
 
     /** 按期间 + 员工查 ACTIVE 实收明细（employee_id 为空时按工号关联兜底）。 */
     @Select("""
+        <script>
         SELECT """ + SUMMARY_COLUMNS + """
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
@@ -95,9 +96,10 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN sys_dept fd ON fd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
         LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
         ORDER BY rd.id
+        </script>
         """)
     List<PerformanceFactSummaryDTO> selectActiveByEmployee(@Param("period") String period,
                                                            @Param("employeeId") Long employeeId);
@@ -312,8 +314,9 @@ public interface ReceivedRealFactMapper {
             JOIN pj_received_detail rd ON rd.contract_id = rc.id
                                      AND rd.detail_status = 'ACTIVE'
                                      AND rd.source_key IS NOT NULL
-            WHERE rc.period = #{period}
-        ),
+            WHERE 1=1
+            <if test="period != null and period != ''">AND rc.period = #{period}</if>
+        },
         orig AS (
             SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt
             FROM sk
@@ -332,6 +335,7 @@ public interface ReceivedRealFactMapper {
 
     /** 历史工资导入批次 ACTIVE 实收明细（结佣 LOCKED 建单用；adjust_id 非空的调整新行不计入批次）。 */
     @Select("""
+        <script>
         SELECT rd.id AS "factId",
                rc.order_no AS "orderNo",
                rc.contract_no AS "contractNo",
@@ -354,24 +358,27 @@ public interface ReceivedRealFactMapper {
         LEFT JOIN pj_people_employee e
                ON (e.employee_id = rd.employee_id
                    OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
-        WHERE rd.period = #{period}
-          AND rd.source_batch_id = #{batchId}
+        WHERE rd.source_batch_id = #{batchId}
           AND rd.detail_status = 'ACTIVE'
           AND rd.adjust_id IS NULL
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
         ORDER BY rd.id
+        </script>
         """)
     List<HistoryRealFactDTO> selectHistoryByBatch(@Param("period") String period,
                                                   @Param("batchId") Long batchId);
 
     /** 按期间 + 合同号/订单号查 ACTIVE 实收明细实体（结佣调整/对齐写路径用）。 */
     @Select("""
+        <script>
         SELECT rd.*
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
         WHERE rd.detail_status = 'ACTIVE'
-          AND rd.period = #{period}
+          <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
         ORDER BY rd.id
+        </script>
         """)
     List<ReceivedDetail> selectActiveDetailsByContract(@Param("period") String period,
                                                         @Param("contractNo") String contractNo);
