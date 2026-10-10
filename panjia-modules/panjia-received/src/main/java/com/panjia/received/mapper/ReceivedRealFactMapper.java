@@ -252,6 +252,11 @@ public interface ReceivedRealFactMapper {
                               WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
                                 AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
             </if>
+            <if test="keyword != null and keyword != ''">
+              AND (rc.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
+                   OR rc.order_no LIKE CONCAT('%', #{keyword}::text, '%')
+                   OR rc.property_address LIKE CONCAT('%', #{keyword}::text, '%'))
+            </if>
             <if test="employeeId != null">
               AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
             </if>
@@ -262,7 +267,8 @@ public interface ReceivedRealFactMapper {
         """)
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
                                                                 @Param("deptId") Long deptId,
-                                                                @Param("employeeId") Long employeeId);
+                                                                @Param("employeeId") Long employeeId,
+                                                                @Param("keyword") String keyword);
 
     /**
      * 跨合同去重员工数：员工键口径与 {@link #selectContractSummaries} 一致

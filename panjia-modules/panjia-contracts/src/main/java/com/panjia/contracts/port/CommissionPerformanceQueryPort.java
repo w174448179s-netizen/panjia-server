@@ -93,7 +93,7 @@ public interface CommissionPerformanceQueryPort {
      * @param factType 事实口径（FactType code）
      * @return 合同维度摘要列表（仅 contract_no 非空的合同，按签约时间倒序由调用方排序）
      */
-    List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId);
+    List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId, String keyword);
 
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计跨合同去重员工数（结佣明细列表合计用）。

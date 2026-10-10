@@ -213,13 +213,13 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId) {
+    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId, String keyword) {
         if (isReal(factType)) {
             ReceivedRealFactPort port = realPort();
             return port == null ? Collections.emptyList()
-                : port.listContractSummaries(period, deptId, employeeId);
+                : port.listContractSummaries(period, deptId, employeeId, keyword);
         }
-        return factMapper.selectContractSummaries(period, factType, deptId, employeeId);
+        return factMapper.selectContractSummaries(period, factType, deptId, employeeId, keyword);
     }
 
     @Override

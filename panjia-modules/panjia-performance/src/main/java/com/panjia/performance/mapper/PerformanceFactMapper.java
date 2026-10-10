@@ -406,13 +406,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 同组全部 ACTIVE 事实列表
      */
     @Select("""
+        <script>
         SELECT f.*
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
+        </script>
         """)
     List<PerformanceFact> selectActiveFactsByContractNo(@Param("period") String period,
                                                          @Param("factType") String factType,
@@ -429,13 +431,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @return 该合同下全部 VOIDED 事实列表
      */
     @Select("""
+        <script>
         SELECT f.*
         FROM pj_perf_fact f
         WHERE f.fact_status = 'VOIDED'
-          AND f.period = #{period}
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
         ORDER BY f.id
+        </script>
         """)
     List<PerformanceFact> selectVoidedFactsByContractNo(@Param("period") String period,
                                                          @Param("factType") String factType,
@@ -880,6 +884,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             <if test="employeeId != null">
               AND f.employee_id = #{employeeId}
             </if>
+            <if test="keyword != null and keyword != ''">
+              AND (f.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
+                   OR f.order_no LIKE CONCAT('%', #{keyword}::text, '%')
+                   OR f.property_address LIKE CONCAT('%', #{keyword}::text, '%'))
+            </if>
         ) s
         GROUP BY s.biz_key
         ORDER BY MAX(s.business_date) DESC, s.biz_key
@@ -888,7 +897,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,
                                                                  @Param("factType") String factType,
                                                                  @Param("deptId") Long deptId,
-                                                                 @Param("employeeId") Long employeeId);
+                                                                 @Param("employeeId") Long employeeId,
+                                                                 @Param("keyword") String keyword);
 
     /**
      * 跨合同去重员工数：指定期间/口径下，业务键（合同号或订单号）命中集合的 ACTIVE 事实

@@ -1221,7 +1221,7 @@ public class CommissionApplicationService {
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
 
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId());
+            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
 
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
@@ -1346,21 +1346,36 @@ public class CommissionApplicationService {
      */
     public PageResult<CommissionContractVo> listAvailableContracts(CommissionApplyBo query, PageQuery pageQuery) {
         String keyword = StringUtils.trimToNull(query.getKeyword());
-        // 必须提供关键字，避免全表扫描
-        if (keyword == null) {
+        // 必须提供门店或关键字，避免全公司全表扫描
+        if (keyword == null && query.getDeptId() == null && query.getEmployeeId() == null) {
             return PageResult.build(Collections.emptyList(), 0L);
         }
 
         // 部门数据权限
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
 
-        // 查实收审批通过的合同（不限期间）
+        // 查实收审批通过的合同（不限期间，关键字下推 SQL 避免全表扫描）
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId());
+            performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
 
-        // 查所有结佣申请单（不限期间），用于排除已结佣的合同
-        List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
-            .orderByDesc(CommissionApplication::getId));
+        // 查结佣申请单（用于排除已结佣的合同）：有关键字时只查匹配的，无关键字时按合同号集合查
+        LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
+        if (keyword != null) {
+            appWrapper.and(w -> w.like(CommissionApplication::getContractNo, keyword)
+                .or().like(CommissionApplication::getOrderNo, keyword));
+        } else if (!contracts.isEmpty()) {
+            Set<String> bizKeys = new HashSet<>();
+            for (PerformanceContractSummaryDTO c : contracts) {
+                if (StringUtils.isNotBlank(c.getContractNo())) bizKeys.add(c.getContractNo());
+                if (StringUtils.isNotBlank(c.getOrderNo())) bizKeys.add(c.getOrderNo());
+            }
+            if (!bizKeys.isEmpty()) {
+                appWrapper.in(CommissionApplication::getContractNo, bizKeys)
+                    .or().in(CommissionApplication::getOrderNo, bizKeys);
+            }
+        }
+        appWrapper.orderByDesc(CommissionApplication::getId);
+        List<CommissionApplication> applications = applicationMapper.selectList(appWrapper);
         Set<String> appliedContractNos = new HashSet<>();
         Set<String> appliedOrderNos = new HashSet<>();
         for (CommissionApplication app : applications) {
@@ -1679,7 +1694,7 @@ public class CommissionApplicationService {
             || (StringUtils.isBlank(app.getContractNo()) && StringUtils.isBlank(app.getOrderNo()))) {
             return;
         }
-        performanceQueryPort.listContractSummaries(app.getPeriod(), null, FACT_TYPE_REAL, null).stream()
+        performanceQueryPort.listContractSummaries(app.getPeriod(), null, FACT_TYPE_REAL, null, null).stream()
             .filter(c -> (StringUtils.isNotBlank(app.getContractNo())
                 && app.getContractNo().equals(c.getContractNo()))
                 || (StringUtils.isNotBlank(app.getOrderNo())

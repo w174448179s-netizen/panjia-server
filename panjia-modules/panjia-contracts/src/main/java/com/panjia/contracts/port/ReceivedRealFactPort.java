@@ -52,7 +52,7 @@ public interface ReceivedRealFactPort {
      *
      * @param period 归属期间 YYYY-MM；可空，空时跨全部期间聚合（应收取该合同全部期间合计）
      */
-    List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId);
+    List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId, String keyword);
 
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计去重员工数（结佣明细列表跨合同合计用）。

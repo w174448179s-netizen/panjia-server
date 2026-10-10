@@ -118,9 +118,9 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId) {
+    public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId, String keyword) {
         // period 可空：结佣列表仅录合同号不选期间时跨期汇总（mapper 内期间条件化）
-        return realMapper.selectContractSummaries(period, deptId, employeeId);
+        return realMapper.selectContractSummaries(period, deptId, employeeId, keyword);
     }
 
     @Override
