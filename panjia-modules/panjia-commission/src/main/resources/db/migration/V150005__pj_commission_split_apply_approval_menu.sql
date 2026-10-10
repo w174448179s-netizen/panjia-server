@@ -33,11 +33,15 @@ UPDATE sys_menu SET parent_id = 1761400000000002205, order_num = 1, update_time 
 UPDATE sys_menu SET parent_id = 1761400000000002205, order_num = 2, update_time = now() WHERE menu_id = 1761400000000011833; -- 批量审批
 UPDATE sys_menu SET parent_id = 1761400000000002205, order_num = 3, update_time = now() WHERE menu_id = 1761400000000011825; -- 作废申请
 
--- 4. 新菜单角色绑定（镜像 2202：总监 10 / 店长 11 / 财务 12）
+-- 4. 新菜单角色绑定：仅总监(10)和财务(12)可见结佣审批页
+--    店长(11)只有发起权限，不绑定审批菜单
 INSERT INTO sys_role_menu (role_id, menu_id) VALUES
 (1761300000000000010, 1761400000000002205),
-(1761300000000000011, 1761400000000002205),
 (1761300000000000012, 1761400000000002205)
 ON CONFLICT (role_id, menu_id) DO NOTHING;
+
+-- 4a. 撤销店长(11)对审批类按钮的权限：作废(1825)原 V150002 已授权给店长，
+--     但作废属于审批流程，店长不应保留此权限
+DELETE FROM sys_role_menu WHERE role_id = 1761300000000000011 AND menu_id = 1761400000000011825;
 
 COMMIT;
