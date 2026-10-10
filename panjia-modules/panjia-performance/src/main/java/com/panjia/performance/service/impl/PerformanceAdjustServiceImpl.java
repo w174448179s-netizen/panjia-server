@@ -7,6 +7,7 @@ import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.FactStatus;
+import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
@@ -14,6 +15,7 @@ import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.bo.AdjustDetailTargetBo;
 import com.panjia.performance.domain.bo.AdjustDeductionBo;
 import com.panjia.performance.domain.bo.AddMemberPayload;
+import com.panjia.performance.domain.bo.ManualOffsetItem;
 import com.panjia.performance.domain.bo.PerformanceAdjustCreateBo;
 import com.panjia.performance.domain.vo.AdjustDetailVo;
 import com.panjia.performance.domain.vo.AdjustFactDetailVo;
@@ -303,6 +305,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (StringUtils.isNotBlank(targetContractNo)) {
             List<AdjustFactDetailVo> details =
                 factMapper.selectAdjustFactDetails(period, targetContractNo, factType);
+            // 业绩冲正（MANUAL_OFFSET）：不修改既有明细，冲正明细在 payload，直接返回既有明细
+            if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
+                dto.setDetails(details);
+                dto.setDetailCount(details.size());
+                dto.setExpectedTotal(adjust.getOriginalAmount());
+                dto.setReceivedTotal(adjust.getTargetAmount());
+                return dto;
+            }
             // 增加角色人（ADD_MEMBER）：分摊展示语义与金额调整完全不同，独立处理后直接返回
             if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 applyAddMemberDetail(adjust, dto, details);
@@ -457,22 +467,50 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             throw new ServiceException("非法调整类型：{}", dto.getAdjustType());
         }
         String scope = StringUtils.isBlank(dto.getAdjustScope()) ? SCOPE_DETAIL : dto.getAdjustScope();
+        // 业绩冲正固定合同级 + 应收口径
+        if (adjustType == AdjustType.MANUAL_OFFSET) {
+            scope = SCOPE_CONTRACT;
+            dto.setAdjustScope(SCOPE_CONTRACT);
+            dto.setFactType(FACT_TYPE_EXPECT);
+        }
         // §4.1 业绩调整只改应收（PERF_EXPECT）：合同级 / 明细级均拦截
         if (!FACT_TYPE_EXPECT.equals(dto.getFactType())) {
             throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
         }
         if (SCOPE_CONTRACT.equals(scope)) {
-            // 合同级支持金额调整（按占比分摊）与增加角色人（2026-09-28，手工多一人分业绩、合同总额不变）
-            if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.ADD_MEMBER) {
-                throw new ServiceException("合同级调整仅支持金额调整或增加角色人");
+            // 合同级支持金额调整、增加角色人、业绩冲正
+            if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.ADD_MEMBER
+                && adjustType != AdjustType.MANUAL_OFFSET) {
+                throw new ServiceException("合同级调整仅支持金额调整、增加角色人或业绩冲正");
             }
             if (StringUtils.isBlank(dto.getContractNo()) || StringUtils.isBlank(dto.getFactType())) {
                 throw new ServiceException("合同级调整缺少合同号或事实口径");
             }
         } else if (dto.getFactId() == null) {
             throw new ServiceException("明细级调整缺少关联业绩事实");
-        } else {
-            // 明细级：校验该事实所属合同的结佣是否已审批锁定
+        }
+
+        // period 为空时从原事实取期间（同新签期间），避免调整单期间为空
+        if (StringUtils.isBlank(dto.getPeriod())) {
+            if (SCOPE_CONTRACT.equals(scope)) {
+                List<PerformanceFact> templateFacts = factMapper.selectActiveFactsByContractNo(
+                    null, dto.getFactType(), dto.getContractNo());
+                if (templateFacts != null && !templateFacts.isEmpty()) {
+                    dto.setPeriod(templateFacts.get(0).getPeriod());
+                }
+            } else {
+                PerformanceFact fact = factMapper.selectById(dto.getFactId());
+                if (fact != null) {
+                    dto.setPeriod(fact.getPeriod());
+                }
+            }
+            if (StringUtils.isBlank(dto.getPeriod())) {
+                throw new ServiceException("无法确定调整期间，请录入目标月份");
+            }
+        }
+
+        // 明细级：校验该事实所属合同的结佣是否已审批锁定
+        if (!SCOPE_CONTRACT.equals(scope) && dto.getFactId() != null) {
             PerformanceFact fact = factMapper.selectById(dto.getFactId());
             if (fact != null && StringUtils.isNotBlank(fact.getContractNo())) {
                 assertCommissionNotLocked(fact.getPeriod(), fact.getContractNo());
@@ -486,6 +524,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         } else if (factMapper.countVoidedSiblingsByFactId(dto.getFactId()) > 0) {
             throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
+        }
+
+        // ==================== 业绩冲正（MANUAL_OFFSET，2026-10-10） ====================
+        // 合同级录入冲正/补录明细，审批通过后按清单循环创建 MANUAL 事实
+        if (adjustType == AdjustType.MANUAL_OFFSET) {
+            if (dto.getOffsetItems() == null || dto.getOffsetItems().isEmpty()) {
+                throw new ServiceException("冲正明细不能为空");
+            }
+            dto.setPayloadJson(JsonUtils.toJsonString(dto.getOffsetItems()));
         }
 
         // ==================== 增加角色人（ADD_MEMBER，2026-09-28） ====================
@@ -512,6 +559,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     throw new ServiceException("金额调整缺少目标金额");
                 }
             }
+            dto.setTargetAmount(targetAmt);
+        } else if (adjustType == AdjustType.MANUAL_OFFSET) {
+            // 冲正后合计 = 当前合同合计 + 冲正明细合计（正增负减）
+            BigDecimal offsetSum = BigDecimal.ZERO;
+            for (ManualOffsetItem item : dto.getOffsetItems()) {
+                if (item.getAmount() != null) {
+                    offsetSum = offsetSum.add(item.getAmount());
+                }
+            }
+            targetAmt = MoneyUtil.round2(originalAmt.add(offsetSum));
             dto.setTargetAmount(targetAmt);
         }
 
@@ -866,9 +923,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 合同级：ADD_MEMBER 增加角色人（当期生效）；AMOUNT 原月=调整月走金额调整，跨月走业绩冲销（§4.6）
+            // 合同级：MANUAL_OFFSET 业绩冲正；ADD_MEMBER 增加角色人（当期生效）；
+            // AMOUNT 原月=调整月走金额调整，跨月走业绩冲销（§4.6）
             // originalPeriod 已在封账校验前解析
-            if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+            if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
+                executeManualOffsetAdjust(adjust, operatorId);
+            } else if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 executeAddMemberAdjust(adjust, operatorId);
             } else if (originalPeriod.equals(adjust.getPeriod())) {
                 executeContractAmountAdjust(adjust, operatorId);
@@ -939,12 +999,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
             subject = subject + "｜新人" + resolveEmployeeName(adjust.getEmployeeId());
         }
+        String bizTitle = adjust.getAdjustType() == AdjustType.MANUAL_OFFSET ? "业绩冲正" : "业绩调整";
         ApprovalStartCmd cmd = ApprovalStartCmd.of(
             text(adjust.getAdjustNo()),
-            "业绩调整｜" + subject
+            bizTitle + "｜" + subject
                 + "｜账期" + text(adjust.getPeriod())
-                + "｜类型" + text(adjust.getAdjustType())
-                + "｜目标金额" + text(adjust.getTargetAmount())
+                + "｜类型" + text(adjust.getAdjustType().getDesc())
+                + "｜冲正后金额" + text(adjust.getTargetAmount())
                 + "｜单号" + text(adjust.getAdjustNo()));
         Map<String, Object> variables = new HashMap<>(2);
         // 后端发起无登录用户上下文，忽略权限
@@ -1905,6 +1966,56 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         factMapper.insert(buildNewMemberFact(facts.get(0), adjust, payload));
         log.info("[调整单-增加角色人] 执行完成：adjustId={}, contractNo={}, newEmployeeId={}, newAmount={}, 指定扣除={}",
             adjust.getId(), adjust.getContractNo(), adjust.getEmployeeId(), newAmount, deductSum);
+    }
+
+    /**
+     * 业绩冲正执行（MANUAL_OFFSET）：审批通过后按 payload 中的冲正明细清单，
+     * 循环创建 MANUAL 事实（正数补录/负数冲正），模板字段从合同既有 ACTIVE 事实复制。
+     */
+    private void executeManualOffsetAdjust(PerformanceAdjust adjust, Long operatorId) {
+        List<ManualOffsetItem> items = JsonUtils.parseArray(adjust.getPayloadJson(), ManualOffsetItem.class);
+        if (items == null || items.isEmpty()) {
+            throw new ServiceException("冲正明细为空，无法执行：adjustId={}", adjust.getId());
+        }
+        // 按 contractNo 跨期查 ACTIVE PERF_EXPECT 事实作为模板
+        List<PerformanceFact> templates = factMapper.selectActiveFactsByContractNo(
+            null, FACT_TYPE_EXPECT, adjust.getContractNo());
+        if (templates == null || templates.isEmpty()) {
+            throw new ServiceException("合同下未找到有效业绩事实：contractNo={}", adjust.getContractNo());
+        }
+        PerformanceFact template = templates.get(0);
+        String targetPeriod = adjust.getPeriod();
+        java.time.LocalDate periodStart = YearMonth.parse(targetPeriod).atDay(1);
+        long tsBase = System.currentTimeMillis();
+        int count = 0;
+        for (ManualOffsetItem item : items) {
+            PerformanceFact fact = new PerformanceFact();
+            fact.setFactType(FactType.PERF_EXPECT);
+            fact.setFactStatus(FactStatus.ACTIVE);
+            fact.setSource(PerformanceSource.MANUAL);
+            fact.setSourceKey(template.getSourceKey() + "|MANUAL-OFFSET-" + tsBase + "-" + count);
+            fact.setPeriod(targetPeriod);
+            fact.setBusinessDate(periodStart.atStartOfDay());
+            fact.setEffectiveDate(periodStart);
+            fact.setBatchId(null);
+            fact.setPerformanceAmount(item.getAmount());
+            // 模板复制
+            fact.setBizType(template.getBizType());
+            fact.setPropertyAddress(template.getPropertyAddress());
+            fact.setOrderNo(template.getOrderNo());
+            fact.setContractNo(template.getContractNo());
+            fact.setFeeItem(template.getFeeItem());
+            fact.setDeptId(template.getDeptId());
+            // 入参覆盖
+            fact.setEmployeeId(item.getEmployeeId());
+            fact.setRoleType(item.getRoleType());
+            fact.setRoleName(item.getRoleName());
+            fact.setOperatorId(operatorId);
+            factMapper.insert(fact);
+            count++;
+        }
+        log.info("[调整单-业绩冲正] 执行完成：adjustId={}, contractNo={}, period={}, 记录数={}",
+            adjust.getId(), adjust.getContractNo(), targetPeriod, count);
     }
 
     /**

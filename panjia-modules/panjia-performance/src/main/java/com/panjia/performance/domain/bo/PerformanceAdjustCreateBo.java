@@ -83,4 +83,12 @@ public class PerformanceAdjustCreateBo {
      * 为空时保持旧交互（AMOUNT 等比分摊 / ADD_MEMBER deductions 扣除）。
      */
     private List<AdjustDetailTargetBo> detailTargets;
+
+    // ==================== 业绩冲正（MANUAL_OFFSET，2026-10-10） ====================
+
+    /**
+     * 冲正明细清单（合同级冲正时必填）：每条含员工ID、角色类型、角色名、冲正金额。
+     * 正数=补录、负数=冲正；审批通过后按清单循环创建 MANUAL 事实。
+     */
+    private List<ManualOffsetItem> offsetItems;
 }

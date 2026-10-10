@@ -3,6 +3,7 @@ package com.panjia.performance.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.performance.domain.bo.ContractVoidBo;
+import com.panjia.performance.domain.bo.ManualOffsetBo;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
@@ -29,6 +30,7 @@ import org.dromara.common.core.domain.R;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.web.core.BaseController;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -108,6 +110,16 @@ public class PerformanceFactController extends BaseController {
     @PostMapping("/restore-contract")
     public R<Integer> restoreByContract(@Validated ContractVoidBo query) {
         return R.ok(voidService.restoreByContract(query));
+    }
+
+    /**
+     * 业绩冲正/补录：对历史合同在目标月份批量录入多条调整业绩事实。
+     */
+    @SaCheckPermission("perf:fact:void")
+    @Log(title = "业绩冲正", businessType = BusinessType.INSERT)
+    @PostMapping("/manual-offset")
+    public R<Integer> manualOffset(@Validated ManualOffsetBo bo) {
+        return R.ok(queryService.createManualOffset(bo, LoginHelper.getUserId()));
     }
 
     /**

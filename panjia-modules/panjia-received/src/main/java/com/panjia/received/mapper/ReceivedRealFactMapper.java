@@ -195,6 +195,7 @@ public interface ReceivedRealFactMapper {
                MAX(s.biz_type) AS "bizType",
                MAX(s.property_address) AS "propertyAddress",
                MAX(s.business_date) AS "businessDate",
+               MIN(s.period) AS "period",
                COALESCE(SUM(s.amount), 0) AS "amount",
                COALESCE((
                    SELECT SUM(pe.performance_amount)
@@ -233,6 +234,7 @@ public interface ReceivedRealFactMapper {
                    rc.biz_type,
                    rc.property_address,
                    rc.business_date,
+                   rd.period AS period,
                    rd.performance_amount AS amount,
                    ra.status AS ra_status,
                    ra.id AS ra_id,

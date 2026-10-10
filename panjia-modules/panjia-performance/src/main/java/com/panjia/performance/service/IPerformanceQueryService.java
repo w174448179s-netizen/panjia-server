@@ -1,6 +1,7 @@
 package com.panjia.performance.service;
 
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.performance.domain.bo.ManualOffsetBo;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
@@ -93,4 +94,13 @@ public interface IPerformanceQueryService {
      * rank 字段按分页 offset 起始序号填充。
      */
     PageResult<PerformanceRankVo> pageRank(PerformanceRankBo query, PageQuery pageQuery);
+
+    /**
+     * 业绩冲正/补录：对历史合同在目标月份批量录入多条调整业绩事实。
+     *
+     * @param bo         批量手工录入参数（含多条明细）
+     * @param operatorId 操作人 ID
+     * @return 新增事实数量
+     */
+    int createManualOffset(ManualOffsetBo bo, Long operatorId);
 }

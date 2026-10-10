@@ -716,6 +716,12 @@ public class CommissionApplicationService {
                 history.add(e);
             }
         }
+        // 当月与历史均有非零新签时合并返回（冲正事实可能落在历史月，需同时参与结佣计算）
+        if (!currentMonth.isEmpty() && !history.isEmpty()) {
+            List<PerformanceFactSummaryDTO> merged = new ArrayList<>(currentMonth);
+            merged.addAll(history);
+            return merged;
+        }
         return !currentMonth.isEmpty() ? currentMonth : history;
     }
 
@@ -1360,8 +1366,17 @@ public class CommissionApplicationService {
         List<PerformanceContractSummaryDTO> contracts =
             performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
 
-        // 查结佣申请单（用于排除已结佣的合同）：有关键字时只查匹配的，无关键字时按合同号集合查
+        // 收集实收事实的期间集合（同期互斥：按 period 维度排除已结佣合同）
+        Set<String> periods = new HashSet<>();
+        for (PerformanceContractSummaryDTO c : contracts) {
+            if (StringUtils.isNotBlank(c.getPeriod())) {
+                periods.add(c.getPeriod());
+            }
+        }
+
+        // 查结佣申请单（用于排除已结佣的合同）：同期互斥，只查活跃状态（DRAFT/SUBMITTED/APPROVED/LOCKED）
         LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
+        appWrapper.in(!periods.isEmpty(), CommissionApplication::getPeriod, periods);
         if (keyword != null) {
             appWrapper.and(w -> w.like(CommissionApplication::getContractNo, keyword)
                 .or().like(CommissionApplication::getOrderNo, keyword));
@@ -1372,20 +1387,23 @@ public class CommissionApplicationService {
                 if (StringUtils.isNotBlank(c.getOrderNo())) bizKeys.add(c.getOrderNo());
             }
             if (!bizKeys.isEmpty()) {
-                appWrapper.in(CommissionApplication::getContractNo, bizKeys)
-                    .or().in(CommissionApplication::getOrderNo, bizKeys);
+                appWrapper.and(w -> w.in(CommissionApplication::getContractNo, bizKeys)
+                    .or().in(CommissionApplication::getOrderNo, bizKeys));
             }
         }
+        appWrapper.in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+            ApplicationStatus.APPROVED, ApplicationStatus.LOCKED);
         appWrapper.orderByDesc(CommissionApplication::getId);
         List<CommissionApplication> applications = applicationMapper.selectList(appWrapper);
-        Set<String> appliedContractNos = new HashSet<>();
-        Set<String> appliedOrderNos = new HashSet<>();
+
+        // 构建 (bizKey, period) 排除集合：同合同同期有活跃单才排除，跨期可再发起
+        Set<String> appliedKeys = new HashSet<>();
         for (CommissionApplication app : applications) {
             if (StringUtils.isNotBlank(app.getContractNo())) {
-                appliedContractNos.add(app.getContractNo());
+                appliedKeys.add(app.getContractNo() + "|" + app.getPeriod());
             }
             if (StringUtils.isNotBlank(app.getOrderNo())) {
-                appliedOrderNos.add(app.getOrderNo());
+                appliedKeys.add(app.getOrderNo() + "|" + app.getPeriod());
             }
         }
 
@@ -1395,8 +1413,16 @@ public class CommissionApplicationService {
 
         List<CommissionContractVo> all = new ArrayList<>();
         for (PerformanceContractSummaryDTO c : contracts) {
-            // 排除已有结佣申请单的合同（任何状态：DRAFT/SUBMITTED/APPROVED/LOCKED/REJECTED）
-            if (appliedContractNos.contains(c.getContractNo()) || appliedOrderNos.contains(c.getOrderNo())) {
+            // 同期互斥：同合同同期有活跃单才排除，跨期可再发起
+            String period = c.getPeriod();
+            boolean excluded = false;
+            if (StringUtils.isNotBlank(c.getContractNo()) && appliedKeys.contains(c.getContractNo() + "|" + period)) {
+                excluded = true;
+            }
+            if (!excluded && StringUtils.isNotBlank(c.getOrderNo()) && appliedKeys.contains(c.getOrderNo() + "|" + period)) {
+                excluded = true;
+            }
+            if (excluded) {
                 continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {
@@ -2142,13 +2168,13 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 查询该合同（跨期间）最近一张活跃申请单，防重复结佣。
+     * 查询该合同同期最近一张活跃申请单，防重复结佣。
      * <p>
-     * 跨期口径（2026-10）：结佣期间与实收月解耦后，同一合同任何期间的活跃单
-     * （DRAFT/SUBMITTED/APPROVED/LOCKED）都阻止再次发起——合同已结佣的追加走调整单。
+     * 同期互斥：同合同同期只允许一张活跃单；跨期补差走新申请单。
      */
     private CommissionApplication findActiveApplication(String period, String contractNo) {
         return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
             .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
                 .or().eq(CommissionApplication::getOrderNo, contractNo))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
@@ -2178,14 +2204,16 @@ public class CommissionApplicationService {
      * （REJECTED）申请单，按输入字符串（合同号或订单号）分别建 Map，
      * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→1 次）。
      * <p>
+     * 同期互斥（2026-10）：同合同同期只允许一张活跃单，跨期补差走新申请单。
      * 同一合同多张单取最新一张（按 createTime DESC 排序后 putIfAbsent）。
      */
     private void loadApplicationsBatch(String period, Collection<String> contractNos, BatchApplyContext ctx) {
         if (contractNos.isEmpty()) {
             return;
         }
-        // 跨期间加载（2026-10）：结佣期间与实收月解耦，同合同任何期间的活跃/驳回单都参与幂等判断
+        // 同期互斥：按 period 过滤，同合同同期的活跃/驳回单参与幂等判断
         List<CommissionApplication> all = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
             .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
                 .or().in(CommissionApplication::getOrderNo, contractNos))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,

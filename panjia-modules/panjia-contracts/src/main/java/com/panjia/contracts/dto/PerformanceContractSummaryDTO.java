@@ -53,6 +53,9 @@ public class PerformanceContractSummaryDTO implements Serializable {
     /** 涉及签约人数（去重） */
     private long employeeCount;
 
+    /** 归属期间 YYYY-MM（跨期汇总时取 MIN(period)，供同期互斥排除用） */
+    private String period;
+
     /** 明细条数 */
     private long detailCount;
 }

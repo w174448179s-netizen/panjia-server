@@ -14,6 +14,8 @@ import com.panjia.performance.domain.PerformancePeriodClose;
 import com.panjia.performance.domain.PerformanceSource;
 import com.panjia.performance.domain.PeriodCloseStatus;
 import com.panjia.performance.domain.bo.AddMemberPayload;
+import com.panjia.performance.domain.bo.ManualOffsetBo;
+import com.panjia.performance.domain.bo.ManualOffsetItem;
 import com.panjia.performance.domain.bo.PerformanceFactBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractDetailBo;
 import com.panjia.performance.domain.bo.PerformanceManageContractBo;
@@ -49,6 +51,7 @@ import org.dromara.system.api.DeptService;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.YearMonth;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -568,6 +571,48 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             row.setRank(seq++);
         }
         return new PageResult<>(rows, total);
+    }
+
+    @Override
+    public int createManualOffset(ManualOffsetBo bo, Long operatorId) {
+        // 按 contractNo 跨期查 ACTIVE PERF_EXPECT 事实作为模板
+        List<PerformanceFact> templates = factMapper.selectActiveFactsByContractNo(
+            null, FactType.PERF_EXPECT.getCode(), bo.getContractNo());
+        if (templates == null || templates.isEmpty()) {
+            throw new ServiceException("合同下未找到有效业绩事实");
+        }
+        PerformanceFact template = templates.get(0);
+        String targetPeriod = bo.getPeriod();
+        java.time.LocalDate periodStart = YearMonth.parse(targetPeriod).atDay(1);
+        long tsBase = System.currentTimeMillis();
+        int count = 0;
+        for (ManualOffsetItem item : bo.getItems()) {
+            PerformanceFact fact = new PerformanceFact();
+            fact.setFactType(FactType.PERF_EXPECT);
+            fact.setFactStatus(FactStatus.ACTIVE);
+            fact.setSource(PerformanceSource.MANUAL);
+            fact.setSourceKey(template.getSourceKey() + "|MANUAL-OFFSET-" + tsBase + "-" + count);
+            fact.setPeriod(targetPeriod);
+            fact.setBusinessDate(periodStart.atStartOfDay());
+            fact.setEffectiveDate(periodStart);
+            fact.setBatchId(null);
+            fact.setPerformanceAmount(item.getAmount());
+            // 其他字段从模板复制
+            fact.setBizType(template.getBizType());
+            fact.setPropertyAddress(template.getPropertyAddress());
+            fact.setOrderNo(template.getOrderNo());
+            fact.setContractNo(template.getContractNo());
+            fact.setFeeItem(template.getFeeItem());
+            fact.setDeptId(template.getDeptId());
+            // 入参覆盖
+            fact.setEmployeeId(item.getEmployeeId());
+            fact.setRoleType(item.getRoleType());
+            fact.setRoleName(item.getRoleName());
+            fact.setOperatorId(operatorId);
+            factMapper.insert(fact);
+            count++;
+        }
+        return count;
     }
 
     /**

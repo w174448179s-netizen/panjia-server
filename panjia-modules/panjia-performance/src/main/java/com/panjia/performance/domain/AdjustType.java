@@ -17,7 +17,10 @@ public enum AdjustType {
     AMOUNT("金额调整"),
 
     /** 增加角色人（合同级）：手工多一个人分业绩，合同总额不变（2026-09-28） */
-    ADD_MEMBER("增加角色人");
+    ADD_MEMBER("增加角色人"),
+
+    /** 业绩冲正（合同级）：对合同录入冲正/补录明细，走审批流程（2026-10-10） */
+    MANUAL_OFFSET("业绩冲正");
 
     /** 调整类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;
