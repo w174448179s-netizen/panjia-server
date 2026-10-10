@@ -518,8 +518,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
 
         // 1.5 合同存在已作废明细时禁止调整（作废为合同级操作，口径一致：先恢复合同业绩再调整）
+        // 业绩冲正跨期查作废明细（冲正期间可能无事实，但原月有）
         if (SCOPE_CONTRACT.equals(scope)) {
-            if (!factMapper.selectVoidedFactsByContractNo(dto.getPeriod(), dto.getFactType(), dto.getContractNo()).isEmpty()) {
+            String voidedPeriod = adjustType == AdjustType.MANUAL_OFFSET ? null : dto.getPeriod();
+            if (!factMapper.selectVoidedFactsByContractNo(voidedPeriod, dto.getFactType(), dto.getContractNo()).isEmpty()) {
                 throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
             }
         } else if (factMapper.countVoidedSiblingsByFactId(dto.getFactId()) > 0) {
@@ -609,11 +611,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setOriginalAmount(originalAmt);
 
         // 合同级调整前端可能未传员工/部门（合同聚合行无此信息），从该合同首条 ACTIVE 事实回填
-        // 跨月调整时事实在 originalPeriod（原业绩归属月）
+        // 跨月调整时事实在 originalPeriod（原业绩归属月）；业绩冲正跨期查模板
         if (SCOPE_CONTRACT.equals(scope)
             && (dto.getDeptId() == null || dto.getDeptId() <= 0 || dto.getEmployeeId() == null)) {
-            String factLoadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
-                ? dto.getOriginalPeriod() : dto.getPeriod();
+            String factLoadPeriod;
+            if (adjustType == AdjustType.MANUAL_OFFSET) {
+                factLoadPeriod = null;
+            } else {
+                factLoadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+                    ? dto.getOriginalPeriod() : dto.getPeriod();
+            }
             List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
                 factLoadPeriod, dto.getFactType(), dto.getContractNo());
             if (facts == null || facts.isEmpty()) {
@@ -691,6 +698,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     private String resolveRealContractNo(PerformanceAdjustCreateBo dto) {
         String factLoadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
             ? dto.getOriginalPeriod() : dto.getPeriod();
+        // 业绩冲正：冲正期间可能无事实，跨期查模板
+        if (AdjustType.MANUAL_OFFSET.getCode().equals(dto.getAdjustType())) {
+            factLoadPeriod = null;
+        }
         List<PerformanceFact> facts = factMapper.selectActiveFactsByContractNo(
             factLoadPeriod, dto.getFactType(), dto.getContractNo());
         return facts.stream()
@@ -2182,6 +2193,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         String factType = dto.getFactType();
         String period = StringUtils.isNotBlank(dto.getOriginalPeriod())
             ? dto.getOriginalPeriod() : dto.getPeriod();
+        // 业绩冲正：冲正期间可能无事实，跨期查合同合计
+        if (AdjustType.MANUAL_OFFSET.getCode().equals(dto.getAdjustType())) {
+            period = null;
+        }
         if (SCOPE_CONTRACT.equals(scope)) {
             BigDecimal total = adjustMapper.selectContractTotalAmount(period, factType, dto.getContractNo());
             return total != null ? total : BigDecimal.ZERO;
