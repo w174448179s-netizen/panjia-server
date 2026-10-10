@@ -167,74 +167,9 @@ public class CommissionApplicationService {
 
     // ==================== 发起结佣（按合同） ====================
 
-    /**
-     * 门店数据权限校验：非超管用户只能发起归属部门为「本部门或本部门下级」的合同。
-     * 判定方向：从合同归属部门沿 parentId 向上递归，父链（含自身）命中当前用户部门才放行。
-     * 在 HTTP 线程中调用（依赖 LoginHelper 获取当前用户）。
-     */
-    void checkContractDeptScope(Long contractDeptId) {
-        checkContractDeptScope(contractDeptId, loadDeptParentMap());
-    }
 
-    /**
-     * 门店数据权限校验（批量场景复用同一份部门父链映射，避免逐单查库）。
-     */
-    void checkContractDeptScope(Long contractDeptId, Map<Long, Long> deptParentMap) {
-        if (LoginHelper.isSuperAdmin()) {
-            return;
-        }
-        if (contractDeptId == null) {
-            throw new ServiceException("该合同无归属门店，无法发起结佣");
-        }
-        Long myDeptId = LoginHelper.getDeptId();
-        if (myDeptId == null) {
-            throw new ServiceException("当前用户无归属门店，无法发起结佣");
-        }
-        // 从合同归属部门开始沿父链向上找：命中用户部门（含恰好同级）即放行
-        Long currentDeptId = contractDeptId;
-        while (currentDeptId != null) {
-            if (myDeptId.equals(currentDeptId)) {
-                return;
-            }
-            Long parentId = deptParentMap == null ? null : deptParentMap.get(currentDeptId);
-            // parentId 为 0（RuoYi 虚拟根）、缺失或自引用时终止，避免死循环
-            if (parentId == null || parentId == 0L || parentId.equals(currentDeptId)) {
-                break;
-            }
-            currentDeptId = parentId;
-        }
-        throw new ServiceException("无权发起该门店的合同结佣");
-    }
 
-    /**
-     * 加载正常状态部门的 deptId → parentId 映射，用于沿父链向上做归属校验。
-     */
-    private Map<Long, Long> loadDeptParentMap() {
-        List<DeptDTO> depts = deptService.selectDeptsByList();
-        Map<Long, Long> parentMap = new HashMap<>();
-        if (depts != null) {
-            for (DeptDTO dept : depts) {
-                if (dept.getDeptId() != null) {
-                    parentMap.put(dept.getDeptId(), dept.getParentId());
-                }
-            }
-        }
-        return parentMap;
-    }
 
-    /**
-     * 查合同归属门店 ID（取该合同 ACTIVE 新签事实的首条 deptId）。
-     * 实收仅为门控，部门归属以新签事实为准。
-     */
-    Long resolveContractDeptId(String period, String contractNo) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-            .findActiveByContract(period, contractNo, FACT_TYPE_EXPECT);
-        return facts.stream()
-            .map(PerformanceFactSummaryDTO::getDeptId)
-            .filter(java.util.Objects::nonNull)
-            .findFirst()
-            .orElse(null);
-    }
 
     /**
      * 发起结佣并提交审批（拉取该合同当月事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
@@ -286,11 +221,7 @@ public class CommissionApplicationService {
         if (ctx == null) {
             checkPeriodOpen(period, "发起结佣");
         }
-        // 门店数据权限校验：非超管只能发起自己门店（含下级）的合同
-        if (!skipDeptScope) {
-            Long contractDeptId = resolveContractDeptId(period, contractNo);
-            checkContractDeptScope(contractDeptId);
-        }
+
         // 驳回单重提：从 ctx 取预加载的驳回单，避免逐单查（P1）
         CommissionApplication rejected = ctx != null
             ? ctx.rejectedApps.get(contractNo)
@@ -369,10 +300,6 @@ public class CommissionApplicationService {
         // 否则流程发起人变量(initiator)为空、总监发起无法自动过总监节点、数据权限拦截报错
         String tokenName = SaManager.getConfig().getTokenName();
         String tokenValue = ServletUtils.getRequest().getHeader(tokenName);
-        // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文，校验门店权限
-        // 非超管用户只能发起归属部门在本部门（含本部门下级）链路上的合同，无权的直接计入跳过；
-        // 部门父链映射只加载一次，逐单沿父链向上校验
-        Map<Long, Long> deptParentMap = LoginHelper.isSuperAdmin() ? null : loadDeptParentMap();
         // 批量上下文：同步阶段缓存事实（避免 doApply 重复查）、预加载应收金额（避免逐单全表查）
         BatchApplyContext ctx = new BatchApplyContext();
         // 应收金额一次性加载：跨月口径，以用户输入的业务键直接匹配（不依赖实收期间）
@@ -387,16 +314,7 @@ public class CommissionApplicationService {
                 List<PerformanceFactSummaryDTO> facts = performanceQueryPort
                     .findActiveByContract(null, contractNo, FACT_TYPE_REAL);
                 ctx.factsMap.put(contractNo, facts);
-                Long contractDeptId = facts.stream()
-                    .map(PerformanceFactSummaryDTO::getDeptId)
-                    .filter(Objects::nonNull)
-                    .findFirst()
-                    .orElse(null);
-                if (contractDeptId == null) {
-                    syncResult.getSkippedContracts().add(contractNo);
-                    continue;
-                }
-                checkContractDeptScope(contractDeptId, deptParentMap);
+                // 发起结佣不再校验合同部门归属：合同本身无门店属性，部门归属取决于明细下人员。
                 myContracts.add(contractNo);
             } catch (ServiceException e) {
                 syncResult.getSkippedContracts().add(contractNo);
@@ -1419,6 +1337,114 @@ public class CommissionApplicationService {
         summary.put("totalAmount", summaryTotalAmount);
         result.setSummary(summary);
         return result;
+    }
+
+    /**
+     * 结佣发起页：查可发起合同（实收审批通过 + 未被结佣）。
+     * <p>
+     * 不限结佣期间，只按实收期间/关键字过滤；已有任何状态结佣申请单的合同不显示。
+     */
+    public PageResult<CommissionContractVo> listAvailableContracts(CommissionApplyBo query, PageQuery pageQuery) {
+        String keyword = StringUtils.trimToNull(query.getKeyword());
+        // 必须提供关键字，避免全表扫描
+        if (keyword == null) {
+            return PageResult.build(Collections.emptyList(), 0L);
+        }
+
+        // 部门数据权限
+        Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
+
+        // 查实收审批通过的合同（不限期间）
+        List<PerformanceContractSummaryDTO> contracts =
+            performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId());
+
+        // 查所有结佣申请单（不限期间），用于排除已结佣的合同
+        List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .orderByDesc(CommissionApplication::getId));
+        Set<String> appliedContractNos = new HashSet<>();
+        Set<String> appliedOrderNos = new HashSet<>();
+        for (CommissionApplication app : applications) {
+            if (StringUtils.isNotBlank(app.getContractNo())) {
+                appliedContractNos.add(app.getContractNo());
+            }
+            if (StringUtils.isNotBlank(app.getOrderNo())) {
+                appliedOrderNos.add(app.getOrderNo());
+            }
+        }
+
+        String bizType = StringUtils.trimToNull(query.getBizType());
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
+            contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
+
+        List<CommissionContractVo> all = new ArrayList<>();
+        for (PerformanceContractSummaryDTO c : contracts) {
+            // 排除已有结佣申请单的合同（任何状态：DRAFT/SUBMITTED/APPROVED/LOCKED/REJECTED）
+            if (appliedContractNos.contains(c.getContractNo()) || appliedOrderNos.contains(c.getOrderNo())) {
+                continue;
+            }
+            if (keyword != null && !containsKeyword(c, keyword)) {
+                continue;
+            }
+            if (bizType != null && !bizType.equals(c.getBizType())) {
+                continue;
+            }
+            // 发起页不显示期间封账状态（还没选结佣期间），period 留空
+            all.add(toAvailableContractVO(c, conversionFactorPort.factorOf(factorMap, c.getBizType())));
+        }
+
+        // 排序：签约/认购时间倒序
+        all.sort((a, b) -> {
+            if (a.getBusinessDate() == null && b.getBusinessDate() == null) return 0;
+            if (a.getBusinessDate() == null) return 1;
+            if (b.getBusinessDate() == null) return -1;
+            return b.getBusinessDate().compareTo(a.getBusinessDate());
+        });
+
+        int total = all.size();
+        int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
+        int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
+        int from = Math.min((pageNum - 1) * pageSize, total);
+        int to = Math.min(from + pageSize, total);
+        List<CommissionContractVo> pageRows = new ArrayList<>(all.subList(from, to));
+
+        PageResult<CommissionContractVo> result = PageResult.build(pageRows, (long) total);
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("contractCount", total);
+        summary.put("employeeCount", performanceQueryPort.countDistinctEmployeesByKeys(null,
+            all.stream().flatMap(r -> {
+                Set<String> keys = new HashSet<String>();
+                if (StringUtils.isNotBlank(r.getContractNo())) keys.add(r.getContractNo());
+                if (StringUtils.isNotBlank(r.getOrderNo())) keys.add(r.getOrderNo());
+                return keys.stream();
+            }).collect(Collectors.toSet()), FACT_TYPE_REAL));
+        summary.put("detailCount", all.stream().mapToLong(CommissionContractVo::getDetailCount).sum());
+        summary.put("totalAmount", all.stream()
+            .map(r -> r.getAmount() != null ? r.getAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        result.setSummary(summary);
+        return result;
+    }
+
+    /**
+     * 可发起合同行 VO：无申请单，金额取新签应收合计。
+     */
+    private CommissionContractVo toAvailableContractVO(PerformanceContractSummaryDTO c, BigDecimal factor) {
+        CommissionContractVo vo = new CommissionContractVo();
+        vo.setContractNo(c.getContractNo());
+        vo.setOrderNo(c.getOrderNo());
+        vo.setBizType(c.getBizType());
+        vo.setPropertyAddress(c.getPropertyAddress());
+        vo.setBusinessDate(c.getBusinessDate());
+        vo.setEmployeeCount(c.getEmployeeCount());
+        vo.setDetailCount(c.getDetailCount());
+        vo.setExpectedAmount(c.getExpectedAmount());
+        vo.setReceivedStatus(c.getReceivedStatus());
+        // 可发起合同：金额 = 新签应收合计（与发起后申请单金额口径一致）
+        vo.setAmount(c.getExpectedAmount());
+        vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
+        vo.setExpectedConvertedAmount(conversionFactorPort.convert(c.getExpectedAmount(), factor));
+        vo.setStatus("AVAILABLE");
+        return vo;
     }
 
     /**

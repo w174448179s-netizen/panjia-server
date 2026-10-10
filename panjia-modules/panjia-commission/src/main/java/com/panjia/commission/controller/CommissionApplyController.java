@@ -81,6 +81,17 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
+     * 结佣发起页：查可发起合同（实收审批通过 + 未被结佣）。
+     * 不限结佣期间，只按关键字/门店/员工/类型过滤。
+     */
+    @SaCheckPermission("commission:apply:list")
+    @GetMapping("/available-contracts")
+    public R<PageResult<com.panjia.commission.domain.vo.CommissionContractVo>> availableContracts(CommissionApplyBo query,
+                                                                                                  PageQuery pageQuery) {
+        return R.ok(applicationService.listAvailableContracts(query, pageQuery));
+    }
+
+    /**
      * 申请单详情（含明细）。
      *
      * @param id 申请单 ID
