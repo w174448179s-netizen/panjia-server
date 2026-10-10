@@ -10,6 +10,7 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 业绩事实跨域查询端口（performance 域对外契约，对结佣域唯一出口）。
@@ -104,6 +105,17 @@ public interface CommissionPerformanceQueryPort {
      * @return 去重员工数；无匹配返回 0
      */
     long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys, String factType);
+
+    /**
+     * 按业务键集合（订单号/合同号）<b>跨期间</b>批量查 ACTIVE 事实的归属期间集合。
+     * <p>用途：结佣发起页同期互斥排除——判断同一合同各实收期间是否均已有活跃结佣单。
+     * 同一事实同时计入其订单号键与合同号键（均非空时），调用方按输入键取值。
+     *
+     * @param bizKeys  订单号或合同号集合（不可为空）
+     * @param factType 事实口径（FactType code：PERF_REAL 走实收拆表，其余走 pj_perf_fact）
+     * @return bizKey → 该合同全部 ACTIVE 事实的期间集合；无事实的键不在结果中
+     */
+    Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys, String factType);
 
     /**
      * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。

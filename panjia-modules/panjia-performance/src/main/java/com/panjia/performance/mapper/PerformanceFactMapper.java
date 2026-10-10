@@ -627,7 +627,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_received_contract rc
             WHERE (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
               <if test="period != null and period != ''">AND rc.period = #{period}</if>
-        },
+        ),
         expect_scope AS (
             -- 新签金额口径：当月有非零新签 → 只取当月；
             -- 当月为 0/无 → 不参与当月计算，取历史（实收月之前），与建单/结佣口径一致
@@ -932,6 +932,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long selectDistinctEmployeeCountByKeys(@Param("period") String period,
                                            @Param("factType") String factType,
                                            @Param("keys") Collection<String> keys);
+
+    /**
+     * 按业务键集合查 ACTIVE 事实的 (业务键, 期间) 去重集合（结佣发起页跨期互斥排除用）。
+     * 输入键按 contract_no 或 order_no 命中事实，返回该合同全部 ACTIVE 事实的期间。
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT k.key AS "bizKey", f.period AS "period"
+        FROM (VALUES
+          <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
+        ) AS k(key)
+        JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE' AND f.fact_type = #{factType}
+             AND (f.contract_no = k.key OR f.order_no = k.key)
+        </script>
+        """)
+    List<Map<String, Object>> selectActivePeriodsByKeys(@Param("factType") String factType,
+                                                        @Param("keys") Collection<String> keys);
 
     /**
      * 批量聚合多个业务键的应收业绩（PERF_EXPECT）合计（自动建单性能优化用）。

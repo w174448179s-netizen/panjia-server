@@ -302,6 +302,22 @@ public interface ReceivedRealFactMapper {
                                            @Param("keys") Collection<String> keys);
 
     /**
+     * 按业务键集合查 ACTIVE 明细的 (业务键, 期间) 去重集合（结佣发起页跨期互斥排除用）。
+     * 输入键按 contract_no 或 order_no 命中合同，返回该合同全部 ACTIVE 明细的期间。
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT k.key AS "bizKey", rd.period AS "period"
+        FROM (VALUES
+          <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
+        ) AS k(key)
+        JOIN pj_received_contract rc ON (rc.contract_no = k.key OR rc.order_no = k.key)
+        JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
+        </script>
+        """)
+    List<Map<String, Object>> selectActivePeriodsByKeys(@Param("keys") Collection<String> keys);
+
+    /**
      * 批量查合同维度「调整前」实收金额合计：以各业务键当前 ACTIVE rd 的 sourceKey 为准，
      * 沿明细链（同 source_key，含历史 REVERSED rd）取 id 最早一条金额求和。
      */
@@ -318,7 +334,7 @@ public interface ReceivedRealFactMapper {
                                      AND rd.source_key IS NOT NULL
             WHERE 1=1
             <if test="period != null and period != ''">AND rc.period = #{period}</if>
-        },
+        ),
         orig AS (
             SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt
             FROM sk

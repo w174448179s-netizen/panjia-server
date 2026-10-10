@@ -7,7 +7,6 @@ import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.FactStatus;
-import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
@@ -302,17 +301,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (StringUtils.isBlank(factType)) {
             factType = "PERF_EXPECT"; // 默认应收口径
         }
+        // 业绩冲正（MANUAL_OFFSET）：冲正明细清单存 payloadJson（员工/角色/金额），
+        // 不修改既有明细——直接解析 payload 转明细行返回，无需查合同既有事实
+        if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
+            dto.setDetails(buildOffsetDetailRows(adjust));
+            dto.setDetailCount(dto.getDetails().size());
+            dto.setExpectedTotal(adjust.getOriginalAmount());
+            dto.setReceivedTotal(adjust.getTargetAmount());
+            return dto;
+        }
         if (StringUtils.isNotBlank(targetContractNo)) {
             List<AdjustFactDetailVo> details =
                 factMapper.selectAdjustFactDetails(period, targetContractNo, factType);
-            // 业绩冲正（MANUAL_OFFSET）：不修改既有明细，冲正明细在 payload，直接返回既有明细
-            if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
-                dto.setDetails(details);
-                dto.setDetailCount(details.size());
-                dto.setExpectedTotal(adjust.getOriginalAmount());
-                dto.setReceivedTotal(adjust.getTargetAmount());
-                return dto;
-            }
             // 增加角色人（ADD_MEMBER）：分摊展示语义与金额调整完全不同，独立处理后直接返回
             if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 applyAddMemberDetail(adjust, dto, details);
@@ -1037,6 +1037,75 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             return String.valueOf(employeeId);
         }
         return String.valueOf(rows.get(0).get("employeeName"));
+    }
+
+    /**
+     * 业绩冲正详情·冲正明细行：解析 payloadJson（offsetItems 清单）→ AdjustFactDetailVo。
+     * 展示口径与冲正弹窗一致：新签业绩=该行冲正前当前业绩（payload 快照）、
+     * 变动=冲正金额（正补录/负冲正）、调整后=当前业绩+冲正金额；
+     * 工号/门店/占比优先取保存时表格行快照，员工主数据兜底；折算后按源事实折算因子换算。
+     */
+    private List<AdjustFactDetailVo> buildOffsetDetailRows(PerformanceAdjust adjust) {
+        List<ManualOffsetItem> items = JsonUtils.parseArray(adjust.getPayloadJson(), ManualOffsetItem.class);
+        if (items == null || items.isEmpty()) {
+            return new ArrayList<>();
+        }
+        // 批量查员工（姓名/工号/部门）+ 部门名，拼部门路径（快照缺失时兜底）
+        List<Long> employeeIds = items.stream()
+            .map(ManualOffsetItem::getEmployeeId).filter(java.util.Objects::nonNull).distinct().toList();
+        Map<Long, Map<String, Object>> empMap = adjustMapper.employeeNames(employeeIds).stream()
+            .collect(Collectors.toMap(m -> ((Number) m.get("employeeId")).longValue(), m -> m, (a, b) -> a));
+        List<Long> deptIds = empMap.values().stream()
+            .map(m -> m.get("deptId")).filter(java.util.Objects::nonNull)
+            .map(v -> ((Number) v).longValue()).distinct().toList();
+        Map<Long, String> deptNameMap = adjustMapper.deptNames(deptIds).stream()
+            .collect(Collectors.toMap(m -> ((Number) m.get("deptId")).longValue(),
+                m -> String.valueOf(m.get("deptName")), (a, b) -> a));
+        // 折算因子：按源事实批量取；无源事实的行取合同任一因子兜底，缺省 1
+        java.util.Set<Long> srcFactIds = items.stream()
+            .map(ManualOffsetItem::getFactId).filter(java.util.Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, BigDecimal> factorMap = srcFactIds.isEmpty()
+            ? Map.of() : factConversionResolver.factorByFactIds(srcFactIds);
+        BigDecimal fallbackFactor = factorMap.values().stream().findFirst().orElse(BigDecimal.ONE);
+        List<AdjustFactDetailVo> rows = new ArrayList<>(items.size());
+        for (ManualOffsetItem item : items) {
+            AdjustFactDetailVo row = new AdjustFactDetailVo();
+            row.setFactId(item.getFactId());
+            Map<String, Object> emp = item.getEmployeeId() == null ? null : empMap.get(item.getEmployeeId());
+            if (emp != null) {
+                row.setEmployeeId(item.getEmployeeId());
+                row.setEmployeeName(toStringOrNull(emp.get("employeeName")));
+                row.setEmployeeCode(StringUtils.isNotBlank(item.getEmployeeCode())
+                    ? item.getEmployeeCode() : toStringOrNull(emp.get("employeeCode")));
+                Object deptId = emp.get("deptId");
+                if (deptId != null) {
+                    String deptName = deptNameMap.get(((Number) deptId).longValue());
+                    row.setDeptPath(StringUtils.isNotBlank(deptName) ? deptName : null);
+                }
+            } else if (item.getEmployeeId() != null) {
+                row.setEmployeeId(item.getEmployeeId());
+                row.setEmployeeCode(item.getEmployeeCode());
+            }
+            if (StringUtils.isNotBlank(item.getDeptName())) {
+                row.setDeptPath(item.getDeptName());    // 保存时表格行快照优先
+            }
+            row.setRoleType(item.getRoleType());
+            row.setRoleName(item.getRoleName());
+            row.setShareRatio(item.getShareRatio());
+            BigDecimal original = item.getOriginalAmount() == null ? BigDecimal.ZERO : item.getOriginalAmount();
+            BigDecimal amt = item.getAmount() == null ? BigDecimal.ZERO : item.getAmount();
+            row.setAmount(original);                     // 冲正前当前业绩（弹窗行快照）
+            row.setDeltaAmount(amt);                     // 变动 = 冲正金额（正补录/负冲正）
+            row.setAfterAmount(original.add(amt));       // 调整后 = 当前业绩 + 冲正金额
+            row.setTarget(true);
+            BigDecimal factor = item.getFactId() != null && factorMap.containsKey(item.getFactId())
+                ? factorMap.get(item.getFactId()) : fallbackFactor;
+            row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
+            row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), factor));
+            rows.add(row);
+        }
+        return rows;
     }
 
     private static String text(Object value) {
@@ -1981,25 +2050,38 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     /**
      * 业绩冲正执行（MANUAL_OFFSET）：审批通过后按 payload 中的冲正明细清单，
-     * 循环创建 MANUAL 事实（正数补录/负数冲正），模板字段从合同既有 ACTIVE 事实复制。
+     * 循环创建 MANUAL 事实（正数补录/负数冲正）。既有行按 payload 携带的 factId
+     * 精确复制对应源事实（门店/费用项/占比等与弹窗所见一致），新增行回退合同
+     * 既有 ACTIVE 事实模板；人员/金额/占比按冲正明细覆盖。
      */
     private void executeManualOffsetAdjust(PerformanceAdjust adjust, Long operatorId) {
         List<ManualOffsetItem> items = JsonUtils.parseArray(adjust.getPayloadJson(), ManualOffsetItem.class);
         if (items == null || items.isEmpty()) {
             throw new ServiceException("冲正明细为空，无法执行：adjustId={}", adjust.getId());
         }
-        // 按 contractNo 跨期查 ACTIVE PERF_EXPECT 事实作为模板
+        // 按 contractNo 跨期查 ACTIVE PERF_EXPECT 事实：既是默认模板，也用于按 factId 精确匹配
         List<PerformanceFact> templates = factMapper.selectActiveFactsByContractNo(
             null, FACT_TYPE_EXPECT, adjust.getContractNo());
         if (templates == null || templates.isEmpty()) {
             throw new ServiceException("合同下未找到有效业绩事实：contractNo={}", adjust.getContractNo());
         }
-        PerformanceFact template = templates.get(0);
+        Map<Long, PerformanceFact> templateById = templates.stream()
+            .collect(Collectors.toMap(PerformanceFact::getId, f -> f, (a, b) -> a));
+        PerformanceFact defaultTemplate = templates.get(0);
         String targetPeriod = adjust.getPeriod();
         java.time.LocalDate periodStart = YearMonth.parse(targetPeriod).atDay(1);
         long tsBase = System.currentTimeMillis();
+        // 批量查员工主数据（工号/部门），冲正记录的人员字段按冲正明细覆盖，
+        // 不沿用模板事实的人员信息（模板可能属于其他角色人）
+        List<Long> employeeIds = items.stream()
+            .map(ManualOffsetItem::getEmployeeId).filter(java.util.Objects::nonNull).distinct().toList();
+        Map<Long, Map<String, Object>> empMap = adjustMapper.employeeNames(employeeIds).stream()
+            .collect(Collectors.toMap(m -> ((Number) m.get("employeeId")).longValue(), m -> m, (a, b) -> a));
         int count = 0;
         for (ManualOffsetItem item : items) {
+            // 既有行按 factId 复制对应源事实（factId 失效时回退默认模板），保证字段与弹窗所见一致
+            PerformanceFact template = item.getFactId() == null
+                ? defaultTemplate : templateById.getOrDefault(item.getFactId(), defaultTemplate);
             PerformanceFact fact = copyFactBase(template);
             fact.setFactStatus(FactStatus.ACTIVE);
             fact.setSource(PerformanceSource.MANUAL);
@@ -2009,10 +2091,25 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             fact.setEffectiveDate(periodStart);
             fact.setBatchId(null);
             fact.setPerformanceAmount(item.getAmount());
-            // 入参覆盖
+            // 人员信息按冲正明细覆盖（工号取保存快照、缺失回退员工主数据；部门取员工主数据）
             fact.setEmployeeId(item.getEmployeeId());
+            Map<String, Object> emp = item.getEmployeeId() == null ? null : empMap.get(item.getEmployeeId());
+            if (StringUtils.isNotBlank(item.getEmployeeCode())) {
+                fact.setEmployeeExternalCode(item.getEmployeeCode());
+            } else if (emp != null) {
+                fact.setEmployeeExternalCode(toStringOrNull(emp.get("employeeCode")));
+            }
+            if (emp != null) {
+                Object deptId = emp.get("deptId");
+                if (deptId != null) {
+                    fact.setDeptId(((Number) deptId).longValue());
+                }
+            }
             fact.setRoleType(item.getRoleType());
             fact.setRoleName(item.getRoleName());
+            if (item.getShareRatio() != null) {
+                fact.setShareRatio(item.getShareRatio());
+            }
             fact.setOperatorId(operatorId);
             factMapper.insert(fact);
             count++;

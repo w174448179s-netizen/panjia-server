@@ -1366,35 +1366,29 @@ public class CommissionApplicationService {
         List<PerformanceContractSummaryDTO> contracts =
             performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
 
-        // 收集实收事实的期间集合（同期互斥：按 period 维度排除已结佣合同）
-        Set<String> periods = new HashSet<>();
+        // 收集业务键（订单号/合同号），批量查各合同 ACTIVE 实收的归属期间集合（跨期）
+        Set<String> bizKeys = new HashSet<>();
         for (PerformanceContractSummaryDTO c : contracts) {
-            if (StringUtils.isNotBlank(c.getPeriod())) {
-                periods.add(c.getPeriod());
-            }
+            if (StringUtils.isNotBlank(c.getContractNo())) bizKeys.add(c.getContractNo());
+            if (StringUtils.isNotBlank(c.getOrderNo())) bizKeys.add(c.getOrderNo());
         }
 
-        // 查结佣申请单（用于排除已结佣的合同）：同期互斥，只查活跃状态（DRAFT/SUBMITTED/APPROVED/LOCKED）
+        // 查结佣申请单（用于排除已结佣的合同）：只查活跃状态（DRAFT/SUBMITTED/APPROVED/LOCKED）。
+        // 跨期间查全部：发起页不选期间，结佣期间由用户发起时自选，不能按合同聚合行的
+        // MIN(period) 过滤，否则跨期合同（如 8 月已发起、10 月新到账）会被整行误伤
         LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
-        appWrapper.in(!periods.isEmpty(), CommissionApplication::getPeriod, periods);
         if (keyword != null) {
             appWrapper.and(w -> w.like(CommissionApplication::getContractNo, keyword)
                 .or().like(CommissionApplication::getOrderNo, keyword));
-        } else if (!contracts.isEmpty()) {
-            Set<String> bizKeys = new HashSet<>();
-            for (PerformanceContractSummaryDTO c : contracts) {
-                if (StringUtils.isNotBlank(c.getContractNo())) bizKeys.add(c.getContractNo());
-                if (StringUtils.isNotBlank(c.getOrderNo())) bizKeys.add(c.getOrderNo());
-            }
-            if (!bizKeys.isEmpty()) {
-                appWrapper.and(w -> w.in(CommissionApplication::getContractNo, bizKeys)
-                    .or().in(CommissionApplication::getOrderNo, bizKeys));
-            }
+        } else if (!bizKeys.isEmpty()) {
+            appWrapper.and(w -> w.in(CommissionApplication::getContractNo, bizKeys)
+                .or().in(CommissionApplication::getOrderNo, bizKeys));
         }
         appWrapper.in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
             ApplicationStatus.APPROVED, ApplicationStatus.LOCKED);
         appWrapper.orderByDesc(CommissionApplication::getId);
-        List<CommissionApplication> applications = applicationMapper.selectList(appWrapper);
+        List<CommissionApplication> applications =
+            (keyword != null || !bizKeys.isEmpty()) ? applicationMapper.selectList(appWrapper) : Collections.emptyList();
 
         // 构建 (bizKey, period) 排除集合：同合同同期有活跃单才排除，跨期可再发起
         Set<String> appliedKeys = new HashSet<>();
@@ -1411,18 +1405,24 @@ public class CommissionApplicationService {
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
+        // 各合同 ACTIVE 实收的归属期间集合（跨期批量查，一次取全）
+        Map<String, Set<String>> periodsByKey = performanceQueryPort.listActivePeriodsByKeys(bizKeys, FACT_TYPE_REAL);
+
         List<CommissionContractVo> all = new ArrayList<>();
         for (PerformanceContractSummaryDTO c : contracts) {
-            // 同期互斥：同合同同期有活跃单才排除，跨期可再发起
-            String period = c.getPeriod();
-            boolean excluded = false;
-            if (StringUtils.isNotBlank(c.getContractNo()) && appliedKeys.contains(c.getContractNo() + "|" + period)) {
-                excluded = true;
+            // 同期互斥（跨期口径）：该合同全部实收期间均已有活跃结佣单才整体隐藏；
+            // 任一实收期间未被结佣即显示（结佣期间由用户发起时自选，创建时再做同期幂等校验）
+            Set<String> receivedPeriods = new HashSet<>();
+            if (StringUtils.isNotBlank(c.getContractNo())) {
+                receivedPeriods.addAll(periodsByKey.getOrDefault(c.getContractNo(), Collections.emptySet()));
             }
-            if (!excluded && StringUtils.isNotBlank(c.getOrderNo()) && appliedKeys.contains(c.getOrderNo() + "|" + period)) {
-                excluded = true;
+            if (StringUtils.isNotBlank(c.getOrderNo())) {
+                receivedPeriods.addAll(periodsByKey.getOrDefault(c.getOrderNo(), Collections.emptySet()));
             }
-            if (excluded) {
+            boolean allCovered = !receivedPeriods.isEmpty() && receivedPeriods.stream().allMatch(p ->
+                appliedKeys.contains(c.getContractNo() + "|" + p)
+                    || appliedKeys.contains(c.getOrderNo() + "|" + p));
+            if (allCovered) {
                 continue;
             }
             if (keyword != null && !containsKeyword(c, keyword)) {

@@ -9,6 +9,7 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 实收「事实」跨域端口（received 域对外契约）。
@@ -64,6 +65,16 @@ public interface ReceivedRealFactPort {
      * @return 去重员工数；无匹配返回 0
      */
     long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys);
+
+    /**
+     * 按业务键集合（订单号/合同号）<b>跨期间</b>批量查 ACTIVE 实收明细的归属期间集合。
+     * <p>用途：结佣发起页同期互斥排除——判断同一合同各实收期间是否均已有活跃结佣单。
+     * 任一业务键（order_no 或 contract_no）命中即计入，调用方按输入键取值。
+     *
+     * @param bizKeys 订单号或合同号集合（不可为空）
+     * @return bizKey → 该合同全部 ACTIVE 明细的期间集合；无 ACTIVE 明细的键不在结果中
+     */
+    Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys);
 
     /**
      * 批量查合同维度「调整前」实收金额合计。

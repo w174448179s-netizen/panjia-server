@@ -235,6 +235,31 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port == null ? Collections.emptyMap() : port.listActivePeriodsByKeys(bizKeys);
+        }
+        return groupPeriodsByKeys(factMapper.selectActivePeriodsByKeys(factType, bizKeys));
+    }
+
+    /** 行集 → bizKey → 期间集合（行列别名 bizKey/period，大小写敏感）。 */
+    private static Map<String, Set<String>> groupPeriodsByKeys(List<Map<String, Object>> rows) {
+        Map<String, Set<String>> result = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Object key = row.get("bizKey");
+            Object period = row.get("period");
+            if (key != null && period != null) {
+                result.computeIfAbsent(String.valueOf(key), k -> new HashSet<>()).add(String.valueOf(period));
+            }
+        }
+        return result;
+    }
+
+    @Override
     public Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, java.util.Collection<String> bizKeys, String factType) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyMap();

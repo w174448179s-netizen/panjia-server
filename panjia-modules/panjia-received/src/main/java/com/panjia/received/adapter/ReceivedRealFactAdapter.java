@@ -26,10 +26,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 实收「事实」跨域端口实现（PERF_REAL 拆表后的唯一读写落地处）。
@@ -130,6 +132,23 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
             return 0L;
         }
         return realMapper.selectDistinctEmployeeCountByKeys(period, bizKeys);
+    }
+
+    @Override
+    public Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        List<Map<String, Object>> rows = realMapper.selectActivePeriodsByKeys(bizKeys);
+        Map<String, Set<String>> result = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Object key = row.get("bizKey");
+            Object period = row.get("period");
+            if (key != null && period != null) {
+                result.computeIfAbsent(String.valueOf(key), k -> new HashSet<>()).add(String.valueOf(period));
+            }
+        }
+        return result;
     }
 
     @Override
