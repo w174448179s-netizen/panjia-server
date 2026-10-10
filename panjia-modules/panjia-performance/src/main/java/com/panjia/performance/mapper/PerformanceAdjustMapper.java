@@ -54,6 +54,32 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
         return selectEmployeeNamesByIds(ids);
     }
 
+    /**
+     * 批量查询员工主数据（按外部工号）。
+     * <p>
+     * 冲正/实收调整快照以工号为稳定业务键：前端 JS Number 精度会把雪花 Long 取整，
+     * employeeId 不可信时用工号反查真实员工（含姓名/部门），保证落库与展示一致。
+     *
+     * @param codes 工号集合
+     * @return 每行含 employee_id / employee_name / employee_code / dept_id；空集合返回空列表
+     */
+    @Select("<script>"
+        + "SELECT employee_id AS \"employeeId\", employee_name AS \"employeeName\", "
+        + "employee_code AS \"employeeCode\", dept_id AS \"deptId\" "
+        + "FROM pj_people_employee "
+        + "WHERE employee_code IN "
+        + "<foreach collection='codes' item='code' open='(' separator=',' close=')'>#{code}</foreach>"
+        + "</script>")
+    List<Map<String, Object>> selectEmployeesByCodes(@Param("codes") List<String> codes);
+
+    /** 空集合安全：按工号批量查员工 */
+    default List<Map<String, Object>> employeesByCodes(List<String> codes) {
+        if (CollectionUtils.isEmpty(codes)) {
+            return Collections.emptyList();
+        }
+        return selectEmployeesByCodes(codes);
+    }
+
     default List<Map<String, Object>> deptNames(List<Long> ids) {
         if (CollectionUtils.isEmpty(ids)) {
             return Collections.emptyList();

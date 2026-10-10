@@ -20,7 +20,10 @@ public enum AdjustType {
     ADD_MEMBER("增加角色人"),
 
     /** 业绩冲正（合同级）：对合同录入冲正/补录明细，走审批流程（2026-10-10） */
-    MANUAL_OFFSET("业绩冲正");
+    MANUAL_OFFSET("业绩冲正"),
+
+    /** 实收调整（合同级）：对合同实收业绩（PERF_REAL）做合同级金额调整，走审批流程（2026-10-10） */
+    RECEIVED_AMOUNT("实收调整");
 
     /** 调整类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

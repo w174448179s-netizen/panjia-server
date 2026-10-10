@@ -466,10 +466,19 @@ public class CommissionApplicationService {
                 + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
 
-        // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣
+        // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣。
+        // 历史导入放行：实收审批流程上线前，导入批次归档即产生 ACTIVE 实收事实、从未挂过实收单
+        // （received_apply_id 为空但 source_batch_id 非空），此类行按「导入即确认的实收」放行；
+        // 有实收单的必须 APPROVED；无批次（系统内手工产生）且无单的仍拦截。
         List<String> unapproved = nonZeroFacts.stream()
-            .filter(f -> f.getReceivedApplyId() == null || !"APPROVED".equals(f.getReceivedStatus()))
-            .map(f -> "事实" + f.getFactId() + "(" + f.getReceivedStatus() + ")")
+            .filter(f -> {
+                if (f.getReceivedApplyId() != null) {
+                    return !"APPROVED".equals(f.getReceivedStatus());
+                }
+                return f.getBatchId() == null;
+            })
+            .map(f -> "事实" + f.getFactId() + "("
+                + (f.getReceivedStatus() == null ? "未发起实收审批" : f.getReceivedStatus()) + ")")
             .distinct()
             .toList();
         if (!unapproved.isEmpty()) {

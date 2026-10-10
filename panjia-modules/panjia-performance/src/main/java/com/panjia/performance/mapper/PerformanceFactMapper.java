@@ -1010,7 +1010,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
                MAX(f.property_address) AS "propertyAddress",
-               MAX(f.business_date) AS "businessDate"
+               MIN(f.business_date) AS "businessDate"
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           <if test="period != null and period != ''">AND f.period = #{period}</if>

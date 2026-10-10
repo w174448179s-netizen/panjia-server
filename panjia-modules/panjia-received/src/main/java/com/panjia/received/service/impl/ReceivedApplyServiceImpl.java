@@ -1193,7 +1193,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             wrapper.and(w -> w.apply(
                 "EXISTS (SELECT 1 FROM pj_received_detail rd"
                     + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
-                    + "   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))"
+                    + "   OR (NOT EXISTS (SELECT 1 FROM pj_people_employee x WHERE x.employee_id = rd.employee_id)"
+                    + "       AND e.employee_code = rd.employee_external_code))"
                     + " WHERE rd.received_apply_id = pj_perf_received_apply.id"
                     + " AND rd.detail_status = 'ACTIVE'"
                     + " AND (e.dept_id = {0}"
@@ -1206,7 +1207,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             wrapper.and(w -> w.apply(
                 "EXISTS (SELECT 1 FROM pj_received_detail rd"
                     + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
-                    + "   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))"
+                    + "   OR (NOT EXISTS (SELECT 1 FROM pj_people_employee x WHERE x.employee_id = rd.employee_id)"
+                    + "       AND e.employee_code = rd.employee_external_code))"
                     + " WHERE rd.received_apply_id = pj_perf_received_apply.id"
                     + " AND rd.detail_status = 'ACTIVE'"
                     + " AND e.employee_id = {0})",
