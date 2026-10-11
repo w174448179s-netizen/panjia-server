@@ -776,13 +776,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 与建单/结佣口径一致。
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
-     * orderNo 非空时合同号+订单号双键精确限定（同合同号挂多订单防跨订单配对），为空退化旧 OR 口径；
-     * degradeToContract=true（调用方双侧闸门判定两侧订单都唯一）时退化仅按合同号配对，
-     * 兼容贝壳新签 order_no 误填成合同号的脏数据。
+     * orderNo 非空时按订单号限定（合同号非空再加合同号=双键精确，同合同号挂多订单防跨订单配对）；
+     * orderNo 为空（历史单据）退化合同号双列 OR 旧口径；合同号与订单号都为空时不匹配任何行；
+     * degradeToContract=true（调用方双侧闸门判定两侧订单都唯一）时新签侧退化仅按合同号配对，
+     * 兼容贝壳新签 order_no 误填成合同号的脏数据（实收侧 JOIN 仍用双键，实收订单号本身是准确的）。
      *
      * @param period              归属期间
      * @param orderNo             订单号（可空）
-     * @param contractNo          合同号/订单号（双列匹配）
+     * @param contractNo          合同号（可空；仅 orderNo 为空的历史单据走双列 OR 兼容）
      * @param degradeToContract   双键未命中且双侧订单唯一时，新签侧退化仅按合同号配对
      * @return 每人实收明细行
      */
@@ -791,8 +792,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WITH rc AS (
             SELECT rc.id, rc.order_no, rc.contract_no
             FROM pj_received_contract rc
-            WHERE (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
-              <if test="orderNo != null and orderNo != ''">AND rc.order_no = #{orderNo}</if>
+            WHERE 1=1
+              <choose>
+                <when test="orderNo != null and orderNo != ''">
+                  AND rc.order_no = #{orderNo}
+                  <if test="contractNo != null and contractNo != ''">AND rc.contract_no = #{contractNo}</if>
+                </when>
+                <when test="contractNo != null and contractNo != ''">AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})</when>
+                <otherwise>AND 1 = 0</otherwise>
+              </choose>
               <if test="period != null and period != ''">AND rc.period = #{period}</if>
         ),
         expect_scope AS (
@@ -805,10 +813,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                   AND pc.performance_amount != 0
                   <choose>
                     <when test="degradeToContract">AND pc.contract_no = #{contractNo}</when>
-                    <otherwise>
+                    <when test="orderNo != null and orderNo != ''">
+                      AND pc.order_no = #{orderNo}
+                      <if test="contractNo != null and contractNo != ''">AND pc.contract_no = #{contractNo}</if>
+                    </when>
+                    <when test="contractNo != null and contractNo != ''">
                       AND (pc.contract_no = #{contractNo} OR pc.order_no = #{contractNo})
-                      <if test="orderNo != null and orderNo != ''">AND pc.order_no = #{orderNo}</if>
-                    </otherwise>
+                    </when>
+                    <otherwise>AND 1 = 0</otherwise>
                   </choose>
             ) AS has_current
         ),
@@ -820,10 +832,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND pe.fact_type = 'PERF_EXPECT'
               <choose>
                 <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
-                <otherwise>
+                <when test="orderNo != null and orderNo != ''">
+                  AND pe.order_no = #{orderNo}
+                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
+                </when>
+                <when test="contractNo != null and contractNo != ''">
                   AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
-                  <if test="orderNo != null and orderNo != ''">AND pe.order_no = #{orderNo}</if>
-                </otherwise>
+                </when>
+                <otherwise>AND 1 = 0</otherwise>
               </choose>
               <if test="period != null and period != ''">
               AND ((es.has_current AND pe.period = #{period})
@@ -844,10 +860,14 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND a.fact_type = 'PERF_EXPECT'
               <choose>
                 <when test="degradeToContract">AND a.contract_no = #{contractNo}</when>
-                <otherwise>
+                <when test="orderNo != null and orderNo != ''">
+                  AND a.order_no = #{orderNo}
+                  <if test="contractNo != null and contractNo != ''">AND a.contract_no = #{contractNo}</if>
+                </when>
+                <when test="contractNo != null and contractNo != ''">
                   AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
-                  <if test="orderNo != null and orderNo != ''">AND a.order_no = #{orderNo}</if>
-                </otherwise>
+                </when>
+                <otherwise>AND 1 = 0</otherwise>
               </choose>
               <if test="period != null and period != ''">
               AND ((es.has_current AND a.period = #{period})
@@ -899,8 +919,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                         oe.contract_no = rc.contract_no
                                       </when>
                                       <when test="orderNo != null and orderNo != ''">
-                                        oe.contract_no = rc.contract_no
-                                        AND oe.order_no = rc.order_no
+                                        <if test="contractNo != null and contractNo != ''">
+                                          oe.contract_no = rc.contract_no
+                                          AND
+                                        </if>
+                                        oe.order_no = rc.order_no
                                       </when>
                                       <otherwise>
                                         (oe.order_no = rc.order_no OR oe.contract_no = rc.contract_no)
@@ -928,14 +951,16 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 取历史（&lt;实收月）合计，与建单/结佣口径一致。
      * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
      * （前端据此不展示「原值 → 调整后值」）。
-     * 匹配口径：键对 orderNo 非空 → 合同号+订单号双键同时满足（同合同号挂多订单防串单）；
-     * orderNo 为空串（历史单据）退化 contract_no/order_no 双键 OR 旧口径；
-     * degrade=true（调用方双侧闸门：新签事实/实收合同两侧该合同去重订单号都恰 1）时，
+     * 匹配口径（订单号为唯一业务锚点，四分支）：
+     * degrade=true（调用方双侧闸门：新签事实/实收合同两侧该合同去重订单号都恰 1）→
      * 应收子查询退化仅按合同号配对，兼容贝壳新签 order_no 误填成合同号的脏数据
-     * （实收侧 JOIN 仍用双键，实收订单号本身是准确的）。
+     * （实收侧 JOIN 仍用双键，实收订单号本身是准确的）；
+     * 合同号+订单号齐全（非退化）→ 双键同时满足（同合同号挂多订单防串单）；
+     * 合同号为空串（一手房/家装荐客等无合同号业务）→ 按订单号；
+     * 订单号为空串（历史单据）→ 退化 contract_no/order_no 双键 OR 旧口径。
      *
      * @param period 归属期间
-     * @param keys   键对集合（每项含 contractNo 非空、orderNo 可空串、degrade=true/false；不可为空）
+     * @param keys   键对集合（每项含 contractNo 可空串、orderNo 可空串，两者不全空、degrade=true/false；不可为空）
      * @return 每键对一行的业务类型、涉及人数、实收/应收合计
      */
     @Select("""
@@ -952,7 +977,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                      AND (
                                (k.dg AND pe.contract_no = k.ck)
-                            OR (NOT k.dg AND k.ok &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                            OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                            OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                             OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                          )
                      <if test="period != null and period != ''">
@@ -964,7 +990,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                  AND pc.performance_amount != 0
                                  AND (
                                        (k.dg AND pc.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pc.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pc.contract_no = k.ck OR pc.order_no = k.ck))
                                      )))
                         OR (pe.period &lt; #{period} AND NOT EXISTS (
@@ -974,7 +1001,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                  AND pc.performance_amount != 0
                                  AND (
                                        (k.dg AND pc.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pc.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pc.contract_no = k.ck OR pc.order_no = k.ck))
                                      )))
                          )
@@ -984,7 +1012,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <foreach collection="keys" item="k" separator=",">(CAST(#{k.contractNo} AS text), CAST(#{k.orderNo} AS text), CAST(#{k.degrade} AS boolean))</foreach>
         ) AS k(ck, ok, dg)
         JOIN pj_received_contract rc ON (
-              (k.ok &lt;&gt; '' AND rc.contract_no = k.ck AND rc.order_no = k.ok)
+              (k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND rc.contract_no = k.ck AND rc.order_no = k.ok)
+           OR (k.ck = '' AND rc.order_no = k.ok)
            OR (k.ok = '' AND (rc.contract_no = k.ck OR rc.order_no = k.ck))
         )
         JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
@@ -1056,7 +1085,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * <p>
      * 按业务键聚合：一手房/房产金融/家装荐客以订单号为准（空回退合同号），
      * 其余以合同号为准（空回退订单号）；返回的 contractNo 即业务键，
-     * 结佣申请单的存储键与幂等匹配（findActiveApplication / uk_capp_period_contract）均以此为准。
+     * 结佣申请单的存储键与幂等匹配（findActiveApplication / uk_capp_period_order）均以此为准。
      * deptId 非空时含下级部门（与业绩明细页口径一致）。
      *
      * @param period   归属期间

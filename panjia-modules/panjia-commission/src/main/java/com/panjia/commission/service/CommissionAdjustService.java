@@ -1155,7 +1155,10 @@ public class CommissionAdjustService {
         newItem.setFactType("PERF_EXPECT");
         newItem.setContractNo(templateItem.getContractNo());
         if (newFact != null) {
-            newItem.setOrderNo(newFact.getOrderNo());
+            // 订单号以申请单/模板明细为准（实收订单号快照）；新签事实 order_no 在
+            // 「贝壳新签 order_no 误填成合同号」退化场景是脏值（=合同号），不能直接用
+            newItem.setOrderNo(templateItem.getOrderNo() != null
+                ? templateItem.getOrderNo() : newFact.getOrderNo());
             newItem.setBusinessDate(newFact.getBusinessDate());
             newItem.setPropertyAddress(newFact.getPropertyAddress());
             newItem.setShareRatio(newFact.getShareRatio());

@@ -9,8 +9,11 @@ import lombok.Data;
  * （EventPort.emit，Outbox 原子提交）。覆盖两条路径：贝壳实收导入自动通过直建、
  * 人工审批工作流 finish 回调；历史工资导入直建不发布（已有 LOCKED 建单链路）。
  * <p>
- * 消费方（结佣域）：按合同自动产生结佣记录（DRAFT 申请单 + 各人新签业绩明细，
- * 审批链保留待人工提交）；同合同同期间已有活跃结佣单则跳过。
+ * 结佣域消费方尚未接入自动建单；结佣单当前由业务人员在结佣列表对 APPROVED 实收
+ * 手工发起（§3.2 前置校验），事件保留审批留痕并供批次撤销/冲正链路重放。
+ * <p>
+ * 字段可空约定：{@code contractNo} 允许为空（一手房/家装荐客等无合同号业务，
+ * 以 {@code orderNo} 为业务锚点），消费方须按「合同号优先、空则订单号」处理。
  * <p>
  * payload 约束（CI: check-event-payload）：基础类型，禁止持有 @Entity。
  */
@@ -26,10 +29,10 @@ public class ReceivedApprovedEvent implements DomainEvent {
     /** 归属期间 YYYY-MM */
     private String period;
 
-    /** 订单号 */
+    /** 订单号（无合同号业务的业务锚点） */
     private String orderNo;
 
-    /** 合同号 */
+    /** 合同号（可空：一手房/家装荐客等无合同号业务为空，消费方回退按 orderNo 处理） */
     private String contractNo;
 
     /** 审批操作人 ID（自动通过为系统操作人） */

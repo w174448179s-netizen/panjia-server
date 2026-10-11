@@ -633,7 +633,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return amt.compareTo(expect) < 0;
     }
 
-    /** 发布实收审批通过事件（结佣域按合同自动产生结佣记录，outbox 原子提交）。 */
+    /** 发布实收审批通过事件（outbox 原子提交；contractNo 可为空，家装荐客等以 orderNo 为锚点）。 */
     private void emitApprovedEvent(ReceivedApply apply, Long operatorId) {
         ReceivedApprovedEvent event = new ReceivedApprovedEvent();
         event.setApplyId(apply.getId());
@@ -650,8 +650,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public boolean resolveDraftAfterNewSign(String period, String contractNo, Long operatorId) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+    public boolean resolveDraftAfterNewSign(String period, String contractNo, String orderNo, Long operatorId) {
+        if (StringUtils.isBlank(period)
+            || (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo))) {
             return false;
         }
         if (operatorId == null) {
@@ -664,13 +665,18 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             operatorId = 1L;
         }
 
-        // 1. 查该合同当月全部 DRAFT 实收审批单：同合同可挂多个订单，须逐单按各自订单号评估，
-        //    不能只取最新一张（否则第二个订单的 DRAFT 永远等不到新签触发）
-        List<ReceivedApply> drafts = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+        // 1. 查当月 DRAFT 实收审批单：主按订单号（订单号为唯一业务锚点，同合同多订单
+        //    各自独立建单，按订单定位才不跨订单串单）；仅历史单据 order_no 为空时回退合同号
+        LambdaQueryWrapper<ReceivedApply> draftQ = new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
-            .eq(ReceivedApply::getContractNo, contractNo)
             .eq(ReceivedApply::getStatus, ReceivedApplyStatus.DRAFT)
-            .orderByAsc(ReceivedApply::getId));
+            .orderByAsc(ReceivedApply::getId);
+        if (StringUtils.isNotBlank(orderNo)) {
+            draftQ.eq(ReceivedApply::getOrderNo, orderNo);
+        } else {
+            draftQ.eq(ReceivedApply::getContractNo, contractNo);
+        }
+        List<ReceivedApply> drafts = applyMapper.selectList(draftQ);
         if (drafts.isEmpty()) {
             return false;
         }
@@ -701,7 +707,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         BigDecimal realSum = nvlAmount(apply.getReceivedAmount());
         apply.setExpectedAmount(expectTotal);
         if (realSum.compareTo(expectTotal) >= 0) {
-            // 实收 ≥ 新签 → 自动通过 + emit（触发结佣建单）
+            // 实收 ≥ 新签 → 自动通过 + emit 实收通过事件
             apply.setStatus(ReceivedApplyStatus.APPROVED);
             apply.setApproverId(operatorId);
             apply.setApproveTime(LocalDateTime.now());
@@ -957,29 +963,53 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
     }
 
+    /** IN 键分片大小：键集随业务量可达数千上万，整包 IN 会撑爆 SQL 文本（parse 开销/内存），分片查询后内存合并 */
+    private static final int IN_KEYS_CHUNK = 500;
+
+    /** 键集合分片（去重保序）。 */
+    private static List<List<String>> chunkKeys(Collection<String> keys) {
+        List<String> distinct = new ArrayList<>(new LinkedHashSet<>(keys));
+        List<List<String>> chunks = new ArrayList<>();
+        for (int i = 0; i < distinct.size(); i += IN_KEYS_CHUNK) {
+            chunks.add(distinct.subList(i, Math.min(i + IN_KEYS_CHUNK, distinct.size())));
+        }
+        return chunks;
+    }
+
     /**
-     * 按匹配键（合同号优先、空则订单号）批量取当月活跃审批单（DRAFT/SUBMITTED/APPROVED），
+     * 按匹配键（订单号优先、合同号兜底）分片批量取当月活跃审批单（DRAFT/SUBMITTED/APPROVED），
      * 归集到实收 orderNo 分组键，同一键取最新一张。贝壳自动建单判重用。
      */
     private Map<String, ReceivedApply> loadActiveAppliesBatch(String period, ExpectMatchKeys keys) {
         if (keys == null || keys.isEmpty()) {
             return Map.of();
         }
-        LambdaQueryWrapper<ReceivedApply> w = new LambdaQueryWrapper<ReceivedApply>()
-            .eq(ReceivedApply::getPeriod, period)
-            .in(ReceivedApply::getStatus,
-                ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED);
-        if (!keys.contractKeys.isEmpty() && !keys.orderOnlyKeys.isEmpty()) {
-            w.and(x -> x.in(ReceivedApply::getContractNo, keys.contractKeys)
-                .or().in(ReceivedApply::getOrderNo, keys.orderOnlyKeys));
-        } else if (!keys.contractKeys.isEmpty()) {
-            w.in(ReceivedApply::getContractNo, keys.contractKeys);
-        } else {
-            w.in(ReceivedApply::getOrderNo, keys.orderOnlyKeys);
+        // IN 键分片：实收键集随批次可达数千，整包 IN 会撑爆 SQL 文本。
+        // 合同号/订单号两列各自分片查询（(c∈A OR o∈B) = A 列查 ∪ B 列查），按 ID 去重合并
+        Map<Long, ReceivedApply> mergedById = new LinkedHashMap<>();
+        for (List<String> chunk : chunkKeys(keys.contractKeys)) {
+            for (ReceivedApply apply : applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getPeriod, period)
+                .in(ReceivedApply::getContractNo, chunk)
+                .in(ReceivedApply::getStatus,
+                    ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED))) {
+                mergedById.putIfAbsent(apply.getId(), apply);
+            }
         }
-        w.orderByDesc(ReceivedApply::getId);
+        for (List<String> chunk : chunkKeys(keys.orderOnlyKeys)) {
+            for (ReceivedApply apply : applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getPeriod, period)
+                .in(ReceivedApply::getOrderNo, chunk)
+                .in(ReceivedApply::getStatus,
+                    ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED))) {
+                mergedById.putIfAbsent(apply.getId(), apply);
+            }
+        }
+        // 同键取最新一张：按 ID 全局降序（putIfAbsent 依赖全局有序）
+        List<ReceivedApply> applies = new ArrayList<>(mergedById.values());
+        applies.sort((a, b) -> Long.compare(b.getId(), a.getId()));
         Map<String, ReceivedApply> result = new HashMap<>();
-        for (ReceivedApply apply : applyMapper.selectList(w)) {
+        for (ReceivedApply apply : applies) {
             String target = keys.resolveTarget(apply.getOrderNo(), apply.getContractNo());
             if (target != null) {
                 result.putIfAbsent(target, apply);
@@ -989,19 +1019,23 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 一条 IN 查询批量取指定订单号当月活跃审批单（DRAFT/SUBMITTED/APPROVED），同一订单号取最新一张。
+     * 分片 IN 查询批量取指定订单号当月活跃审批单（DRAFT/SUBMITTED/APPROVED），同一订单号取最新一张。
      * 手工提交 / 历史工资路径用（按 orderNo 口径）。
      */
     private Map<String, ReceivedApply> loadActiveAppliesBatch(String period, Collection<String> orderNos) {
         if (orderNos.isEmpty()) {
             return Map.of();
         }
-        List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
-            .eq(ReceivedApply::getPeriod, period)
-            .in(ReceivedApply::getOrderNo, orderNos)
-            .in(ReceivedApply::getStatus,
-                ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
-            .orderByDesc(ReceivedApply::getId));
+        List<ReceivedApply> applies = new ArrayList<>();
+        for (List<String> chunk : chunkKeys(orderNos)) {
+            applies.addAll(applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getPeriod, period)
+                .in(ReceivedApply::getOrderNo, chunk)
+                .in(ReceivedApply::getStatus,
+                    ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)));
+        }
+        // 跨分片合并后按 ID 全局降序（下方 putIfAbsent 取最新依赖全局有序）
+        applies.sort((a, b) -> Long.compare(b.getId(), a.getId()));
         Map<String, ReceivedApply> result = new HashMap<>(orderNos.size() * 2);
         for (ReceivedApply apply : applies) {
             if (apply.getOrderNo() != null) {
@@ -1159,19 +1193,23 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 一条 IN 查询批量取指定合同当月 SUBMITTED 实收审批单（批量审批预检用）。
+     * 分片 IN 查询批量取指定合同当月 SUBMITTED 实收审批单（批量审批预检用）。
      * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
      */
     private Map<String, ReceivedApply> loadSubmittedAppliesBatch(String period, Collection<String> contractNos) {
         if (contractNos.isEmpty()) {
             return Map.of();
         }
-        List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
-            .eq(ReceivedApply::getPeriod, period)
-            .and(w -> w.in(ReceivedApply::getContractNo, contractNos)
-                .or().in(ReceivedApply::getOrderNo, contractNos))
-            .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
-            .orderByDesc(ReceivedApply::getId));
+        List<ReceivedApply> applies = new ArrayList<>();
+        for (List<String> chunk : chunkKeys(contractNos)) {
+            applies.addAll(applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getPeriod, period)
+                .and(w -> w.in(ReceivedApply::getContractNo, chunk)
+                    .or().in(ReceivedApply::getOrderNo, chunk))
+                .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)));
+        }
+        // 跨分片合并后按 ID 全局降序（下方 putIfAbsent 取最新依赖全局有序）
+        applies.sort((a, b) -> Long.compare(b.getId(), a.getId()));
         Map<String, ReceivedApply> byContract = new HashMap<>();
         Map<String, ReceivedApply> byOrder = new HashMap<>();
         for (ReceivedApply apply : applies) {
@@ -1404,14 +1442,15 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 按 (period, contractNo, orderNo) 从 ACTIVE 事实回退补齐；涉及人数与应收合计仍需实时聚合，
      * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
      * 应收合计含已生效调整（新签业绩显示调整后金额），与快照不一致时置「已调整」标记。
-     * 同合同号挂多订单时按合同号+订单号双键聚合（历史单据 orderNo 为空退化合同号口径）。
-     * 期间或合同号缺失的行保持 null，前端显示占位符。
+     * 同合同号挂多订单时按合同号+订单号双键聚合；合同号缺失（一手房/家装荐客等）
+     * 直接按订单号聚合（订单号为唯一业务锚点）。
+     * 期间/合同号/订单号全缺失的行保持 null，前端显示占位符。
      */
     private void fillContractMetrics(List<ReceivedApply> records) {
         if (records == null || records.isEmpty()) {
             return;
         }
-        // 本页需要退化判定的合同（orderNo 非空）：一次批量双侧闸门（2 条 group by SQL），
+        // 本页需要退化判定的合同（合同号+订单号齐全）：一次批量双侧闸门（2 条 group by SQL），
         // 口径与建单/详情一致——新签 order_no 误填成合同号且两侧订单都唯一时，应收按合同号配对
         Set<String> preciseContracts = records.stream()
             .filter(a -> StringUtils.isNotBlank(a.getPeriod()) && StringUtils.isNotBlank(a.getContractNo())
@@ -1419,21 +1458,27 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .map(ReceivedApply::getContractNo)
             .collect(Collectors.toCollection(LinkedHashSet::new));
         Set<String> degradableContracts = globallyDegradableContracts(preciseContracts);
-        // period → 键对集合（contractNo 非空、orderNo 空串占位、degrade 退化标志），同键对去重避免重复 VALUES 行
+        // period → 键对集合（ck=合同号可空、ok=订单号可空、dg 退化标志），同键对去重避免重复 VALUES 行。
+        // 键对直接取单据自身 (contractNo, orderNo)，不做「订单号塞进合同号参数」的 hack；
+        // metrics SQL 按四分支匹配：dg→按合同号退化 / 双键精确 / ck=''→按订单号 / ok=''→历史 OR 宽松口径
         Map<String, Map<String, Map<String, String>>> keysByPeriod = new HashMap<>();
         for (ReceivedApply apply : records) {
-            if (StringUtils.isBlank(apply.getPeriod()) || StringUtils.isBlank(apply.getContractNo())) {
+            if (StringUtils.isBlank(apply.getPeriod())) {
                 continue;
             }
+            String contractNo = StringUtils.isBlank(apply.getContractNo()) ? "" : apply.getContractNo();
             String orderNo = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
+            if (contractNo.isEmpty() && orderNo.isEmpty()) {
+                continue;
+            }
             Map<String, String> keyMap = new HashMap<>(3);
-            keyMap.put("contractNo", apply.getContractNo());
+            keyMap.put("contractNo", contractNo);
             keyMap.put("orderNo", orderNo);
-            keyMap.put("degrade", !orderNo.isEmpty() && degradableContracts.contains(apply.getContractNo())
-                ? "true" : "false");
+            keyMap.put("degrade", !contractNo.isEmpty() && !orderNo.isEmpty()
+                && degradableContracts.contains(contractNo) ? "true" : "false");
             Map<String, Map<String, String>> byPair =
                 keysByPeriod.computeIfAbsent(apply.getPeriod(), k -> new LinkedHashMap<>());
-            byPair.computeIfAbsent(metricsPairKey(apply.getContractNo(), orderNo), k -> keyMap);
+            byPair.computeIfAbsent(metricsPairKey(contractNo, orderNo), k -> keyMap);
         }
         if (keysByPeriod.isEmpty()) {
             return;
@@ -1454,8 +1499,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .collect(java.util.stream.Collectors.toSet());
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
         for (ReceivedApply apply : records) {
-            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo(),
-                StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo()));
+            String effContract = StringUtils.isBlank(apply.getContractNo()) ? "" : apply.getContractNo();
+            String effOrder = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
+            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), effContract, effOrder));
             if (m != null) {
                 // 业务类型优先用落库快照值；旧数据（列新增前建单）为空时回退实时聚合
                 String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
@@ -1493,15 +1539,17 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
     }
 
-    /** 组装 (合同号, 订单号) 复合键（orderNo 空串占位）。 */
+    /** 组装 (合同号, 订单号) 复合键（两者均可空串占位）。 */
     private String metricsPairKey(String contractNo, String orderNo) {
         return contractNo + '|' + (orderNo == null ? "" : orderNo);
     }
 
-    /** 组装 (期间, 合同号, 订单号) 复合键；期间/合同号为空返回空串（对应查不到，保持 null）。 */
+    /** 组装 (期间, 合同号, 订单号) 复合键；期间为空或合同号/订单号全空返回空串（对应查不到，保持 null）。 */
     private String metricsKey(String period, String contractNo, String orderNo) {
-        return StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)
-            ? "" : period + '|' + contractNo + '|' + (orderNo == null ? "" : orderNo);
+        String ck = contractNo == null ? "" : contractNo;
+        String ok = orderNo == null ? "" : orderNo;
+        return StringUtils.isBlank(period) || (ck.isEmpty() && ok.isEmpty())
+            ? "" : period + '|' + ck + '|' + ok;
     }
 
     @Override
@@ -1513,7 +1561,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         // 脏数据兼容：新签 order_no 误填成合同号时，顶部合计与每人明细统一经双侧闸门退化按合同号配对。
         boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
             && canDegradeExpectToReceived(apply.getContractNo());
-        if (StringUtils.isNotBlank(apply.getContractNo())) {
+        if (StringUtils.isNotBlank(apply.getContractNo()) || StringUtils.isNotBlank(apply.getOrderNo())) {
             BigDecimal expected = sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
             apply.setExpectedAdjusted(apply.getExpectedAmount() != null
                 && apply.getExpectedAmount().compareTo(expected) != 0);

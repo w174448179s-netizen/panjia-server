@@ -25,10 +25,12 @@ public interface ReceivedContractMapper extends BaseMapper<ReceivedContract> {
      * @return 去重非空订单号数量
      */
     @Select("""
+         <script>
         SELECT COUNT(DISTINCT order_no)
         FROM pj_received_contract
         WHERE contract_no = #{contractNo}
           AND order_no IS NOT NULL AND order_no &lt;&gt; ''
+        </script>
         """)
     long countDistinctOrderNos(@Param("contractNo") String contractNo);
 }

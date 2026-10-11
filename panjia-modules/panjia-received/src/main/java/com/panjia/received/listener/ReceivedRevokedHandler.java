@@ -272,9 +272,9 @@ public class ReceivedRevokedHandler implements DomainEventHandler {
     }
 
     /**
-     * 对重算后仍为 APPROVED 的实收单重放实收通过事件（结佣域重建 DRAFT 草稿单）。
-     * <p>DRAFT 单（旧批次时期就在等新签）不重放——createApplicationWithItems 会因
-     * 实收未通过拒绝建单，等新签导入触发 resolveDraftAfterNewSign 自然流转。
+     * 对重算后仍为 APPROVED 的实收单重放实收通过事件（outbox 留痕，供结佣域消费方接入后重建）。
+     * <p>DRAFT 单（旧批次时期就在等新签）不重放——结佣发起会因实收未通过拒绝建单，
+     * 等新签导入触发 resolveDraftAfterNewSign 自然流转。
      */
     private void replayApprovedApplies(List<ReceivedApply> applies, Long operatorId) {
         int replayed = 0;

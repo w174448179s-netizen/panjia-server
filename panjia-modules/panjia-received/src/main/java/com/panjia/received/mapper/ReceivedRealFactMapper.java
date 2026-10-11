@@ -193,6 +193,37 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
+        <choose>
+            <when test="period != null and period != ''">
+        WITH cur_nonzero AS (
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   bool_or(pe.performance_amount &lt;&gt; 0) AS has_nonzero
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period = #{period}
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        ),
+        expect_sum AS (
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            LEFT JOIN cur_nonzero c ON c.biz_key = COALESCE(pe.order_no, pe.contract_no)
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND ((pe.period = #{period} AND COALESCE(c.has_nonzero, false))
+                OR (pe.period &lt; #{period} AND NOT COALESCE(c.has_nonzero, false)))
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        )
+            </when>
+            <otherwise>
+        WITH expect_sum AS (
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        )
+            </otherwise>
+        </choose>
         SELECT MAX(s.contract_no) AS "contractNo",
                MAX(s.order_no) AS "orderNo",
                MAX(s.biz_type) AS "bizType",
@@ -200,28 +231,7 @@ public interface ReceivedRealFactMapper {
                MAX(s.business_date) AS "businessDate",
                MIN(s.period) AS "period",
                COALESCE(SUM(s.amount), 0) AS "amount",
-               COALESCE((
-                   SELECT SUM(pe.performance_amount)
-                   FROM pj_perf_fact pe
-                   WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-                     AND (COALESCE(pe.order_no, pe.contract_no)) = s.biz_key
-                     <if test="period != null and period != ''">
-                     AND (
-                           (pe.period = #{period} AND EXISTS (
-                               SELECT 1 FROM pj_perf_fact pc
-                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                                 AND pc.period = #{period}
-                                 AND pc.performance_amount != 0
-                                 AND (COALESCE(pc.order_no, pc.contract_no)) = s.biz_key))
-                        OR (pe.period &lt; #{period} AND NOT EXISTS (
-                               SELECT 1 FROM pj_perf_fact pc
-                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                                 AND pc.period = #{period}
-                                 AND pc.performance_amount != 0
-                                 AND (COALESCE(pc.order_no, pc.contract_no)) = s.biz_key))
-                         )
-                     </if>
-               ), 0) AS "expectedAmount",
+               COALESCE(MAX(es.amt), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
                    WHEN bool_or(s.ra_status = 'DRAFT') THEN 'DRAFT'
@@ -268,6 +278,7 @@ public interface ReceivedRealFactMapper {
               AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
             </if>
         ) s
+        LEFT JOIN expect_sum es ON es.biz_key = s.biz_key
         GROUP BY s.biz_key
         ORDER BY MAX(s.business_date) DESC, s.biz_key
         </script>
@@ -310,12 +321,25 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
-        SELECT DISTINCT k.key AS "bizKey", rd.period AS "period"
-        FROM (VALUES
+        WITH k(key) AS (
           <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
-        ) AS k(key)
-        JOIN pj_received_contract rc ON (rc.contract_no = k.key OR rc.order_no = k.key)
-        JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
+        ),
+        hit AS (
+            SELECT rc.id, rc.contract_no, rc.order_no
+            FROM k JOIN pj_received_contract rc ON rc.order_no = k.key
+            UNION
+            SELECT rc.id, rc.contract_no, rc.order_no
+            FROM k JOIN pj_received_contract rc ON rc.contract_no = k.key
+        )
+        SELECT h.order_no AS "bizKey", rd.period AS "period"
+        FROM hit h
+        JOIN pj_received_detail rd ON rd.contract_id = h.id AND rd.detail_status = 'ACTIVE'
+        WHERE h.order_no IS NOT NULL
+        UNION
+        SELECT h.contract_no AS "bizKey", rd.period AS "period"
+        FROM hit h
+        JOIN pj_received_detail rd ON rd.contract_id = h.id AND rd.detail_status = 'ACTIVE'
+        WHERE h.contract_no IS NOT NULL
         </script>
         """)
     List<Map<String, Object>> selectActivePeriodsByKeys(@Param("keys") Collection<String> keys);
@@ -326,17 +350,32 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
-        WITH sk AS (
-            SELECT DISTINCT k.key, rd.source_key
-            FROM (VALUES
-              <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
-            ) AS k(key)
-            JOIN pj_received_contract rc ON (rc.contract_no = k.key OR rc.order_no = k.key)
-            JOIN pj_received_detail rd ON rd.contract_id = rc.id
+        WITH k(key) AS (
+          <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
+        ),
+        hit AS (
+            SELECT rc.id, rc.contract_no, rc.order_no, rc.period
+            FROM k JOIN pj_received_contract rc ON rc.order_no = k.key
+            UNION
+            SELECT rc.id, rc.contract_no, rc.order_no, rc.period
+            FROM k JOIN pj_received_contract rc ON rc.contract_no = k.key
+        ),
+        sk AS (
+            SELECT h.order_no AS key, rd.source_key
+            FROM hit h
+            JOIN pj_received_detail rd ON rd.contract_id = h.id
                                      AND rd.detail_status = 'ACTIVE'
                                      AND rd.source_key IS NOT NULL
-            WHERE 1=1
-            <if test="period != null and period != ''">AND rc.period = #{period}</if>
+            WHERE h.order_no IS NOT NULL
+            <if test="period != null and period != ''">AND h.period = #{period}</if>
+            UNION
+            SELECT h.contract_no AS key, rd.source_key
+            FROM hit h
+            JOIN pj_received_detail rd ON rd.contract_id = h.id
+                                     AND rd.detail_status = 'ACTIVE'
+                                     AND rd.source_key IS NOT NULL
+            WHERE h.contract_no IS NOT NULL
+            <if test="period != null and period != ''">AND h.period = #{period}</if>
         ),
         orig AS (
             SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt

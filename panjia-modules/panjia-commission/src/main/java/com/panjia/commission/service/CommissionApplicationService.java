@@ -313,6 +313,11 @@ public class CommissionApplicationService {
                 List<PerformanceFactSummaryDTO> facts = performanceQueryPort
                     .findActiveByContract(null, contractNo, FACT_TYPE_REAL);
                 ctx.factsMap.put(contractNo, facts);
+                // 宽捞应收未命中的键：用实收事实 (订单号, 合同号) 对退化补算
+                // （「贝壳新签 order_no 误填成合同号」场景宽捞键=实收订单号，新签行两列都是合同号）
+                if (!ctx.expectedAmounts.containsKey(contractNo) && !facts.isEmpty()) {
+                    ctx.expectedAmounts.put(contractNo, sumExpectDegraded(facts.get(0)));
+                }
                 // 发起结佣不再校验合同部门归属：合同本身无门店属性，部门归属取决于明细下人员。
                 myContracts.add(contractNo);
             } catch (ServiceException e) {
@@ -532,15 +537,15 @@ public class CommissionApplicationService {
         // 到账是否覆盖新签已由实收域按合同维度判定，此处到账金额不参与计算）
         application.setTotalAmount(sumAmounts(itemFacts));
         // 应收金额：跨月口径（该合同/订单全部月份新签合计），与建单分流判定基数一致；
-        // 从 ctx 取预加载值，避免逐单全表查（P0）
-        application.setExpectedAmount(ctx != null
-            ? ctx.expectedAmounts.getOrDefault(contractNo, BigDecimal.ZERO)
-            : resolveExpectedAmount(period, contractNo));
+        // 从 ctx 取预加载值，避免逐单全表查（P0）；ctx 未命中走现场宽捞+退化（见 resolveExpectedAmount）
+        application.setExpectedAmount(ctx != null && ctx.expectedAmounts.containsKey(contractNo)
+            ? ctx.expectedAmounts.get(contractNo)
+            : resolveExpectedAmount(contractNo, nonZeroFacts.get(0)));
         application.setAligned(false);
         try {
             applicationMapper.insert(application);
         } catch (DuplicateKeyException e) {
-            // 并发发起撞 uk_capp_period_contract 部分唯一索引 → 转友好提示
+            // 并发发起撞 uk_capp_period_order 部分唯一索引 → 转友好提示
             throw new ServiceException("合同 " + contractNo + " " + period + " 月申请单已由他人发起，请刷新");
         }
 
@@ -683,8 +688,13 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 结佣明细源（2026-09-27 定稿新签口径）：按合同/订单双键跨月取 ACTIVE 新签事实
-     * （PERF_EXPECT，每条事实一行，金额=事实当前值即调整后值）。
+     * 结佣明细源（2026-09-27 定稿新签口径）：按实收事实的 (订单号, 合同号) 双键跨月取
+     * ACTIVE 新签事实（PERF_EXPECT，每条事实一行，金额=事实当前值即调整后值）。
+     * <p>匹配口径与实收建单一致（订单号为唯一业务锚点，2026-10-11）：
+     * 双键精确优先；双键未命中时端口内部按双侧闸门（新签事实/实收合同两侧该合同
+     * 去重订单号都恰 1）退化按合同号匹配，兼容贝壳新签 order_no 误填成合同号的脏数据；
+     * 历史实收行无订单号时回退按合同号双列。同合同多订单时各订单只取自己的新签，
+     * 不再按合同号整包拉取（防跨订单串单）。
      * <ul>
      *   <li>金额为 0 的新签行不生成明细（结佣明细不存在 0 金额行）；</li>
      *   <li>空经纪人实收行天然不在此列（实收明细仅展示，不参与任何计算）。</li>
@@ -692,24 +702,31 @@ public class CommissionApplicationService {
      */
     private List<PerformanceFactSummaryDTO> loadExpectItemFacts(List<PerformanceFactSummaryDTO> realFacts,
                                                                  String period) {
-        // 匹配键（2026-09-30）：合同号优先，合同号为空用订单号。
-        // 贝壳新签源数据 orderNo 可能误填成合同号（与实收 orderNo 不同），有 contractNo 时按合同号
-        // 关联新签；findActiveByBizKeys 内部按 order_no OR contract_no 双键匹配
-        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
+        // 按 (订单号, 合同号) 去重对逐键取新签：端口内双键精确 → 双侧闸门退化 → 无订单号按合同号
+        Map<Long, PerformanceFactSummaryDTO> expectById = new LinkedHashMap<>();
+        Set<String> seenPairs = new HashSet<>();
         for (PerformanceFactSummaryDTO f : realFacts) {
-            String key = (f.getContractNo() != null && !f.getContractNo().isBlank())
-                ? f.getContractNo() : f.getOrderNo();
-            if (key != null && !key.isBlank()) {
-                bizKeys.add(key);
+            String on = f.getOrderNo() == null ? "" : f.getOrderNo().trim();
+            String cn = f.getContractNo() == null ? "" : f.getContractNo().trim();
+            if (on.isEmpty() && cn.isEmpty()) {
+                continue;
+            }
+            if (!seenPairs.add(on + '|' + cn)) {
+                continue;
+            }
+            List<PerformanceFactSummaryDTO> expects = performanceQueryPort
+                .findActiveByBizKey(null, on.isEmpty() ? null : on, cn.isEmpty() ? null : cn, FACT_TYPE_EXPECT);
+            for (PerformanceFactSummaryDTO e : expects) {
+                if (e.getFactId() != null) {
+                    expectById.putIfAbsent(e.getFactId(), e);
+                }
             }
         }
-        List<PerformanceFactSummaryDTO> expects =
-            performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
         // 结佣金额口径（2026-09-30 定稿）：当月有非零新签用当月，当月为 0/无新签用历史
         // （实收月之前全部月合计）。0 元新签不参与计算、不视为"当月有新签"，仍回退汇总历史
         List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
         List<PerformanceFactSummaryDTO> history = new ArrayList<>();
-        for (PerformanceFactSummaryDTO e : expects) {
+        for (PerformanceFactSummaryDTO e : expectById.values()) {
             // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
             if (e.getEmployeeId() == null) {
                 continue;
@@ -734,12 +751,26 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 应收合计：跨月口径（该合同/订单全部月份 ACTIVE PERF_EXPECT 合计，与建单分流判定基数一致）。
-     * 查询按「订单号 OR 合同号」双列匹配，用户输入订单号或合同号均可命中。
+     * 应收金额（跨月口径）：先按业务键宽捞（订单号键只计本订单，合同号键计全合同）；
+     * 宽捞未命中（「贝壳新签 order_no 误填成合同号」：宽捞键=实收订单号，新签行两列都是
+     * 合同号）退化用实收事实 (订单号, 合同号) 对走双键+双侧闸门求和。
      */
-    private BigDecimal resolveExpectedAmount(String period, String contractNo) {
-        return performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(java.util.List.of(contractNo))
-            .getOrDefault(contractNo, BigDecimal.ZERO);
+    private BigDecimal resolveExpectedAmount(String bizKey, PerformanceFactSummaryDTO receivedAnchor) {
+        BigDecimal hit = performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(java.util.List.of(bizKey))
+            .get(bizKey);
+        return hit != null ? hit : sumExpectDegraded(receivedAnchor);
+    }
+
+    /** 宽捞键未命中时的应收退化补算：按实收事实 (订单号, 合同号) 对跨月求和（端口内双键精确→双侧闸门退化）。 */
+    private BigDecimal sumExpectDegraded(PerformanceFactSummaryDTO receivedAnchor) {
+        return performanceQueryPort.findActiveByBizKey(null,
+                StringUtils.isNotBlank(receivedAnchor.getOrderNo()) ? receivedAnchor.getOrderNo() : null,
+                StringUtils.isNotBlank(receivedAnchor.getContractNo()) ? receivedAnchor.getContractNo() : null,
+                FACT_TYPE_EXPECT)
+            .stream()
+            .map(PerformanceFactSummaryDTO::getAmount)
+            .filter(java.util.Objects::nonNull)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
     /**
@@ -960,8 +991,21 @@ public class CommissionApplicationService {
             }, taskExecutor);
     }
 
+    /** IN 键分片大小：键集随业务量可达数千上万，整包 IN 会撑爆 SQL 文本（parse 开销/内存），分片查询后内存合并 */
+    private static final int IN_KEYS_CHUNK = 500;
+
+    /** 键集合分片（去重保序）。 */
+    private static List<List<String>> chunkKeys(Collection<String> keys) {
+        List<String> distinct = new ArrayList<>(new LinkedHashSet<>(keys));
+        List<List<String>> chunks = new ArrayList<>();
+        for (int i = 0; i < distinct.size(); i += IN_KEYS_CHUNK) {
+            chunks.add(distinct.subList(i, Math.min(i + IN_KEYS_CHUNK, distinct.size())));
+        }
+        return chunks;
+    }
+
     /**
-     * 一条 IN 查询批量取指定合同当月 SUBMITTED 申请单（批量审批预检用）。
+     * 分片 IN 查询批量取指定合同当月 SUBMITTED 申请单（批量审批预检用）。
      * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
      */
     private Map<String, CommissionApplication> loadSubmittedApplicationsBatch(
@@ -969,13 +1013,17 @@ public class CommissionApplicationService {
         if (contractNos.isEmpty()) {
             return Map.of();
         }
-        List<CommissionApplication> apps = applicationMapper.selectList(
-            new LambdaQueryWrapper<CommissionApplication>()
-                .eq(CommissionApplication::getPeriod, period)
-                .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
-                    .or().in(CommissionApplication::getOrderNo, contractNos))
-                .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)
-                .orderByDesc(CommissionApplication::getId));
+        List<CommissionApplication> apps = new ArrayList<>();
+        for (List<String> chunk : chunkKeys(contractNos)) {
+            apps.addAll(applicationMapper.selectList(
+                new LambdaQueryWrapper<CommissionApplication>()
+                    .eq(CommissionApplication::getPeriod, period)
+                    .and(w -> w.in(CommissionApplication::getContractNo, chunk)
+                        .or().in(CommissionApplication::getOrderNo, chunk))
+                    .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)));
+        }
+        // 跨分片合并后按 ID 全局降序（下方 putIfAbsent 取最新依赖全局有序）
+        apps.sort((a, b) -> Long.compare(b.getId(), a.getId()));
         Map<String, CommissionApplication> byContract = new HashMap<>();
         Map<String, CommissionApplication> byOrder = new HashMap<>();
         for (CommissionApplication app : apps) {
@@ -1384,19 +1432,29 @@ public class CommissionApplicationService {
         // 查结佣申请单（用于排除已结佣的合同）：只查活跃状态（DRAFT/SUBMITTED/APPROVED/LOCKED）。
         // 跨期间查全部：发起页不选期间，结佣期间由用户发起时自选，不能按合同聚合行的
         // MIN(period) 过滤，否则跨期合同（如 8 月已发起、10 月新到账）会被整行误伤
-        LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
+        List<CommissionApplication> applications;
         if (keyword != null) {
+            LambdaQueryWrapper<CommissionApplication> appWrapper = new LambdaQueryWrapper<>();
             appWrapper.and(w -> w.like(CommissionApplication::getContractNo, keyword)
                 .or().like(CommissionApplication::getOrderNo, keyword));
+            appWrapper.in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                ApplicationStatus.APPROVED, ApplicationStatus.LOCKED);
+            appWrapper.orderByDesc(CommissionApplication::getId);
+            applications = applicationMapper.selectList(appWrapper);
         } else if (!bizKeys.isEmpty()) {
-            appWrapper.and(w -> w.in(CommissionApplication::getContractNo, bizKeys)
-                .or().in(CommissionApplication::getOrderNo, bizKeys));
+            // IN 键分片：bizKeys 随数据量可达数千，整包 IN 会撑爆 SQL 文本，分片查询后合并
+            List<CommissionApplication> merged = new ArrayList<>();
+            for (List<String> chunk : chunkKeys(bizKeys)) {
+                merged.addAll(applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+                    .and(w -> w.in(CommissionApplication::getContractNo, chunk)
+                        .or().in(CommissionApplication::getOrderNo, chunk))
+                    .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                        ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)));
+            }
+            applications = merged;
+        } else {
+            applications = Collections.emptyList();
         }
-        appWrapper.in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
-            ApplicationStatus.APPROVED, ApplicationStatus.LOCKED);
-        appWrapper.orderByDesc(CommissionApplication::getId);
-        List<CommissionApplication> applications =
-            (keyword != null || !bizKeys.isEmpty()) ? applicationMapper.selectList(appWrapper) : Collections.emptyList();
 
         // 构建 (bizKey, period) 排除集合：同合同同期有活跃单才排除，跨期可再发起
         Set<String> appliedKeys = new HashSet<>();
@@ -1903,9 +1961,12 @@ public class CommissionApplicationService {
         if (contractNos.isEmpty()) {
             return;
         }
-        List<CommissionAdjust> pendings = adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
-            .in(CommissionAdjust::getContractNo, contractNos)
-            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
+        List<CommissionAdjust> pendings = new ArrayList<>();
+        for (List<String> chunk : chunkKeys(contractNos)) {
+            pendings.addAll(adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
+                .in(CommissionAdjust::getContractNo, chunk)
+                .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)));
+        }
         if (pendings.isEmpty()) {
             return;
         }
@@ -2208,25 +2269,33 @@ public class CommissionApplicationService {
     /**
      * 批量预查所有合同当月活跃+驳回申请单（P1 优化）。
      * <p>
-     * 一条 IN 查询取所有输入合同号对应的活跃（DRAFT/SUBMITTED/APPROVED/LOCKED）和驳回
+     * 分片 IN 查询取所有输入合同号对应的活跃（DRAFT/SUBMITTED/APPROVED/LOCKED）和驳回
      * （REJECTED）申请单，按输入字符串（合同号或订单号）分别建 Map，
-     * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→1 次）。
+     * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→N/500 次）。
      * <p>
      * 同期互斥（2026-10）：同合同同期只允许一张活跃单，跨期补差走新申请单。
-     * 同一合同多张单取最新一张（按 createTime DESC 排序后 putIfAbsent）。
+     * 同一合同多张单取最新一张（createTime DESC 排序后 putIfAbsent）。
      */
     private void loadApplicationsBatch(String period, Collection<String> contractNos, BatchApplyContext ctx) {
         if (contractNos.isEmpty()) {
             return;
         }
-        // 同期互斥：按 period 过滤，同合同同期的活跃/驳回单参与幂等判断
-        List<CommissionApplication> all = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
-            .and(w -> w.in(CommissionApplication::getContractNo, contractNos)
-                .or().in(CommissionApplication::getOrderNo, contractNos))
-            .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
-                ApplicationStatus.APPROVED, ApplicationStatus.LOCKED, ApplicationStatus.REJECTED)
-            .orderByDesc(CommissionApplication::getCreateTime));
+        // 同期互斥：按 period 过滤，同合同同期的活跃/驳回单参与幂等判断。
+        // IN 键分片：勾选键集可达数千上万，整包 IN 会撑爆 SQL 文本，分片查询后合并
+        List<CommissionApplication> all = new ArrayList<>();
+        for (List<String> chunk : chunkKeys(contractNos)) {
+            all.addAll(applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+                .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
+                .and(w -> w.in(CommissionApplication::getContractNo, chunk)
+                    .or().in(CommissionApplication::getOrderNo, chunk))
+                .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                    ApplicationStatus.APPROVED, ApplicationStatus.LOCKED, ApplicationStatus.REJECTED)));
+        }
+        // 跨分片合并后按 createTime DESC, id DESC 全局排序（下方 putIfAbsent 取最新依赖全局有序）
+        all.sort((a, b) -> {
+            int c = b.getCreateTime().compareTo(a.getCreateTime());
+            return c != 0 ? c : Long.compare(b.getId(), a.getId());
+        });
         // 按真实合同号/订单号分别建索引（同键取最新一张）
         Map<String, CommissionApplication> activeByContract = new HashMap<>();
         Map<String, CommissionApplication> activeByOrder = new HashMap<>();
@@ -2281,8 +2350,10 @@ public class CommissionApplicationService {
         item.setPerformanceFactId(fact.getFactId());
         item.setFactType(fact.getFactType());
         item.setContractNo(application.getContractNo());
-        // 冻结事实展示快照：工资明细/导出直接取本表，免跨域 JOIN 事实表
-        item.setOrderNo(fact.getOrderNo());
+        // 冻结事实展示快照：工资明细/导出直接取本表，免跨域 JOIN 事实表。
+        // 订单号以申请单为准（建单时快照自实收事实=真实订单号）；新签事实 order_no 在
+        // 「贝壳新签 order_no 误填成合同号」退化场景是脏值（=合同号），不能直接用
+        item.setOrderNo(application.getOrderNo() != null ? application.getOrderNo() : fact.getOrderNo());
         item.setBusinessDate(fact.getBusinessDate());
         item.setPropertyAddress(fact.getPropertyAddress());
         item.setShareRatio(fact.getShareRatio());

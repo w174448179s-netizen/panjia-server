@@ -157,8 +157,8 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
 
     /**
      * 对恢复合同当月 APPROVED 实收单重放实收通过事件。
-     * <p>新事件在本事务提交后的下一轮 Outbox 投递才消费，此时本批 DRAFT 结佣单已被
-     * 结佣域撤销处理器删除，重建无冲突；结佣建单自带活跃单判重，重复重放幂等。
+     * <p>新事件在本事务提交后的下一轮 Outbox 投递；outbox 留痕并幂等重放，
+     * 供结佣域消费方接入后按事件重建（当前结佣由业务人员对 APPROVED 实收手工发起）。
      */
     private void replayReceivedApproved(String period, Set<String> contractKeys, Long operatorId) {
         if (period == null || contractKeys.isEmpty()) {

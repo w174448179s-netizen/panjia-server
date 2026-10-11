@@ -78,16 +78,20 @@ public interface ReceivedApplyPort {
      * <p>评估口径同 autoCreateForReceivedBatch：新签=该订单跨月 PERF_EXPECT ACTIVE 合计，
      * 实收=审批单 receivedAmount（含历史合并入 DRAFT 的全部到账）。
      * <ul>
-     *   <li>实收 ≥ 新签 → 自动通过(APPROVED) + emit ReceivedApprovedEvent（触发结佣建单）；</li>
+     *   <li>实收 ≥ 新签 → 自动通过(APPROVED) + emit ReceivedApprovedEvent；</li>
      *   <li>实收 &lt; 新签 → 启动人工审批工作流(SUBMITTED)，与导入时"有新签但不足"路径一致；</li>
      *   <li>仍无新签 → 保持 DRAFT（不应发生，新签刚导入；兜底不处理）。</li>
      * </ul>
      * 仅处理 DRAFT 单；SUBMITTED(人工流中)/APPROVED(已通过) 不打扰。
+     * <p>匹配维度：合同号非空时按合同号查当月全部 DRAFT 逐单按各自订单号评估
+     * （同合同多订单互不干扰）；合同号为空（一手房/家装荐客等无合同号业务，
+     * 以 order_no 为锚点）时按订单号查 DRAFT。
      *
      * @param period     实收归属期间 YYYY-MM
-     * @param contractNo 合同号
+     * @param contractNo 合同号（可空，空时按 orderNo 匹配）
+     * @param orderNo    订单号（contractNo 为空时必传）
      * @param operatorId 操作人 ID（事件场景无登录上下文，null 走兜底）
      * @return true=已自动通过；false=未通过（启动人工或保持 DRAFT）
      */
-    boolean resolveDraftAfterNewSign(String period, String contractNo, Long operatorId);
+    boolean resolveDraftAfterNewSign(String period, String contractNo, String orderNo, Long operatorId);
 }
