@@ -355,6 +355,33 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                              @Param("orderNos") List<String> orderNos);
 
     /**
+     * 按业务键集合批量查询合同维度业务类型（调整单列表「调整对象」号源展示回填用）。
+     * <p>
+     * 只取 DISTINCT 合同维度行（期间/口径/合同号/订单号/业务类型），不查明细金额，轻量回填。
+     * 键命中 {@code contract_no} 或 {@code order_no} 任一即可（调整单 contract_no 存的是提交时
+     * 展示键，可能本身就是订单号），服务层再按期间+口径+订单号优先口径精确配对。
+     *
+     * @param keys 业务键集合（调整单 contract_no + order_no 合集，不能为空）
+     * @return 每行含 factType/period/contractNo/orderNo/bizType；空集合返回空列表
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT f.fact_type AS factType,
+                        f.period AS period,
+                        f.contract_no AS contractNo,
+                        f.order_no AS orderNo,
+                        f.biz_type AS bizType
+        FROM pj_perf_fact f
+        WHERE f.fact_status IN ('ACTIVE', 'VOIDED')
+          AND (f.contract_no IN
+          <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
+            OR f.order_no IN
+          <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>)
+        </script>
+        """)
+    List<Map<String, Object>> selectBizTypesByKeys(@Param("keys") Collection<String> keys);
+
+    /**
      * 按业务键集合查询实收明细（结佣业绩口径，合同维度树表懒加载数据源）。
      * <p>
      * 拆表后 PERF_REAL 已迁出 pj_perf_fact：实收侧以 {@code pj_received_detail rd}

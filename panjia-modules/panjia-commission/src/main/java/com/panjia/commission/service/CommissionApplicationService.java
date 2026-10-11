@@ -511,6 +511,9 @@ public class CommissionApplicationService {
                 + "不能发起结佣；未通过明细：" + unapproved);
         }
 
+        // 同合同多订单防串单：实收事实跨多个订单号时禁止按合同号整包建单（2026-10-12）
+        assertSingleOrderScope(nonZeroFacts, contractNo);
+
         // 员工归属：明细数据源为跨月新签事实（导入未匹配即拦截，必有人），无需兜底补齐
 
         // 合同快照（订单号/房源/签约时间取事实聚合值；跨门店合作单 dept_id 留空）
@@ -553,6 +556,9 @@ public class CommissionApplicationService {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
         }
+        // 事实占用预检：新签事实已被他单非 REVERSED 明细绑定时友好拦截
+        // （库 uk_citem_fact_active 部分唯一索引兜底，并发/漏网场景由 insertBatch catch 二次兜底）
+        assertFactsNotSettled(itemFacts, null, contractNo);
         application.setItemCount(itemFacts.size());
         // 结佣金额合计 = Σ明细金额（新签口径，与 expectedAmount 同基数；
         // 到账是否覆盖新签已由实收域按合同维度判定，此处到账金额不参与计算）
@@ -575,7 +581,13 @@ public class CommissionApplicationService {
         for (PerformanceFactSummaryDTO fact : itemFacts) {
             items.add(buildItem(application, fact, fact.getAmount(), null));
         }
-        itemMapper.insertBatch(items);
+        try {
+            itemMapper.insertBatch(items);
+        } catch (DuplicateKeyException e) {
+            // 并发漏网（预检后、插入前被他单抢占）→ uk_citem_fact_active，转友好提示
+            throw new ServiceException("合同 " + contractNo
+                + " 的部分新签业绩刚被其他结佣申请单占用，请刷新后重试；如原单有误请先作废原单");
+        }
 
         log.info("[结佣-发起] 合同申请单已创建：applyNo={}, period={}, contractNo={}, itemCount={}, received={}, expected={}",
             application.getApplyNo(), period, contractNo, application.getItemCount(),
@@ -598,16 +610,25 @@ public class CommissionApplicationService {
             throw new ServiceException("合同 " + contractNo
                 + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
+        // 同合同多订单防串单（与 createApplicationWithItems 同口径，2026-10-12）
+        assertSingleOrderScope(nonZeroFacts, contractNo);
         List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts, period);
         if (itemFacts.isEmpty()) {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
         }
+        // 事实占用预检：排除本单自身（本单旧明细已全部 REVERSED，不会命中）
+        assertFactsNotSettled(itemFacts, application.getId(), contractNo);
         List<CommissionItem> items = new ArrayList<>(itemFacts.size());
         for (PerformanceFactSummaryDTO fact : itemFacts) {
             items.add(buildItem(application, fact, fact.getAmount(), null));
         }
-        itemMapper.insertBatch(items);
+        try {
+            itemMapper.insertBatch(items);
+        } catch (DuplicateKeyException e) {
+            throw new ServiceException("合同 " + contractNo
+                + " 的部分新签业绩已被其他结佣申请单占用，无法重建明细；如原单有误请先作废原单");
+        }
         recalcAggregates(application.getId(), null);
         log.info("[结佣-重建明细] 合同 {} {} 月明细已重建：{} 条",
             contractNo, period, itemFacts.size());
@@ -706,6 +727,64 @@ public class CommissionApplicationService {
             log.info("[结佣-审批回退] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
         }
         recalcAggregates(applicationId, null);
+    }
+
+    /**
+     * 同合同多订单防串单（2026-10-12）：一个合同号下挂多个实收订单时，结佣必须按订单分别发起。
+     * <p>背景：房产金融等业务同一合同号可挂多个订单（如 100015059270 下有 14040462 与
+     * JR5101002603141045077）。若用合同号发起，实收事实按「合同号 OR 订单号」会整包拉回
+     * 全部订单的实收行，新签明细随之跨订单并入一张单——他单新签被本单占用（uk_citem_fact_active），
+     * 他单再发起即唯一约束冲突，且本单结佣金额虚高。实收事实出现多个不同订单号时直接拒绝。
+     */
+    private void assertSingleOrderScope(List<PerformanceFactSummaryDTO> realFacts, String bizKey) {
+        Set<String> orderNos = new LinkedHashSet<>();
+        for (PerformanceFactSummaryDTO f : realFacts) {
+            if (f != null && StringUtils.isNotBlank(f.getOrderNo())) {
+                orderNos.add(f.getOrderNo().trim());
+            }
+        }
+        if (orderNos.size() > 1) {
+            throw new ServiceException("合同 " + bizKey + " 下存在多个实收订单（" + String.join("、", orderNos)
+                + "），结佣须按订单分别发起，请在发起列表中选择具体订单后提交，勿直接用合同号发起");
+        }
+    }
+
+    /**
+     * 新签事实占用预检（2026-10-12）：任一待绑定 ACTIVE 新签事实已被<b>他单</b>非 REVERSED
+     * 明细绑定时拒绝建单，提前给出可读提示（库 uk_citem_fact_active 部分唯一索引是最终兜底）。
+     *
+     * @param excludeApplicationId 重建场景排除本单自身（本单旧明细已 REVERSED）；新建传 null
+     */
+    private void assertFactsNotSettled(List<PerformanceFactSummaryDTO> itemFacts,
+                                       Long excludeApplicationId, String bizKey) {
+        List<Long> factIds = itemFacts.stream()
+            .map(PerformanceFactSummaryDTO::getFactId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        if (factIds.isEmpty()) {
+            return;
+        }
+        List<CommissionItem> bound = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+            .select(CommissionItem::getApplicationId)
+            .in(CommissionItem::getPerformanceFactId, factIds)
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .ne(excludeApplicationId != null, CommissionItem::getApplicationId, excludeApplicationId));
+        if (bound.isEmpty()) {
+            return;
+        }
+        Set<Long> appIds = bound.stream()
+            .map(CommissionItem::getApplicationId)
+            .collect(Collectors.toSet());
+        List<CommissionApplication> occupiers = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .select(CommissionApplication::getApplyNo, CommissionApplication::getOrderNo, CommissionApplication::getContractNo)
+            .in(CommissionApplication::getId, appIds));
+        String desc = occupiers.stream()
+            .map(a -> a.getApplyNo() + "（订单 "
+                + (StringUtils.isNotBlank(a.getOrderNo()) ? a.getOrderNo() : a.getContractNo()) + "）")
+            .collect(Collectors.joining("、"));
+        throw new ServiceException("业务键 " + bizKey + " 的部分新签业绩已被申请单 " + desc
+            + " 结佣占用，不能重复发起；如原申请单发起有误（误用合同号整包发起），请先作废原单，再按订单分别发起");
     }
 
     /**

@@ -149,4 +149,11 @@ public class PerformanceAdjust implements Serializable {
      */
     @TableField(exist = false)
     private BigDecimal afterTotalAmount;
+
+    /**
+     * 业务类型（一手房/房产金融/二手房等，展示用，由 pj_perf_fact 批量回填）。
+     * 列表「调整对象」号源口径与新签明细一致：一手房/房产金融显订单号，其它显合同号。
+     */
+    @TableField(exist = false)
+    private String bizType;
 }

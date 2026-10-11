@@ -150,6 +150,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         fillConvertedAmounts(records);
         // ADD_MEMBER 回填调整后合同总额（混合金额调整时与原总额不等）
         fillAddMemberAfterTotal(records);
+        // 回填业务类型：列表「调整对象」号源口径对齐新签明细（一手房/房产金融显订单号）
+        fillBizTypes(records);
         return PageResult.build(records, page.getTotal());
     }
 
@@ -254,6 +256,65 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
             r.setAfterTotalAmount(afterTotal != null ? MoneyUtil.round2(afterTotal)
                 : (r.getOriginalAmount() != null ? MoneyUtil.round2(r.getOriginalAmount()) : null));
+        }
+    }
+
+    /**
+     * 批量回填业务类型（pj_perf_fact.biz_type）：列表「调整对象」号源口径对齐新签明细——
+     * 一手房/房产金融显订单号，其它业务类型显合同号（前端 resolveBizNo 同口径取值）。
+     * <p>
+     * 一次 IN 查询（合同号+订单号合集双列 OR），内存按「期间 + 事实口径 + 订单号优先」精确配对，
+     * 配对口径与 {@code selectContractTotalAmount} 一致，避免同合同号多订单/跨口径串值。
+     * 调整单自身不存 biz_type（其为合同静态属性），故从事实表回填；事实全部冲销时留空，前端回退合同号。
+     */
+    private void fillBizTypes(List<PerformanceAdjust> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        Set<String> keys = new HashSet<>();
+        for (PerformanceAdjust r : records) {
+            if (StringUtils.isNotBlank(r.getContractNo())) {
+                keys.add(r.getContractNo());
+            }
+            if (StringUtils.isNotBlank(r.getOrderNo())) {
+                keys.add(r.getOrderNo());
+            }
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        List<Map<String, Object>> rows = factMapper.selectBizTypesByKeys(new ArrayList<>(keys));
+        if (rows.isEmpty()) {
+            return;
+        }
+        for (PerformanceAdjust r : records) {
+            if (StringUtils.isBlank(r.getContractNo()) && StringUtils.isBlank(r.getOrderNo())) {
+                continue;
+            }
+            String factType = StringUtils.isNotBlank(r.getFactType()) ? r.getFactType() : FACT_TYPE_EXPECT;
+            for (Map<String, Object> row : rows) {
+                if (!factType.equals(String.valueOf(row.get("factType")))
+                    || !r.getPeriod().equals(String.valueOf(row.get("period")))) {
+                    continue;
+                }
+                String fContractNo = row.get("contractNo") == null ? null : String.valueOf(row.get("contractNo"));
+                String fOrderNo = row.get("orderNo") == null ? null : String.valueOf(row.get("orderNo"));
+                boolean matched;
+                if (StringUtils.isNotBlank(r.getOrderNo())) {
+                    // 有订单号：按订单号精确配对（贝壳侧订单号与合同号 1:1）
+                    matched = r.getOrderNo().equals(fOrderNo);
+                } else {
+                    // 历史单据无订单号：合同号/订单号双列 OR 兼容
+                    matched = r.getContractNo().equals(fContractNo) || r.getContractNo().equals(fOrderNo);
+                }
+                if (matched) {
+                    Object bizType = row.get("bizType");
+                    if (bizType != null) {
+                        r.setBizType(String.valueOf(bizType));
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -1324,8 +1385,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         wrapper.notLike(PerformanceAdjust::getAdjustNo, "CADJ");
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()),
             PerformanceAdjust::getPeriod, query.getPeriod());
+        // 菜单口径分流：新签调整菜单不传 adjustType（=新签类全部），默认排除 RECEIVED_AMOUNT；
+        // 实收调整菜单显式传 RECEIVED_AMOUNT 走实收口径（PERF_REAL），两菜单数据互不混入。
         wrapper.eq(StringUtils.isNotBlank(query.getAdjustType()),
             PerformanceAdjust::getAdjustType, AdjustType.fromCode(query.getAdjustType()));
+        wrapper.ne(StringUtils.isBlank(query.getAdjustType()),
+            PerformanceAdjust::getAdjustType, AdjustType.RECEIVED_AMOUNT);
         wrapper.eq(StringUtils.isNotBlank(query.getStatus()),
             PerformanceAdjust::getStatus, AdjustStatus.fromCode(query.getStatus()));
         wrapper.eq(query.getEmployeeId() != null,
