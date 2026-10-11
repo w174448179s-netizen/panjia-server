@@ -771,9 +771,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 关联 pj_people_employee（导入时 rd.employee_id 暂留空）。
      * <p>
      * 应收金额按「同合同 + 同员工工号 + 同角色」配对 ACTIVE PERF_EXPECT 求和
-     * （同员工同角色可能跨多个费项，故聚合为一行）；金额口径<b>当月优先</b>——当月有
-     * <b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，取历史（&lt;实收月）合计，
-     * 与建单/结佣口径一致。
+     * （同员工同角色可能跨多个费项，故聚合为一行）；金额口径=实收月及之前全部期间合计
+     * （当月+历史合并，与建单 loadExpectItemFacts 2026-09-30 定稿一致）——
+     * 冲正/红冲负数镜像落在实收月，旧「当月优先排斥历史」会把应收算成负数（2026-10-11 修复）。
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
      * orderNo 非空时按订单号限定（合同号非空再加合同号=双键精确，同合同号挂多订单防跨订单配对）；
@@ -803,31 +803,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               </choose>
               <if test="period != null and period != ''">AND rc.period = #{period}</if>
         ),
-        expect_scope AS (
-            -- 新签金额口径：当月有非零新签 → 只取当月；
-            -- 当月为 0/无 → 不参与当月计算，取历史（实收月之前），与建单/结佣口径一致
-            SELECT EXISTS (
-                SELECT 1 FROM pj_perf_fact pc
-                WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                  <if test="period != null and period != ''">AND pc.period = #{period}</if>
-                  AND pc.performance_amount != 0
-                  <choose>
-                    <when test="degradeToContract">AND pc.contract_no = #{contractNo}</when>
-                    <when test="orderNo != null and orderNo != ''">
-                      AND pc.order_no = #{orderNo}
-                      <if test="contractNo != null and contractNo != ''">AND pc.contract_no = #{contractNo}</if>
-                    </when>
-                    <when test="contractNo != null and contractNo != ''">
-                      AND (pc.contract_no = #{contractNo} OR pc.order_no = #{contractNo})
-                    </when>
-                    <otherwise>AND 1 = 0</otherwise>
-                  </choose>
-            ) AS has_current
-        ),
         active_expect AS (
             SELECT pe.employee_external_code AS emp_code, pe.role_type,
                    SUM(pe.performance_amount) AS exp_amt
-            FROM pj_perf_fact pe, expect_scope es
+            FROM pj_perf_fact pe
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
               <choose>
@@ -841,10 +820,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 </when>
                 <otherwise>AND 1 = 0</otherwise>
               </choose>
-              <if test="period != null and period != ''">
-              AND ((es.has_current AND pe.period = #{period})
-                   OR (NOT es.has_current AND pe.period &lt; #{period}))
-              </if>
+              <if test="period != null and period != ''">AND pe.period &lt;= #{period}</if>
             GROUP BY pe.employee_external_code, pe.role_type
         ),
         reversed_chain AS (
@@ -855,7 +831,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact a
             JOIN pj_perf_fact b ON b.source_key = a.source_key
                AND b.fact_type = 'PERF_EXPECT' AND b.fact_status = 'REVERSED'
-            CROSS JOIN expect_scope es
             WHERE a.fact_status = 'ACTIVE'
               AND a.fact_type = 'PERF_EXPECT'
               <choose>
@@ -869,10 +844,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 </when>
                 <otherwise>AND 1 = 0</otherwise>
               </choose>
-              <if test="period != null and period != ''">
-              AND ((es.has_current AND a.period = #{period})
-                   OR (NOT es.has_current AND a.period &lt; #{period}))
-              </if>
+              <if test="period != null and period != ''">AND a.period &lt;= #{period}</if>
             ORDER BY a.source_key, b.id ASC
         ),
         original_expect AS (

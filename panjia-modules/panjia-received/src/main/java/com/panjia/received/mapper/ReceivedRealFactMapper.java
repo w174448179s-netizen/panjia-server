@@ -188,29 +188,23 @@ public interface ReceivedRealFactMapper {
     /**
      * 按期间查实收「合同」维度汇总（结佣申请列表合并展示用）。
      * 按 COALESCE(rc.order_no,rc.contract_no) 聚合；deptId 非空含下级部门。
-     * <p>period 可空：空时跨全部期间聚合（仅录合同号不选期间场景），
-     * expectedAmount 对应取该合同全部期间 ACTIVE PERF_EXPECT 合计。
+     * <p>period 非空：expectedAmount 取该合同实收月及之前全部期间 ACTIVE PERF_EXPECT 合计
+     * （当月+历史合并，冲正镜像不排斥历史正数）；period 可空：空时跨全部期间聚合
+     * （仅录合同号不选期间场景），expectedAmount 对应取该合同全部期间 ACTIVE PERF_EXPECT 合计。
      */
     @Select("""
         <script>
         <choose>
             <when test="period != null and period != ''">
-        WITH cur_nonzero AS (
-            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
-                   bool_or(pe.performance_amount &lt;&gt; 0) AS has_nonzero
-            FROM pj_perf_fact pe
-            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-              AND pe.period = #{period}
-            GROUP BY COALESCE(pe.order_no, pe.contract_no)
-        ),
-        expect_sum AS (
+        WITH expect_sum AS (
+            -- 新签金额口径 = 实收月及之前全部 ACTIVE PERF_EXPECT 合计（当月+历史合并，
+            -- 与 loadExpectItemFacts 2026-09-30 定稿一致）：冲正/红冲负数镜像落在当月，
+            -- 旧「当月优先排斥历史」会把新签金额算成负数（2026-10-11 修复）
             SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
                    SUM(pe.performance_amount) AS amt
             FROM pj_perf_fact pe
-            LEFT JOIN cur_nonzero c ON c.biz_key = COALESCE(pe.order_no, pe.contract_no)
             WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-              AND ((pe.period = #{period} AND COALESCE(c.has_nonzero, false))
-                OR (pe.period &lt; #{period} AND NOT COALESCE(c.has_nonzero, false)))
+              AND pe.period &lt;= #{period}
             GROUP BY COALESCE(pe.order_no, pe.contract_no)
         )
             </when>

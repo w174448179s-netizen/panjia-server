@@ -166,16 +166,16 @@ public class CommissionApplicationService {
 
     // ==================== 发起结佣（按合同） ====================
 
-
-
-
-
     /**
-     * 发起结佣并提交审批（拉取该合同当月事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
+     * 单个发起结佣并提交审批（拉取该合同事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
      * <p>
      * 业务人员一次操作即完成发起+提交，无需再单独点"提交"按钮。
-     * 兼容驳回重提：该合同当月已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
+     * 兼容驳回重提：该合同已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
      * 新流程前置（§3.2）：合同实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
+     * <p>
+     * 与批量发起共用 {@link BatchApplyContext} 预加载机制：活跃/驳回单、实收事实、应收金额
+     * 各一次查询载入上下文，消除 5 参 {@link #apply} 与 {@link #createApplicationWithItems}
+     * 内部的逐项重复查询（P0：原单发链路 apply 与 createApplicationWithItems 各查一遍活跃单）。
      *
      * @param period     业绩归属月（结算月 YYYY-MM）
      * @param contractNo 合同号
@@ -184,20 +184,23 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId) {
-        return apply(period, contractNo, operatorId, false);
-    }
-
-    /**
-     * 发起结佣并提交审批。
-     *
-     * @param skipDeptScope 是否跳过门店数据权限校验。批量发起时门店权限已在 HTTP 线程的同步阶段
-     *                      逐个校验过；异步线程无 Sa-Token 上下文，而门店校验查询的部门表带
-     *                      {@code @DataPermission}，拦截器取登录态会抛 SaTokenContextException，
-     *                      故异步路径必须跳过（不构成越权：同步阶段已过滤）。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public CommissionApplication apply(String period, String contractNo, Long operatorId, boolean skipDeptScope) {
-        return apply(period, contractNo, operatorId, skipDeptScope, null);
+        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+            throw new ServiceException("结算月与合同号不能为空");
+        }
+        checkPeriodOpen(period, "发起结佣");
+        BatchApplyContext ctx = new BatchApplyContext();
+        // 活跃/驳回申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）
+        loadApplicationsBatch(period, List.of(contractNo), ctx);
+        // 实收事实：跨期查找（period 传 null），发起月不必与实收月一致
+        ctx.factsMap.put(contractNo,
+            performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL));
+        // 应收金额：跨期口径一次查（命中才入 ctx，未命中由 createApplicationWithItems 走宽捞+退化）
+        BigDecimal expect = performanceQueryPort
+            .sumExpectAmountsByKeysCrossPeriod(java.util.List.of(contractNo)).get(contractNo);
+        if (expect != null) {
+            ctx.expectedAmounts.put(contractNo, expect);
+        }
+        return apply(period, contractNo, operatorId, false, ctx);
     }
 
     /**
@@ -226,7 +229,7 @@ public class CommissionApplicationService {
             ? ctx.rejectedApps.get(contractNo)
             : findRejectedApplication(period, contractNo);
         if (rejected != null) {
-            submit(rejected.getId(), operatorId);
+            submit(rejected, operatorId);
             return rejected;
         }
         // 实收审批通过后系统自动生成的 DRAFT 草稿单（不自动提交，保留人工审批链）：
@@ -251,14 +254,14 @@ public class CommissionApplicationService {
                     active.setApplicantId(operatorId);
                     applicationMapper.updateById(active);
                 }
-                submit(active.getId(), operatorId);
+                submit(active, operatorId);
                 return active;
             }
             throw new ServiceException("合同 " + contractNo + " " + period
                 + " 月已存在" + active.getStatus().getDesc() + "申请单（" + active.getApplyNo() + "），请勿重复发起");
         }
         CommissionApplication application = createApplicationWithItems(period, contractNo, operatorId, ctx);
-        submit(application.getId(), operatorId);
+        submit(application, operatorId);
         return application;
     }
 
@@ -306,23 +309,41 @@ public class CommissionApplicationService {
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
         CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
         syncResult.setTotal(deduped.size());
-        for (String contractNo : deduped) {
+        // 事实一次批量加载（P0：原逐合同 N 次串行查询 → 分片批量，100 合同约省数秒）；
+        // 跨期查找口径与单发一致（period 传 null）：发起月不必与实收月一致
+        List<String> keyList = new ArrayList<>(deduped);
+        for (int from = 0; from < keyList.size(); from += IN_KEYS_CHUNK) {
+            List<String> chunkKeys = keyList.subList(from, Math.min(from + IN_KEYS_CHUNK, keyList.size()));
+            List<PerformanceFactSummaryDTO> rows;
             try {
-                // 查实收事实并缓存，doApply 直接复用（P0：减少一半事实查询）；
-                // 跨期查找（period 传 null）：发起月不必与实收月一致
-                List<PerformanceFactSummaryDTO> facts = performanceQueryPort
-                    .findActiveByContract(null, contractNo, FACT_TYPE_REAL);
-                ctx.factsMap.put(contractNo, facts);
+                rows = performanceQueryPort.findActiveByBizKeys(chunkKeys, FACT_TYPE_REAL);
+            } catch (ServiceException e) {
+                syncResult.getSkippedContracts().addAll(chunkKeys);
+                log.warn("[结佣-批量发起] {} 个合同事实批量查询失败，整片跳过：{}", chunkKeys.size(), e.getMessage());
+                continue;
+            }
+            // 归组：order_no IN / contract_no IN 双列命中，一行可归多个输入键组，
+            // 与逐键 findActiveByContract（contract_no = ? OR order_no = ?）语义一致
+            Map<String, List<PerformanceFactSummaryDTO>> grouped = new HashMap<>();
+            for (PerformanceFactSummaryDTO row : rows) {
+                if (row.getOrderNo() != null && deduped.contains(row.getOrderNo())) {
+                    grouped.computeIfAbsent(row.getOrderNo(), k -> new ArrayList<>()).add(row);
+                }
+                if (row.getContractNo() != null && deduped.contains(row.getContractNo())) {
+                    grouped.computeIfAbsent(row.getContractNo(), k -> new ArrayList<>()).add(row);
+                }
+            }
+            for (String key : chunkKeys) {
+                List<PerformanceFactSummaryDTO> facts = grouped.getOrDefault(key, Collections.emptyList());
+                // 空键也占位：createApplicationWithItems 以 containsKey 短路复用缓存
+                ctx.factsMap.putIfAbsent(key, facts);
                 // 宽捞应收未命中的键：用实收事实 (订单号, 合同号) 对退化补算
                 // （「贝壳新签 order_no 误填成合同号」场景宽捞键=实收订单号，新签行两列都是合同号）
-                if (!ctx.expectedAmounts.containsKey(contractNo) && !facts.isEmpty()) {
-                    ctx.expectedAmounts.put(contractNo, sumExpectDegraded(facts.get(0)));
+                if (!ctx.expectedAmounts.containsKey(key) && !facts.isEmpty()) {
+                    ctx.expectedAmounts.put(key, sumExpectDegraded(facts.get(0)));
                 }
                 // 发起结佣不再校验合同部门归属：合同本身无门店属性，部门归属取决于明细下人员。
-                myContracts.add(contractNo);
-            } catch (ServiceException e) {
-                syncResult.getSkippedContracts().add(contractNo);
-                log.warn("[结佣-批量发起] 合同 {} 门店权限校验失败：{}", contractNo, e.getMessage());
+                myContracts.add(key);
             }
         }
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
@@ -799,7 +820,20 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void submit(Long applicationId, Long operatorId) {
-        CommissionApplication application = getApplication(applicationId);
+        // 用干净实体（selectById）而非 getApplication：后者按实时口径覆盖 expectedAmount 供前端展示，
+        // 若拿覆盖后的实体 updateById 会把展示值污染进提交快照（2026-10-11 修复）
+        submit(applicationMapper.selectById(applicationId), operatorId);
+    }
+
+    /**
+     * 提交审批（实体入参重载）：调用方持有的申请单实体（批量上下文/新建单）直接提交，
+     * 避免为校验状态再回表一次。实体必须是未经过 {@link #getApplication} 展示覆盖的干净数据。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void submit(CommissionApplication application, Long operatorId) {
+        if (application == null) {
+            throw new ServiceException("结佣申请单不存在");
+        }
         if (application.getStatus() != ApplicationStatus.DRAFT
             && application.getStatus() != ApplicationStatus.REJECTED) {
             throw new ServiceException("仅草稿/已驳回状态可提交（当前：" + application.getStatus().getDesc() + "）");
@@ -808,7 +842,7 @@ public class CommissionApplicationService {
         applicationMapper.updateById(application);
         // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
         itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, applicationId)
+            .eq(CommissionItem::getApplicationId, application.getId())
             .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
             .set(CommissionItem::getStatus, ItemStatus.PENDING));
 
@@ -816,21 +850,21 @@ public class CommissionApplicationService {
             startWorkflow(application);
         } else {
             // 驳回后流程停在申请人节点：办理申请人任务重新提交
-            Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, applicationId);
+            Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, application.getId());
             if (taskId == null) {
                 throw new ServiceException("审批流程任务不存在，请联系管理员");
             }
-            approvalPort.completeAsSys(BizType.COMMISSION, applicationId, ApprovalAction.PASS, "重新提交");
+            approvalPort.completeAsSys(BizType.COMMISSION, application.getId(), ApprovalAction.PASS, "重新提交");
         }
 
         // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
         // 后续 §3.5 差异对齐与「无差异自动过财务」由 capp_finance 任务创建事件监听器接管
         if (currentRoles().contains(ROLE_DIRECTOR)) {
-            Long directorTask = taskAtNode(applicationId, NODE_DIRECTOR);
+            Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
             if (directorTask == null) {
                 throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
             }
-            completeTaskAsLoginUser(applicationId, ApprovalAction.PASS, "总监发起，系统自动审批");
+            completeTaskAsLoginUser(application.getId(), ApprovalAction.PASS, "总监发起，系统自动审批");
         }
         refreshCurrentNode(application);
         log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
@@ -1285,8 +1319,11 @@ public class CommissionApplicationService {
         // 部门数据权限：业务角色（总监/店长/经纪人）限定本部门（含下级）；财务/超管不限制
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "结佣");
 
+        // 合同汇总跨期查询（期间过滤在行侧按申请单期间做）：实收明细归属期间（rd.period）
+        // 可与发起期间错位（如 6 月实收 10 月发起，申请单期间=2026-10），若按实收期间过滤
+        // 会漏掉跨期发起的单据（发起成功但审批页按期间查不到，2026-10-11 修复）
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listContractSummaries(period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
+            performanceQueryPort.listContractSummaries(null, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword);
 
         List<CommissionApplication> applications = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
@@ -1312,9 +1349,8 @@ public class CommissionApplicationService {
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
         List<CommissionContractVo> all = new ArrayList<>(contracts.size());
-        // 封账判定：固定期间一次判定；跨期查询按行所属期间逐个判定（懒加载缓存，避免逐行回表）
+        // 封账判定：行期间=申请单归属期间（跨期发起时≠实收期间），不同期间懒加载判定缓存
         Map<String, Boolean> closedCache = new HashMap<>();
-        Boolean fixedClosed = period != null ? periodCloseQueryPort.isClosed(period) : null;
         for (PerformanceContractSummaryDTO c : contracts) {
             CommissionApplication app = appMap.get(c.getContractNo());
             if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
@@ -1322,6 +1358,10 @@ public class CommissionApplicationService {
             }
             // 实收审批通过后系统自动生成结佣草稿单，无申请单的合同不在结佣明细展示
             if (app == null || app.getStatus() == null) {
+                continue;
+            }
+            // 期间过滤：按申请单归属期间（发起人选择的结佣期间），而非实收明细期间
+            if (period != null && !period.equals(app.getPeriod())) {
                 continue;
             }
             String status = app.getStatus().getCode();
@@ -1341,10 +1381,10 @@ public class CommissionApplicationService {
             if (bizType != null && !bizType.equals(c.getBizType())) {
                 continue;
             }
-            // 行级期间/封账：固定期间直接用；跨期时行期间取申请单归属期间
-            String rowPeriod = period != null ? period : app.getPeriod();
-            boolean rowClosed = fixedClosed != null ? fixedClosed
-                : closedCache.computeIfAbsent(rowPeriod, p -> periodCloseQueryPort.isClosed(p));
+            // 行级期间/封账：行期间恒取申请单归属期间（跨期发起时≠实收明细期间），
+            // 封账按行期间判定（懒加载缓存，每个期间只回表一次）
+            String rowPeriod = app.getPeriod();
+            boolean rowClosed = closedCache.computeIfAbsent(rowPeriod, p -> periodCloseQueryPort.isClosed(p));
             all.add(toContractVO(rowPeriod, rowClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
         }
 
@@ -1374,7 +1414,8 @@ public class CommissionApplicationService {
         // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
         fillContractPendingAdjust(pageRows);
         // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
-        fillAddMemberMark(period, pageRows);
+        // 行集跨期（行期间=申请单期间），加人事实按事实自身期间命中，传 null 跨期查
+        fillAddMemberMark(null, pageRows);
 
         // 跨页全局汇总（统计栏不随分页变化）：合同/明细条数/金额按过滤后全集内存聚合；
         // 涉及人数须跨合同去重（同一员工可能在多个合同），走实收事实 COUNT(DISTINCT 员工键)
@@ -1396,7 +1437,9 @@ public class CommissionApplicationService {
         PageResult<CommissionContractVo> result = PageResult.build(pageRows, (long) total);
         Map<String, Object> summary = new HashMap<>();
         summary.put("contractCount", total);
-        summary.put("employeeCount", performanceQueryPort.countDistinctEmployeesByKeys(period, summaryKeys, FACT_TYPE_REAL));
+        // 涉及人数跨期统计：行集按申请单期间过滤，实收明细期间与申请单期间可错位，
+        // 按查询期间过滤会漏掉跨期发起单据的员工（传 null 跨期，键集已限定行集范围）
+        summary.put("employeeCount", performanceQueryPort.countDistinctEmployeesByKeys(null, summaryKeys, FACT_TYPE_REAL));
         summary.put("detailCount", summaryDetailCount);
         summary.put("totalAmount", summaryTotalAmount);
         result.setSummary(summary);
@@ -1706,8 +1749,9 @@ public class CommissionApplicationService {
     /**
      * 查当前 ACTIVE PERF_EXPECT 合计，与申请单快照比较：
      * 不一致时置 expectedAdjusted=true，并用当前值覆盖 expectedAmount 供前端展示。
-     * <p>金额口径当月优先（与 loadExpectItemFacts 一致）：当月有<b>非零</b>新签 → 只取当月合计；
-     * 当月为 0/无 → 不参与当月计算，取历史（&lt;实收月）合计。
+     * <p>金额口径当月+历史<b>合并</b>（与 loadExpectItemFacts 2026-09-30 定稿一致）：
+     * 当月与历史（&lt;实收月）均有非零新签时合并求和——冲正/红冲负数镜像落在当月，
+     * 若「当月优先」排斥历史会把新签金额算成负数；未来月（&gt;申请单期间）不参与。
      */
     private void fillExpectedAdjusted(CommissionApplication app) {
         if (app == null || StringUtils.isBlank(app.getPeriod())
@@ -1717,23 +1761,16 @@ public class CommissionApplicationService {
         String lookupKey = StringUtils.isNotBlank(app.getContractNo()) ? app.getContractNo() : app.getOrderNo();
         List<PerformanceFactSummaryDTO> allExpects =
             performanceQueryPort.findActiveByBizKeys(java.util.List.of(lookupKey), FACT_TYPE_EXPECT);
-        List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
-        List<PerformanceFactSummaryDTO> history = new ArrayList<>();
+        BigDecimal currentExpected = BigDecimal.ZERO;
         for (PerformanceFactSummaryDTO e : allExpects) {
             if (e.getAmount() == null || e.getAmount().signum() == 0) {
                 continue;
             }
             String ep = e.getPeriod();
-            if (app.getPeriod().equals(ep)) {
-                currentMonth.add(e);
-            } else if (ep != null && ep.compareTo(app.getPeriod()) < 0) {
-                history.add(e);
+            if (app.getPeriod().equals(ep) || (ep != null && ep.compareTo(app.getPeriod()) < 0)) {
+                currentExpected = currentExpected.add(e.getAmount());
             }
         }
-        List<PerformanceFactSummaryDTO> target = !currentMonth.isEmpty() ? currentMonth : history;
-        BigDecimal currentExpected = target.stream()
-            .map(PerformanceFactSummaryDTO::getAmount)
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
         if (app.getExpectedAmount() != null && app.getExpectedAmount().compareTo(currentExpected) != 0) {
             app.setExpectedAdjusted(true);
         }

@@ -24,7 +24,7 @@ public class AddMemberItemBo {
     /** 新角色人业绩金额（&gt;0；所有新人金额合计参与扣除分摊/合同总额校验） */
     private BigDecimal amount;
 
-    /** 新角色人业绩比例/角色占比（可空=不设置；&gt;0，不强制各角色合计=100%） */
+    /** 新角色人业绩比例/角色占比（可空=不设置；允许 0，负数非法；不强制各角色合计=100%） */
     private BigDecimal shareRatio;
 
     /** 新角色人业绩归属部门（空=取员工档案部门） */

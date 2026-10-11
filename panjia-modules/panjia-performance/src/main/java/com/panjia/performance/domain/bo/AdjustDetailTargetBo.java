@@ -21,6 +21,6 @@ public class AdjustDetailTargetBo {
     /** 该行调整后业绩金额（允许负数=红冲） */
     private BigDecimal targetAmount;
 
-    /** 该行调整后角色占比（可空=不修改占比；>0，不强制合计=100%） */
+    /** 该行调整后角色占比（可空=不修改占比；允许 0，负数非法；不强制合计=100%） */
     private BigDecimal shareRatio;
 }

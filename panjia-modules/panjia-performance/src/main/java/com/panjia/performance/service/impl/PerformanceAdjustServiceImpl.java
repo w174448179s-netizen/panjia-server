@@ -1705,8 +1705,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (factById.get(t.getFactId()) == null) {
                 throw new ServiceException("指定调整行不在该合同业绩明细中：factId={}", t.getFactId());
             }
-            if (t.getShareRatio() != null && t.getShareRatio().signum() <= 0) {
-                throw new ServiceException("角色占比必须大于 0：factId={}", t.getFactId());
+            if (t.getShareRatio() != null && t.getShareRatio().signum() < 0) {
+                throw new ServiceException("角色占比不能为负：factId={}", t.getFactId());
             }
             validTargets.add(t);
             coveredIds.add(t.getFactId());
@@ -1960,8 +1960,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (m.getAmount() == null || m.getAmount().signum() <= 0) {
                 throw new ServiceException("新角色人业绩金额缺失或不大于 0：employeeId={}", m.getEmployeeId());
             }
-            if (m.getShareRatio() != null && m.getShareRatio().signum() <= 0) {
-                throw new ServiceException("新角色人业绩比例必须大于 0：employeeId={}", m.getEmployeeId());
+            // 占比允许为 0：金额被全部扣减的角色人，其业绩比例可同步归零
+            if (m.getShareRatio() != null && m.getShareRatio().signum() < 0) {
+                throw new ServiceException("新角色人业绩比例不能为负：employeeId={}", m.getEmployeeId());
             }
             if (!requestEmpIds.add(m.getEmployeeId())) {
                 throw new ServiceException("同一员工不能重复添加为新角色人：employeeId={}", m.getEmployeeId());
@@ -2015,8 +2016,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 if (factById.get(t.getFactId()) == null) {
                     throw new ServiceException("指定调整行不在该合同业绩明细中：factId={}", t.getFactId());
                 }
-                if (t.getShareRatio() != null && t.getShareRatio().signum() <= 0) {
-                    throw new ServiceException("角色占比必须大于 0：factId={}", t.getFactId());
+                // 占比允许为 0：金额被全部扣减的角色人，其业绩比例可同步归零
+                if (t.getShareRatio() != null && t.getShareRatio().signum() < 0) {
+                    throw new ServiceException("角色占比不能为负：factId={}", t.getFactId());
                 }
                 validTargets.add(t);
                 coveredIds.add(t.getFactId());
