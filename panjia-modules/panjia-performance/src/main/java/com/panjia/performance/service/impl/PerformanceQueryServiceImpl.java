@@ -86,6 +86,11 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
+    /**
+     * 实收调整单 Mapper（pj_perf_received_adjust，2026-10-12 拆表）：
+     * PERF_REAL 的「调整审批中」标记/预演必须查实收调整表，新签调整表已不再含 RECEIVED_AMOUNT 单。
+     */
+    private final com.panjia.performance.mapper.ReceivedAdjustMapper receivedAdjustMapper;
     /** 双键未命中退化合同号匹配的安全闸门（同合同多订单禁退化、订单误填唯一订单才退化） */
     private final com.panjia.performance.service.BizKeyMatchGuard bizKeyMatchGuard;
     private final PerformancePeriodCloseMapper periodCloseMapper;
@@ -806,7 +811,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (keys.isEmpty()) {
             return;
         }
-        List<Map<String, Object>> pendings = adjustMapper.doSelectPendingByBizKeys(period, factType, keys);
+        // PERF_REAL 在途实收调整单已拆至 pj_perf_received_adjust（2026-10-12），按口径分表查询
+        List<Map<String, Object>> pendings = "PERF_REAL".equals(factType)
+            ? receivedAdjustMapper.doSelectPendingByBizKeys(period, keys)
+            : adjustMapper.doSelectPendingByBizKeys(period, factType, keys);
         if (pendings.isEmpty()) {
             return;
         }
@@ -878,8 +886,11 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (contractNos == null || contractNos.isEmpty()) {
             return;
         }
-        List<Map<String, Object>> contractPendings =
-            adjustMapper.doSelectPendingByBizKeys(period, factType, new HashSet<>(contractNos));
+        // PERF_REAL 在途实收调整单查实收调整表（2026-10-12 拆表）；实收单类型为 RECEIVED_AMOUNT，
+        // 下方仅做命中识别（非 AMOUNT/ADD_MEMBER 不做金额分摊预演），与拆表前行为一致
+        List<Map<String, Object>> contractPendings = "PERF_REAL".equals(factType)
+            ? receivedAdjustMapper.doSelectPendingByBizKeys(period, new HashSet<>(contractNos))
+            : adjustMapper.doSelectPendingByBizKeys(period, factType, new HashSet<>(contractNos));
         String rowOrderNo = rows.get(0).getOrderNo();
         String rowContractNo = rows.get(0).getContractNo();
         contractPendings = contractPendings.stream()

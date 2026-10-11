@@ -2,7 +2,10 @@ package com.panjia.performance.listener;
 
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.event.ApprovalEvent;
+import com.panjia.performance.domain.PerformanceAdjust;
+import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.service.IPerformanceAdjustService;
+import com.panjia.performance.service.IReceivedAdjustService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -40,6 +43,8 @@ import java.util.Map;
 public class AdjustWorkflowListener {
 
     private final IPerformanceAdjustService adjustService;
+    private final IReceivedAdjustService receivedAdjustService;
+    private final PerformanceAdjustMapper performanceAdjustMapper;
 
     @EventListener(condition = "#approvalEvent.bizType == '" + BizType.PERF_ADJUST + "'")
     public void onApprovalEvent(ApprovalEvent approvalEvent) {
@@ -60,6 +65,17 @@ public class AdjustWorkflowListener {
                 Object m = params.get("message");
                 handler = h == null ? null : h.toString();
                 message = m == null ? null : m.toString();
+            }
+
+            // 兼容拆表（2026-10-12）：存量在途实收单已迁移至 pj_perf_received_adjust，
+            // 但其工作流实例仍挂在 perf_adjust 定义下（实例按 businessId 定位），
+            // 新签表查不到该单时委托实收调整服务处理。
+            PerformanceAdjust perfAdjust = performanceAdjustMapper.selectById(adjustId);
+            if (perfAdjust == null) {
+                log.info("[业绩调整工作流] 新签调整表无此单，按迁移在途实收单委托实收服务处理：adjustId={}, status={}",
+                    adjustId, status);
+                receivedAdjustService.handleWorkflowEvent(adjustId, status, handler, message);
+                return;
             }
 
             log.info("[业绩调整工作流] 回调：adjustId={}, status={}, nodeCode={}",

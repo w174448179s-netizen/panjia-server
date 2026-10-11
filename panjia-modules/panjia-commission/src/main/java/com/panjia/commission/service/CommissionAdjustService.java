@@ -157,15 +157,19 @@ public class CommissionAdjustService {
             }
         }
 
-        // ③ 同一合同无未完成调整单（合同级互斥：结佣调整直接改 PERF_EXPECT 事实，
-        //    同合同任意在途调整单（含明细级/合同级/其他期间申请单）都会改变共享事实，
-        //    并发执行会互相覆盖，故按合同号拦截，粒度粗于 applicationId/itemId）
+        // ③ 同合同+同订单无未完成调整单（互斥：结佣调整 supersede 的事实按 (订单号,合同号)
+        //    双键精确，不同订单的事实互不共享、并发执行不会互相覆盖，2026-10-12 收窄为订单级；
+        //    order_no 为空的历史调整单无法区分订单，仍按合同号兜底拦截）
+        String appOrderNo = StringUtils.trimToNull(application.getOrderNo());
         LambdaQueryWrapper<CommissionAdjust> unfinishedWrapper = new LambdaQueryWrapper<CommissionAdjust>()
             .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
-            .eq(CommissionAdjust::getContractNo, application.getContractNo());
+            .eq(CommissionAdjust::getContractNo, application.getContractNo())
+            .and(appOrderNo != null, w -> w
+                .eq(CommissionAdjust::getOrderNo, appOrderNo)
+                .or().isNull(CommissionAdjust::getOrderNo));
         Long unfinished = adjustMapper.selectCount(unfinishedWrapper);
         if (unfinished != null && unfinished > 0) {
-            throw new ServiceException("该合同已有审批中的结佣调整单，请待其审批完成后再发起新调整");
+            throw new ServiceException("该订单已有审批中的结佣调整单，请待其审批完成后再发起新调整");
         }
 
         // 计算调整前金额与差额
@@ -251,19 +255,25 @@ public class CommissionAdjustService {
     }
 
     /**
-     * 前端预检：该合同是否存在审批中的结佣调整单（SUBMITTED/APPROVED）。
-     * <p>结佣调整直接修改 PERF_EXPECT 事实，同合同并发调整会互相覆盖，故按合同号互斥。
+     * 前端预检：该订单是否存在审批中的结佣调整单（SUBMITTED/APPROVED）。
+     * <p>互斥粒度为「合同+订单」（调整只 supersede 本订单双键事实，同合同他订单不阻塞）；
+     * orderNo 为空（历史无订单单/调用方未传）时退合同号口径。
      *
      * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
      * @return true=存在在途调整单，前端应禁用提交
      */
-    public boolean hasInFlightAdjust(String contractNo) {
+    public boolean hasInFlightAdjust(String contractNo, String orderNo) {
         if (StringUtils.isBlank(contractNo)) {
             return false;
         }
+        String on = StringUtils.trimToNull(orderNo);
         Long count = adjustMapper.selectCount(new LambdaQueryWrapper<CommissionAdjust>()
             .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
-            .eq(CommissionAdjust::getContractNo, contractNo));
+            .eq(CommissionAdjust::getContractNo, contractNo)
+            .and(on != null, w -> w
+                .eq(CommissionAdjust::getOrderNo, on)
+                .or().isNull(CommissionAdjust::getOrderNo)));
         return count != null && count > 0;
     }
 

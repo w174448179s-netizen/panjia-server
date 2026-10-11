@@ -81,15 +81,17 @@ public class CommissionAdjustController extends BaseController {
     }
 
     /**
-     * 前端预检：指定合同是否存在审批中的结佣调整单。
-     * <p>结佣调整按合同级互斥（同合同任意在途调整单都会改共享 PERF_EXPECT 事实），
-     * 前端打开调整弹窗前调用，存在在途单时禁用提交。
+     * 前端预检：指定订单是否存在审批中的结佣调整单。
+     * <p>互斥粒度为「合同+订单」（同合同他订单在途调整不阻塞本订单）；
+     * orderNo 可空，为空时退合同号口径（历史无订单单兼容）。
      *
      * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
      */
     @SaCheckPermission("commission:adjust:list")
     @GetMapping("/in-flight-check")
-    public R<Boolean> checkInFlight(@RequestParam String contractNo) {
-        return R.ok(adjustService.hasInFlightAdjust(contractNo));
+    public R<Boolean> checkInFlight(@RequestParam String contractNo,
+                                    @RequestParam(required = false) String orderNo) {
+        return R.ok(adjustService.hasInFlightAdjust(contractNo, orderNo));
     }
 }

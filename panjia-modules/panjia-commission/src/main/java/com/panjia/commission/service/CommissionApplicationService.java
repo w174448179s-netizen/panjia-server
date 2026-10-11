@@ -167,40 +167,54 @@ public class CommissionApplicationService {
     // ==================== 发起结佣（按合同） ====================
 
     /**
-     * 单个发起结佣并提交审批（拉取该合同事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
+     * 单个发起结佣并提交审批（拉取该订单事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
      * <p>
      * 业务人员一次操作即完成发起+提交，无需再单独点"提交"按钮。
-     * 兼容驳回重提：该合同已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
-     * 新流程前置（§3.2）：合同实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
+     * 兼容驳回重提：该订单已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
+     * 新流程前置（§3.2）：订单实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
+     * <p>
+     * 键口径（2026-10-12）：列表行合同号、订单号同传，<b>以订单号为准</b>——业务键 bizKey
+     * 恒取订单号（同合同多订单各自独立发起、互不串单）；合同号用于 REAL 事实双键 AND 精确
+     * 限定与申请单快照归一化。orderNo 为空（历史/手工入口）时 bizKey 退合同号，
+     * 由 {@link #assertSingleOrderScope} 多订单防串单兜底拦截。
      * <p>
      * 与批量发起共用 {@link BatchApplyContext} 预加载机制：活跃/驳回单、实收事实、应收金额
      * 各一次查询载入上下文，消除 5 参 {@link #apply} 与 {@link #createApplicationWithItems}
      * 内部的逐项重复查询（P0：原单发链路 apply 与 createApplicationWithItems 各查一遍活跃单）。
      *
      * @param period     业绩归属月（结算月 YYYY-MM）
-     * @param contractNo 合同号
+     * @param contractNo 合同号（必填）
+     * @param orderNo    订单号（列表发起必传，为空退合同号口径）
      * @param operatorId 发起人 ID
      * @return 申请单（已提交，进入审批流）
      */
     @Transactional(rollbackFor = Exception.class)
-    public CommissionApplication apply(String period, String contractNo, Long operatorId) {
+    public CommissionApplication apply(String period, String contractNo, String orderNo, Long operatorId) {
         if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
             throw new ServiceException("结算月与合同号不能为空");
         }
         checkPeriodOpen(period, "发起结佣");
+        // 业务键以订单号为准：ctx 各 Map（申请单/事实/应收）统一按 bizKey 索引，
+        // 5 参 apply 与 createApplicationWithItems 无需感知输入是合同号还是订单号
+        String bizKey = StringUtils.isNotBlank(orderNo) ? orderNo.trim() : contractNo.trim();
         BatchApplyContext ctx = new BatchApplyContext();
-        // 活跃/驳回申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）
-        loadApplicationsBatch(period, List.of(contractNo), ctx);
-        // 实收事实：跨期查找（period 传 null），发起月不必与实收月一致
-        ctx.factsMap.put(contractNo,
-            performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL));
+        // 活跃/驳回申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）；
+        // 输入为订单号时归组自动命中 order_no 索引
+        loadApplicationsBatch(period, List.of(bizKey), ctx);
+        // 实收事实：跨期查找（period 传 null），发起月不必与实收月一致。
+        // 有订单号走 (orderNo AND contractNo) 双键精确，只装该订单实收行，绝不串同合同他订单；
+        // 无订单号退合同号 OR 口径（多订单时由 createApplicationWithItems 内防串单校验拒绝）
+        List<PerformanceFactSummaryDTO> realFacts = StringUtils.isNotBlank(orderNo)
+            ? performanceQueryPort.findActiveByBizKey(null, orderNo.trim(), contractNo.trim(), FACT_TYPE_REAL)
+            : performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL);
+        ctx.factsMap.put(bizKey, realFacts);
         // 应收金额：跨期口径一次查（命中才入 ctx，未命中由 createApplicationWithItems 走宽捞+退化）
         BigDecimal expect = performanceQueryPort
-            .sumExpectAmountsByKeysCrossPeriod(java.util.List.of(contractNo)).get(contractNo);
+            .sumExpectAmountsByKeysCrossPeriod(java.util.List.of(bizKey)).get(bizKey);
         if (expect != null) {
-            ctx.expectedAmounts.put(contractNo, expect);
+            ctx.expectedAmounts.put(bizKey, expect);
         }
-        return apply(period, contractNo, operatorId, false, ctx);
+        return apply(period, bizKey, operatorId, false, ctx);
     }
 
     /**
@@ -304,14 +318,16 @@ public class CommissionApplicationService {
         String tokenValue = ServletUtils.getRequest().getHeader(tokenName);
         // 批量上下文：同步阶段缓存事实（避免 doApply 重复查）、预加载应收金额（避免逐单全表查）
         BatchApplyContext ctx = new BatchApplyContext();
-        // 应收金额一次性加载：跨月口径，以用户输入的业务键直接匹配（不依赖实收期间）
+        // 应收金额一次性加载：跨月口径，以用户输入的业务键直接匹配（不依赖实收期间）。
+        // 输入是订单号时直接命中；输入是合同号时键不匹配，下方按展开后的订单键逐单退化补算
         ctx.expectedAmounts.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(deduped));
         LinkedHashSet<String> myContracts = new LinkedHashSet<>();
         CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
-        syncResult.setTotal(deduped.size());
         // 事实一次批量加载（P0：原逐合同 N 次串行查询 → 分片批量，100 合同约省数秒）；
         // 跨期查找口径与单发一致（period 传 null）：发起月不必与实收月一致
         List<String> keyList = new ArrayList<>(deduped);
+        // 订单号→该订单实收事实（跨分片累积）：合同号输入展开其下全部订单后，按订单键取事实子集
+        Map<String, List<PerformanceFactSummaryDTO>> factsByOrder = new HashMap<>();
         for (int from = 0; from < keyList.size(); from += IN_KEYS_CHUNK) {
             List<String> chunkKeys = keyList.subList(from, Math.min(from + IN_KEYS_CHUNK, keyList.size()));
             List<PerformanceFactSummaryDTO> rows;
@@ -326,29 +342,64 @@ public class CommissionApplicationService {
             // 与逐键 findActiveByContract（contract_no = ? OR order_no = ?）语义一致
             Map<String, List<PerformanceFactSummaryDTO>> grouped = new HashMap<>();
             for (PerformanceFactSummaryDTO row : rows) {
-                if (row.getOrderNo() != null && deduped.contains(row.getOrderNo())) {
-                    grouped.computeIfAbsent(row.getOrderNo(), k -> new ArrayList<>()).add(row);
+                if (row.getOrderNo() != null) {
+                    factsByOrder.computeIfAbsent(row.getOrderNo(), k -> new ArrayList<>()).add(row);
+                    if (deduped.contains(row.getOrderNo())) {
+                        grouped.computeIfAbsent(row.getOrderNo(), k -> new ArrayList<>()).add(row);
+                    }
                 }
                 if (row.getContractNo() != null && deduped.contains(row.getContractNo())) {
                     grouped.computeIfAbsent(row.getContractNo(), k -> new ArrayList<>()).add(row);
                 }
             }
+            // 输入键 → 实际发起的订单键集合（2026-10-12）：
+            //  · 输入本身是订单号（事实中存在 order_no=输入键）→ 只发起该订单，防同批合同号串入；
+            //  · 输入是合同号 → 展开为该合同下全部订单，逐张发起（同合同多订单各结各的佣）；
+            //  · 无实收事实 → 保留原键，进入异步后由 apply 报「无实收记录」计入失败。
             for (String key : chunkKeys) {
                 List<PerformanceFactSummaryDTO> facts = grouped.getOrDefault(key, Collections.emptyList());
-                // 空键也占位：createApplicationWithItems 以 containsKey 短路复用缓存
-                ctx.factsMap.putIfAbsent(key, facts);
-                // 宽捞应收未命中的键：用实收事实 (订单号, 合同号) 对退化补算
-                // （「贝壳新签 order_no 误填成合同号」场景宽捞键=实收订单号，新签行两列都是合同号）
-                if (!ctx.expectedAmounts.containsKey(key) && !facts.isEmpty()) {
-                    ctx.expectedAmounts.put(key, sumExpectDegraded(facts.get(0)));
+                if (facts.isEmpty()) {
+                    ctx.factsMap.putIfAbsent(key, Collections.emptyList());
+                    myContracts.add(key);
+                    continue;
                 }
-                // 发起结佣不再校验合同部门归属：合同本身无门店属性，部门归属取决于明细下人员。
-                myContracts.add(key);
+                boolean inputIsOrder = facts.stream()
+                    .anyMatch(f -> key.equals(f.getOrderNo()));
+                LinkedHashSet<String> targets = new LinkedHashSet<>();
+                if (inputIsOrder) {
+                    targets.add(key);
+                } else {
+                    for (PerformanceFactSummaryDTO f : facts) {
+                        if (StringUtils.isNotBlank(f.getOrderNo())) {
+                            targets.add(f.getOrderNo());
+                        }
+                    }
+                    // 事实行全部缺订单号的脏数据：无法按订单展开，保留原键走防串单/报错路径
+                    if (targets.isEmpty()) {
+                        targets.add(key);
+                    }
+                }
+                for (String target : targets) {
+                    List<PerformanceFactSummaryDTO> targetFacts = key.equals(target)
+                        ? facts : factsByOrder.getOrDefault(target, Collections.emptyList());
+                    // 空键也占位：createApplicationWithItems 以 containsKey 短路复用缓存
+                    ctx.factsMap.putIfAbsent(target, targetFacts);
+                    // 宽捞应收未命中的订单键：用实收事实 (订单号, 合同号) 对退化补算
+                    // （「贝壳新签 order_no 误填成合同号」场景宽捞键=实收订单号，新签行两列都是合同号）
+                    if (!ctx.expectedAmounts.containsKey(target) && !targetFacts.isEmpty()) {
+                        ctx.expectedAmounts.put(target, sumExpectDegraded(targetFacts.get(0)));
+                    }
+                    // 发起结佣不再校验合同部门归属：合同本身无门店属性，部门归属取决于明细下人员。
+                    myContracts.add(target);
+                }
             }
         }
+        // total 以展开后的订单数为准（查询失败整片跳过的输入键计入 skip，不占 total）
+        int totalTargets = myContracts.size();
+        syncResult.setTotal(totalTargets);
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
-        log.info("[结佣-批量发起] period={}, total={}, myContracts={}, skipped={}, operator={}",
-            applyPeriod, deduped.size(), myContracts.size(), syncResult.getSkipped(), operatorId);
+        log.info("[结佣-批量发起] period={}, 输入={}, 展开订单={}, skipped={}, operator={}",
+            applyPeriod, deduped.size(), totalTargets, syncResult.getSkipped(), operatorId);
         final CommissionBatchResultVo preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> runWithOperatorToken(tokenName, tokenValue, () -> {
@@ -1036,11 +1087,12 @@ public class CommissionApplicationService {
 
     /**
      * 按合同号批量审批（CompletableFuture 挂起等待，线程池逐单办理当前待办节点）。
-     * <p>去重合同号，非 SUBMITTED 或无待办任务的跳过。单合同失败不阻断整批。
+     * <p>去重输入键，非 SUBMITTED 或无待办任务的跳过。单合同/订单失败不阻断整批。
+     * 输入合同号→展开该合同下全部订单的申请单；输入订单号→仅审该订单；混录按申请单 ID 去重。
      * 异步线程用 completeTaskAsLoginUser 走引擎原生鉴权。
      *
      * @param period      结算月
-     * @param contractNos 合同号列表（允许重复，内部去重）
+     * @param contractNos 合同号/订单号列表（允许重复，内部去重）
      * @param operatorId  操作人 ID（异步线程无 Sa-Token 上下文，同步阶段捕获）
      * @return 批量审批结果
      */
@@ -1064,33 +1116,61 @@ public class CommissionApplicationService {
         // 同步阶段过滤：在 HTTP 线程中有 Sa-Token 上下文。
         // ① 一条 IN 查询取所有 SUBMITTED 申请单（替代逐单 selectOne 的 N 次查询）；
         // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
+        // 键口径与批量发起一致（2026-10-12）：输入合同号→展开该合同下全部订单的申请单逐张审；
+        // 输入订单号→只审该订单；同批混录按申请单 ID 去重，避免同一单办两次。
         CommissionBatchResultVo syncResult = new CommissionBatchResultVo();
-        syncResult.setTotal(deduped.size());
-        Map<String, CommissionApplication> submittedApps = loadSubmittedApplicationsBatch(period, deduped);
-        List<CommissionApplication> appList = submittedApps.values().stream().distinct().toList();
-        Map<Long, MyTaskBrief> myTaskMap = appList.isEmpty()
-            ? Map.of()
-            : approvalPort.myCurrentTasks(BizType.COMMISSION,
-                appList.stream().map(CommissionApplication::getId).toList());
-        // 按用户输入顺序组装可办任务，异步直接用 taskId 办理
-        List<BatchApproveItem> approveItems = new ArrayList<>(deduped.size());
-        for (String contractNo : deduped) {
-            CommissionApplication application = submittedApps.get(contractNo);
-            if (application == null) {
-                syncResult.getSkippedContracts().add(contractNo);
+        List<CommissionApplication> submittedApps = loadSubmittedApplicationsBatch(period, deduped);
+        Map<String, List<CommissionApplication>> appsByContract = new HashMap<>();
+        Map<String, CommissionApplication> appsByOrder = new HashMap<>();
+        for (CommissionApplication app : submittedApps) {
+            if (StringUtils.isNotBlank(app.getContractNo())) {
+                appsByContract.computeIfAbsent(app.getContractNo(), k -> new ArrayList<>()).add(app);
+            }
+            if (StringUtils.isNotBlank(app.getOrderNo())) {
+                appsByOrder.putIfAbsent(app.getOrderNo(), app);
+            }
+        }
+        // 输入键 → 目标申请单（按 ID 去重保序：同合同各单仅审一次，混录合同号+订单号不重复）
+        LinkedHashMap<Long, CommissionApplication> targetApps = new LinkedHashMap<>();
+        int noAppKeyCount = 0;
+        for (String key : deduped) {
+            // 输入是订单号（存在 order_no=输入键的申请单）→ 只审该单；否则按合同号展开全部订单单
+            CommissionApplication orderApp = appsByOrder.get(key);
+            List<CommissionApplication> targets = orderApp != null
+                ? List.of(orderApp)
+                : appsByContract.getOrDefault(key, Collections.emptyList());
+            if (targets.isEmpty()) {
+                // 该合同/订单期间无 SUBMITTED 申请单：按输入键计入跳过
+                syncResult.getSkippedContracts().add(key);
+                noAppKeyCount++;
                 continue;
             }
+            for (CommissionApplication app : targets) {
+                targetApps.putIfAbsent(app.getId(), app);
+            }
+        }
+        Map<Long, MyTaskBrief> myTaskMap = targetApps.isEmpty()
+            ? Map.of()
+            : approvalPort.myCurrentTasks(BizType.COMMISSION, new ArrayList<>(targetApps.keySet()));
+        // 逐单鉴权：有当前用户可办任务才入异步办理；结果清单用申请单订单号（空则合同号）展示
+        List<BatchApproveItem> approveItems = new ArrayList<>(targetApps.size());
+        for (CommissionApplication application : targetApps.values()) {
+            String displayKey = StringUtils.isNotBlank(application.getOrderNo())
+                ? application.getOrderNo() : application.getContractNo();
             MyTaskBrief task = myTaskMap.get(application.getId());
             if (task == null) {
-                syncResult.getSkippedContracts().add(contractNo);
+                syncResult.getSkippedContracts().add(displayKey);
                 continue;
             }
-            approveItems.add(new BatchApproveItem(contractNo, application, task));
+            approveItems.add(new BatchApproveItem(displayKey, application, task));
         }
+        // total = 展开后的申请单数（无待办任务的已计入跳过）+ 无申请单的输入键数
+        syncResult.setTotal(targetApps.size() + noAppKeyCount);
         syncResult.setSkipped(syncResult.getSkippedContracts().size());
         syncResult.setFailed(syncResult.getFailedContracts().size());
-        log.info("[结佣-批量审批] period={}, total={}, myTasks={}, skipped={}, operator={}",
-            period, deduped.size(), approveItems.size(), syncResult.getSkipped(), operatorId);
+        log.info("[结佣-批量审批] period={}, 输入={}, 展开申请单={}, myTasks={}, skipped={}, operator={}",
+            period, deduped.size(), targetApps.size(), approveItems.size(),
+            syncResult.getSkipped(), operatorId);
         final CommissionBatchResultVo preResult = syncResult;
         return CompletableFuture.supplyAsync(
             () -> {
@@ -1118,13 +1198,14 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 分片 IN 查询批量取指定合同当月 SUBMITTED 申请单（批量审批预检用）。
-     * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
+     * 分片 IN 查询批量取指定合同/订单当月全部 SUBMITTED 申请单（批量审批预检用）。
+     * <p>双列 OR 命中：合同号输入会带回该合同下全部订单的申请单，由调用方按订单/合同分组展开；
+     * 同合同多订单各一张单，不再只取最新一张（2026-10-12）。
      */
-    private Map<String, CommissionApplication> loadSubmittedApplicationsBatch(
+    private List<CommissionApplication> loadSubmittedApplicationsBatch(
             String period, Collection<String> contractNos) {
         if (contractNos.isEmpty()) {
-            return Map.of();
+            return List.of();
         }
         List<CommissionApplication> apps = new ArrayList<>();
         for (List<String> chunk : chunkKeys(contractNos)) {
@@ -1135,26 +1216,7 @@ public class CommissionApplicationService {
                         .or().in(CommissionApplication::getOrderNo, chunk))
                     .eq(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED)));
         }
-        // 跨分片合并后按 ID 全局降序（下方 putIfAbsent 取最新依赖全局有序）
-        apps.sort((a, b) -> Long.compare(b.getId(), a.getId()));
-        Map<String, CommissionApplication> byContract = new HashMap<>();
-        Map<String, CommissionApplication> byOrder = new HashMap<>();
-        for (CommissionApplication app : apps) {
-            if (app.getContractNo() != null) {
-                byContract.putIfAbsent(app.getContractNo(), app);
-            }
-            if (app.getOrderNo() != null) {
-                byOrder.putIfAbsent(app.getOrderNo(), app);
-            }
-        }
-        Map<String, CommissionApplication> result = new HashMap<>(contractNos.size() * 2);
-        for (String input : contractNos) {
-            CommissionApplication app = byContract.getOrDefault(input, byOrder.get(input));
-            if (app != null) {
-                result.put(input, app);
-            }
-        }
-        return result;
+        return apps;
     }
 
     /**
@@ -1431,9 +1493,14 @@ public class CommissionApplicationService {
         // 封账判定：行期间=申请单归属期间（跨期发起时≠实收期间），不同期间懒加载判定缓存
         Map<String, Boolean> closedCache = new HashMap<>();
         for (PerformanceContractSummaryDTO c : contracts) {
-            CommissionApplication app = appMap.get(c.getContractNo());
-            if (app == null && StringUtils.isNotBlank(c.getOrderNo())) {
-                app = appMap.get(c.getOrderNo());
+            // 行→申请单匹配：必须先按行自身订单号精确命中，未命中再退合同号。
+            // 同合同多订单各自有单时，appMap 中合同号键只 putIfAbsent 到其中一张，
+            // 若先取合同号必然把另一订单行张冠李戴到这张单上（表现为两行显示同一张单、
+            // 作废一行两行同灭，2026-10-12 修复）
+            CommissionApplication app = StringUtils.isNotBlank(c.getOrderNo())
+                ? appMap.get(c.getOrderNo()) : null;
+            if (app == null && StringUtils.isNotBlank(c.getContractNo())) {
+                app = appMap.get(c.getContractNo());
             }
             // 实收审批通过后系统自动生成结佣草稿单，无申请单的合同不在结佣明细展示
             if (app == null || app.getStatus() == null) {
@@ -2052,13 +2119,28 @@ public class CommissionApplicationService {
         if (pendings.isEmpty()) {
             return;
         }
-        Map<String, CommissionAdjust> pendingByContract = new HashMap<>();
+        // 索引：有订单号的调整单按「合同+订单」精确归位（同合同他订单调整不误标本行）；
+        // order_no 为空的历史调整单无法区分订单，保留合同级兜底
+        Map<String, CommissionAdjust> pendingByOrderKey = new HashMap<>();
+        Map<String, CommissionAdjust> pendingByContractOnly = new HashMap<>();
         for (CommissionAdjust p : pendings) {
-            pendingByContract.putIfAbsent(p.getContractNo(), p);
+            if (StringUtils.isNotBlank(p.getOrderNo())) {
+                pendingByOrderKey.putIfAbsent(p.getContractNo() + "|" + p.getOrderNo(), p);
+            } else {
+                pendingByContractOnly.putIfAbsent(p.getContractNo(), p);
+            }
         }
         for (CommissionContractVo row : rows) {
-            CommissionAdjust pending = StringUtils.isBlank(row.getContractNo()) ? null
-                : pendingByContract.get(row.getContractNo());
+            if (StringUtils.isBlank(row.getContractNo())) {
+                continue;
+            }
+            CommissionAdjust pending = StringUtils.isNotBlank(row.getOrderNo())
+                ? pendingByOrderKey.get(row.getContractNo() + "|" + row.getOrderNo())
+                : null;
+            if (pending == null) {
+                // 仅无订单号的历史在途调整单才按合同号兜底标记
+                pending = pendingByContractOnly.get(row.getContractNo());
+            }
             if (pending == null) {
                 continue;
             }

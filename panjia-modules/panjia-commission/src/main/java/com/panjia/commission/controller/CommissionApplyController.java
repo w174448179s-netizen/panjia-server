@@ -113,13 +113,16 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 发起结佣（合同 + 月）：一次操作完成发起并提交审批，直接进入审批流。
+     * 发起结佣（订单 + 月）：一次操作完成发起并提交审批，直接进入审批流。
      * <p>
-     * 幂等：该合同当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
+     * 列表行同时携带合同号与订单号：以订单号为准精确装载该订单事实，同合同多订单互不串单；
+     * orderNo 为空（历史入口）时退合同号口径，由服务端多订单防串单校验兜底。
+     * <p>
+     * 幂等：该订单当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
      * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
      * 已审批/锁定拒绝，变更走调整单。
      *
-     * @param dto 发起条件（期间 + 合同号）
+     * @param dto 发起条件（期间 + 合同号 + 可选订单号）
      * @return 申请单 ID
      */
     @SaCheckPermission("commission:apply:add")
@@ -127,7 +130,7 @@ public class CommissionApplyController extends BaseController {
     @PostMapping
     public R<Long> add(@Validated @RequestBody CommissionApplyCreateBo dto) {
         CommissionApplication application = applicationService.apply(
-            dto.getPeriod(), dto.getContractNo(), LoginHelper.getUserId());
+            dto.getPeriod(), dto.getContractNo(), dto.getOrderNo(), LoginHelper.getUserId());
         return R.ok("发起成功", application.getId());
     }
 
