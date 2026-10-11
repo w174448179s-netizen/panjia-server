@@ -70,14 +70,17 @@ public interface ReceivedRealFactPort {
     long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys);
 
     /**
-     * 按业务键集合（订单号/合同号）<b>跨期间</b>批量查 ACTIVE 实收明细的归属期间集合。
-     * <p>用途：结佣发起页同期互斥排除——判断同一合同各实收期间是否均已有活跃结佣单。
-     * 任一业务键（order_no 或 contract_no）命中即计入，调用方按输入键取值。
+     * 结佣发起页主查询：实收<b>审批通过</b>的审批单行（订单维度，一行=一张审批单）。
+     * 展示字段取审批单快照，员工数/明细数经实收明细聚合现算；
+     * 门店（含下级）与员工过滤经实收明细判定，keyword（合同号/订单号/房源地址）与 bizType 下推 SQL。
      *
-     * @param bizKeys 订单号或合同号集合（不可为空）
-     * @return bizKey → 该合同全部 ACTIVE 明细的期间集合；无 ACTIVE 明细的键不在结果中
+     * @param deptId     门店 ID（null 查全部；非 null 含下级部门）
+     * @param employeeId 员工 ID（null 不过滤）
+     * @param keyword    关键字（可空）
+     * @param bizType    业务类型（可空；精确匹配）
+     * @return 审批单行（按签约日期倒序，id 次序兜底）；无数据返回空列表
      */
-    Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys);
+    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType);
 
     /**
      * 批量查合同维度「调整前」实收金额合计。

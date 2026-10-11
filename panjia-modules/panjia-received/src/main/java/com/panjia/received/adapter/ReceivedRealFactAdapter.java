@@ -122,20 +122,8 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
-    public Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys) {
-        if (bizKeys == null || bizKeys.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        List<Map<String, Object>> rows = realMapper.selectActivePeriodsByKeys(bizKeys);
-        Map<String, Set<String>> result = new HashMap<>();
-        for (Map<String, Object> row : rows) {
-            Object key = row.get("bizKey");
-            Object period = row.get("period");
-            if (key != null && period != null) {
-                result.computeIfAbsent(String.valueOf(key), k -> new HashSet<>()).add(String.valueOf(period));
-            }
-        }
-        return result;
+    public List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType) {
+        return realMapper.selectApprovedApplies(deptId, employeeId, keyword, bizType);
     }
 
     @Override

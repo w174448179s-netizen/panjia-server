@@ -316,33 +316,71 @@ public interface ReceivedRealFactMapper {
                                            @Param("keys") Collection<String> keys);
 
     /**
-     * 按业务键集合查 ACTIVE 明细的 (业务键, 期间) 去重集合（结佣发起页跨期互斥排除用）。
-     * 输入键按 contract_no 或 order_no 命中合同，返回该合同全部 ACTIVE 明细的期间。
+     * 结佣发起页主查询：实收审批通过的审批单行（订单维度，一行=一张审批单，同订单跨期间多行）。
+     * 展示字段全部取审批单快照（无需关联实收合同表）；员工数/明细数按 received_apply_id
+     * 对 ACTIVE 明细聚合现算（item_count 为建单快照，明细调整后会漂移，不可用）；
+     * keyword 命中合同号/订单号/房源地址，bizType 精确匹配；
+     * 门店过滤走明细 COALESCE(dd.dept_id, rc.dept_id, e.dept_id)（审批单 dept_id 快照为空），
+     * 员工过滤走明细 COALESCE(dd.employee_id, 工号兜底 e.employee_id)。
      */
     @Select("""
         <script>
-        WITH k(key) AS (
-          <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
-        ),
-        hit AS (
-            SELECT rc.id, rc.contract_no, rc.order_no
-            FROM k JOIN pj_received_contract rc ON rc.order_no = k.key
-            UNION
-            SELECT rc.id, rc.contract_no, rc.order_no
-            FROM k JOIN pj_received_contract rc ON rc.contract_no = k.key
-        )
-        SELECT h.order_no AS "bizKey", rd.period AS "period"
-        FROM hit h
-        JOIN pj_received_detail rd ON rd.contract_id = h.id AND rd.detail_status = 'ACTIVE'
-        WHERE h.order_no IS NOT NULL
-        UNION
-        SELECT h.contract_no AS "bizKey", rd.period AS "period"
-        FROM hit h
-        JOIN pj_received_detail rd ON rd.contract_id = h.id AND rd.detail_status = 'ACTIVE'
-        WHERE h.contract_no IS NOT NULL
+        SELECT ra.id AS "rowId",
+               ra.contract_no AS "contractNo",
+               ra.order_no AS "orderNo",
+               ra.biz_type AS "bizType",
+               ra.property_address AS "propertyAddress",
+               ra.business_date AS "businessDate",
+               ra.period AS "period",
+               'APPROVED' AS "receivedStatus",
+               ra.received_amount AS "amount",
+               agg.detail_count AS "detailCount",
+               agg.employee_count AS "employeeCount"
+        FROM pj_perf_received_apply ra
+        LEFT JOIN (
+            SELECT dd.received_apply_id,
+                   COUNT(*) AS detail_count,
+                   COUNT(DISTINCT COALESCE(dd.employee_id::text, dd.employee_external_code)) AS employee_count
+            FROM pj_received_detail dd
+            WHERE dd.detail_status = 'ACTIVE'
+            GROUP BY dd.received_apply_id
+        ) agg ON agg.received_apply_id = ra.id
+        WHERE ra.status = 'APPROVED'
+        <if test="keyword != null and keyword != ''">
+          AND (ra.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
+               OR ra.order_no LIKE CONCAT('%', #{keyword}::text, '%')
+               OR ra.property_address LIKE CONCAT('%', #{keyword}::text, '%'))
+        </if>
+        <if test="bizType != null and bizType != ''">AND ra.biz_type = #{bizType}</if>
+        <if test="deptId != null">
+          AND EXISTS (
+              SELECT 1 FROM pj_received_detail dd
+              JOIN pj_received_contract rc ON rc.id = dd.contract_id
+              LEFT JOIN pj_people_employee e
+                     ON (e.employee_id = dd.employee_id
+                         OR (dd.employee_id IS NULL AND e.employee_code = dd.employee_external_code))
+              WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
+                AND (COALESCE(dd.dept_id, rc.dept_id, e.dept_id) = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd
+                                WHERE sd.dept_id = COALESCE(dd.dept_id, rc.dept_id, e.dept_id)
+                                  AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%'))))
+        </if>
+        <if test="employeeId != null">
+          AND EXISTS (
+              SELECT 1 FROM pj_received_detail dd
+              LEFT JOIN pj_people_employee e
+                     ON (e.employee_id = dd.employee_id
+                         OR (dd.employee_id IS NULL AND e.employee_code = dd.employee_external_code))
+              WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
+                AND COALESCE(dd.employee_id, e.employee_id) = #{employeeId})
+        </if>
+        ORDER BY ra.business_date DESC, ra.id DESC
         </script>
         """)
-    List<Map<String, Object>> selectActivePeriodsByKeys(@Param("keys") Collection<String> keys);
+    List<PerformanceContractSummaryDTO> selectApprovedApplies(@Param("deptId") Long deptId,
+                                                              @Param("employeeId") Long employeeId,
+                                                              @Param("keyword") String keyword,
+                                                              @Param("bizType") String bizType);
 
     /**
      * 批量查合同维度「调整前」实收金额合计：以各业务键当前 ACTIVE rd 的 sourceKey 为准，

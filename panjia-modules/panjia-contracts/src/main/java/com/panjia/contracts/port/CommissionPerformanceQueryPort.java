@@ -121,15 +121,21 @@ public interface CommissionPerformanceQueryPort {
     long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys, String factType);
 
     /**
-     * 按业务键集合（订单号/合同号）<b>跨期间</b>批量查 ACTIVE 事实的归属期间集合。
-     * <p>用途：结佣发起页同期互斥排除——判断同一合同各实收期间是否均已有活跃结佣单。
-     * 同一事实同时计入其订单号键与合同号键（均非空时），调用方按输入键取值。
+     * 结佣发起页主查询：实收<b>审批通过</b>的审批单行（订单维度，一行=一张审批单）。
+     * <p>
+     * 展示字段取审批单快照（合同号/订单号/业务类型/房源地址/签约日期/实收金额），
+     * 员工数与明细数经实收明细按 received_apply_id 聚合现算；
+     * 门店（含下级）与员工过滤经实收明细判定（审批单 dept_id 快照为空）；
+     * keyword 命中合同号/订单号/房源地址，bizType 精确匹配，均下推 SQL。
+     * 排除已结佣与结佣金额（订单号→合同号退化）由结佣域处理。
      *
-     * @param bizKeys  订单号或合同号集合（不可为空）
-     * @param factType 事实口径（FactType code：PERF_REAL 走实收拆表，其余走 pj_perf_fact）
-     * @return bizKey → 该合同全部 ACTIVE 事实的期间集合；无事实的键不在结果中
+     * @param deptId     门店 ID（null 查全部；非 null 含下级部门）
+     * @param employeeId 员工 ID（null 不过滤；经实收明细 COALESCE(员工 ID, 工号兜底) 匹配）
+     * @param keyword    关键字（可空；合同号/订单号/房源地址 LIKE）
+     * @param bizType    业务类型（可空；精确匹配）
+     * @return 审批单行（按签约日期倒序，id 次序兜底）；无数据返回空列表
      */
-    Map<String, Set<String>> listActivePeriodsByKeys(Collection<String> bizKeys, String factType);
+    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType);
 
     /**
      * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
