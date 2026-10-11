@@ -6,6 +6,7 @@ import lombok.NoArgsConstructor;
 import java.io.Serial;
 import java.io.Serializable;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -52,6 +53,14 @@ public class AddMemberPayload implements Serializable {
     /** 新角色人业绩比例（角色占比；可空=不设置占比；>0，不强制合计=100%） */
     private BigDecimal newShareRatio;
 
+    /**
+     * 新角色人清单（2026-10-11 起支持一张单添加多人）。
+     * <p>新快照以此为权威列表；为空表示 2026-10-11 前的旧快照（仅一个新人，
+     * 字段在顶层），读取统一走 {@link #effectiveMembers()} 回退。
+     * 新快照顶层单新人字段仍写第一个新人，兼容结佣镜像等历史读取方。
+     */
+    private List<NewMember> members;
+
     /** 发起时合同业绩合计快照（调整前） */
     private BigDecimal contractTotal;
 
@@ -91,5 +100,67 @@ public class AddMemberPayload implements Serializable {
 
         /** 变动额（负=扣减） */
         private BigDecimal delta;
+    }
+
+    /**
+     * 单个新角色人快照（多人调整单的权威列表项）。
+     */
+    @Data
+    @NoArgsConstructor
+    public static class NewMember implements Serializable {
+
+        @Serial
+        private static final long serialVersionUID = 1L;
+
+        /** 新角色人员工 ID */
+        private Long employeeId;
+
+        /** 新角色人工号 */
+        private String employeeCode;
+
+        /** 新角色人姓名 */
+        private String employeeName;
+
+        /** 业绩归属部门 ID（默认员工档案部门） */
+        private Long deptId;
+
+        /** 部门名称（详情/在途虚拟行展示用） */
+        private String deptName;
+
+        /** 角色类型（自由文本） */
+        private String roleType;
+
+        /** 该新角色人业绩金额 */
+        private BigDecimal amount;
+
+        /** 该新角色人业绩比例（角色占比；可空=不设置占比） */
+        private BigDecimal newShareRatio;
+    }
+
+    /**
+     * 有效新角色人清单（统一读取入口）：{@link #members} 优先（多人新快照）；
+     * 为空时回退顶层单新人字段（2026-10-11 前旧快照/结佣镜像单）。
+     *
+     * @return 不可为空的新角色人列表（可能为空列表，表示快照无新人）
+     */
+    public List<NewMember> effectiveMembers() {
+        if (members != null && !members.isEmpty()) {
+            return members;
+        }
+        if (newEmployeeId == null) {
+            return List.of();
+        }
+        NewMember m = new NewMember();
+        m.setEmployeeId(newEmployeeId);
+        m.setEmployeeCode(employeeCode);
+        m.setEmployeeName(employeeName);
+        m.setDeptId(deptId);
+        m.setDeptName(deptName);
+        m.setRoleType(roleType);
+        m.setAmount(amount);
+        m.setNewShareRatio(newShareRatio);
+        List<NewMember> fallback = new ArrayList<>(1);
+        fallback.add(m);
+        return fallback;
     }
 }

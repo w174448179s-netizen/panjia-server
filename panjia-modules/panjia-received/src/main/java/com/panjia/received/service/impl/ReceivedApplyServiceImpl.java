@@ -1,6 +1,7 @@
 package com.panjia.received.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.FactType;
@@ -1374,33 +1375,65 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     public PageResult<ReceivedApply> list(ReceivedApplyBo query, PageQuery pageQuery) {
         // §3.6 数据权限：所有登录用户仅本部门（含下级）审批单（统一走 DeptScopeUtils，超管不限）
         Long effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query == null ? null : query.getDeptId(), deptService::selectDeptAndChildById, "实收审批");
-        // 默认排除已作废（CANCELLED），与业绩明细只查 ACTIVE 一致；
-        // 前端显式传 status 时按指定状态查询（含 CANCELLED）
-        LambdaQueryWrapper<ReceivedApply> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), ReceivedApply::getPeriod, query.getPeriod())
-            .eq(query.getBatchId() != null, ReceivedApply::getBatchId, query.getBatchId())
-            // 业务类型已落库（biz_type，见 V140009）：筛选下推到 SQL（旧实现在接口层无谓传入后被静默忽略）
-            .eq(StringUtils.isNotBlank(query.getBizType()), ReceivedApply::getBizType, query.getBizType())
-            .ne(StringUtils.isBlank(query.getStatus()),
-                ReceivedApply::getStatus, ReceivedApplyStatus.CANCELLED)
-            .eq(StringUtils.isNotBlank(query.getStatus()),
-                ReceivedApply::getStatus, ReceivedApplyStatus.fromCode(query.getStatus()))
-            .and(StringUtils.isNotBlank(query.getKeyword()), w -> w
-                .like(ReceivedApply::getContractNo, query.getKeyword())
-                .or().like(ReceivedApply::getOrderNo, query.getKeyword())
-                .or().like(ReceivedApply::getPropertyAddress, query.getKeyword()))
-            // 三个业绩列表统一排序：签约/认购时间倒序 → 订单号(空取合同号)次序 → id 倒序兜底，
-            // 不再按建单时间排（批量导入时建单时间集中且与业务发生顺序无关）
-            .orderByDesc(ReceivedApply::getBusinessDate)
+        // 分页查询：三个业绩列表统一排序（签约/认购时间倒序 → 订单号(空取合同号)次序 → id 倒序兜底），
+        // 不再按建单时间排（批量导入时建单时间集中且与业务发生顺序无关）
+        QueryWrapper<ReceivedApply> wrapper = buildListCondition(query, effectiveDeptId);
+        wrapper.orderByDesc("business_date")
             .last(", COALESCE(order_no, contract_no), id DESC");
-        // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）
+        Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
+        List<ReceivedApply> records = page.getRecords();
+        fillContractMetrics(records);
+
+        // 全量实收合计：与列表完全同条件（不含排序）一次聚合，随 summary 返回；
+        // 前端汇总条展示「本查询条件下的总实收」，不能只算当前页
+        QueryWrapper<ReceivedApply> sumWrapper = buildListCondition(query, effectiveDeptId);
+        sumWrapper.select("COALESCE(SUM(received_amount), 0) AS total_received_amount");
+        List<Map<String, Object>> sumRows = applyMapper.selectMaps(sumWrapper);
+        BigDecimal totalReceivedAmount = BigDecimal.ZERO;
+        if (sumRows != null && !sumRows.isEmpty() && sumRows.get(0) != null) {
+            Object v = sumRows.get(0).get("total_received_amount");
+            if (v == null) {
+                v = sumRows.get(0).get("totalReceivedAmount");
+            }
+            if (v != null) {
+                totalReceivedAmount = new BigDecimal(String.valueOf(v));
+            }
+        }
+
+        PageResult<ReceivedApply> result = PageResult.build(records, page.getTotal());
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("totalReceivedAmount", totalReceivedAmount);
+        result.setSummary(summary);
+        return result;
+    }
+
+    /**
+     * 实收审批单列表 WHERE 条件（分页查询与全量汇总共用，保证口径一致）。
+     * <p>
+     * 默认排除已作废（CANCELLED），与业绩明细只查 ACTIVE 一致；
+     * 前端显式传 status 时按指定状态查询（含 CANCELLED）。
+     * 审批节点数据隔离：审批中单据只允许本人角色对应节点可见（前端不再传节点参数，防绕过由服务端强制）；
+     * 门店/组别筛选通过实收明细关联员工归属部门过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。
+     * 拆表后 PERF_REAL 已迁出 pj_perf_fact → pj_received_detail；导入时 employee_id 暂留空、
+     * 只存 employee_external_code，故须按外部工号关联 pj_people_employee 取 dept_id
+     * （兼容后续 employee_id 回填：优先 ID 直连，为空时按工号匹配）。
+     */
+    private QueryWrapper<ReceivedApply> buildListCondition(ReceivedApplyBo query, Long effectiveDeptId) {
+        QueryWrapper<ReceivedApply> wrapper = new QueryWrapper<>();
+        wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), "period", query.getPeriod())
+            .eq(query.getBatchId() != null, "batch_id", query.getBatchId())
+            // 业务类型已落库（biz_type，见 V140009）：筛选下推到 SQL
+            .eq(StringUtils.isNotBlank(query.getBizType()), "biz_type", query.getBizType())
+            .ne(StringUtils.isBlank(query.getStatus()), "status", ReceivedApplyStatus.CANCELLED)
+            .eq(StringUtils.isNotBlank(query.getStatus()), "status", ReceivedApplyStatus.fromCode(query.getStatus()))
+            .and(StringUtils.isNotBlank(query.getKeyword()), w -> w
+                .like("contract_no", query.getKeyword())
+                .or().like("order_no", query.getKeyword())
+                .or().like("property_address", query.getKeyword()));
+        // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见
         applyApprovalNodeScope(wrapper);
-        // 门店/组别筛选：通过实收明细关联员工归属部门过滤（合同下人员可能跨部门，不能用审批单的单一 dept_id）。
-        // 拆表后 PERF_REAL 已迁出 pj_perf_fact → pj_received_detail；导入时 employee_id 暂留空、
-        // 只存 employee_external_code，故须按外部工号关联 pj_people_employee 取 dept_id
-        // （兼容后续 employee_id 回填：优先 ID 直连，为空时按工号匹配）。
         if (effectiveDeptId != null) {
-            wrapper.and(w -> w.apply(
+            wrapper.apply(
                 "EXISTS (SELECT 1 FROM pj_received_detail rd"
                     + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
                     + "   OR (NOT EXISTS (SELECT 1 FROM pj_people_employee x WHERE x.employee_id = rd.employee_id)"
@@ -1410,11 +1443,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     + " AND (e.dept_id = {0}"
                     + " OR e.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
                     + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))))",
-                effectiveDeptId));
+                effectiveDeptId);
         }
-        // 员工筛选：通过实收明细关联员工（口径同上，employee_id 未回填时按外部工号匹配）
+        // 员工筛选：通过实收明细关联员工（口径同上）
         if (query.getEmployeeId() != null) {
-            wrapper.and(w -> w.apply(
+            wrapper.apply(
                 "EXISTS (SELECT 1 FROM pj_received_detail rd"
                     + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
                     + "   OR (NOT EXISTS (SELECT 1 FROM pj_people_employee x WHERE x.employee_id = rd.employee_id)"
@@ -1422,12 +1455,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     + " WHERE rd.received_apply_id = pj_perf_received_apply.id"
                     + " AND rd.detail_status = 'ACTIVE'"
                     + " AND e.employee_id = {0})",
-                query.getEmployeeId()));
+                query.getEmployeeId());
         }
-        Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
-        List<ReceivedApply> records = page.getRecords();
-        fillContractMetrics(records);
-        return PageResult.build(records, page.getTotal());
+        return wrapper;
     }
 
     @Override
@@ -1792,6 +1822,31 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (LoginHelper.isSuperAdmin()) {
             return;
         }
+        List<String> myNodes = collectMyApprovalNodes();
+        if (myNodes.isEmpty()) {
+            wrapper.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED);
+        } else {
+            wrapper.and(w -> w.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
+                .or().in(ReceivedApply::getCurrentNode, myNodes));
+        }
+    }
+
+    /** 同 {@link #applyApprovalNodeScope(LambdaQueryWrapper)}，字符串列版（全量汇总聚合查询共用）。 */
+    private void applyApprovalNodeScope(QueryWrapper<ReceivedApply> wrapper) {
+        if (LoginHelper.isSuperAdmin()) {
+            return;
+        }
+        List<String> myNodes = collectMyApprovalNodes();
+        if (myNodes.isEmpty()) {
+            wrapper.ne("status", ReceivedApplyStatus.SUBMITTED);
+        } else {
+            wrapper.and(w -> w.ne("status", ReceivedApplyStatus.SUBMITTED)
+                .or().in("current_node", myNodes));
+        }
+    }
+
+    /** 当前登录用户角色对应的审批节点集合（FINANCE/DIRECTOR；无角色或无登录上下文返回空=不可见审批中单据）。 */
+    private List<String> collectMyApprovalNodes() {
         List<String> myNodes = new ArrayList<>();
         try {
             if (LoginHelper.isLogin() && LoginHelper.getLoginUser() != null) {
@@ -1808,12 +1863,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         } catch (Exception e) {
             log.debug("[实收审批] 无登录上下文，不授予任何审批节点可见性：{}", e.getMessage());
         }
-        if (myNodes.isEmpty()) {
-            wrapper.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED);
-        } else {
-            wrapper.and(w -> w.ne(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)
-                .or().in(ReceivedApply::getCurrentNode, myNodes));
-        }
+        return myNodes;
     }
 
     private Set<String> currentRoles() {

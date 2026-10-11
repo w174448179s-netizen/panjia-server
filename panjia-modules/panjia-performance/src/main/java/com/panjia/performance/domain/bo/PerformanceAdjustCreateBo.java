@@ -78,6 +78,14 @@ public class PerformanceAdjustCreateBo {
     /** 新角色人业绩归属部门（默认取员工档案部门，可改） */
     private Long newDeptId;
 
+    /**
+     * 新角色人清单（2026-10-11 起支持一张单添加多人）。
+     * <p>非空时以本清单为准（单人/多人统一走列表）；为空时回退
+     * {@link #newEmployeeId}/{@link #newRoleType}/{@link #newAmount} 等旧单字段，
+     * 保证旧版前端与历史调用方兼容。
+     */
+    private List<AddMemberItemBo> newMembers;
+
     /** 指定扣除清单：优先从指定既有角色人身上精确扣除，剩余由未指定行按占比等比分摊 */
     private List<AdjustDeductionBo> deductions;
 

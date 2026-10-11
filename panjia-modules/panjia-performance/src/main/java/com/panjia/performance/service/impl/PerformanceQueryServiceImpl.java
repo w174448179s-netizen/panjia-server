@@ -930,11 +930,14 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
      * 执行前既有事实未被替代，payload.allocations.factId 可直接命中当前 ACTIVE 行
      * （兜底按员工匹配）：回填每人 adjustPendingDelta / adjustPendingAmount；
      * 新角色人此时尚无事实行，按 payload 合成虚拟行（amount=null，0 → X，审批中标记）。
+     * 2026-10-11 起一张单可含多个新角色人，逐个合成虚拟行（旧快照回退顶层单新人字段）。
      */
     private void applyPendingAddMember(List<PerformanceManageVo> rows, String period, String factType,
                                        Map<String, Object> pending) {
         AddMemberPayload payload = parseAddMemberPayload(pending.get("payloadJson"));
-        if (payload == null || payload.getAllocations() == null || payload.getNewEmployeeId() == null) {
+        List<AddMemberPayload.NewMember> members = payload == null
+            ? List.of() : payload.effectiveMembers();
+        if (payload == null || payload.getAllocations() == null || members.isEmpty()) {
             return;
         }
         Map<Long, AddMemberPayload.Alloc> allocByFact = new HashMap<>();
@@ -965,37 +968,37 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             row.setAdjustPendingDelta(delta);
             row.setAdjustPendingAmount(MoneyUtil.round2(amt.add(delta)));
         }
-        // 新角色人虚拟行：合同字段从既有行复制，保证后续折算填充（按 bizType）口径一致
+        // 新角色人虚拟行：合同字段从既有行复制，保证后续折算填充（按 bizType）口径一致；逐个新人各加一行
         PerformanceManageVo sample = rows.get(0);
-        BigDecimal newAmount = payload.getAmount() != null
-            ? payload.getAmount()
-            : (pending.get("targetAmount") != null
-                ? new BigDecimal(pending.get("targetAmount").toString()) : BigDecimal.ZERO);
-        PerformanceManageVo member = new PerformanceManageVo();
-        member.setFactType(factType);
-        member.setPeriod(period);
-        member.setFactStatus("ACTIVE");
-        member.setOrderNo(sample.getOrderNo());
-        member.setContractNo(sample.getContractNo());
-        member.setBizType(sample.getBizType());
-        member.setFeeItem(sample.getFeeItem());
-        member.setPropertyAddress(sample.getPropertyAddress());
-        member.setBusinessDate(sample.getBusinessDate());
-        member.setEmployeeId(payload.getNewEmployeeId());
-        member.setEmployeeCode(payload.getEmployeeCode());
-        member.setEmployeeName(payload.getEmployeeName());
-        member.setDeptPath(payload.getDeptName());
-        member.setRoleType(payload.getRoleType());
-        member.setRoleName(payload.getRoleType());
-        member.setShareRatio(payload.getNewShareRatio());
-        member.setAmount(null);
-        member.setOriginalAmount(null);
-        member.setAdjustPending(true);
-        member.setAdjustPendingType("ADD_MEMBER");
-        member.setAdjustPendingAmount(MoneyUtil.round2(newAmount));
-        member.setAdjustPendingDelta(MoneyUtil.round2(newAmount));
-        member.setSettled(false);
-        rows.add(member);
+        for (AddMemberPayload.NewMember nm : members) {
+            BigDecimal newAmount = nm.getAmount() != null
+                ? MoneyUtil.round2(nm.getAmount()) : BigDecimal.ZERO;
+            PerformanceManageVo member = new PerformanceManageVo();
+            member.setFactType(factType);
+            member.setPeriod(period);
+            member.setFactStatus("ACTIVE");
+            member.setOrderNo(sample.getOrderNo());
+            member.setContractNo(sample.getContractNo());
+            member.setBizType(sample.getBizType());
+            member.setFeeItem(sample.getFeeItem());
+            member.setPropertyAddress(sample.getPropertyAddress());
+            member.setBusinessDate(sample.getBusinessDate());
+            member.setEmployeeId(nm.getEmployeeId());
+            member.setEmployeeCode(nm.getEmployeeCode());
+            member.setEmployeeName(nm.getEmployeeName());
+            member.setDeptPath(nm.getDeptName());
+            member.setRoleType(nm.getRoleType());
+            member.setRoleName(nm.getRoleType());
+            member.setShareRatio(nm.getNewShareRatio());
+            member.setAmount(null);
+            member.setOriginalAmount(null);
+            member.setAdjustPending(true);
+            member.setAdjustPendingType("ADD_MEMBER");
+            member.setAdjustPendingAmount(newAmount);
+            member.setAdjustPendingDelta(newAmount);
+            member.setSettled(false);
+            rows.add(member);
+        }
     }
 
     /**
@@ -1174,7 +1177,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 逆向回退一单已执行的「增加角色人」调整（工作数组原地修改）：
      * <ul>
-     *   <li>新角色人行（员工 + 角色命中 payload）：调整前不存在，工作值置 0；</li>
+     *   <li>新角色人行（员工 + 角色命中 payload 快照成员，支持一张单多个新人）：调整前不存在，工作值置 0；</li>
      *   <li>既有行：按 source_key（首选；执行后事实 id 已变但 source_key 沿用）
      *       或员工+角色 / 员工（兜底）命中快照分摊，工作值回加 −delta（扣减额被加回）。</li>
      * </ul>
@@ -1185,6 +1188,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (payload == null || payload.getAllocations() == null) {
             return;
         }
+        List<AddMemberPayload.NewMember> members = payload.effectiveMembers();
         Map<String, AddMemberPayload.Alloc> allocBySourceKey = new HashMap<>();
         Map<String, AddMemberPayload.Alloc> allocByEmpRole = new HashMap<>();
         Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
@@ -1203,10 +1207,17 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         }
         for (int i = 0; i < rows.size(); i++) {
             PerformanceManageVo row = rows.get(i);
-            // 新角色人行：还原为 0（0 → X 的调整前口径）
-            if (payload.getNewEmployeeId() != null
-                && payload.getNewEmployeeId().equals(row.getEmployeeId())
-                && (StringUtils.isBlank(payload.getRoleType()) || payload.getRoleType().equals(row.getRoleType()))) {
+            // 新角色人行：还原为 0（0 → X 的调整前口径），逐个快照成员按 员工+角色 命中
+            boolean isNewMemberRow = false;
+            for (AddMemberPayload.NewMember m : members) {
+                if (m.getEmployeeId() != null
+                    && m.getEmployeeId().equals(row.getEmployeeId())
+                    && (StringUtils.isBlank(m.getRoleType()) || m.getRoleType().equals(row.getRoleType()))) {
+                    isNewMemberRow = true;
+                    break;
+                }
+            }
+            if (isNewMemberRow) {
                 working[i] = BigDecimal.ZERO;
                 continue;
             }
