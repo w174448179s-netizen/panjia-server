@@ -86,6 +86,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
+    /** 双键未命中退化合同号匹配的安全闸门（同合同多订单禁退化、订单误填唯一订单才退化） */
+    private final com.panjia.performance.service.BizKeyMatchGuard bizKeyMatchGuard;
     private final PerformancePeriodCloseMapper periodCloseMapper;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final PerformanceViewLogService viewLogService;
@@ -575,20 +577,25 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     @Override
     public int createManualOffset(ManualOffsetBo bo, Long operatorId) {
-        // 按订单号+合同号双键跨期查 ACTIVE PERF_EXPECT 事实作为模板（同合同号挂多订单防串单；
-        // 订单号为空退化合同号口径），模板决定新事实归属的 contract_no/order_no
+        // 按订单号+合同号双键跨期查 ACTIVE PERF_EXPECT 事实作为模板（同合同号挂多订单防串单）；
+        // 双键未命中经闸门判定：合同事实订单维度唯一才退化合同号（兼容新签 order_no 误填合同号），
+        // 多订单禁止退化；orderNo 为空直接合同号旧口径。模板决定新事实归属的 contract_no/order_no
         List<PerformanceFact> templates;
         if (StringUtils.isNotBlank(bo.getOrderNo())) {
             templates = factMapper.selectActiveFactsByOrderAndContract(
                 null, FactType.PERF_EXPECT.getCode(), bo.getOrderNo(), bo.getContractNo());
             if (templates == null || templates.isEmpty()) {
-                log.warn("[手工冲正] 按订单号+合同号双键未查到模板事实，回退合同号匹配：orderNo={}, contractNo={}",
-                    bo.getOrderNo(), bo.getContractNo());
+                if (bizKeyMatchGuard.canDegradeActiveExpect(null, bo.getContractNo())) {
+                    log.warn("[手工冲正] 双键未命中且合同事实订单唯一，退化合同号匹配：orderNo={}, contractNo={}",
+                        bo.getOrderNo(), bo.getContractNo());
+                    templates = factMapper.selectActiveFactsByContractNo(
+                        null, FactType.PERF_EXPECT.getCode(), bo.getContractNo());
+                } else {
+                    log.warn("[手工冲正] 双键未命中且该合同存在多个订单，禁止退化：orderNo={}, contractNo={}",
+                        bo.getOrderNo(), bo.getContractNo());
+                }
             }
         } else {
-            templates = null;
-        }
-        if (templates == null || templates.isEmpty()) {
             templates = factMapper.selectActiveFactsByContractNo(
                 null, FactType.PERF_EXPECT.getCode(), bo.getContractNo());
         }

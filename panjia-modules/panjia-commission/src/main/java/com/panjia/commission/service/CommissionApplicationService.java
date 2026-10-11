@@ -28,7 +28,6 @@ import com.panjia.commission.mapper.CommissionItemMapper;
 import com.panjia.contracts.constant.BizType;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
-import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.event.CommissionApprovedEvent;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.port.ApprovalAction;

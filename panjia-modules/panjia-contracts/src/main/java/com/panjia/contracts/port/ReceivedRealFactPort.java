@@ -3,7 +3,6 @@ package com.panjia.contracts.port;
 import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
-import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 
 import java.math.BigDecimal;
 import java.util.Collection;
@@ -114,9 +113,12 @@ public interface ReceivedRealFactPort {
     Long transferDetail(Long detailId, Long targetDeptId, Long operatorId, Long adjustId);
 
     /**
-     * 实收自动对齐应收（§3.5）：同合同下 ACTIVE 实收明细按
-     * （员工工号 + 角色）配对 PERF_EXPECT ACTIVE 应收，金额/分摊比例不一致（超容差）时
-     * supersede 为应收口径，保留 receivedApplyId 关联；返回新旧明细映射供结佣域重绑。
+     * 统计某合同号在实收合同表（全局，不限期间/批次）的去重非空订单号数量。
+     * <p>双键未命中退化按合同号归属的闸门组成部分：新签事实订单唯一 <b>且</b> 实收合同订单唯一
+     * 才允许退化（兼容新签 order_no 误填成合同号），防止同合同多订单/分批到账单重复归属。
+     *
+     * @param contractNo 合同号
+     * @return 去重非空订单号数量
      */
-    ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId);
+    long countDistinctReceivedOrders(String contractNo);
 }

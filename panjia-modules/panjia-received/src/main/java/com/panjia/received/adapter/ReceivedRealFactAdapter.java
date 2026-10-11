@@ -3,12 +3,9 @@ package com.panjia.received.adapter;
 import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
-import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.PerformanceFactReversedEvent;
 import com.panjia.contracts.port.ReceivedRealFactPort;
-import com.panjia.performance.domain.PerformanceFact;
-import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.util.MoneyUtil;
 import com.panjia.received.domain.ReceivedContract;
 import com.panjia.received.domain.ReceivedDetail;
@@ -17,7 +14,6 @@ import com.panjia.received.mapper.ReceivedDetailMapper;
 import com.panjia.received.mapper.ReceivedRealFactMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.dromara.system.api.ConfigService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -30,7 +26,6 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -54,18 +49,10 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     private static final String REASON_SUPERSEDE = "SUPERSEDE";
     /** ReversedReason.MANUAL_ADJUST（调整单冲销） */
     private static final String REASON_MANUAL_ADJUST = "MANUAL_ADJUST";
-    private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
-
-    /** 配置项：实收应收差异容忍阈值（元），默认 1。 */
-    private static final String CONFIG_DIFF_TOLERANCE = "panjia.commission.diff_tolerance";
-    private static final BigDecimal DEFAULT_DIFF_TOLERANCE = BigDecimal.ONE;
 
     private final ReceivedRealFactMapper realMapper;
     private final ReceivedDetailMapper detailMapper;
     private final ReceivedContractMapper contractMapper;
-    /** PERF_EXPECT 仍在 pj_perf_fact：对齐/对照读应收（received 临时依赖 performance） */
-    private final PerformanceFactMapper factMapper;
-    private final ConfigService configService;
     private final EventPort eventPort;
 
     // ==================== 读 ====================
@@ -253,97 +240,14 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return supersede(oldDetail, patch, operatorId, adjustId).getId();
     }
 
-    // ==================== 写：对齐应收 ====================
+    // ==================== 退化闸门支撑 ====================
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
-    public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
-        List<ReceivedDetail> realDetails = realMapper.selectActiveDetailsByContract(period, null, contractNo);
-        List<PerformanceFact> expectFacts = factMapper.selectActiveFactsByContractNo(
-            period, FACT_TYPE_EXPECT, contractNo);
-
-        BigDecimal before = sumDetails(realDetails);
-        BigDecimal expectedTotal = expectFacts.stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        ReceivedAlignmentResultDTO result = new ReceivedAlignmentResultDTO();
-        result.setPeriod(period);
-        result.setContractNo(contractNo);
-        result.setReceivedTotalBefore(before);
-        result.setExpectedTotal(expectedTotal);
-
-        // 拆表后 rd.source_key（order|工号|期间|日期）与 PERF_EXPECT source_key 不同源，
-        // 按业务身份（员工工号 + 角色）分组配对；当前数据每组恰一条 rd（2026-08 实测 292/292）。
-        Map<String, List<ReceivedDetail>> realGroups = groupDetails(realDetails);
-        Map<String, List<PerformanceFact>> expectGroups = groupFacts(expectFacts);
-
-        List<Long> createdIds = new ArrayList<>();
-        Map<Long, Long> oldToNew = new LinkedHashMap<>();
-        int aligned = 0;
-        for (Map.Entry<String, List<ReceivedDetail>> entry : realGroups.entrySet()) {
-            List<ReceivedDetail> rdRows = entry.getValue();
-            List<PerformanceFact> exRows = expectGroups.getOrDefault(entry.getKey(), List.of());
-            if (exRows.isEmpty()) {
-                // 无对应应收（实收多出行）：保持不变
-                log.warn("[实收对齐] 实收明细无对应应收事实，保持不变：detailIds={}, group={}",
-                    rdRows.stream().map(ReceivedDetail::getId).toList(), entry.getKey());
-                continue;
-            }
-            BigDecimal realSum = sumDetails(rdRows);
-            BigDecimal expSum = exRows.stream()
-                .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-            if (withinTolerance(realSum, expSum)
-                && shareRatiosEqual(rdRows, exRows)) {
-                continue;
-            }
-            // 目标金额/系数：单行组吸收应收组全部金额；等多行组按顺序一一配对
-            int pairCount = rdRows.size() == 1 ? 1 : Math.min(rdRows.size(), exRows.size());
-            for (int i = 0; i < pairCount; i++) {
-                ReceivedDetail rdRow = rdRows.get(i);
-                BigDecimal targetAmount = rdRows.size() == 1 ? expSum
-                    : nvl(exRows.get(i).getPerformanceAmount());
-                BigDecimal targetShare = rdRows.size() == 1 ? exRows.get(0).getShareRatio()
-                    : exRows.get(i).getShareRatio();
-                if (rdRows.size() != 1 && rdRows.size() != exRows.size()) {
-                    log.warn("[实收对齐] 实收/应收明细行数不一致，按顺序配对，余量保持不变：group={}, real={}, expect={}",
-                        entry.getKey(), rdRows.size(), exRows.size());
-                }
-                if (withinTolerance(nvl(rdRow.getPerformanceAmount()), targetAmount)
-                    && Objects.equals(rdRow.getShareRatio(), targetShare)) {
-                    continue;
-                }
-                ReceivedDetail patch = new ReceivedDetail();
-                patch.setPerformanceAmount(targetAmount);
-                patch.setShareRatio(targetShare);
-                ReceivedDetail created = supersede(rdRow, patch, operatorId, null);
-                createdIds.add(created.getId());
-                oldToNew.put(rdRow.getId(), created.getId());
-                aligned++;
-            }
+    public long countDistinctReceivedOrders(String contractNo) {
+        if (contractNo == null || contractNo.isBlank()) {
+            return 0L;
         }
-
-        Map<Long, PerformanceFactSummaryDTO> createdSummaries = new HashMap<>();
-        if (!createdIds.isEmpty()) {
-            for (PerformanceFactSummaryDTO dto : realMapper.selectActiveByIds(createdIds)) {
-                createdSummaries.put(dto.getFactId(), dto);
-            }
-        }
-        for (Map.Entry<Long, Long> e : oldToNew.entrySet()) {
-            ReceivedAlignmentResultDTO.Mapping mapping = new ReceivedAlignmentResultDTO.Mapping();
-            mapping.setOldFactId(e.getKey());
-            mapping.setNewFact(createdSummaries.get(e.getValue()));
-            if (mapping.getNewFact() != null) {
-                result.getMappings().add(mapping);
-            }
-        }
-
-        BigDecimal after = sumDetails(realMapper.selectActiveDetailsByContract(period, null, contractNo));
-        result.setReceivedTotalAfter(after);
-        log.info("[实收对齐] 合同实收已对齐应收：period={}, contractNo={}, 对齐明细数={}, before={}, after={}, expect={}",
-            period, contractNo, aligned, before, after, expectedTotal);
-        return result;
+        return contractMapper.countDistinctOrderNos(contractNo);
     }
 
     // ==================== 内部方法 ====================
@@ -463,52 +367,5 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return details.stream()
             .map(d -> d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-    }
-
-    private static String groupKey(String employeeCode, String roleType) {
-        return (employeeCode == null ? "" : employeeCode) + '\u0001' + (roleType == null ? "" : roleType);
-    }
-
-    private static Map<String, List<ReceivedDetail>> groupDetails(List<ReceivedDetail> details) {
-        Map<String, List<ReceivedDetail>> map = new LinkedHashMap<>();
-        for (ReceivedDetail d : details) {
-            map.computeIfAbsent(groupKey(d.getEmployeeExternalCode(), d.getRoleType()),
-                k -> new ArrayList<>()).add(d);
-        }
-        return map;
-    }
-
-    private static Map<String, List<PerformanceFact>> groupFacts(List<PerformanceFact> facts) {
-        Map<String, List<PerformanceFact>> map = new LinkedHashMap<>();
-        for (PerformanceFact f : facts) {
-            map.computeIfAbsent(groupKey(f.getEmployeeExternalCode(), f.getRoleType()),
-                k -> new ArrayList<>()).add(f);
-        }
-        return map;
-    }
-
-    /** 组内实收系数是否与应收一致（单行组取应收首行系数；等多行组逐行比）。 */
-    private boolean shareRatiosEqual(List<ReceivedDetail> rdRows, List<PerformanceFact> exRows) {
-        if (rdRows.size() == 1) {
-            return Objects.equals(rdRows.get(0).getShareRatio(), exRows.get(0).getShareRatio());
-        }
-        if (rdRows.size() != exRows.size()) {
-            return false;
-        }
-        for (int i = 0; i < rdRows.size(); i++) {
-            if (!Objects.equals(rdRows.get(i).getShareRatio(), exRows.get(i).getShareRatio())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /** 金额容忍判定：|a - b| <= 容忍阈值（默认 1 元，系统参数 panjia.commission.diff_tolerance）。 */
-    private boolean withinTolerance(BigDecimal a, BigDecimal b) {
-        BigDecimal tolerance = configService.getConfigDecimal(CONFIG_DIFF_TOLERANCE);
-        if (tolerance == null) {
-            tolerance = DEFAULT_DIFF_TOLERANCE;
-        }
-        return nvl(a).subtract(nvl(b)).abs().compareTo(tolerance) <= 0;
     }
 }

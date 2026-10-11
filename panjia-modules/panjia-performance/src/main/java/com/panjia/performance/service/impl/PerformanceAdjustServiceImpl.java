@@ -112,6 +112,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     private final PerformanceAdjustMapper adjustMapper;
     private final PerformanceFactMapper factMapper;
+    /** 双键未命中退化合同号匹配的安全闸门（同合同多订单禁退化、订单误填唯一订单才退化） */
+    private final com.panjia.performance.service.BizKeyMatchGuard bizKeyMatchGuard;
     /** 实收事实跨域查询端口（PERF_REAL 读写唯一入口，禁止直连 pj_received_* 表；本模块内装配） */
     private final com.panjia.contracts.port.CommissionPerformanceQueryPort performanceQueryPort;
     private final ReverseService reverseService;
@@ -726,14 +728,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 调整链路统一装载 ACTIVE 事实：订单号优先精确匹配，订单号未命中（数据修正/历史脏数据）
-     * 告警后回退合同号（双键 OR），订单号为空直接按合同号。
+     * 调整链路统一装载 ACTIVE 事实：订单号+合同号双键精确优先；双键未命中时经
+     * {@link BizKeyMatchGuard} 闸门判定（目标事实订单维度唯一才退化，兼容贝壳新签
+     * order_no 误填成合同号的脏数据），同合同多订单禁止退化（返回空，由调用方报错/走人工）；
+     * orderNo 为空直接按合同号旧口径。
      * <p>
      * 背景：同一合同号可能挂多个订单号，按合同号 OR 装载会把多订单明细混排，
      * 导致「指定调整行不在该合同业绩明细中」与金额合计口径错误。
      * 发起校验与执行落库必须共用本方法，保证两端集合口径一致。
      *
-     * @param period     归属期间（可空=不限期间）
+     * @param period     归属期间（可空=不限期间；闸门计数同口径）
      * @param factType   事实口径
      * @param orderNo    订单号（可空）
      * @param contractNo 合同号（也兼容前端业务键：订单号优先的场景传入的是订单号）
@@ -746,15 +750,23 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (byOrder != null && !byOrder.isEmpty()) {
                 return byOrder;
             }
-            log.warn("[调整单] 按订单号+合同号双键未查到有效业绩事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+            // 双键未命中：仅当该合同 ACTIVE 事实订单维度唯一（含 order_no 误填合同号的脏数据）才退化
+            if (bizKeyMatchGuard.canDegradeToContract(period, factType,
+                List.of(FactStatus.ACTIVE.getCode()), contractNo)) {
+                log.warn("[调整单] 双键未命中且合同事实订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                return factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+            }
+            log.warn("[调整单] 双键未命中且该合同存在多个订单，禁止退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
                 orderNo, contractNo, period, factType);
+            return List.of();
         }
         return factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
     }
 
     /**
-     * 调整链路统一装载 VOIDED 事实：口径同 {@link #loadActiveFactsForAdjust}（订单号+合同号
-     * 双键精确优先，未命中告警回退合同号双键 OR，订单号为空直接按合同号）。
+     * 调整链路统一装载 VOIDED 事实：口径同 {@link #loadActiveFactsForAdjust}（双键精确优先，
+     * 未命中经闸门判定才退化合同号；闸门统计 VOIDED 状态订单基数，保证作废-恢复可逆口径一致）。
      * 用于合同级调整发起前的「存在已作废明细禁止调整」校验，防止跨订单误拦/漏拦。
      */
     private List<PerformanceFact> loadVoidedFactsForAdjust(String period, String factType,
@@ -764,8 +776,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (byOrder != null && !byOrder.isEmpty()) {
                 return byOrder;
             }
-            log.warn("[调整单] 按订单号+合同号双键未查到已作废事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+            if (bizKeyMatchGuard.canDegradeToContract(period, factType,
+                List.of(FactStatus.VOIDED.getCode()), contractNo)) {
+                log.warn("[调整单] 双键未命中且合同作废事实订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                return factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
+            }
+            log.warn("[调整单] 双键未命中且该合同存在多个订单的作废事实，禁止退化：orderNo={}, contractNo={}, period={}, factType={}",
                 orderNo, contractNo, period, factType);
+            return List.of();
         }
         return factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
     }

@@ -10,8 +10,8 @@ import java.math.BigDecimal;
  * 实收审批单详情·每人明细行（实收明细页详情弹窗展示用）。
  * <p>
  * 列口径对齐「合同业绩明细」页：门店/组别、工号、姓名、所属角色、角色占比、应收金额、实收金额。
- * 应收金额按同 sourceKey 的 PERF_EXPECT 事实配对（导入引擎一行双发 REAL+EXPECT，
- * 与 {@code ReceivedAlignmentService} 配对口径一致）。
+ * 应收金额由 selectReceivedFactDetails 按「同合同 + 同员工工号 + 同角色」配对
+ * ACTIVE PERF_EXPECT 事实聚合（双键精确，双侧闸门通过时退化按合同号）。
  */
 @Data
 @NoArgsConstructor

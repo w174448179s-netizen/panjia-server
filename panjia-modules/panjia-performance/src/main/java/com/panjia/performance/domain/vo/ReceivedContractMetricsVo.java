@@ -22,6 +22,9 @@ public class ReceivedContractMetricsVo implements Serializable {
     /** 合同号 */
     private String contractNo;
 
+    /** 订单号（同合同号挂多订单时与合同号双键精确匹配；历史数据为空串，退化合同号口径） */
+    private String orderNo;
+
     /** 业务类型（同合同多事实时取 MAX） */
     private String bizType;
 

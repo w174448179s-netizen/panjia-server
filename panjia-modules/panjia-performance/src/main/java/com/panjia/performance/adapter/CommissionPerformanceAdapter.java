@@ -4,7 +4,6 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.CommissionAdjustMirrorDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
-import com.panjia.contracts.dto.ReceivedAlignmentResultDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ReceivedRealFactPort;
 import com.panjia.performance.domain.AdjustStatus;
@@ -18,7 +17,7 @@ import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.domain.bo.AddMemberPayload;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
-import com.panjia.performance.service.ReceivedAlignmentService;
+import com.panjia.performance.service.BizKeyMatchGuard;
 import com.panjia.performance.service.ReverseService;
 import com.panjia.performance.util.MoneyUtil;
 import lombok.RequiredArgsConstructor;
@@ -57,7 +56,8 @@ import java.util.Set;
 public class CommissionPerformanceAdapter implements CommissionPerformanceQueryPort {
 
     private final PerformanceFactMapper factMapper;
-    private final ReceivedAlignmentService receivedAlignmentService;
+    /** 双键未命中退化合同号匹配的单侧闸门（事实行订单唯一性） */
+    private final BizKeyMatchGuard bizKeyMatchGuard;
     private final ReverseService reverseService;
     private final PerformanceAdjustMapper adjustMapper;
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
@@ -71,6 +71,20 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     /** PERF_REAL 读/写全部委托实收域端口；端口实现缺失时返回 null（调用方按空结果兜底）。 */
     private ReceivedRealFactPort realPort() {
         return receivedRealFactPortProvider.getIfAvailable();
+    }
+
+    /**
+     * 结佣侧新签事实装载/执行的<b>双侧</b>退化闸门：新签 ACTIVE 事实订单维度唯一
+     * <b>且</b>实收合同表全局订单维度唯一才允许双键未命中后退化按合同号匹配。
+     * <p>比业绩域单侧闸门更严：结佣金额归属到实收订单驱动的结佣单，须防止同笔脏新签
+     * （order_no 误填成合同号）被多个实收订单（含分批到账）重复归属。
+     */
+    private boolean canDegradeExpectToReceived(String period, String contractNo) {
+        if (!bizKeyMatchGuard.canDegradeActiveExpect(period, contractNo)) {
+            return false;
+        }
+        ReceivedRealFactPort port = realPort();
+        return port != null && port.countDistinctReceivedOrders(contractNo) == 1L;
     }
 
     private static boolean isReal(String factType) {
@@ -178,8 +192,17 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
                 enrichWithEmployeeData(list);
                 return list;
             }
-            log.warn("[业绩端口] 按订单号+合同号双键未查到有效事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+            // 双键未命中：双侧闸门（新签事实+实收合同均订单唯一）才退化，兼容 order_no 误填合同号
+            if (canDegradeExpectToReceived(period, contractNo)) {
+                log.warn("[业绩端口] 双键未命中且新签/实收两侧订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                list = factMapper.selectActiveFactSummariesByContractNo(period, factType, contractNo);
+                enrichWithEmployeeData(list);
+                return list;
+            }
+            log.warn("[业绩端口] 双键未命中且两侧不满足订单唯一，禁止退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
                 orderNo, contractNo, period, factType);
+            return Collections.emptyList();
         }
         return findActiveByContract(period, contractNo, factType);
     }
@@ -298,11 +321,6 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             }
         }
         return result;
-    }
-
-    @Override
-    public ReceivedAlignmentResultDTO alignReceivedToExpected(String period, String contractNo, Long operatorId) {
-        return receivedAlignmentService.align(period, contractNo, operatorId);
     }
 
     // ==================== 历史工资导入（HISTORY_PAYROLL）结佣建单支撑 ====================
@@ -430,9 +448,16 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         if (StringUtils.isNotBlank(orderNo)) {
             facts = factMapper.selectActiveFactsByOrderAndContract(period, factType, orderNo, contractNo);
             if (facts == null || facts.isEmpty()) {
-                log.warn("[业绩端口] 按订单号+合同号双键未查到有效事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
-                    orderNo, contractNo, period, factType);
-                facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+                // 双键未命中：双侧闸门通过才退化（兼容新签 order_no 误填合同号），否则禁止跨订单分摊
+                if (canDegradeExpectToReceived(period, contractNo)) {
+                    log.warn("[业绩端口] 双键未命中且新签/实收两侧订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                        orderNo, contractNo, period, factType);
+                    facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+                } else {
+                    log.warn("[业绩端口] 双键未命中且两侧不满足订单唯一，禁止退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                        orderNo, contractNo, period, factType);
+                    facts = Collections.emptyList();
+                }
             }
         } else {
             facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);

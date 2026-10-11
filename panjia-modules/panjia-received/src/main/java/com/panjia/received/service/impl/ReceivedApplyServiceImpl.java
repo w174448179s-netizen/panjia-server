@@ -1,7 +1,6 @@
 package com.panjia.received.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.FactType;
@@ -492,10 +491,13 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             return 0;
         }
         // ===== 3. 批量查新签应收（ACTIVE PERF_EXPECT）→ 按匹配键归集到实收订单 =====
-        // 匹配口径（2026-09-30）：合同号优先，合同号为空用订单号。
+        // 匹配口径（2026-10-11 双侧闸门定稿）：合同号+订单号双键精确；双键未命中时，
+        // 仅当新签事实与实收合同表两侧该合同的去重订单号都恰为 1（兼容新签 orderNo 误填成合同号）
+        // 才退化按合同号归集，同合同多订单一律不退化（宁可不归集走人工，也不跨订单串单）。
         // 金额口径：当月优先——实收月有<b>非零</b>新签 → 只取当月合计；
         // 当月新签为 0/无 → 不参与当月计算，回退汇总历史（<实收月）合计
         ExpectMatchKeys matchKeys = ExpectMatchKeys.build(contractByOrder);
+        matchKeys.retainGloballyDegradable(globallyDegradableContracts(matchKeys.degradeCandidates()));
         Map<String, BigDecimal> expectTotalByOrder = new HashMap<>();
         if (!matchKeys.isEmpty()) {
             LambdaQueryWrapper<PerformanceFact> expectQ = new LambdaQueryWrapper<PerformanceFact>()
@@ -662,21 +664,37 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             operatorId = 1L;
         }
 
-        // 1. 查该合同当月 DRAFT 实收审批单（取最新一张）
-        ReceivedApply apply = applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
+        // 1. 查该合同当月全部 DRAFT 实收审批单：同合同可挂多个订单，须逐单按各自订单号评估，
+        //    不能只取最新一张（否则第二个订单的 DRAFT 永远等不到新签触发）
+        List<ReceivedApply> drafts = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
             .eq(ReceivedApply::getContractNo, contractNo)
             .eq(ReceivedApply::getStatus, ReceivedApplyStatus.DRAFT)
-            .orderByDesc(ReceivedApply::getId)
-            .last("LIMIT 1"));
-        if (apply == null) {
+            .orderByAsc(ReceivedApply::getId));
+        if (drafts.isEmpty()) {
             return false;
         }
+        boolean anyApproved = false;
+        for (ReceivedApply apply : drafts) {
+            if (evaluateDraftAfterNewSign(apply, operatorId)) {
+                anyApproved = true;
+            }
+        }
+        return anyApproved;
+    }
 
-        // 2. 当月优先查该实收合同对应 PERF_EXPECT ACTIVE 合计（合同号优先，口径同 autoCreateForReceivedBatch）
-        BigDecimal expectTotal = sumExpectForMatch(apply.getOrderNo(), apply.getContractNo(), apply.getPeriod());
+    /**
+     * 评估单张 DRAFT 实收审批单（新签补触发）：按该单自身合同号+订单号双键（双侧闸门兼容脏数据）
+     * 取当月优先新签合计；有新签且实收 ≥ 新签 → 自动通过并 emit；实收 < 新签 → 转人工审批；
+     * 无对应新签（其他订单先到/双键不中且禁退化）→ 保持 DRAFT 等下次触发。
+     *
+     * @return 本单是否自动通过
+     */
+    private boolean evaluateDraftAfterNewSign(ReceivedApply apply, Long operatorId) {
+        // 2. 当月优先查该单对应 PERF_EXPECT ACTIVE 合计（双键+双侧闸门，口径同 autoCreateForReceivedBatch）
+        BigDecimal expectTotal = sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
         if (expectTotal.signum() <= 0) {
-            // 仍无新签（兜底，不应发生——新签刚导入触发）
+            // 该单订单尚无新签（多订单中另一张单的新签先到，或双键不中且闸门禁止退化）：保持 DRAFT
             return false;
         }
 
@@ -701,27 +719,132 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 按「当月优先」口径查该实收合同对应的 PERF_EXPECT ACTIVE 新签金额合计（合同号优先，空则订单号）。
-     * <p>当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，回退汇总历史（&lt;当月）。
-     * 贝壳新签源数据 orderNo 可能误填成合同号，故有 contractNo 时按新签 contract_no 关联。
+     * 新签-实收退化的<b>双侧全局闸门</b>（单合同，新签补触发/重算合计/详情用）：
+     * 该合同 ACTIVE PERF_EXPECT 事实（跨全部期间）去重订单号恰 1 个，<b>且</b>
+     * 实收合同表（全局，不限期间/批次）去重订单号恰 1 个，才允许双键未命中后退化按合同号匹配。
+     * 基数≥2（同合同多订单，含分批到账）或 0（无事实）一律不退化，宁走人工也不串单。
      */
-    private BigDecimal sumExpectForMatch(String orderNo, String contractNo, String period) {
-        boolean byContract = StringUtils.isNotBlank(contractNo);
-        if (period == null || (!byContract && StringUtils.isBlank(orderNo))) {
+    private boolean canDegradeExpectToReceived(String contractNo) {
+        if (StringUtils.isBlank(contractNo)) {
+            return false;
+        }
+        long expectOrderCount = factMapper.countDistinctOrderNos(null, FACT_TYPE_EXPECT,
+            List.of(com.panjia.performance.domain.FactStatus.ACTIVE.getCode()), contractNo);
+        return expectOrderCount == 1L && contractMapper.countDistinctOrderNos(contractNo) == 1L;
+    }
+
+    /**
+     * 双侧全局闸门批量版（贝壳建单入口用，每侧仅 1 条 group by SQL，避免 N+1）：
+     * 入参为「本批仅挂一个实收订单」的候选合同，返回新签 ACTIVE 事实与实收合同表
+     * 去重订单号都恰为 1 的合同集合。
+     */
+    private Set<String> globallyDegradableContracts(Set<String> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return Set.of();
+        }
+        // 新签侧：一次查出 (合同号, 订单号) 去重对，内存按合同计数
+        List<PerformanceFact> expectPairs = factMapper.selectList(
+            new LambdaQueryWrapper<PerformanceFact>()
+                .select(PerformanceFact::getContractNo, PerformanceFact::getOrderNo)
+                .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+                .in(PerformanceFact::getContractNo, candidates)
+                .isNotNull(PerformanceFact::getOrderNo)
+                .ne(PerformanceFact::getOrderNo, "")
+                .groupBy(PerformanceFact::getContractNo, PerformanceFact::getOrderNo));
+        Map<String, Integer> expectCountByContract = new HashMap<>();
+        for (PerformanceFact f : expectPairs) {
+            expectCountByContract.merge(f.getContractNo(), 1, Integer::sum);
+        }
+        // 实收侧：实收合同表 (合同号, 订单号) 去重对（全局，不限期间/批次）
+        List<com.panjia.received.domain.ReceivedContract> receivedPairs = contractMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .select(com.panjia.received.domain.ReceivedContract::getContractNo,
+                    com.panjia.received.domain.ReceivedContract::getOrderNo)
+                .in(com.panjia.received.domain.ReceivedContract::getContractNo, candidates)
+                .isNotNull(com.panjia.received.domain.ReceivedContract::getOrderNo)
+                .ne(com.panjia.received.domain.ReceivedContract::getOrderNo, "")
+                .groupBy(com.panjia.received.domain.ReceivedContract::getContractNo,
+                    com.panjia.received.domain.ReceivedContract::getOrderNo));
+        Map<String, Integer> receivedCountByContract = new HashMap<>();
+        for (com.panjia.received.domain.ReceivedContract c : receivedPairs) {
+            receivedCountByContract.merge(c.getContractNo(), 1, Integer::sum);
+        }
+        Set<String> allowed = new LinkedHashSet<>();
+        for (String cn : candidates) {
+            if (expectCountByContract.getOrDefault(cn, 0) == 1
+                && receivedCountByContract.getOrDefault(cn, 0) == 1) {
+                allowed.add(cn);
+            }
+        }
+        return allowed;
+    }
+
+    /**
+     * 按「当月优先」口径计算该实收审批单对应的 ACTIVE PERF_EXPECT 新签金额合计。
+     * 建单分流后的新签补触发、重算合计、详情顶部应收合计共用<b>唯一入口</b>。
+     * <p>金额口径：当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 回退历史（&lt;当月）合计。
+     * <p>匹配口径（2026-10-11 双侧闸门定稿）：
+     * <ul>
+     *   <li>合同号+订单号齐全：双键精确；未命中时经 {@link #canDegradeExpectToReceived}
+     *       双侧闸门（新签事实/实收合同全局订单都唯一）才退化按合同号汇总——兼容贝壳新签
+     *       orderNo 误填成合同号；同合同多订单双键不中返回 0（走人工，宁可不自动通过也不串单）；</li>
+     *   <li>订单号为空（历史单据）：退化旧口径 contract_no/order_no 双键 OR；</li>
+     *   <li>合同号为空：按订单号。</li>
+     * </ul>
+     */
+    private BigDecimal sumExpectByBizKey(String period, String orderNo, String contractNo) {
+        if (period == null) {
             return BigDecimal.ZERO;
         }
+        boolean hasContract = StringUtils.isNotBlank(contractNo);
+        boolean hasOrder = StringUtils.isNotBlank(orderNo);
+        if (!hasContract && !hasOrder) {
+            return BigDecimal.ZERO;
+        }
+        if (hasContract && hasOrder) {
+            List<PerformanceFact> precise = factMapper.selectList(
+                new LambdaQueryWrapper<PerformanceFact>()
+                    .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                    .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+                    .eq(PerformanceFact::getContractNo, contractNo)
+                    .eq(PerformanceFact::getOrderNo, orderNo));
+            if (!precise.isEmpty()) {
+                return currentMonthPrioritySum(precise, period);
+            }
+            if (canDegradeExpectToReceived(contractNo)) {
+                log.warn("[实收审批] 新签双键未命中且新签/实收两侧订单唯一，退化按合同号汇总：contractNo={}, orderNo={}",
+                    contractNo, orderNo);
+                List<PerformanceFact> degraded = factMapper.selectList(
+                    new LambdaQueryWrapper<PerformanceFact>()
+                        .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                        .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
+                        .eq(PerformanceFact::getContractNo, contractNo));
+                return currentMonthPrioritySum(degraded, period);
+            }
+            log.warn("[实收审批] 新签双键未命中且两侧不满足订单唯一，不退化合同号匹配：contractNo={}, orderNo={}",
+                contractNo, orderNo);
+            return BigDecimal.ZERO;
+        }
+        // 历史单据/缺键：合同号在时走旧 OR 宽松口径，否则按订单号
         LambdaQueryWrapper<PerformanceFact> q = new LambdaQueryWrapper<PerformanceFact>()
             .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
             .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE);
-        if (byContract) {
-            q.eq(PerformanceFact::getContractNo, contractNo);
+        if (hasContract) {
+            q.and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
+                .or().eq(PerformanceFact::getOrderNo, contractNo));
         } else {
             q.eq(PerformanceFact::getOrderNo, orderNo);
         }
+        return currentMonthPrioritySum(factMapper.selectList(q), period);
+    }
+
+    /** 当月优先合计：当月有非零事实只取当月，否则取历史（&lt; period）合计，零金额行不计。 */
+    private BigDecimal currentMonthPrioritySum(List<PerformanceFact> facts, String period) {
         BigDecimal currentSum = BigDecimal.ZERO;
         boolean hasCurrent = false;
         BigDecimal historySum = BigDecimal.ZERO;
-        for (PerformanceFact e : factMapper.selectList(q)) {
+        for (PerformanceFact e : facts) {
             BigDecimal amt = nvlAmount(e.getPerformanceAmount());
             if (amt.signum() == 0) {
                 continue;
@@ -738,41 +861,90 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 新签-实收匹配键（2026-09-30 定稿）：<b>合同号优先，合同号为空用订单号</b>。
-     * <p>贝壳新签源数据 orderNo 可能误填成合同号（与实收 orderNo 不同），故实收合同有
-     * contractNo 时一律按新签 contract_no 关联；仅 contractNo 缺失时回退 order_no。
-     * 建单批量查新签 / 活跃审批单判重 / 新签补触发三处共用此口径。
+     * 新签-实收匹配键（2026-10-11 双侧闸门定稿）：<b>合同号+订单号双键同时满足精确归集</b>；
+     * 双键未命中时，仅当该合同在<b>本批实收订单、新签 ACTIVE 事实、实收合同表全局</b>三处
+     * 订单维度都唯一才退化按合同号归集（兼容贝壳新签 orderNo 误填成合同号的脏数据）；
+     * 合同号缺失再回退订单号。
+     * <p>背景：同一合同号可能挂多个订单号，旧版「合同号优先 + putIfAbsent」会把该合同下
+     * 所有订单的应收事实归集到第一个实收订单，导致第二个订单 expectedAmount=0、自动分流判错。
+     * 建单批量查新签 / 活跃审批单判重共用此口径；新签补触发/重算合计走
+     * {@link #sumExpectByBizKey} 单合同双侧闸门，口径一致。
      */
     private static final class ExpectMatchKeys {
-        /** 有合同号的实收：按新签 contract_no 匹配（合同号集合） */
+        /** 有合同号的实收：宽捞新签事实用（合同号集合），归集仍以双键为准 */
         final Set<String> contractKeys = new java.util.LinkedHashSet<>();
         /** 无合同号的实收：回退按新签/审批单 order_no 匹配（订单号集合） */
         final Set<String> orderOnlyKeys = new java.util.LinkedHashSet<>();
-        /** 合同号 → 实收分组订单号（命中后归集到 factsByOrder 分组键） */
-        final Map<String, String> contractNoToOrderNo = new HashMap<>();
+        /** 精确双键：合同号 + 订单号 → 实收分组订单号（命中后归集到 factsByOrder 分组键） */
+        final Map<String, String> pairToOrderNo = new HashMap<>();
+        /**
+         * 允许合同号退化的映射：合同号 → 实收分组订单号。
+         * build 时先放入「本批唯一」候选，再由 {@link #retainGloballyDegradable}
+         * 按双侧全局闸门（新签事实/实收合同表去重订单号都恰为 1）过滤。
+         */
+        final Map<String, String> contractUnique = new HashMap<>();
+
+        private static String pairKey(String contractNo, String orderNo) {
+            return contractNo + '' + orderNo;
+        }
 
         static ExpectMatchKeys build(
             Map<String, com.panjia.received.domain.ReceivedContract> contractByOrder) {
             ExpectMatchKeys m = new ExpectMatchKeys();
+            // 合同号 → 本批实收订单号集合（本批唯一只是退化候选，还须过双侧全局闸门）
+            Map<String, Set<String>> ordersByContract = new HashMap<>();
             contractByOrder.forEach((orderNo, c) -> {
                 String cn = c == null ? null : c.getContractNo();
                 if (StringUtils.isNotBlank(cn)) {
                     m.contractKeys.add(cn);
-                    m.contractNoToOrderNo.putIfAbsent(cn, orderNo);
+                    if (StringUtils.isNotBlank(c.getOrderNo())) {
+                        m.pairToOrderNo.put(pairKey(cn, c.getOrderNo()), orderNo);
+                    }
+                    ordersByContract.computeIfAbsent(cn, k -> new LinkedHashSet<>()).add(orderNo);
                 } else {
                     m.orderOnlyKeys.add(orderNo);
+                }
+            });
+            ordersByContract.forEach((cn, orders) -> {
+                if (orders.size() == 1) {
+                    m.contractUnique.put(cn, orders.iterator().next());
                 }
             });
             return m;
         }
 
-        /** 按行的合同号/订单号解析归集目标实收 orderNo；不匹配返回 null */
+        /** 本批唯一的候选退化合同（调用方据此批量查双侧全局基数，避免 N+1）。 */
+        Set<String> degradeCandidates() {
+            return new LinkedHashSet<>(contractUnique.keySet());
+        }
+
+        /**
+         * 应用双侧全局闸门：仅保留新签 ACTIVE 事实与实收合同表全局去重订单号都恰为 1 的合同。
+         *
+         * @param degradableContracts 两侧基数都为 1 的合同号集合
+         */
+        void retainGloballyDegradable(Set<String> degradableContracts) {
+            contractUnique.keySet().retainAll(degradableContracts);
+        }
+
+        /**
+         * 按新签行/审批单的合同号+订单号解析归集目标实收 orderNo；不匹配返回 null。
+         * 顺序：双键精确 → 合同唯一订单退化 → 无合同号按订单号；同合同多订单且双键不中
+         * （新签订单号与实收对不上）返回 null，宁可不归集也不串到其他订单。
+         */
         String resolveTarget(String orderNo, String contractNo) {
             if (StringUtils.isNotBlank(contractNo)) {
-                String byContract = contractNoToOrderNo.get(contractNo);
-                if (byContract != null) {
-                    return byContract;
+                if (StringUtils.isNotBlank(orderNo)) {
+                    String exact = pairToOrderNo.get(pairKey(contractNo, orderNo));
+                    if (exact != null) {
+                        return exact;
+                    }
                 }
+                String unique = contractUnique.get(contractNo);
+                if (unique != null) {
+                    return unique;
+                }
+                return null;
             }
             if (orderNo != null && orderOnlyKeys.contains(orderNo)) {
                 return orderNo;
@@ -1229,32 +1401,50 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 回填实收明细列表的补充字段（涉及人数、应收合计）。
      * <p>
      * 业务类型已落库（{@code biz_type}，见 V140009），本方法只在旧数据 bizType 为空时
-     * 按 (period, contractNo) 从 ACTIVE 事实回退补齐；涉及人数与应收合计仍需实时聚合，
+     * 按 (period, contractNo, orderNo) 从 ACTIVE 事实回退补齐；涉及人数与应收合计仍需实时聚合，
      * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
      * 应收合计含已生效调整（新签业绩显示调整后金额），与快照不一致时置「已调整」标记。
+     * 同合同号挂多订单时按合同号+订单号双键聚合（历史单据 orderNo 为空退化合同号口径）。
      * 期间或合同号缺失的行保持 null，前端显示占位符。
      */
     private void fillContractMetrics(List<ReceivedApply> records) {
         if (records == null || records.isEmpty()) {
             return;
         }
-        Map<String, Set<String>> contractsByPeriod = new HashMap<>();
+        // 本页需要退化判定的合同（orderNo 非空）：一次批量双侧闸门（2 条 group by SQL），
+        // 口径与建单/详情一致——新签 order_no 误填成合同号且两侧订单都唯一时，应收按合同号配对
+        Set<String> preciseContracts = records.stream()
+            .filter(a -> StringUtils.isNotBlank(a.getPeriod()) && StringUtils.isNotBlank(a.getContractNo())
+                && StringUtils.isNotBlank(a.getOrderNo()))
+            .map(ReceivedApply::getContractNo)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<String> degradableContracts = globallyDegradableContracts(preciseContracts);
+        // period → 键对集合（contractNo 非空、orderNo 空串占位、degrade 退化标志），同键对去重避免重复 VALUES 行
+        Map<String, Map<String, Map<String, String>>> keysByPeriod = new HashMap<>();
         for (ReceivedApply apply : records) {
             if (StringUtils.isBlank(apply.getPeriod()) || StringUtils.isBlank(apply.getContractNo())) {
                 continue;
             }
-            contractsByPeriod.computeIfAbsent(apply.getPeriod(), k -> new LinkedHashSet<>())
-                .add(apply.getContractNo());
+            String orderNo = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
+            Map<String, String> keyMap = new HashMap<>(3);
+            keyMap.put("contractNo", apply.getContractNo());
+            keyMap.put("orderNo", orderNo);
+            keyMap.put("degrade", !orderNo.isEmpty() && degradableContracts.contains(apply.getContractNo())
+                ? "true" : "false");
+            Map<String, Map<String, String>> byPair =
+                keysByPeriod.computeIfAbsent(apply.getPeriod(), k -> new LinkedHashMap<>());
+            byPair.computeIfAbsent(metricsPairKey(apply.getContractNo(), orderNo), k -> keyMap);
         }
-        if (contractsByPeriod.isEmpty()) {
+        if (keysByPeriod.isEmpty()) {
             return;
         }
         Map<String, ReceivedContractMetricsVo> metrics = new HashMap<>();
-        for (Map.Entry<String, Set<String>> entry : contractsByPeriod.entrySet()) {
+        for (Map.Entry<String, Map<String, Map<String, String>>> entry : keysByPeriod.entrySet()) {
             List<ReceivedContractMetricsVo> rows =
-                factMapper.selectReceivedContractMetrics(entry.getKey(), entry.getValue());
+                factMapper.selectReceivedContractMetrics(entry.getKey(), entry.getValue().values());
             for (ReceivedContractMetricsVo row : rows) {
-                metrics.put(metricsKey(entry.getKey(), row.getContractNo()), row);
+                metrics.put(metricsKey(entry.getKey(), row.getContractNo(),
+                    StringUtils.isBlank(row.getOrderNo()) ? "" : row.getOrderNo()), row);
             }
         }
         // 一次性批量取本页全部 bizType 的折算因子（避免循环内逐条 factorOf(String) 触发全表扫描 pj_payroll_conversion_rule）
@@ -1264,7 +1454,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .collect(java.util.stream.Collectors.toSet());
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
         for (ReceivedApply apply : records) {
-            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo()));
+            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), apply.getContractNo(),
+                StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo()));
             if (m != null) {
                 // 业务类型优先用落库快照值；旧数据（列新增前建单）为空时回退实时聚合
                 String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
@@ -1302,19 +1493,28 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
     }
 
-    /** 组装 (期间, 合同号) 复合键；任一为空返回空串（对应查不到，保持 null）。 */
-    private String metricsKey(String period, String contractNo) {
-        return StringUtils.isBlank(period) || StringUtils.isBlank(contractNo) ? "" : period + '|' + contractNo;
+    /** 组装 (合同号, 订单号) 复合键（orderNo 空串占位）。 */
+    private String metricsPairKey(String contractNo, String orderNo) {
+        return contractNo + '|' + (orderNo == null ? "" : orderNo);
+    }
+
+    /** 组装 (期间, 合同号, 订单号) 复合键；期间/合同号为空返回空串（对应查不到，保持 null）。 */
+    private String metricsKey(String period, String contractNo, String orderNo) {
+        return StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)
+            ? "" : period + '|' + contractNo + '|' + (orderNo == null ? "" : orderNo);
     }
 
     @Override
     public ReceivedApplyDetail getDetail(Long id) {
         ReceivedApply apply = getAndCheck(id);
         // 应收是参照口径（非审批对象）：展示时实时取当前 ACTIVE PERF_EXPECT 合计（含已生效调整），
-        // 与明细行「按 source_key 实时配对」口径一致；仅内存覆盖，不落库。
+        // 与明细行「按合同+工号+角色实时配对」口径一致；仅内存覆盖，不落库。
         // 与提交时快照不一致时置「已调整」标记，让业务人员知道差额来自业绩调整。
+        // 脏数据兼容：新签 order_no 误填成合同号时，顶部合计与每人明细统一经双侧闸门退化按合同号配对。
+        boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
+            && canDegradeExpectToReceived(apply.getContractNo());
         if (StringUtils.isNotBlank(apply.getContractNo())) {
-            BigDecimal expected = sumExpect(apply.getPeriod(), apply.getContractNo());
+            BigDecimal expected = sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
             apply.setExpectedAdjusted(apply.getExpectedAmount() != null
                 && apply.getExpectedAmount().compareTo(expected) != 0);
             // 保留快照供前端展示「调整前」，再覆盖为当前值
@@ -1322,7 +1522,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             apply.setExpectedAmount(expected);
         }
         List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
-            apply.getPeriod(), apply.getContractNo());
+            apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect);
         // 实收不再做折算；应收折算因子按合同业务类型取（整单同一因子）
         String bizType = apply.getBizType();
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
@@ -1517,54 +1717,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         apply.setReceivedAmount(bound.stream()
             .map(d -> d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO)
             .reduce(BigDecimal.ZERO, BigDecimal::add));
-        // PERF_EXPECT 应收合计（当月优先口径：当月有新签只取当月，无则历史；与建单/结佣一致）
+        // PERF_EXPECT 应收合计（当月优先 + 双键/双侧闸门，与建单/新签补触发/详情一致）
         apply.setExpectedAmount(
-            sumExpectForMatch(apply.getOrderNo(), apply.getContractNo(), apply.getPeriod()));
+            sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo()));
         apply.setUpdateTime(LocalDateTime.now());
         applyMapper.updateById(apply);
-    }
-
-    /** 按已绑定实收明细重算实收合计/条数，并刷新应收合计与快照。
-     * （已重写为查实收表，旧版查 PERF_REAL 的方法已删除） */
-
-    private BigDecimal sumExpect(String period, String contractNo) {
-        // 当月优先口径：当月有<b>非零</b>新签 → 只取当月合计；
-        // 当月为 0/无 → 不参与当月计算，回退汇总历史（<实收月）合计。一次查询内存分流
-        List<PerformanceFact> facts = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
-                .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
-                .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
-                .and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
-                    .or().eq(PerformanceFact::getOrderNo, contractNo)));
-        List<PerformanceFact> currentMonth = new ArrayList<>();
-        List<PerformanceFact> history = new ArrayList<>();
-        for (PerformanceFact f : facts) {
-            if (f.getPerformanceAmount() == null || f.getPerformanceAmount().signum() == 0) {
-                continue;
-            }
-            String fp = f.getPeriod();
-            if (period.equals(fp)) {
-                currentMonth.add(f);
-            } else if (fp != null && fp.compareTo(period) < 0) {
-                history.add(f);
-            }
-        }
-        List<PerformanceFact> target = !currentMonth.isEmpty() ? currentMonth : history;
-        return target.stream()
-            .map(f -> nvlAmount(f.getPerformanceAmount()))
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-    }
-
-    private ReceivedApply findActiveApply(String period, String contractNo) {
-        // 查未完结单（DRAFT/SUBMITTED/APPROVED）：APPROVED 单仍存在以便 autoCreateForBatch 判重跳过，
-        // 但 autoCreateForBatch 的 else 分支会对 APPROVED 单跳过合并事实，避免改 receivedAmount。
-        return applyMapper.selectOne(new LambdaQueryWrapper<ReceivedApply>()
-            .eq(ReceivedApply::getPeriod, period)
-            .and(w -> w.eq(ReceivedApply::getContractNo, contractNo)
-                .or().eq(ReceivedApply::getOrderNo, contractNo))
-            .in(ReceivedApply::getStatus,
-                ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
-            .orderByDesc(ReceivedApply::getId)
-            .last("LIMIT 1"));
     }
 
     private ReceivedApply getAndCheck(Long id) {

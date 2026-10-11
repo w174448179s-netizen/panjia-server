@@ -32,14 +32,16 @@ import java.util.List;
 public class PerformanceFactVoidService {
 
     private final PerformanceFactMapper factMapper;
+    private final BizKeyMatchGuard bizKeyMatchGuard;
     private final IPeriodCloseService periodCloseService;
     private final PayrollBatchQueryPort payrollBatchQueryPort;
 
     private static final DateTimeFormatter PERIOD_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM");
 
     /**
-     * 统一装载 ACTIVE 事实：订单号+合同号双键精确优先，未命中告警回退合同号（双键 OR），
-     * 订单号为空直接按合同号。同合同号挂多订单时防止跨订单作废/恢复。
+     * 统一装载 ACTIVE 事实：订单号+合同号双键精确优先；双键未命中经 {@link BizKeyMatchGuard}
+     * 闸门判定（该合同 ACTIVE 事实订单维度唯一才退化，兼容新签 order_no 误填成合同号的脏数据），
+     * 同合同多订单禁止退化（返回空，调用方报「无有效业绩」）；orderNo 为空直接按合同号旧口径。
      */
     private List<PerformanceFact> loadActiveFactsForVoid(String period, String factType,
                                                           String orderNo, String contractNo) {
@@ -48,14 +50,22 @@ public class PerformanceFactVoidService {
             if (byOrder != null && !byOrder.isEmpty()) {
                 return byOrder;
             }
-            log.warn("[业绩作废] 按订单号+合同号双键未查到有效业绩事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+            if (bizKeyMatchGuard.canDegradeToContract(period, factType,
+                List.of(FactStatus.ACTIVE.getCode()), contractNo)) {
+                log.warn("[业绩作废] 双键未命中且合同事实订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                return factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
+            }
+            log.warn("[业绩作废] 双键未命中且该合同存在多个订单，禁止退化：orderNo={}, contractNo={}, period={}, factType={}",
                 orderNo, contractNo, period, factType);
+            return List.of();
         }
         return factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
     }
 
     /**
-     * 统一装载 VOIDED 事实：口径同 {@link #loadActiveFactsForVoid}。
+     * 统一装载 VOIDED 事实：口径同 {@link #loadActiveFactsForVoid}（闸门统计 VOIDED 订单基数，
+     * 保证作废后恢复在脏数据场景同样可退化，多订单场景不误恢复另一订单）。
      */
     private List<PerformanceFact> loadVoidedFactsForRestore(String period, String factType,
                                                              String orderNo, String contractNo) {
@@ -64,8 +74,15 @@ public class PerformanceFactVoidService {
             if (byOrder != null && !byOrder.isEmpty()) {
                 return byOrder;
             }
-            log.warn("[业绩恢复] 按订单号+合同号双键未查到已作废业绩事实，回退合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+            if (bizKeyMatchGuard.canDegradeToContract(period, factType,
+                List.of(FactStatus.VOIDED.getCode()), contractNo)) {
+                log.warn("[业绩恢复] 双键未命中且合同作废事实订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
+                    orderNo, contractNo, period, factType);
+                return factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
+            }
+            log.warn("[业绩恢复] 双键未命中且该合同存在多个订单的作废事实，禁止退化：orderNo={}, contractNo={}, period={}, factType={}",
                 orderNo, contractNo, period, factType);
+            return List.of();
         }
         return factMapper.selectVoidedFactsByContractNo(period, factType, contractNo);
     }
