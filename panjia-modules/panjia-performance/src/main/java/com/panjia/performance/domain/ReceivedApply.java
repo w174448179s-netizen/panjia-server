@@ -127,6 +127,14 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private BigDecimal originalReceivedConvertedAmount;
 
+    /** 是否存在审批中的实收调整单（非入库字段；SUBMITTED/APPROVED 状态） */
+    @TableField(exist = false)
+    private Boolean adjustPending;
+
+    /** 审批中实收调整单的目标金额（非入库字段；调整后实收合计） */
+    @TableField(exist = false)
+    private BigDecimal adjustPendingAmount;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 

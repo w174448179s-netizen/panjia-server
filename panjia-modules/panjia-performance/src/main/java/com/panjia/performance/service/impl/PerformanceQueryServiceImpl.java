@@ -102,6 +102,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     private final FactConversionResolver factConversionResolver;
     /** 部门子树查询（部门数据权限：校验所选部门是否在本人部门范围内） */
     private final DeptService deptService;
+    private final com.panjia.contracts.port.ReceivedApplyPort receivedApplyPort;
 
     @Override
     public PageResult<PerformanceFactVo> listFacts(PerformanceFactBo query, PageQuery pageQuery) {
@@ -638,6 +639,61 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             factMapper.insert(fact);
             count++;
         }
+        return count;
+    }
+
+    @Override
+    public int createExpectSupplement(com.panjia.performance.domain.bo.ExpectSupplementBo bo, Long operatorId) {
+        // 生成唯一 sourceKey 前缀：orderNo|contractNo|MANUAL-SUPPLEMENT|ts
+        String orderNo = bo.getOrderNo();
+        String contractNo = bo.getContractNo();
+        String keyBase = (orderNo != null ? orderNo : contractNo) + "|MANUAL-SUPPLEMENT|" + System.currentTimeMillis();
+        java.time.LocalDate periodStart = java.time.YearMonth.parse(bo.getPeriod()).atDay(1);
+        java.time.LocalDateTime businessDateTime = bo.getBusinessDate().atStartOfDay();
+        int count = 0;
+        for (com.panjia.performance.domain.bo.ExpectSupplementItem item : bo.getItems()) {
+            if (item.getAmount() == null || item.getAmount().signum() == 0) {
+                continue; // 零金额不生成事实（与导入口径一致）
+            }
+            PerformanceFact fact = new PerformanceFact();
+            fact.setFactType(FactType.PERF_EXPECT);
+            fact.setFactStatus(FactStatus.ACTIVE);
+            fact.setSource(PerformanceSource.MANUAL);
+            fact.setSourceKey(keyBase + "-" + count);
+            fact.setPeriod(bo.getPeriod());
+            fact.setBusinessDate(businessDateTime);
+            fact.setEffectiveDate(periodStart);
+            fact.setPerformanceAmount(item.getAmount());
+            // 从实收继承
+            fact.setOrderNo(orderNo);
+            fact.setContractNo(contractNo);
+            fact.setBizType(bo.getBizType());
+            fact.setPropertyAddress(bo.getPropertyAddress());
+            fact.setFeeItem(bo.getFeeItem());
+            // 入参覆盖
+            fact.setEmployeeId(item.getEmployeeId());
+            fact.setEmployeeExternalCode(item.getEmployeeExternalCode());
+            fact.setRoleType(item.getRoleType());
+            fact.setRoleName(item.getRoleName());
+            fact.setDeptId(item.getDeptId() != null ? item.getDeptId() : bo.getDeptId());
+            fact.setShareRatio(item.getShareRatio());
+            fact.setOperatorId(operatorId);
+            factMapper.insert(fact);
+            count++;
+        }
+        if (count == 0) {
+            throw new ServiceException("未录入有效新签金额（全部为零）");
+        }
+        // 触发实收 DRAFT 单重评：用实收月查 DRAFT 单，evaluateDraftAfterNewSign 内部按实收月汇总新签
+        // （新签结算月 ≤ 实收月时历史回退能查到；> 实收月时当月查不到，DRAFT 单保持不变，需手工处理）
+        try {
+            receivedApplyPort.resolveDraftAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId);
+        } catch (Exception e) {
+            log.warn("[新签补录] 触发 DRAFT 单重评失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
+                bo.getReceivedPeriod(), bo.getPeriod(), orderNo, contractNo, e.getMessage());
+        }
+        log.info("[新签补录] 完成：period={}, receivedPeriod={}, orderNo={}, contractNo={}, 新增事实={}, operator={}",
+            bo.getPeriod(), bo.getReceivedPeriod(), orderNo, contractNo, count, operatorId);
         return count;
     }
 

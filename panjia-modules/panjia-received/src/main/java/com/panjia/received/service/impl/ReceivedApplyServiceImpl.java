@@ -14,6 +14,7 @@ import com.panjia.performance.domain.bo.ReceivedApplyBo;
 import com.panjia.performance.domain.vo.ReceivedContractMetricsVo;
 import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.mapper.ReceivedAdjustMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.received.service.IReceivedApplyService;
 import lombok.RequiredArgsConstructor;
@@ -85,6 +86,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private final DeptService deptService;
     /** 实收审批通过事件（结佣域按合同自动产生结佣记录，outbox 原子提交） */
     private final EventPort eventPort;
+    /** 实收调整单 Mapper（pj_perf_received_adjust）：列表回填实收调整标记与调整前原值 */
+    private final ReceivedAdjustMapper receivedAdjustMapper;
 
     // ==================== 导入自动建单（§2.1） ====================
 
@@ -1528,6 +1531,53 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .filter(StringUtils::isNotBlank)
             .collect(java.util.stream.Collectors.toSet());
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
+
+        // 实收调整：按期间批量查已执行单（取调整前原值）与审批中单（取目标金额+标记）
+        // 业务键集合（合同号+订单号混合），按期间分组查询避免跨期串单
+        Map<String, Set<String>> keysByPeriodForAdjust = new HashMap<>();
+        for (ReceivedApply apply : records) {
+            if (StringUtils.isBlank(apply.getPeriod())) {
+                continue;
+            }
+            Set<String> keys = keysByPeriodForAdjust.computeIfAbsent(apply.getPeriod(), k -> new LinkedHashSet<>());
+            if (StringUtils.isNotBlank(apply.getContractNo())) {
+                keys.add(apply.getContractNo());
+            }
+            if (StringUtils.isNotBlank(apply.getOrderNo())) {
+                keys.add(apply.getOrderNo());
+            }
+        }
+        // period → bizKey → 已执行调整单（originalAmount/targetAmount）
+        Map<String, Map<String, Map<String, Object>>> executedByPeriod = new HashMap<>();
+        // period → bizKey → 审批中调整单（targetAmount）
+        Map<String, Map<String, Map<String, Object>>> pendingByPeriod = new HashMap<>();
+        for (Map.Entry<String, Set<String>> entry : keysByPeriodForAdjust.entrySet()) {
+            String period = entry.getKey();
+            Set<String> keys = entry.getValue();
+            if (keys.isEmpty()) {
+                continue;
+            }
+            List<Map<String, Object>> executed = receivedAdjustMapper.doSelectExecutedByBizKeys(period, keys);
+            Map<String, Map<String, Object>> execMap = new HashMap<>();
+            for (Map<String, Object> e : executed) {
+                String bk = e.get("bizKey") == null ? null : e.get("bizKey").toString();
+                if (bk != null) {
+                    execMap.put(bk, e);
+                }
+            }
+            executedByPeriod.put(period, execMap);
+
+            List<Map<String, Object>> pendings = receivedAdjustMapper.doSelectPendingByBizKeys(period, keys);
+            Map<String, Map<String, Object>> pendMap = new HashMap<>();
+            for (Map<String, Object> p : pendings) {
+                String bk = p.get("bizKey") == null ? null : p.get("bizKey").toString();
+                if (bk != null) {
+                    pendMap.put(bk, p);
+                }
+            }
+            pendingByPeriod.put(period, pendMap);
+        }
+
         for (ReceivedApply apply : records) {
             String effContract = StringUtils.isBlank(apply.getContractNo()) ? "" : apply.getContractNo();
             String effOrder = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
@@ -1545,16 +1595,37 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                         && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
-                // 实收业绩展示实时值（ACTIVE PERF_REAL 合计，含已生效结佣调整）；
-                // 事实链最早值留存为「调整前」，与实时值不一致时置「已调整」，供前端展示「原值 → 调整后值」
+                // 实收业绩展示实时值（pj_received_detail ACTIVE 合计，含已生效实收调整）；
+                // 调整前原值从 pj_perf_received_adjust 已执行单的 original_amount 快照取（执行后 rd 金额已更新），
+                // 与实时值不一致时置「已调整」，供前端展示「原值 → 调整后值」
                 if (m.getReceivedAmount() != null) {
-                    boolean receivedAdjusted = m.getOriginalReceivedAmount() != null
-                        && m.getOriginalReceivedAmount().compareTo(m.getReceivedAmount()) != 0;
+                    BigDecimal originalReceived = null;
+                    Map<String, Map<String, Object>> execMap = executedByPeriod.get(apply.getPeriod());
+                    if (execMap != null) {
+                        Map<String, Object> exec = matchAdjustByBizKey(execMap, apply.getContractNo(), apply.getOrderNo());
+                        if (exec != null && exec.get("originalAmount") != null) {
+                            originalReceived = new BigDecimal(exec.get("originalAmount").toString());
+                        }
+                    }
+                    boolean receivedAdjusted = originalReceived != null
+                        && originalReceived.compareTo(m.getReceivedAmount()) != 0;
                     apply.setReceivedAdjusted(receivedAdjusted);
                     if (receivedAdjusted) {
-                        apply.setOriginalReceivedAmount(m.getOriginalReceivedAmount());
+                        apply.setOriginalReceivedAmount(originalReceived);
                     }
                     apply.setReceivedAmount(m.getReceivedAmount());
+                }
+                // 审批中实收调整单标记：存在 SUBMITTED/APPROVED 单据时展示「调整审批中」+ 目标金额
+                Map<String, Map<String, Object>> pendMap = pendingByPeriod.get(apply.getPeriod());
+                if (pendMap != null) {
+                    Map<String, Object> pend = matchAdjustByBizKey(pendMap, apply.getContractNo(), apply.getOrderNo());
+                    if (pend != null) {
+                        apply.setAdjustPending(true);
+                        Object target = pend.get("targetAmount");
+                        if (target != null) {
+                            apply.setAdjustPendingAmount(new BigDecimal(target.toString()));
+                        }
+                    }
                 }
                 // 应收折算后金额：按业务类型因子从批量结果中取（实收已不做折算）
                 BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
@@ -1567,6 +1638,37 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 }
             }
         }
+    }
+
+    /**
+     * 按合同号/订单号匹配实收调整单（与 {@code PerformanceQueryServiceImpl.matchesBizRow} 同口径）。
+     * <p>
+     * 调整单 contract_no 存的是提交时的展示键（合同号或订单号，随入口而异），
+     * 按订单号感知匹配：调整单有 order_no 时行的订单号必须相等；无 order_no 时退化按 bizKey 命中行合同号/订单号任一。
+     */
+    private Map<String, Object> matchAdjustByBizKey(Map<String, Map<String, Object>> adjustMap,
+                                                     String rowContractNo, String rowOrderNo) {
+        for (Map.Entry<String, Map<String, Object>> entry : adjustMap.entrySet()) {
+            Map<String, Object> adj = entry.getValue();
+            String adjOrder = adj.get("orderNo") == null ? null : adj.get("orderNo").toString();
+            if (StringUtils.isNotBlank(adjOrder)) {
+                if (StringUtils.isBlank(rowOrderNo) || !adjOrder.equals(rowOrderNo)) {
+                    continue;
+                }
+                String adjContract = adj.get("bizKey") == null ? null : adj.get("bizKey").toString();
+                if (adjContract != null
+                    && (adjContract.equals(rowContractNo) || adjContract.equals(rowOrderNo))) {
+                    return adj;
+                }
+                continue;
+            }
+            String bk = entry.getKey();
+            if (bk.equals(rowContractNo)
+                || (StringUtils.isNotBlank(rowOrderNo) && bk.equals(rowOrderNo))) {
+                return adj;
+            }
+        }
+        return null;
     }
 
     /** 组装 (合同号, 订单号) 复合键（两者均可空串占位）。 */
@@ -1620,9 +1722,31 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
             if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
         }
-        // 实收合计取实收明细实时合计（rd ACTIVE）；实收侧暂无调整链，不展示「原值 → 调整后值」，也不再折算
+        // 实收合计取实收明细实时合计（rd ACTIVE，含已生效实收调整）；
+        // 调整前原值从 pj_perf_received_adjust 已执行单的 original_amount 快照取，展示「原值 → 调整后值」
         apply.setReceivedAmount(recvSum);
-        apply.setReceivedAdjusted(false);
+        BigDecimal originalReceived = null;
+        if (StringUtils.isNotBlank(apply.getContractNo()) || StringUtils.isNotBlank(apply.getOrderNo())) {
+            Set<String> keys = new LinkedHashSet<>();
+            if (StringUtils.isNotBlank(apply.getContractNo())) {
+                keys.add(apply.getContractNo());
+            }
+            if (StringUtils.isNotBlank(apply.getOrderNo())) {
+                keys.add(apply.getOrderNo());
+            }
+            List<Map<String, Object>> executed = receivedAdjustMapper.doSelectExecutedByBizKeys(apply.getPeriod(), keys);
+            for (Map<String, Object> e : executed) {
+                if (e.get("originalAmount") != null) {
+                    originalReceived = new BigDecimal(e.get("originalAmount").toString());
+                    break;
+                }
+            }
+        }
+        boolean receivedAdjusted = originalReceived != null && originalReceived.compareTo(recvSum) != 0;
+        apply.setReceivedAdjusted(receivedAdjusted);
+        if (receivedAdjusted) {
+            apply.setOriginalReceivedAmount(originalReceived);
+        }
         apply.setExpectedConvertedAmount(expectConvertedSum);
         // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）
         apply.setOriginalExpectedConvertedAmount(expectOriginalConvertedSum);

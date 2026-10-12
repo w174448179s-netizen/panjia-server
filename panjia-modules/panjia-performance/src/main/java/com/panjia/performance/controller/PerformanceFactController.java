@@ -123,6 +123,16 @@ public class PerformanceFactController extends BaseController {
     }
 
     /**
+     * 新签补录：为「待补新签」实收单手工创建 PERF_EXPECT 事实并触发 DRAFT 单重评。
+     */
+    @SaCheckPermission("perf:fact:supplement")
+    @Log(title = "新签补录", businessType = BusinessType.INSERT)
+    @PostMapping("/supplement-expect")
+    public R<Integer> supplementExpect(@Validated com.panjia.performance.domain.bo.ExpectSupplementBo bo) {
+        return R.ok(queryService.createExpectSupplement(bo, LoginHelper.getUserId()));
+    }
+
+    /**
      * 完整业绩查询（合同维度）。
      */
     @SaCheckPermission("perf:fact:list")

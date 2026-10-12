@@ -103,4 +103,13 @@ public interface IPerformanceQueryService {
      * @return 新增事实数量
      */
     int createManualOffset(ManualOffsetBo bo, Long operatorId);
+
+    /**
+     * 新签补录：为「待补新签」实收单手工创建 PERF_EXPECT 事实并触发 DRAFT 单重评。
+     *
+     * @param bo         补录参数（合同号/订单号/签约日期/明细列表）
+     * @param operatorId 操作人 ID
+     * @return 新增事实数量
+     */
+    int createExpectSupplement(com.panjia.performance.domain.bo.ExpectSupplementBo bo, Long operatorId);
 }
