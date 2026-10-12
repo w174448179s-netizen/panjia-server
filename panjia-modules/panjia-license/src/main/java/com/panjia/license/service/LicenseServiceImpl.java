@@ -161,6 +161,12 @@ public class LicenseServiceImpl implements LicenseService {
 
         JSONObject json = JSONUtil.toBean(resp.body(), JSONObject.class);
         String token = json.getStr("jwt");
+        if (token == null || token.isEmpty()) {
+            // 服务端业务失败用 HTTP 200 包裹（如 FP_MISMATCH 指纹不匹配），必须显式判空，
+            // 否则 decodeToken(null) 抛 "CharSequence cannot be null or empty"，无法定位真实原因
+            throw new LicenseException("激活被拒绝：" + json.getStr("code") + " " + json.getStr("message")
+                    + "（重装系统/换机后，请先在授权管理后台对该授权码发起换机重绑，或更换授权码）");
+        }
         long offlineExpireAt = json.getStr("offlineExpireAt") != null
                 ? OffsetDateTime.parse(json.getStr("offlineExpireAt")).toInstant().toEpochMilli() : 0L;
         String clientMode = json.getStr("clientMode", ClientModeEnum.NORMAL.name());
