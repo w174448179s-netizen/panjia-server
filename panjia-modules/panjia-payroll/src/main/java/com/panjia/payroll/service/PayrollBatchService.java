@@ -317,63 +317,51 @@ public class PayrollBatchService {
             rawDeptNewSign.merge(it.getDeptId(), converted, BigDecimal::add);
         }
 
-        // ====== 门店级聚合：新签 roll-up + 社保业绩扣款（标准×计缴人数）+ 新签与结佣差额 ======
-        // 门店社保业绩扣款 = DEPT 政策 socialStandard（每人每月固定额）× 计缴参保人数
-        //   计缴人数口径：非兼职 + 参保 + 个人社保比例>30%，按门店及下属组别合计
-        // 新签与结佣差额 = 门店当月配置（pj_payroll_dept_monthly_config），未配置=0
+        // ====== 组级聚合：新签 + 社保业绩扣款（标准×计缴人数）+ 新签与结佣差额 ======
+        // 口径：店长/总监均按所在组别计算团队提成，不再向上归一到门店（2026-10-12 改）
+        // 社保业绩扣款 = DEPT 政策 socialStandard（每人每月固定额）× 计缴参保人数
+        //   计缴人数口径：非兼职 + 参保 + 个人社保比例>30%，按组别合计
+        // 新签与结佣差额 = 组级当月配置（pj_payroll_dept_monthly_config），未配置=0
         Map<Long, BigDecimal> deptDiffConfig = deptMonthlyConfigService.loadDiffForPeriod(period);
 
-        // 收集相关部门（员工归属 + 新签归属 + 差额配置），统一归一到门店锚点
+        // 收集相关部门（员工归属 + 新签归属 + 差额配置），不再归一到门店锚点
         Set<Long> relevantDeptIds = new HashSet<>();
         for (EmployeeSnapshot es : employees) {
             if (es.getDeptId() != null) relevantDeptIds.add(es.getDeptId());
         }
         relevantDeptIds.addAll(rawDeptNewSign.keySet());
         relevantDeptIds.addAll(deptDiffConfig.keySet());
-        Map<Long, Long> deptStoreAnchor = relevantDeptIds.isEmpty()
-            ? Map.of() : peopleQueryPort.findStoreAnchors(relevantDeptIds);
-        input.deptStoreAnchor = deptStoreAnchor;
 
-        Set<Long> storeIds = new HashSet<>(deptStoreAnchor.values());
-        // 保留原始分组兜底（挂在无锚点部门的业绩仍可按原 deptId 取），门店键随后覆盖为 roll-up 值
-        Map<Long, BigDecimal> storeNewSign = new HashMap<>(rawDeptNewSign);
-        Map<Long, BigDecimal> storeSocial = new HashMap<>();
-        Map<Long, BigDecimal> storeStandardMap = new HashMap<>();
-        Map<Long, Integer> insuredCountMap = new HashMap<>();
-        if (!storeIds.isEmpty()) {
-            // 批量取门店及所有子孙组别（入口一次取数，避免循环查询）
-            Map<Long, List<Long>> storeDescendants = peopleQueryPort.findDeptAndChildren(storeIds);
-            // 门店计缴参保人数（员工按锚点门店归集）
-            Map<Long, Integer> headcount = new HashMap<>();
-            for (EmployeeSnapshot es : employees) {
-                Long anchor = es.getDeptId() == null ? null : deptStoreAnchor.get(es.getDeptId());
-                if (anchor != null && SalaryCalculationEngine.isInsuredHeadcount(es, input.snapshot)) {
-                    headcount.merge(anchor, 1, Integer::sum);
-                }
-            }
-            for (Long storeId : storeIds) {
-                BigDecimal ns = BigDecimal.ZERO;
-                for (Long descId : storeDescendants.getOrDefault(storeId, List.of(storeId))) {
-                    BigDecimal v = rawDeptNewSign.get(descId);
-                    if (v != null) ns = ns.add(v);
-                }
-                storeNewSign.put(storeId, ns);
+        // 组级新签 = 原始 deptId 分组（rawDeptNewSign 即为组级数据）
+        Map<Long, BigDecimal> deptNewSign = new HashMap<>(rawDeptNewSign);
+        Map<Long, BigDecimal> deptSocial = new HashMap<>();
+        Map<Long, BigDecimal> deptStandardMap = new HashMap<>();
+        Map<Long, Integer> deptInsuredCountMap = new HashMap<>();
 
-                int count = headcount.getOrDefault(storeId, 0);
-                BigDecimal standard = input.snapshot.deptSocialStandard(storeId);
-                insuredCountMap.put(storeId, count);
-                storeStandardMap.put(storeId, standard);
-                storeSocial.put(storeId, standard.multiply(BigDecimal.valueOf(count)));
+        // 组级计缴参保人数：按员工所在组别直接统计
+        Map<Long, Integer> headcountByDept = new HashMap<>();
+        for (EmployeeSnapshot es : employees) {
+            if (es.getDeptId() != null && SalaryCalculationEngine.isInsuredHeadcount(es, input.snapshot)) {
+                headcountByDept.merge(es.getDeptId(), 1, Integer::sum);
             }
         }
-        input.deptNewSignTotal = storeNewSign;
-        input.deptEmployerSocialTotal = storeSocial;
-        input.deptSocialStandard = storeStandardMap;
-        input.deptInsuredCount = insuredCountMap;
+        for (Map.Entry<Long, Integer> entry : headcountByDept.entrySet()) {
+            Long deptId = entry.getKey();
+            int count = entry.getValue();
+            BigDecimal standard = input.snapshot.deptSocialStandard(deptId);
+            deptInsuredCountMap.put(deptId, count);
+            deptStandardMap.put(deptId, standard);
+            deptSocial.put(deptId, standard.multiply(BigDecimal.valueOf(count)));
+        }
+
+        input.deptNewSignTotal = deptNewSign;
+        input.deptEmployerSocialTotal = deptSocial;
+        input.deptSocialStandard = deptStandardMap;
+        input.deptInsuredCount = deptInsuredCountMap;
         input.deptDiffTotal = deptDiffConfig;
 
-        // 总监管辖门店 deptId 列表（总监挂顶级根，取其直接子部门 = 门店级，
-        // 门店级汇总已在上方统一完成，多门店按门店分别跳点算提成）
+        // 总监管辖组 deptId 列表（总监挂顶级根，取其直接子部门 = 组级，
+        // 组级汇总已在上方统一完成，多组按组分别跳点算提成）
         Map<Long, List<Long>> directorStoreDepts = new HashMap<>();
         Set<Long> directorDeptIds = new HashSet<>();
         List<EmployeeSnapshot> directors = new ArrayList<>();
@@ -395,14 +383,13 @@ public class PayrollBatchService {
         }
         input.directorStoreDepts = directorStoreDepts;
 
-        // 部门展示名（总监门店提成明细导出按门店分行展示门店名）
+        // 部门展示名（总监管辖组提成明细导出按组分行展示组名）
         Set<Long> allDeptIds = new HashSet<>();
         allDeptIds.addAll(input.deptNewSignTotal.keySet());
         if (input.deptEmployerSocialTotal != null) {
             allDeptIds.addAll(input.deptEmployerSocialTotal.keySet());
         }
         allDeptIds.addAll(deptDiffConfig.keySet());
-        allDeptIds.addAll(deptStoreAnchor.keySet());
         for (List<Long> children : directorStoreDepts.values()) {
             allDeptIds.addAll(children);
         }

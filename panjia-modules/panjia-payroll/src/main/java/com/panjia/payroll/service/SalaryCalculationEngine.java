@@ -57,8 +57,6 @@ public class SalaryCalculationEngine {
         public Map<Long, Integer> deptInsuredCount;
         /** deptId -> 门店当月新签与结佣差额（门店月度配置，未配置=0，计薪基数直接扣减项） */
         public Map<Long, BigDecimal> deptDiffTotal;
-        /** deptId(员工/业绩归属) -> 门店锚点 deptId（组别向上归一到门店；顶级根无映射） */
-        public Map<Long, Long> deptStoreAnchor;
         /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
         /** factId → 业绩归属月（结佣明细对应的业绩事实 period，用于按导入月锁定规则） */
@@ -265,19 +263,19 @@ public class SalaryCalculationEngine {
             if (role == EmployeeRole.MANAGER) {
                 // finalRate 已在上方用 personalRate 口径计算，这里只保留非提成的逻辑
 
-                // 团队提成 = (门店新签合计 - 店长本人新签 - 门店社保业绩扣款 - 新签与结佣差额) × teamRate
-                // 口径：团队业绩 = 本店及店下所有子部门新签合计，排除店长本人的新签
-                // 社保业绩扣款 = 门店社保扣减标准 × 计缴参保人数（非兼职+参保+个人比例>30%）
-                // 新签与结佣差额 = 门店当月配置值（不再用新签−结佣现算）
+                // 团队提成 = (组新签合计 - 店长本人新签 - 组社保业绩扣款 - 新签与结佣差额) × teamRate
+                // 口径：团队业绩 = 店长所在组别新签合计，排除店长本人的新签（2026-10-12 改，不再归一到门店）
+                // 社保业绩扣款 = 组社保扣减标准 × 组计缴参保人数（非兼职+参保+个人比例>30%）
+                // 新签与结佣差额 = 组当月配置值（pj_payroll_dept_monthly_config）
                 BigDecimal teamRate = bd(rank.path("teamRate").asText("0.10"));
-                Long storeDeptId = resolveStoreDeptId(input, emp.getDeptId());
-                BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                Long groupDeptId = emp.getDeptId();
+                BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(groupDeptId, BigDecimal.ZERO);
                 // 排除店长本人的新签（personalNewsignPerfCommon 已在上方用同 snap 折算，口径与 deptNewSignTotal 一致）
                 deptTotal = deptTotal.subtract(personalNewsignPerfCommon);
                 BigDecimal deptSocial = input.deptEmployerSocialTotal == null
-                    ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                    ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(groupDeptId, BigDecimal.ZERO);
                 BigDecimal deptDiff = input.deptDiffTotal == null
-                    ? BigDecimal.ZERO : input.deptDiffTotal.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                    ? BigDecimal.ZERO : input.deptDiffTotal.getOrDefault(groupDeptId, BigDecimal.ZERO);
                 BigDecimal billableBase = deptTotal.subtract(deptSocial).subtract(deptDiff);
                 teamIncome = MoneyUtil.round2(billableBase.multiply(teamRate));
                 d.setTeamIncome(teamIncome);
@@ -300,11 +298,11 @@ public class SalaryCalculationEngine {
                 }
                 d.setGuaranteeFill(guaranteeFill);
 
-                // 落地：店长 sheet 展示字段（门店新签/社保标准/参保人数/社保业绩扣款/差额/团队提成比例/保底）
+                // 落地：店长 sheet 展示字段（组新签/社保标准/参保人数/社保业绩扣款/差额/团队提成比例/保底）
                 BigDecimal deptStandard = input.deptSocialStandard == null
-                    ? BigDecimal.ZERO : input.deptSocialStandard.getOrDefault(storeDeptId, BigDecimal.ZERO);
+                    ? BigDecimal.ZERO : input.deptSocialStandard.getOrDefault(groupDeptId, BigDecimal.ZERO);
                 int insuredCount = input.deptInsuredCount == null
-                    ? 0 : input.deptInsuredCount.getOrDefault(storeDeptId, 0);
+                    ? 0 : input.deptInsuredCount.getOrDefault(groupDeptId, 0);
                 d.setDeptNewSignTotal(MoneyUtil.round2(deptTotal));
                 d.setDeptSocialStandard(MoneyUtil.round2(deptStandard));
                 d.setDeptInsuredCount(insuredCount);
@@ -314,12 +312,11 @@ public class SalaryCalculationEngine {
                 d.setMinSalary(minSalary);
 
             } else if (role == EmployeeRole.DIRECTOR) {
-                // 底薪 6000
                 baseSalary = bd(rank.path("baseSalary").asText("6000"));
                 d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
-                // 总监多门店：遍历管辖门店，各门店独立按合计跳点算提成，汇总 storeIncome。
-                // 对齐天街工资表总监 sheet（每门店一行：新签/社保/合计/跳点/提成金额，
+                // 总监多组：遍历管辖组别，各组独立按合计跳点算提成，汇总 storeIncome。
+                // 对齐天街工资表总监 sheet（每组一行：新签/社保/合计/跳点/提成金额，
                 // 提成金额汇总到第一行发工资）。
                 List<Long> managedDepts;
                 if (input.directorStoreDepts != null && input.directorStoreDepts.containsKey(emp.getEmployeeId())) {
@@ -364,7 +361,7 @@ public class SalaryCalculationEngine {
                 d.setStoreIncome(storeIncome);
               //  d.setNewSignPerformance(BigDecimal.ZERO);
              //   d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
-                // 落地：汇总值（一行展示）+ JSON 明细（导出按门店分行）
+                // 落地：汇总值（一行展示）+ JSON 明细（导出按组分行）
                 d.setDeptNewSignTotal(MoneyUtil.round2(sumNewSign));
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(sumSocial));
                 d.setDeptDiffAmount(MoneyUtil.round2(sumDiff));
@@ -590,24 +587,7 @@ public class SalaryCalculationEngine {
     }
 
     /**
-     * 员工/业绩归属部门 → 门店锚点解析：有归一映射用映射（组别挂店长也能取到门店级聚合），
-     * 无映射时回退原 deptId（兼容单测直接按 deptId 注入门店聚合的口径）。
-     */
-    private static Long resolveStoreDeptId(CalcInput input, Long deptId) {
-        if (deptId == null) {
-            return null;
-        }
-        if (input.deptStoreAnchor != null) {
-            Long anchor = input.deptStoreAnchor.get(deptId);
-            if (anchor != null) {
-                return anchor;
-            }
-        }
-        return deptId;
-    }
-
-    /**
-     * 门店计缴参保人数判定：非兼职 + 已参保 + 个人社保缴纳比例 > 30%。
+     * 组计缴参保人数判定：非兼职 + 已参保 + 个人社保缴纳比例 > 30%。
      * <p>个人金额取值与个人社保扣款一致：员工核定 socialFee &gt; 职级固定额 socialFixedFee
      * &gt; 职级比例 socialSettlementRatio × baseSocial；A0=30% 不计入，C/S 系比例 0 不计入。
      */
