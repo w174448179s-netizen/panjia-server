@@ -61,6 +61,8 @@ public class SalaryCalculationEngine {
         public Map<Long, Long> deptStoreAnchor;
         /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
+        /** factId → 业绩归属月（结佣明细对应的业绩事实 period，用于按导入月锁定规则） */
+        public Map<Long, String> factPeriodMap = Map.of();
         /**
          * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。
          * <p>
@@ -209,7 +211,7 @@ public class SalaryCalculationEngine {
                 // 按规则期间分组
                 Map<String, List<CommissionItemDTO>> byRulePeriod = new HashMap<>();
                 for (CommissionItemDTO it : lockedItems) {
-                    String rulePeriod = resolveCommissionRulePeriod(it);
+                    String rulePeriod = resolveCommissionRulePeriod(it, input.factPeriodMap);
                     byRulePeriod.computeIfAbsent(rulePeriod, k -> new ArrayList<>()).add(it);
                 }
                 commissionPerf = BigDecimal.ZERO;
@@ -692,26 +694,19 @@ public class SalaryCalculationEngine {
     }
 
     /**
-     * 解析结佣明细对应的规则期间（2026-09-28 起统一按签约月，取消按结算月分流）。
-     * <ul>
-     *   <li>签约月（businessDate 所在月）；</li>
-     *   <li>缺失字段时兜底返回算薪期间（period 字段）。</li>
-     * </ul>
+     * 解析结佣明细对应的规则期间。
+     * <p>
+     * 口径：按<b>业绩归属月（period，即导入月/结算月）</b>取规则快照。
+     * 业绩事实 period 为 NOT NULL，必然存在；factId 未命中映射时返回空串（回退主快照）。
      *
      * @param item 结佣明细
+     * @param factPeriodMap factId → 业绩归属月（由 PayrollBatchService 预先从业绩事实加载）
      * @return 规则期间（YYYY-MM）
      */
-    private String resolveCommissionRulePeriod(CommissionItemDTO item) {
-        // 签约月
-        java.time.LocalDateTime bizDate = item.getBusinessDate();
-        if (bizDate != null) {
-            return YearMonth.from(bizDate).toString();
+    private String resolveCommissionRulePeriod(CommissionItemDTO item, Map<Long, String> factPeriodMap) {
+        if (item.getPerformanceFactId() != null && factPeriodMap != null) {
+            return factPeriodMap.getOrDefault(item.getPerformanceFactId(), "");
         }
-        // 兜底：用业绩归属月
-        if (item.getPeriod() != null && !item.getPeriod().isBlank()) {
-            return item.getPeriod();
-        }
-        // 最终兜底：空字符串（会被 periodSnapshots.getOrDefault 回退到主快照）
         return "";
     }
 

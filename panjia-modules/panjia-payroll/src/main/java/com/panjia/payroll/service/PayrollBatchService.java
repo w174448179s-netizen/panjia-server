@@ -3,6 +3,7 @@ package com.panjia.payroll.service;
 import com.panjia.contracts.dto.AttendanceApprovalStatusDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -51,6 +52,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -84,6 +86,7 @@ public class PayrollBatchService {
     private final PeopleScoreQueryPort scoreQueryPort;
     private final IRateAdjustService rateAdjustService;
     private final DeptMonthlyConfigService deptMonthlyConfigService;
+    private final CommissionPerformanceQueryPort commissionPerformanceQueryPort;
 
     // ==================== 创建 ====================
 
@@ -254,16 +257,29 @@ public class PayrollBatchService {
         input.employees = employees;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
 
-        // ====== 多期间规则快照构建（结佣提成统一按签约月取规则，2026-09-28 取消
-        // settlement-rate-biz-types 按结算月分流） ======
-        // 扫描结佣明细，收集需要的规则期间集合（与 engine.resolveCommissionRulePeriod 口径一致：
-        // 签约月 → 业绩归属月兜底）
+        // ====== 多期间规则快照构建（结佣提成统一按业绩归属月取规则，2026-10-12 改） ======
+        // 扫描结佣明细，收集需要的规则期间集合（与 engine.resolveCommissionRulePeriod 口径一致）
+        // 先批量加载业绩事实 period（factId → 业绩归属月）
+        Set<Long> factIds = lockedItems.stream()
+            .map(CommissionItemDTO::getPerformanceFactId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<Long, String> factPeriodMap = new HashMap<>();
+        if (!factIds.isEmpty()) {
+            List<PerformanceFactSummaryDTO> facts = commissionPerformanceQueryPort.findActiveByFacts(factIds);
+            for (PerformanceFactSummaryDTO f : facts) {
+                factPeriodMap.put(f.getFactId(), f.getPeriod());
+            }
+        }
+        input.factPeriodMap = factPeriodMap;
+
         Set<String> requiredPeriods = new HashSet<>();
         for (CommissionItemDTO it : lockedItems) {
-            if (it.getBusinessDate() != null) {
-                requiredPeriods.add(YearMonth.from(it.getBusinessDate()).toString());
-            } else if (it.getPeriod() != null && !it.getPeriod().isBlank()) {
-                requiredPeriods.add(it.getPeriod());
+            if (it.getPerformanceFactId() != null) {
+                String factPeriod = factPeriodMap.get(it.getPerformanceFactId());
+                if (factPeriod != null) {
+                    requiredPeriods.add(factPeriod);
+                }
             }
         }
         // 算薪期间本身也加入（主快照兜底）
