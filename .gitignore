@@ -66,6 +66,7 @@ script/docker/.env
 script/keys/
 data/
 deploy/docker/.env
+deploy/docker/server.env
 deploy/docker/data/
 deploy/docker/logs/
 deploy/docker/web/dist/

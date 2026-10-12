@@ -1,16 +1,17 @@
 #!/bin/bash
 # ============================================================================
-# 盘家智管 — deploy/docker 整包部署（标准交付脚本）
+# 盘家智管 — 脚本一：全新部署（标准交付，首次上线/换客户服务器用）
 #
 # 就三步：整包拷到服务器 → docker load → docker compose up
+# 自带产物构建，不动数据；日常发版请用 update-backend.sh / update-frontend.sh
 #
 # 用法（Mac 本地执行）：
-#   bash push-server.sh <服务器IP> [SSH用户]          # 首次：打包上传 + 部署
-#   bash push-server.sh <服务器IP> --skip-upload      # 服务器已有文件（重跑/重启）
-#   bash push-server.sh 162.14.72.197                 # 例：盘家生产
+#   bash deploy.sh <服务器IP> [SSH用户]          # 首次：打包上传 + 部署
+#   bash deploy.sh <服务器IP> --skip-upload      # 服务器已有文件（重跑/重启）
+#   bash deploy.sh 162.14.72.197                 # 例：盘家生产
 #
 # 也可用环境变量（优先级：命令行参数 > 环境变量 > 默认值）：
-#   SERVER_IP=1.2.3.4 SERVER_USER=root INSTALL_DIR=/opt/panjia bash push-server.sh
+#   SERVER_IP=1.2.3.4 SERVER_USER=root INSTALL_DIR=/opt/panjia bash deploy.sh
 # ============================================================================
 
 set -euo pipefail
@@ -32,7 +33,7 @@ SERVER_USER="${2:-${SERVER_USER:-ubuntu}}"
 if [ -f "$(dirname "$0")/server.env" ] && [ -z "$SERVER_IP" ]; then
     . "$(dirname "$0")/server.env"   # 格式：SERVER_IP=x.x.x.x SERVER_USER=ubuntu INSTALL_DIR=/opt/panjia
 fi
-SERVER_IP="${SERVER_IP:?请传入服务器 IP：bash push-server.sh <IP> [用户]，或在 server.env 里配置}"
+SERVER_IP="${SERVER_IP:?请传入服务器 IP：bash deploy.sh <IP> [用户]，或在 server.env 里配置}"
 REMOTE_DIR="${INSTALL_DIR:-/home/$SERVER_USER/panjia}"
 if [ "$SERVER_USER" = "root" ]; then REMOTE_DIR="${INSTALL_DIR:-/root/panjia}"; fi
 SSH_TARGET="${SERVER_USER}@${SERVER_IP}"
@@ -40,12 +41,10 @@ SSH_TARGET="${SERVER_USER}@${SERVER_IP}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_TAR="$SCRIPT_DIR/panjia-server-latest.tar"
 
-SKIP_UPLOAD=0
-for arg in "$@"; do case "$arg" in --skip-upload) SKIP_UPLOAD=1 ;; esac; done
-
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn()  { echo -e "\033[0;33m[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 
 echo ""
@@ -81,7 +80,8 @@ fi
 
 # ==================== 2. 服务器：修加速源 + load 镜像 ====================
 info ">>> 步骤 2/3：服务器配置（加速源 + 导入镜像）"
-ssh -o ServerAliveInterval=30 "$SSH_TARGET" sudo bash << 'REMOTE'
+# PANJIA_AUTH_CODE 通过 env 显式传给远程 sudo bash（heredoc 是 quoted 的，不会自动透传）
+ssh -o ServerAliveInterval=30 "$SSH_TARGET" "sudo env PANJIA_AUTH_CODE='${PANJIA_AUTH_CODE:-}' bash" << 'REMOTE'
 set -e
 cd /home/ubuntu/panjia
 
@@ -109,13 +109,9 @@ else
     echo "[服务器] 加速源已配置，跳过"
 fi
 
-# ---- 导入后端镜像（tar 里有，不用拉）----
-if docker image inspect panjia-server:latest >/dev/null 2>&1; then
-    echo "[服务器] 后端镜像已存在，跳过 load"
-else
-    echo "[服务器] docker load 后端镜像..."
-    docker load -i panjia-server-latest.tar
-fi
+# ---- 导入后端镜像（每次都 load 覆盖同 tag 旧镜像；不能"已存在跳过"，否则镜像更新不生效）----
+echo "[服务器] docker load 后端镜像..."
+docker load -i panjia-server-latest.tar
 
 # ---- 预拉基础镜像（postgres/redis/minio/nginx，走加速源）----
 for img in postgres:16.9 redis:7-alpine nginx:stable-alpine pgsty/minio:RELEASE.2026-04-17T00-00-00Z; do
@@ -148,12 +144,14 @@ IMAGE_TAG=latest
 WEB_PORT=80
 SERVER_PORT=8080
 JAVA_OPTS=-Xms2048m -Xmx4096m -XX:+UseG1GC
+PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
 ENVEOF
     chmod 600 .env
     echo "[服务器] .env 已生成"
+    if [ -n "${PANJIA_AUTH_CODE:-}" ]; then echo "[服务器] 已写入授权码（首次启动自动激活）"; fi
 else
     echo "[服务器] .env 已存在，保留现有密码"
-    # 老版本 .env 升级：补齐 MinIO 配置（幂等）
+    # 老版本 .env 升级：补齐 MinIO / License 授权码配置（幂等）
     if ! grep -q MINIO_ROOT_PASSWORD .env; then
         MN_PW="Mn$(openssl rand -hex 10)!"
         cat >> .env << MNEOF
@@ -165,6 +163,10 @@ MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 MNEOF
         echo "[服务器] .env 已补充 MinIO 配置（MinIO 密码：$MN_PW）"
+    fi
+    if ! grep -q '^PANJIA_AUTH_CODE=' .env; then
+        echo "PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}" >> .env
+        echo "[服务器] .env 已补充 PANJIA_AUTH_CODE"
     fi
 fi
 

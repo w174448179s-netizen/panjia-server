@@ -2,7 +2,7 @@
 # ============================================================================
 # 盘家智管 — 本地出包（部署前跑一次）
 #
-# 产出两样东西（都在本目录，push-server.sh 直接用）：
+# 产出两样东西（都在本目录，deploy.sh / update-backend.sh 直接用）：
 #   1. panjia-server-latest.tar   后端 Docker 镜像
 #   2. web/dist/                  前端静态文件
 #
@@ -56,6 +56,22 @@ if [ "$BACKEND" = "1" ]; then
     $MVN clean package -Pprod -DskipTests -q
     [ -f "ruoyi-admin/target/ruoyi-admin.jar" ] || fail "打包失败"
 
+    # 基础镜像预拉兜底：多镜像源 pull 后 retag，避免 daocloud 等源间歇 502 卡死构建
+    BASE_IMAGE="eclipse-temurin:21-jre-jammy"
+    if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+        info ">>> 预拉基础镜像 $BASE_IMAGE ..."
+        PULLED=0
+        for MIRROR in "docker.1ms.run/library" "docker.1panel.live/library" "docker.m.daocloud.io/library" ""; do
+            SRC="${MIRROR:+$MIRROR/}$BASE_IMAGE"
+            if docker pull "$SRC"; then
+                [ -n "$MIRROR" ] && docker tag "$SRC" "$BASE_IMAGE"
+                PULLED=1
+                break
+            fi
+        done
+        [ "$PULLED" = "1" ] || fail "基础镜像拉取失败：$BASE_IMAGE"
+    fi
+
     info ">>> docker build..."
     docker build -t panjia-server:latest "$PROJECT_DIR"
 
@@ -83,4 +99,4 @@ if [ "$FRONTEND" = "1" ]; then
 fi
 
 echo ""
-ok "出包完成，部署：bash push-server.sh <客户服务器IP>"
+ok "出包完成，部署：bash deploy.sh <客户服务器IP>（日常发版用 update-backend.sh / update-frontend.sh）"

@@ -12,7 +12,7 @@ case "$SERVICE" in
 esac
 
 if [ $# -eq 0 ]; then
-    docker compose logs -f --tail 100 "$SERVICE"
+    sudo docker compose logs -f --tail 100 "$SERVICE"
 else
-    docker compose logs "$@" "$SERVICE"
+    sudo docker compose logs "$@" "$SERVICE"
 fi

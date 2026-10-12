@@ -87,10 +87,14 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?err}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?err}
+      # License 授权：首次部署配 PANJIA_AUTH_CODE 自动激活，token 落盘 data/panjia-license 后可留空
+      PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
       JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC}
     volumes:
       - ./logs:/ruoyi/server/logs
       - ./data/panjia-license:/data/panjia-license
+      # License 机器指纹主因子：只读挂载宿主机 machine-id
+      - /etc/machine-id:/etc/machine-id:ro
     expose:
       - "8080"
     ports:

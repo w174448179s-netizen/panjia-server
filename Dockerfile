@@ -1,4 +1,4 @@
-FROM docker.m.daocloud.io/library/eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:21-jre-jammy
 
 RUN mkdir -p /ruoyi/server/logs /ruoyi/server/temp /ruoyi/server/data
 
