@@ -57,7 +57,7 @@ echo ""
 [ -f "$IMAGE_TAR" ] || fail "镜像 tar 不存在：$IMAGE_TAR"
 [ -d "$SCRIPT_DIR/web/dist" ] || fail "前端 dist 不存在：$SCRIPT_DIR/web/dist"
 ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1 \
-    || fail "SSH 连不上 $SSH_TARGET（先 ssh-copy-id）"
+    || fail "SSH 连不上 ${SSH_TARGET}（先 ssh-copy-id）"
 ok " 本地检查通过（tar $(du -sh "$IMAGE_TAR" | cut -f1)）"
 
 # ==================== 1. 打包上传 ====================
@@ -142,7 +142,6 @@ MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 IMAGE_TAG=latest
 WEB_PORT=80
-SERVER_PORT=8080
 JAVA_OPTS=-Xms2048m -Xmx4096m -XX:+UseG1GC
 PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
 ENVEOF
@@ -162,7 +161,7 @@ MINIO_ROOT_PASSWORD=$MN_PW
 MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 MNEOF
-        echo "[服务器] .env 已补充 MinIO 配置（MinIO 密码：$MN_PW）"
+        echo "[服务器] .env 已补充 MinIO 配置（MinIO 密码：${MN_PW}）"
     fi
     if ! grep -q '^PANJIA_AUTH_CODE=' .env; then
         echo "PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}" >> .env
@@ -197,7 +196,7 @@ echo "[服务器] 当前容器状态："
 docker compose ps
 if [ "$SRV_HEALTH" != "healthy" ]; then
     echo ""
-    echo "[WARN] 后端 server 当前状态：$SRV_HEALTH（前端 nginx 不受影响，已正常启动）"
+    echo "[WARN] 后端 server 当前状态：${SRV_HEALTH}（前端 nginx 不受影响，已正常启动）"
     echo "[WARN] 常见原因：尚未配置授权码。处理："
     echo "         1) sudo nano $PWD/.env  填入 PANJIA_AUTH_CODE=PJ-XXXX-XXXX-XXXX"
     echo "         2) sudo ./restart.sh"
@@ -211,7 +210,7 @@ ok " 服务器启动完成"
 info ">>> 步骤 3/3：健康检查"
 sleep 3
 CODE=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "http://$SERVER_IP" 2>/dev/null || echo "000")
-[ "$CODE" = "200" ] || [ "$CODE" = "301" ] && ok " 前端正常（HTTP $CODE）" || warn " 前端返回 $CODE"
+[ "$CODE" = "200" ] || [ "$CODE" = "301" ] && ok " 前端正常（HTTP ${CODE}）" || warn " 前端返回 ${CODE}"
 
 echo ""
 echo "=========================================="

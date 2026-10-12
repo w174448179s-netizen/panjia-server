@@ -42,7 +42,7 @@ ok " dist 就绪：$(du -sh "$SCRIPT_DIR/web/dist" | cut -f1)"
 # ---- 2. rsync 同步 ----
 info ">>> 步骤 2/3：同步 dist 到服务器（增量 + 清理旧文件）"
 ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "mkdir -p $REMOTE_DIR/web/dist" \
-    || fail "SSH 连不上 $SSH_TARGET（先 ssh-copy-id）"
+    || fail "SSH 连不上 ${SSH_TARGET}（先 ssh-copy-id）"
 rsync -az --delete \
     "$SCRIPT_DIR/web/dist/" \
     "$SSH_TARGET:$REMOTE_DIR/web/dist/"

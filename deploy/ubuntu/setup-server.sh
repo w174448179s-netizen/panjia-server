@@ -4,7 +4,7 @@
 #
 # 做四件事（全部幂等，重复执行安全）：
 #   1. 系统基础：apt 更新 + 常用工具 + 时区 Asia/Shanghai
-#   2. 防火墙 ufw：放行 22/80/8080 后启用（先放行 SSH 再 enable，防锁死）
+#   2. 防火墙 ufw：放行 22/80 后启用（先放行 SSH 再 enable，防锁死）
 #   3. Docker CE + compose 插件：腾讯云内网源优先，不可达自动回退官方源
 #   4. Docker 加速源 daemon.json：腾讯云内网 registry 源优先 + 日志限制
 #
@@ -13,7 +13,7 @@
 #   bash setup-server.sh <服务器IP> [SSH用户] # 临时指定其它服务器
 #
 # 前提：
-#   - 云控制台**安全组**已放行 22/80/8080（安全组是云层，ufw 是系统层，两层都要放）
+#   - 云控制台**安全组**已放行 22/80（安全组是云层，ufw 是系统层，两层都要放）
 #   - 本地已配免密：ssh-copy-id ubuntu@<服务器IP>
 #
 # 初始化完成后 → 部署系统见 ../docker/README.md
@@ -37,9 +37,10 @@ SERVER_USER="${ARG_USER:-${SERVER_USER:-ubuntu}}"
 SSH_TARGET="${SERVER_USER}@${SERVER_IP}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+info()  { printf '%b[INFO]%b  %s\n' "$BLUE" "$NC" "$*"; }
+ok()    { printf '%b[OK]%b    %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[WARN]%b  %s\n' '\033[0;33m' "$NC" "$*"; }
+fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
 
 echo ""
 echo "=========================================="
@@ -51,7 +52,7 @@ ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1
     || fail "SSH 连不上 ${SSH_TARGET}（先 ssh-copy-id）"
 ok " SSH 连通"
 
-# ==================== 步骤 0：云安全组自动放行 80/8080（腾讯云，本地执行） ====================
+# ==================== 步骤 0：云安全组自动放行 80（腾讯云，本地执行） ====================
 # 安全组是云平台 API 层的，服务器内部脚本改不了；这里通过 tccli 调云 API 自动补规则。
 # 密钥来源：环境变量 TENCENTCLOUD_* > ../docker/server.env；不配置则跳过（回退手工控制台放行）。
 SG_SECRET_ID="${TENCENTCLOUD_SECRET_ID:-}"
@@ -71,9 +72,9 @@ ensure_tccli() {
 }
 
 if [ -n "$SG_SECRET_ID" ] && [ -n "$SG_SECRET_KEY" ] && [ -n "$SG_REGION" ]; then
-    info ">>> 步骤 0/4：云安全组自动放行 22/80/8080（region: $SG_REGION）"
+    info ">>> 步骤 0/4：云安全组自动放行 22/80（region: ${SG_REGION}）"
     if ! ensure_tccli; then
-        warn "tccli 安装失败，请手工在控制台放行安全组 22/80/8080"
+        warn "tccli 安装失败，请手工在控制台放行安全组 22/80"
     else
         export TENCENTCLOUD_SECRET_ID="$SG_SECRET_ID" TENCENTCLOUD_SECRET_KEY="$SG_SECRET_KEY"
         export TENCENTCLOUD_REGION="$SG_REGION"
@@ -102,7 +103,7 @@ except Exception:
     pass
 ")
             if [ -z "$LH_ID" ]; then
-                warn "CVM/轻量服务器都未找到公网 IP 为 $SERVER_IP 的实例（核对 TENCENTCLOUD_REGION），请手工放行 22/80/8080"
+                warn "CVM/轻量服务器都未找到公网 IP 为 $SERVER_IP 的实例（核对 TENCENTCLOUD_REGION），请手工放行 22/80"
             else
                 ok " 识别为轻量应用服务器：$LH_ID"
                 LH_INFO=$("$SG_TCCLI" lighthouse DescribeFirewallRules --InstanceId "$LH_ID" --output json 2>/dev/null | python3 -c "
@@ -118,11 +119,11 @@ except Exception:
                 LH_VER="${LH_INFO%% *}"
                 HAVE=" ${LH_INFO#* } "
                 MISS=""
-                for P in 22 80 8080; do
+                for P in 22 80; do
                     echo "$HAVE" | grep -q " $P " || MISS="$MISS$P "
                 done
                 if [ -z "$MISS" ]; then
-                    ok " 实例防火墙已放行 22/80/8080"
+                    ok " 实例防火墙已放行 22/80"
                 else
                     info "  实例防火墙补放行:$MISS"
                     RULES=$(MISS_LIST="$MISS" python3 -c "
@@ -133,7 +134,7 @@ print(json.dumps(rules))
                     if "$SG_TCCLI" lighthouse CreateFirewallRules --InstanceId "$LH_ID" --FirewallVersion "$LH_VER" --Rules "$RULES" >/dev/null 2>&1; then
                         ok " 实例防火墙已放行:$MISS"
                     else
-                        warn "实例防火墙自动放行失败，请手工在控制台放行 22/80/8080"
+                        warn "实例防火墙自动放行失败，请手工在控制台放行 22/80"
                     fi
                 fi
             fi
@@ -148,11 +149,11 @@ except Exception:
     print('')
 ")
                 MISS=""
-                for P in 22 80 8080; do
+                for P in 22 80; do
                     echo " $HAVE " | grep -q " $P " || MISS="$MISS$P "
                 done
                 if [ -z "$MISS" ]; then
-                    ok " 安全组 $SG 已放行 22/80/8080"
+                    ok " 安全组 $SG 已放行 22/80"
                     continue
                 fi
                 info "  安全组 $SG 补放行:$MISS"
@@ -164,13 +165,13 @@ print(json.dumps([{'SecurityGroupPolicySet': {'Ingress': ingress}}]))
                 if "$SG_TCCLI" vpc CreateSecurityGroupPolicies --SecurityGroupId "$SG" --SecurityGroupPolicies "$RULES" >/dev/null 2>&1; then
                     ok " 安全组 $SG 已放行:$MISS"
                 else
-                    warn "安全组 $SG 自动放行失败，请手工在控制台放行 80/8080"
+                    warn "安全组 $SG 自动放行失败，请手工在控制台放行 22/80"
                 fi
             done
         fi
     fi
 else
-    info ">>> 步骤 0/4：未配置腾讯云 API 密钥（server.env 的 TENCENTCLOUD_*），安全组需手工放行 22/80/8080"
+    info ">>> 步骤 0/4：未配置腾讯云 API 密钥（server.env 的 TENCENTCLOUD_*），安全组需手工放行 22/80"
 fi
 
 info ">>> 步骤 1/4：系统基础（apt 工具 + 时区）"
@@ -199,9 +200,9 @@ else
     echo "[服务器] ufw 已在运行"
 fi
 ufw allow 22/tcp   >/dev/null      # SSH
-ufw allow 80/tcp   >/dev/null      # 前端 + API 入口（nginx）
-ufw allow 8080/tcp >/dev/null      # 后端直连（调试用）
-echo "[服务器] 放行规则：22 / 80 / 8080"
+ufw allow 80/tcp   >/dev/null      # 前端 + API 入口（nginx，容器内反代后端）
+# 只放行 22/80：后端 8080 与 pg/redis/minio 均不发布公网，需要时走 SSH 隧道
+echo "[服务器] 放行规则：22 / 80"
 ufw status numbered | head -20
 REMOTE
 ok " 防火墙完成"

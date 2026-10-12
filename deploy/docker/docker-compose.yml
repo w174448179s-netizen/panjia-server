@@ -9,8 +9,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-panjia}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # 只绑宿主机回环：容器间走内网，外部仅能通过 SSH 隧道访问，不对公网暴露
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -29,7 +30,7 @@ services:
     volumes:
       - ./data/redis:/data
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping 2>/dev/null | grep -q PONG"]
       interval: 10s
@@ -49,8 +50,8 @@ services:
       MINIO_COMPRESS_EXTENSIONS: ""
       MINIO_COMPRESS_MIME_TYPES: ""
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - ./data/minio:/data
     command: server --address ':9000' --console-address ':9001' /data
@@ -95,10 +96,10 @@ services:
       - ./data/panjia-license:/data/panjia-license
       # License 机器指纹主因子：只读挂载宿主机 machine-id
       - /etc/machine-id:/etc/machine-id:ro
+    # 只在容器内网暴露，不发布到宿主机：nginx 通过容器名 server:8080 反代，
+    # 禁止绕过 nginx 从公网直连后端 API
     expose:
       - "8080"
-    ports:
-      - "${SERVER_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
       interval: 30s

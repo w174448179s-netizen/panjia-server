@@ -43,7 +43,7 @@ ok " 镜像就绪：$(du -sh "$IMAGE_TAR" | cut -f1)"
 # ---- 2. 上传 ----
 info ">>> 步骤 2/4：上传镜像 tar"
 ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "mkdir -p $REMOTE_DIR" \
-    || fail "SSH 连不上 $SSH_TARGET（先 ssh-copy-id）"
+    || fail "SSH 连不上 ${SSH_TARGET}（先 ssh-copy-id）"
 scp -q "$IMAGE_TAR" "$SSH_TARGET:$REMOTE_DIR/"
 ok " 上传完成"
 
@@ -68,13 +68,13 @@ SUCC=0
 for i in $(seq 1 15); do
     CODE=$(curl -s -m 5 -o /dev/null -w "%{http_code}" "http://$SERVER_IP" 2>/dev/null || echo "000")
     if [ "$CODE" = "200" ] || [ "$CODE" = "301" ]; then
-        ok " 前端正常（HTTP $CODE，第 $i/15 次）"
+        ok " 前端正常（HTTP ${CODE}，第 ${i}/15 次）"
         SUCC=1
         break
     fi
     sleep 2
 done
-[ "$SUCC" = "0" ] && warn "重试 15 次仍返回 $CODE（看日志：ssh $SSH_TARGET 'cd $REMOTE_DIR && sudo ./logs.sh'）"
+[ "$SUCC" = "0" ] && warn "重试 15 次仍返回 ${CODE}（看日志：ssh ${SSH_TARGET} 'cd ${REMOTE_DIR} && sudo ./logs.sh')"
 
 echo ""
 echo "=========================================="
