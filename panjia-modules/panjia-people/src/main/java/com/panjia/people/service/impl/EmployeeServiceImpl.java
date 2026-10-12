@@ -152,7 +152,11 @@ public class EmployeeServiceImpl implements EmployeeService {
         if (exists != null && exists > 0) {
             throw new ServiceException("工号 {} 已存在", dto.getEmployeeCode());
         }
-        Long mentorId = resolveMentorIdByCode(dto.getMentorCode());
+        // 导入侧预解析后可直传 mentorId 绕过库内查询（师傅在本批次但尚未入库的场景）；
+        // 员工管理界面路径不传 mentorId，回退到 mentorCode 走库内解析
+        Long mentorId = dto.getMentorId() != null
+            ? dto.getMentorId()
+            : resolveMentorIdByCode(dto.getMentorCode());
 
         Employee emp = new Employee();
         emp.setEmployeeCode(dto.getEmployeeCode().trim());

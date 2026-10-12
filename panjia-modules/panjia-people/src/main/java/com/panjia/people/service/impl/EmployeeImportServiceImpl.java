@@ -340,6 +340,12 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             .filter(StringUtils::isNotBlank)
             .collect(Collectors.toSet());
         Map<String, Long> existingIds = employeeService.findEmployeeIdsByCodes(codes);
+        // 本批次已知工号 → 员工 ID（库内已有 + 本批次已创建），用于解析师傅在本批次的场景
+        // 解决阶段 A「库内 OR 本批次」放行但落地时 createEmployee 内部只查库内的口径不一致：
+        // 师傅行排在徒弟后时，徒弟先落地，师傅尚未入库 → 抛「师傅工号不存在」整批回滚
+        Map<String, Long> knownEmployees = new HashMap<>(existingIds);
+        // 待回填师傅关系：徒弟 employeeId → 师傅工号（师傅在本批次但创建顺序晚于徒弟）
+        Map<Long, String> pendingMentor = new LinkedHashMap<>();
         int processed = 0;
         for (ParsedRow row : sheet.getRows()) {
             String code = str(row, "employee_code");
@@ -348,12 +354,31 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
                 employeeService.updateEmployee(existingId,
                     toUpdateDTO(row, deptCols, deptIdCache, effectDate), operator);
             } else {
-                employeeService.createEmployee(toCreateDTO(row, deptCols, deptIdCache), operator);
+                // 师傅在本批次已知（已创建或库内已有）→ 直传 mentorId 绕过 createEmployee 内部库内查询；
+                // 师傅在本批次但尚未创建（行号晚于徒弟）→ 暂置无师傅，循环结束后回填
+                String mentorCode = str(row, "mentor_code");
+                Long mentorId = StringUtils.isNotBlank(mentorCode)
+                    ? knownEmployees.get(mentorCode.trim()) : null;
+                Long newId = employeeService.createEmployee(
+                    toCreateDTO(row, deptCols, deptIdCache, mentorId), operator);
+                if (mentorId == null && StringUtils.isNotBlank(mentorCode)) {
+                    pendingMentor.put(newId, mentorCode.trim());
+                }
+                if (StringUtils.isNotBlank(code)) {
+                    knownEmployees.put(code, newId);
+                }
             }
             processed++;
             if (processed % PROGRESS_INTERVAL == 0) {
                 updateProgress(batchId, processed);
             }
+        }
+        // 回填师傅关系（师傅行排在徒弟后，此时师傅已入库，updateEmployee 能解析到）
+        for (Map.Entry<Long, String> entry : pendingMentor.entrySet()) {
+            EmployeeUpdateDTO mentorDto = new EmployeeUpdateDTO();
+            mentorDto.setMentorCode(entry.getValue());
+            mentorDto.setEffectiveDate(effectDate);
+            employeeService.updateEmployee(entry.getKey(), mentorDto, operator);
         }
     }
 
@@ -400,8 +425,13 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
 
     /**
      * 解析行 → 新增员工 DTO（映射规则与旧 EmployeeImportSink 一致）。
+     *
+     * @param mentorId 师傅员工 ID（导入侧已预解析则直传，绕过 createEmployee 内部库内查询）；
+     *                 null 时 createEmployee 内部走 mentorCode 库内解析（本方法不再 set mentorCode，
+     *                 避免与 mentorId 冲突；本批次师傅未创建的 pending 场景由调用方循环结束后回填）
      */
-    private EmployeeCreateDTO toCreateDTO(ParsedRow row, List<ColumnDef> deptCols, Map<String, Long> deptIdCache) {
+    private EmployeeCreateDTO toCreateDTO(ParsedRow row, List<ColumnDef> deptCols,
+                                          Map<String, Long> deptIdCache, Long mentorId) {
         String deptFull = assembleDeptPath(row, deptCols);
         Long deptId = deptIdCache.computeIfAbsent(deptFull, deptPort::ensureDept);
 
@@ -420,7 +450,9 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setCommercialInsured(bool(row, "commercial"));
         dto.setDormitory(bool(row, "dormitory"));
         dto.setParttime(bool(row, "parttime"));
-        dto.setMentorCode(str(row, "mentor_code"));
+        // 师傅关系由调用方预解析为 mentorId 直传（本批次师傅尚未创建的场景由调用方循环结束回填）；
+        // 不再 set mentorCode，避免 createEmployee 内部又走 resolveMentorIdByCode 库内查询
+        dto.setMentorId(mentorId);
         dto.setSocialFee(decimal(row, "social_fee"));
         dto.setCommercialFee(decimal(row, "commercial_fee"));
         dto.setHousingFund(decimal(row, "housing_fund"));
