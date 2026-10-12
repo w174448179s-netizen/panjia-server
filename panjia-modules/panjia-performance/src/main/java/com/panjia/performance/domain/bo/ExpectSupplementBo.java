@@ -31,8 +31,7 @@ public class ExpectSupplementBo {
     /** 订单号（从实收继承，部分业务无订单号则传 null） */
     private String orderNo;
 
-    /** 签约日期（手工录入） */
-    @NotNull(message = "签约日期不能为空")
+    /** 签约日期（从实收行继承，可空时回退为新签结算月 1 号） */
     private LocalDate businessDate;
 
     /** 业务类型（从实收继承） */

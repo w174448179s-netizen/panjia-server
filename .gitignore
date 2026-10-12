@@ -69,7 +69,7 @@ deploy/docker/.env
 deploy/docker/data/
 deploy/docker/logs/
 deploy/docker/web/dist/
-
+deploy/docker/*.tar
 ######################################################################
 # Windows 安装器构建产物（源码提交，构建结果不提交）
 deploy/windows/panjia-setup.exe
@@ -90,4 +90,5 @@ deploy/windows/build_nsi_upgrade/
 backups/
 backup/
 *.dump
+
 

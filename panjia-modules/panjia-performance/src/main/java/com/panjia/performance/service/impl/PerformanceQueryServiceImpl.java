@@ -649,7 +649,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         String contractNo = bo.getContractNo();
         String keyBase = (orderNo != null ? orderNo : contractNo) + "|MANUAL-SUPPLEMENT|" + System.currentTimeMillis();
         java.time.LocalDate periodStart = java.time.YearMonth.parse(bo.getPeriod()).atDay(1);
-        java.time.LocalDateTime businessDateTime = bo.getBusinessDate().atStartOfDay();
+        // 签约日期从实收行继承，实收单无签约日期时回退为新签结算月 1 号
+        java.time.LocalDate businessDate = bo.getBusinessDate() != null ? bo.getBusinessDate() : periodStart;
+        java.time.LocalDateTime businessDateTime = businessDate.atStartOfDay();
         // 批量预加载员工主数据：部门归属/工号/姓名以主数据为准（实收明细可能缺 dept_id，
         // 而业绩查询按事实 dept_id 做数据权限过滤，为空会被过滤掉导致「保存成功却查不到」）
         java.util.List<Long> empIds = bo.getItems().stream()
