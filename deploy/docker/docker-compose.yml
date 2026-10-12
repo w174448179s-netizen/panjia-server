@@ -101,10 +101,21 @@ services:
       PANJIA_IMPORT_MINIO_BUCKET: ${PANJIA_IMPORT_MINIO_BUCKET:-panjia-archive}
       # License 授权：首次部署配 PANJIA_AUTH_CODE 自动激活，token 落盘 data/panjia-license 后可留空
       PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
+      # 数据库备份恢复（系统管理 → 备份恢复）：容器内无 docker CLI，走 local 模式
+      # 用镜像内置的 pg_dump/pg_restore 经容器内网 TCP 直连 postgres 容器
+      PANJIA_BACKUP_MODE: local
+      PANJIA_BACKUP_DB_HOST: postgres
+      PANJIA_BACKUP_DB_PORT: 5432
+      PANJIA_BACKUP_DB: ${POSTGRES_DB:-panjia}
+      PANJIA_BACKUP_USER: ${POSTGRES_USER:?err}
+      PANJIA_BACKUP_PASS: ${POSTGRES_PASSWORD:?err}
+      PANJIA_BACKUP_DIR: /ruoyi/server/backup
       JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC}
     volumes:
       - ./logs:/ruoyi/server/logs
       - ./data/panjia-license:/data/panjia-license
+      # 备份产物持久化（.dump 文件，可拷贝归档）
+      - ./data/backup:/ruoyi/server/backup
       # License 机器指纹主因子：只读挂载宿主机 machine-id
       - /etc/machine-id:/etc/machine-id:ro
     # 只在容器内网暴露，不发布到宿主机：nginx 通过容器名 server:8080 反代，

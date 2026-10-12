@@ -1,6 +1,22 @@
 FROM eclipse-temurin:21-jre-jammy
 
-RUN mkdir -p /ruoyi/server/logs /ruoyi/server/temp /ruoyi/server/data
+# 安装 PostgreSQL 16 客户端（备份恢复功能 local 模式用，与 Dockerfile.local 同口径）：
+# 生产容器内无 docker CLI，BackupServiceImpl 直接执行 pg_dump/pg_restore 经 TCP
+# 连 postgres 容器（compose 里 PANJIA_BACKUP_MODE=local，见 application.yml 的 panjia.backup）。
+# jammy 默认源只提供 client-14，旧客户端不能 dump 16.x 服务端，必须挂 pgdg 源装 16。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates gnupg lsb-release wget \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && wget -q -O /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /ruoyi/server/logs /ruoyi/server/temp /ruoyi/server/data /ruoyi/server/backup
 
 WORKDIR /ruoyi/server
 
