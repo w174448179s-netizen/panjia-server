@@ -142,6 +142,12 @@ MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 IMAGE_TAG=latest
 WEB_PORT=80
+# 内置 MinIO 随 compose 启动；改用外部独立 MinIO 时把本行置空并填好下面 4 项
+COMPOSE_PROFILES=embedded-minio
+# PANJIA_IMPORT_MINIO_ENDPOINT=http://文件服务器IP:9000
+# PANJIA_IMPORT_MINIO_ACCESS_KEY=外部MinIO账号
+# PANJIA_IMPORT_MINIO_SECRET_KEY=外部MinIO密码
+# PANJIA_IMPORT_MINIO_BUCKET=panjia-archive
 JAVA_OPTS=-Xms2048m -Xmx4096m -XX:+UseG1GC
 PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
 ENVEOF
@@ -167,6 +173,11 @@ MNEOF
         echo "PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}" >> .env
         echo "[服务器] .env 已补充 PANJIA_AUTH_CODE"
     fi
+    # 老版本升级：默认启用内置 MinIO（外置 MinIO 用户自行置空）
+    if ! grep -q '^COMPOSE_PROFILES=' .env; then
+        echo "COMPOSE_PROFILES=embedded-minio" >> .env
+        echo "[服务器] .env 已补充 COMPOSE_PROFILES=embedded-minio"
+    fi
 fi
 
 # ---- 清理上次失败残留的容器，再启动 ----
@@ -181,8 +192,38 @@ chmod +x *.sh 2>/dev/null || true
 echo "[服务器] docker compose up -d（全部容器创建启动）..."
 docker compose up -d
 
-echo "[服务器] 等待基础设施健康（postgres/redis/minio，最多 5 分钟）..."
-docker compose up -d --wait --wait-timeout 300 postgres redis minio
+# 判断内置/外部 MinIO（.env 里 COMPOSE_PROFILES 含 embedded-minio 为内置）
+set -a; . ./.env; set +a
+MC_IMAGE="pgsty/minio:RELEASE.2026-04-17T00-00-00Z"
+IMPORT_BUCKET="${PANJIA_IMPORT_MINIO_BUCKET:-panjia-archive}"
+
+if docker compose config --services | grep -q '^minio$'; then
+    echo "[服务器] 等待基础设施健康（postgres/redis/内置minio，最多 5 分钟）..."
+    docker compose up -d --wait --wait-timeout 300 postgres redis minio
+    # OSS 客户端不会自动建桶；mc 已内置在 minio 镜像里，幂等
+    echo "[服务器] 确保内置 MinIO 归档桶 ${IMPORT_BUCKET} ..."
+    docker exec panjia-minio sh -c '
+        mc alias set local http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1
+        if mc ls "local/'"$IMPORT_BUCKET"'" >/dev/null 2>&1; then
+            echo "[服务器] 桶 '"$IMPORT_BUCKET"' 已存在"
+        else
+            mc mb "local/'"$IMPORT_BUCKET"'" && echo "[服务器] 已创建桶 '"$IMPORT_BUCKET"'"
+        fi'
+else
+    EXT_EP="${PANJIA_IMPORT_MINIO_ENDPOINT:?外置 MinIO 模式必须在 .env 配置 PANJIA_IMPORT_MINIO_ENDPOINT}"
+    echo "[服务器] 外置 MinIO 模式：${EXT_EP}（内置 minio 容器不启动）"
+    echo "[服务器] 等待基础设施健康（postgres/redis，最多 5 分钟）..."
+    docker compose up -d --wait --wait-timeout 300 postgres redis
+    echo "[服务器] 连接外置 MinIO 并确保归档桶 ${IMPORT_BUCKET} ..."
+    docker run --rm --entrypoint sh "$MC_IMAGE" -c '
+        mc alias set ext "'"$EXT_EP"'" "'"$PANJIA_IMPORT_MINIO_ACCESS_KEY"'" "'"$PANJIA_IMPORT_MINIO_SECRET_KEY"'" >/dev/null 2>&1 \
+            || { echo "[服务器] 连不上外置 MinIO，请检查地址/密钥/安全组"; exit 1; }
+        if mc ls "ext/'"$IMPORT_BUCKET"'" >/dev/null 2>&1; then
+            echo "[服务器] 桶 '"$IMPORT_BUCKET"' 已存在"
+        else
+            mc mb "ext/'"$IMPORT_BUCKET"'" && echo "[服务器] 已创建桶 '"$IMPORT_BUCKET"'"
+        fi'
+fi
 
 echo "[服务器] 等待后端 server 健康（宽限 ~150 秒，不阻断部署）..."
 SRV_HEALTH="starting"

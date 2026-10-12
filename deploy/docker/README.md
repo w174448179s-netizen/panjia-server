@@ -90,6 +90,100 @@ sudo cat ~/panjia/.env     # 数据库/Redis 密码都在这（root 600 权限�
 > 本机需要直连数据库/Redis/MinIO 调试时走 SSH 隧道（不用改任何发布配置）：
 > `ssh -L 5432:127.0.0.1:5432 -L 9001:127.0.0.1:9001 ubuntu@服务器IP`，然后本地连 127.0.0.1 对应端口。
 
+### 文件服务拆到独立服务器（外部 MinIO）
+
+随业务增长要把文件存储从应用机拆出去时，**不用改 compose / 不用重新部署应用**，按下面 6 步切换。系统里文件相关配置有两个面，都要改：
+
+| 配置面 | 管什么 | 改哪 |
+|--------|--------|------|
+| 导入归档 | 员工表等导入 Excel 的归档 | 应用机 `.env` 的 `PANJIA_IMPORT_MINIO_*` |
+| 通用文件服务 | 附件/图片等上传下载 | 管理后台「系统管理 → OSS 配置」（`sys_oss_config` 表，改完即时生效） |
+
+#### 1）文件服务器部署 MinIO
+
+新机器装好 Docker 后，建 `/opt/minio/docker-compose.yml`（数据目录挂独立数据盘，如 `/data/minio`）：
+
+```yaml
+services:
+  minio:
+    image: pgsty/minio:RELEASE.2026-04-17T00-00-00Z
+    container_name: minio
+    restart: always
+    environment:
+      TZ: Asia/Shanghai
+      MINIO_ROOT_USER: panjia
+      MINIO_ROOT_PASSWORD: 改成强密码_至少16位
+    command: server --address ':9000' --console-address ':9001' /data
+    volumes:
+      - /data/minio:/data
+    ports:
+      - "9000:9000"
+      - "127.0.0.1:9001:9001"   # 控制台只绑回环，用 SSH 隧道访问
+```
+
+```bash
+cd /opt/minio && docker compose up -d
+```
+
+#### 2）网络放通（最小暴露）
+
+- 文件机 ufw / 云防火墙放行 9000，**来源只填应用服务器内网 IP**，禁止 0.0.0.0/0
+- 两台机放同一 VPC，走内网流量；9001 控制台不对公网开，需要时 `ssh -L 9001:127.0.0.1:9001 ubuntu@文件机IP` 后访问 http://127.0.0.1:9001
+
+#### 3）迁移旧文件（应用机执行，镜像自带 mc）
+
+```bash
+docker run --rm --entrypoint sh pgsty/minio:RELEASE.2026-04-17T00-00-00Z -c '
+  mc alias set old http://127.0.0.1:9000 旧AK 旧SK
+  mc alias set new http://文件机内网IP:9000 新AK 新SK
+  mc mirror --overwrite old/panjia-archive new/panjia-archive
+  echo "迁移完成，对象数："; mc ls --recursive new/panjia-archive | wc -l'
+```
+
+> 通用文件服务如果还有别的桶（在 OSS 配置里看 bucket 名），同样 `mc mirror` 一遍。建议低峰期操作，迁完先别删旧数据。
+
+#### 4）切应用机 `.env`
+
+```bash
+ssh ubuntu@应用机IP
+cd ~/panjia && sudo nano .env
+```
+
+```dotenv
+COMPOSE_PROFILES=                                    # 置空 → 内置 minio 容器不再启动
+PANJIA_IMPORT_MINIO_ENDPOINT=http://文件机内网IP:9000
+PANJIA_IMPORT_MINIO_ACCESS_KEY=panjia
+PANJIA_IMPORT_MINIO_SECRET_KEY=文件机的强密码
+PANJIA_IMPORT_MINIO_BUCKET=panjia-archive
+```
+
+#### 5）改后台 OSS 配置
+
+登录系统 → 系统管理 → OSS 配置，把启用中的那条 MinIO 配置的 **访问站点(endpoint) / accessKey / secretKey** 改成文件服务器的，保存（即时生效，不用重启）。
+
+#### 6）重启验证
+
+```bash
+sudo ./restart.sh                                   # 内置 minio 容器自动消失，server/web 正常
+sudo docker ps                                       # 应只剩 postgres/redis/server/web 四个容器
+```
+
+验证清单：
+- [ ] 重新导入一次员工表成功（导入归档走新 MinIO）
+- [ ] 页面上传/下载一个附件成功（通用文件服务走新 MinIO）
+- [ ] 文件机 `mc ls new/panjia-archive/panjia-import/` 能看到新文件
+- [ ] 确认无误后再删应用机旧数据 `~/panjia/data/minio`（保留几天备份更稳妥）
+
+#### 回滚
+
+出问题把 `.env` 改回 `COMPOSE_PROFILES=embedded-minio`、`PANJIA_IMPORT_MINIO_*` 注释回内置值，OSS 配置改回原 endpoint，`sudo ./restart.sh` 即可（旧数据未删时无损）。
+
+#### 架构建议
+
+- **endpoint 用内网域名不用裸 IP**（内网 DNS 或 hosts，如 `http://oss.panjia:9000`）：以后再迁文件机只改一条 DNS，应用配置和数据库里的历史 URL 都不受影响
+- 两机同 VPC：免公网带宽费，9000 无需对公网暴露
+- 文件机数据盘独立挂载、定期快照；MinIO 单节点够用，数据增长后再考虑分布式模式
+
 ## 六、代码更新 → 发版流程
 
 ```bash

@@ -39,13 +39,17 @@ services:
       start_period: 10s
 
   minio:
+    # 默认随 compose 一起启动（COMPOSE_PROFILES=embedded-minio）；
+    # 改用外部独立 MinIO 服务器时，.env 里 COMPOSE_PROFILES 留空即可，本服务不启动
+    profiles: ["embedded-minio"]
     image: pgsty/minio:RELEASE.2026-04-17T00-00-00Z
     container_name: panjia-minio
     restart: always
     environment:
       TZ: Asia/Shanghai
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?err}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?err}
+      # 弱默认值仅兜底：内置模式由 .env 注入随机强密码；外部模式此服务不启动
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-panjia}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-panjia123456}
       MINIO_COMPRESS: "off"
       MINIO_COMPRESS_EXTENSIONS: ""
       MINIO_COMPRESS_MIME_TYPES: ""
@@ -84,10 +88,16 @@ services:
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?err}
       SPRING_DATA_REDIS_DATABASE: 0
       REDISSON_SINGLESERVERCONFIG_PASSWORD: ${REDIS_PASSWORD:?err}
-      # MinIO 对象存储
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?err}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?err}
+      # MinIO 对象存储（通用文件服务走后台 sys_oss_config 表配置；此处随导入归档变量联动）
+      MINIO_ENDPOINT: ${PANJIA_IMPORT_MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${PANJIA_IMPORT_MINIO_ACCESS_KEY:-${MINIO_ROOT_USER:-panjia}}
+      MINIO_SECRET_KEY: ${PANJIA_IMPORT_MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-panjia123456}}
+      # MinIO 对象存储（导入归档 common-import-util 专用，属性名不同，必须单独配）
+      # 内置容器默认 http://minio:9000；迁到独立服务器时在 .env 填外部地址+密钥即可
+      PANJIA_IMPORT_MINIO_ENDPOINT: ${PANJIA_IMPORT_MINIO_ENDPOINT:-http://minio:9000}
+      PANJIA_IMPORT_MINIO_ACCESS_KEY: ${PANJIA_IMPORT_MINIO_ACCESS_KEY:-${MINIO_ROOT_USER:-panjia}}
+      PANJIA_IMPORT_MINIO_SECRET_KEY: ${PANJIA_IMPORT_MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD:-panjia123456}}
+      PANJIA_IMPORT_MINIO_BUCKET: ${PANJIA_IMPORT_MINIO_BUCKET:-panjia-archive}
       # License 授权：首次部署配 PANJIA_AUTH_CODE 自动激活，token 落盘 data/panjia-license 后可留空
       PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
       JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC}
