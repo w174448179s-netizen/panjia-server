@@ -26,9 +26,9 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"       # panjia-server/
 UI_DIR="$(cd "$PROJECT_DIR/.." && pwd)/panjia-ui"    # panjia-ui/
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+ok()    { printf '%b[OK]%b    %s\n' "$GREEN" "$NC" "$*"; }
+info()  { printf '%b[INFO]%b  %s\n' "$BLUE" "$NC" "$*"; }
+fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
 
 echo ""
 echo "=========================================="
@@ -85,7 +85,7 @@ if [ "$FRONTEND" = "1" ]; then
     [ -d "$UI_DIR" ] || fail "前端目录不存在：$UI_DIR"
     command -v pnpm >/dev/null 2>&1 || command -v npx >/dev/null 2>&1 || fail "未找到 pnpm：npm install -g pnpm"
 
-    info ">>> 前端构建（$UI_DIR）..."
+    info ">>> 前端构建（${UI_DIR}）..."
     cd "$UI_DIR"
     [ -d node_modules ] || { info " 安装依赖..."; if command -v pnpm >/dev/null 2>&1; then pnpm install; else npx pnpm install; fi; }
     if command -v pnpm >/dev/null 2>&1; then pnpm build; else npx pnpm build; fi

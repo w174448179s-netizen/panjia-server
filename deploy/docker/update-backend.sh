@@ -24,10 +24,10 @@ SSH_TARGET="${SERVER_USER}@${SERVER_IP}"
 IMAGE_TAR="$SCRIPT_DIR/panjia-server-latest.tar"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "\033[0;33m[WARN]${NC}  $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+info()  { printf '%b[INFO]%b  %s\n' "$BLUE" "$NC" "$*"; }
+ok()    { printf '%b[OK]%b    %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[WARN]%b  %s\n' '\033[0;33m' "$NC" "$*"; }
+fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
 
 echo ""
 echo "=========================================="

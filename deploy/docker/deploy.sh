@@ -42,10 +42,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_TAR="$SCRIPT_DIR/panjia-server-latest.tar"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
-info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
-ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()  { echo -e "\033[0;33m[WARN]${NC}  $*"; }
-fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+info()  { printf '%b[INFO]%b  %s\n' "$BLUE" "$NC" "$*"; }
+ok()    { printf '%b[OK]%b    %s\n' "$GREEN" "$NC" "$*"; }
+warn()  { printf '%b[WARN]%b  %s\n' '\033[0;33m' "$NC" "$*"; }
+fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
 
 echo ""
 echo "=========================================="
@@ -174,9 +174,36 @@ fi
 docker compose down --remove-orphans 2>/dev/null || true
 chmod +x *.sh 2>/dev/null || true
 
-echo "[服务器] docker compose up（--wait 等健康检查）..."
-docker compose up -d --wait --wait-timeout 600
+# 启动策略（关键）：
+# 1) up -d 全部创建启动，不阻塞 —— web 只 depends_on server 启动，后端挂了 nginx 也照常跑
+# 2) 基础设施（pg/redis/minio）必须健康，才继续；不健康直接判失败
+# 3) server 只做宽限等待（最多 ~150s），不健康不阻断 —— 常见原因是还没配授权码，
+#    部署完成后补 .env 再 ./restart.sh 即可，不应拖死整个部署
+echo "[服务器] docker compose up -d（全部容器创建启动）..."
+docker compose up -d
+
+echo "[服务器] 等待基础设施健康（postgres/redis/minio，最多 5 分钟）..."
+docker compose up -d --wait --wait-timeout 300 postgres redis minio
+
+echo "[服务器] 等待后端 server 健康（宽限 ~150 秒，不阻断部署）..."
+SRV_HEALTH="starting"
+for i in $(seq 1 30); do
+    SRV_HEALTH=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' panjia-server 2>/dev/null || echo missing)
+    [ "$SRV_HEALTH" = "healthy" ] && break
+    sleep 5
+done
+
+echo "[服务器] 当前容器状态："
 docker compose ps
+if [ "$SRV_HEALTH" != "healthy" ]; then
+    echo ""
+    echo "[WARN] 后端 server 当前状态：$SRV_HEALTH（前端 nginx 不受影响，已正常启动）"
+    echo "[WARN] 常见原因：尚未配置授权码。处理："
+    echo "         1) sudo nano $PWD/.env  填入 PANJIA_AUTH_CODE=PJ-XXXX-XXXX-XXXX"
+    echo "         2) sudo ./restart.sh"
+    echo "         查日志：sudo ./logs.sh"
+    echo ""
+fi
 REMOTE
 ok " 服务器启动完成"
 
@@ -191,5 +218,5 @@ echo "=========================================="
 ok " 部署完成！访问 http://$SERVER_IP"
 echo "  日志：  ssh $SSH_TARGET 'cd $REMOTE_DIR && ./logs.sh'"
 echo "  重启：  ssh $SSH_TARGET 'cd $REMOTE_DIR && ./restart.sh'"
-echo "  密码：  ssh $SSH_TARGET 'cat $REMOTE_DIR/.env'"
+echo "  密码：  ssh $SSH_TARGET 'sudo cat $REMOTE_DIR/.env'"
 echo "=========================================="

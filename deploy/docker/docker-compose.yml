@@ -110,9 +110,11 @@ services:
     image: nginx:stable-alpine
     container_name: panjia-web
     restart: always
+    # 只等 server 容器启动（保证容器名 DNS 可解析），不等健康：
+    # 后端没起来/重启循环时 nginx 照常服务静态页，API 返回 502 而不是整站打不开
     depends_on:
       server:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "${WEB_PORT:-80}:80"
     volumes:
