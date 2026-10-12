@@ -81,11 +81,11 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     @Override
     public PageResult<EmployeeVO> pageList(EmployeeQuery query, PageQuery pageQuery) {
+        List<EmployeeStatus> statuses = EmployeeStatus.fromCodes(query.getStatus());
         LambdaQueryWrapper<Employee> wrapper = new LambdaQueryWrapper<Employee>()
             .like(StringUtils.isNotBlank(query.getEmployeeCode()), Employee::getEmployeeCode, query.getEmployeeCode())
             .like(StringUtils.isNotBlank(query.getEmployeeName()), Employee::getEmployeeName, query.getEmployeeName())
-            .eq(StringUtils.isNotBlank(query.getStatus()),
-                Employee::getStatus, EmployeeStatus.fromCode(query.getStatus()))
+            .in(!statuses.isEmpty(), Employee::getStatus, statuses)
             .orderByDesc(Employee::getCreateTime)
             .orderByDesc(Employee::getEmployeeId);
 

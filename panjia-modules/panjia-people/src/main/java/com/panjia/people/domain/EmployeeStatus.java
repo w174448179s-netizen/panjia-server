@@ -2,6 +2,12 @@ package com.panjia.people.domain;
 
 import com.fasterxml.jackson.annotation.JsonValue;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
 /**
  * 员工状态枚举（V5.2）。
  * <p>
@@ -68,5 +74,27 @@ public enum EmployeeStatus {
             }
         }
         return null;
+    }
+
+    /**
+     * 按 code 集合批量解析状态枚举（多选查询用）。
+     * <p>
+     * 忽略空白与无法识别的 code，结果去重并保持入参顺序。
+     *
+     * @param codes 状态码集合
+     * @return 状态枚举列表；入参为空时返回空列表
+     */
+    public static List<EmployeeStatus> fromCodes(Collection<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return List.of();
+        }
+        Set<EmployeeStatus> parsed = new LinkedHashSet<>();
+        for (String code : codes) {
+            EmployeeStatus status = fromCode(code);
+            if (status != null) {
+                parsed.add(status);
+            }
+        }
+        return new ArrayList<>(parsed);
     }
 }

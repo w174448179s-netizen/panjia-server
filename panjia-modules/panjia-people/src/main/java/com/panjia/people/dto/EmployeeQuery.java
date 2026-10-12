@@ -2,6 +2,8 @@ package com.panjia.people.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * 员工列表筛选条件。
  */
@@ -20,6 +22,6 @@ public class EmployeeQuery {
     /** 岗位名（精确匹配，筛选拥有该岗位的员工） */
     private String postName;
 
-    /** 状态（ACTIVE/PARTTIME/LEFT/PENDING） */
-    private String status;
+    /** 状态集合（ACTIVE/PARTTIME/LEFT/PENDING），支持多选；为空表示不限制 */
+    private List<String> status;
 }
