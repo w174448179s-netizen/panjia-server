@@ -73,7 +73,9 @@ if [ "$BACKEND" = "1" ]; then
     fi
 
     info ">>> docker build..."
-    docker build -t panjia-server:latest "$PROJECT_DIR"
+    # DOCKER_BUILDKIT=1：启用 BuildKit，分层缓存命中时明确显示 CACHED，
+    # 避免每次发版重装 postgresql-client 等基础层（只要 Dockerfile 前段不变就命中缓存）
+    DOCKER_BUILDKIT=1 docker build -t panjia-server:latest "$PROJECT_DIR"
 
     info ">>> docker save → panjia-server-latest.tar..."
     docker save -o "$SCRIPT_DIR/panjia-server-latest.tar" panjia-server:latest
