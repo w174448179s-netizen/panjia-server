@@ -27,7 +27,7 @@
 
 - [ ] 客户服务器：Ubuntu 22.04 / 24.04（其他发行版脚本会自动适配 apt）
 - [ ] 裸机先初始化：`bash ../ubuntu/setup-server.sh`（装 Docker + 防火墙 + 加速源，一次性，幂等）
-- [ ] 腾讯云/阿里云**安全组**放行：`22`(SSH)、`80`(HTTP)、`8080`(后端直连，可选)
+- [ ] 腾讯云/阿里云**安全组**放行：`22`(SSH)、`80`(HTTP)；其余端口全部不需要（后端/数据库只走容器内网或回环）
 - [ ] 本地已配免密：`ssh-copy-id ubuntu@<客户服务器IP>`
 - [ ] 本地产物已就绪：`panjia-server-latest.tar` + `web/dist/` 存在（没有就先跑 `bash build.sh`）
 - [ ] **已从授权管理后台生成该客户的授权码**（首次部署必填，写入服务器 `.env` 的 `PANJIA_AUTH_CODE`，激活后 token 落盘、此值可清空）
@@ -78,14 +78,17 @@ sudo cat ~/panjia/.env     # 数据库/Redis 密码都在这（root 600 权限�
 
 ## 五、端口一览
 
-| 端口 | 用途 | 安全组建议 |
-|------|------|-----------|
-| 80 | 前端页面 + API 入口（nginx） | 放行 |
-| 8080 | 后端直连（调试用） | 可关闭，走 80 反代即可 |
-| 5432 | PostgreSQL | **不对公网放行** |
-| 6379 | Redis | **不对公网放行** |
-| 9000 | MinIO API | 按需（后端走容器内网，一般无需对公网） |
-| 9001 | MinIO 控制台（网页管理） | 按需放行，管理对象存储时用 |
+| 端口 | 用途 | 发布范围 |
+|------|------|---------|
+| **80** | 前端页面 + API 入口（nginx，容器内反代后端） | ✅ 唯一对公网发布，云防火墙放行 |
+| 8080 | 后端服务 | 仅容器内网（expose，不发布宿主机），**无法绕过 nginx 直连** |
+| 5432 | PostgreSQL | 仅绑宿主机 127.0.0.1 |
+| 6379 | Redis | 仅绑宿主机 127.0.0.1 |
+| 9000 | MinIO API | 仅绑宿主机 127.0.0.1 |
+| 9001 | MinIO 控制台 | 仅绑宿主机 127.0.0.1 |
+
+> 本机需要直连数据库/Redis/MinIO 调试时走 SSH 隧道（不用改任何发布配置）：
+> `ssh -L 5432:127.0.0.1:5432 -L 9001:127.0.0.1:9001 ubuntu@服务器IP`，然后本地连 127.0.0.1 对应端口。
 
 ## 六、代码更新 → 发版流程
 
@@ -105,7 +108,7 @@ bash deploy.sh <IP>
 | 后端反复重启，日志见 `未检测到有效 token` | 首次部署没配授权码：`.env` 里写 `PANJIA_AUTH_CODE=<授权码>` 后 `sudo ./restart.sh`；激活成功后 token 落盘 `data/panjia-license/` |
 | 拉镜像超时 `registry-1.docker.io` | `deploy.sh` 会自动写加速源并重启 docker；手动检查：`docker info \| grep -A5 Mirrors` |
 | 前端 502 | 后端没起来：`./logs.sh server` 看启动日志（首次 Flyway 建表约 1-2 分钟） |
-| 端口被占用 | `ss -tlnp \| grep -E ':80\|:8080'`，改 `.env` 里 `WEB_PORT`/`SERVER_PORT` 后 `./restart.sh` |
+| 端口被占用 | `ss -tlnp \| grep ':80'`，改 `.env` 里 `WEB_PORT` 后 `./restart.sh`（8080/5432 等只绑回环，不会与外部冲突） |
 | 服务器重启后自动恢复 | compose 已配 `restart: always`，无需人工干预 |
 | 磁盘满 | docker 日志已限 100m×5；清旧镜像：`docker image prune -a` |
 
