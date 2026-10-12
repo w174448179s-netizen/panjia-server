@@ -650,10 +650,27 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         String keyBase = (orderNo != null ? orderNo : contractNo) + "|MANUAL-SUPPLEMENT|" + System.currentTimeMillis();
         java.time.LocalDate periodStart = java.time.YearMonth.parse(bo.getPeriod()).atDay(1);
         java.time.LocalDateTime businessDateTime = bo.getBusinessDate().atStartOfDay();
+        // 批量预加载员工主数据：部门归属/工号/姓名以主数据为准（实收明细可能缺 dept_id，
+        // 而业绩查询按事实 dept_id 做数据权限过滤，为空会被过滤掉导致「保存成功却查不到」）
+        java.util.List<Long> empIds = bo.getItems().stream()
+            .map(com.panjia.performance.domain.bo.ExpectSupplementItem::getEmployeeId)
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .toList();
+        Map<Long, EmployeeMainDataDTO> empMap = empIds.isEmpty()
+            ? Map.of() : employeeMainDataQueryPort.listByIds(empIds);
         int count = 0;
         for (com.panjia.performance.domain.bo.ExpectSupplementItem item : bo.getItems()) {
             if (item.getAmount() == null || item.getAmount().signum() == 0) {
                 continue; // 零金额不生成事实（与导入口径一致）
+            }
+            EmployeeMainDataDTO emp = empMap.get(item.getEmployeeId());
+            if (emp == null && item.getEmployeeExternalCode() != null && !item.getEmployeeExternalCode().isBlank()) {
+                // 兜底：前端 JS Number 对超 2^53 的 Long 精度截断导致 ID 查不到时，按工号取主数据
+                emp = employeeMainDataQueryPort.getByEmployeeCode(item.getEmployeeExternalCode().trim());
+            }
+            if (emp == null) {
+                throw new ServiceException("员工不存在或已离职：employeeId=" + item.getEmployeeId());
             }
             PerformanceFact fact = new PerformanceFact();
             fact.setFactType(FactType.PERF_EXPECT);
@@ -670,12 +687,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             fact.setBizType(bo.getBizType());
             fact.setPropertyAddress(bo.getPropertyAddress());
             fact.setFeeItem(bo.getFeeItem());
-            // 入参覆盖
-            fact.setEmployeeId(item.getEmployeeId());
-            fact.setEmployeeExternalCode(item.getEmployeeExternalCode());
+            // 身份归属以员工主数据为权威（item 可覆盖角色展示名）
+            fact.setEmployeeId(emp.getEmployeeId());
+            fact.setEmployeeExternalCode(emp.getEmployeeCode());
             fact.setRoleType(item.getRoleType());
-            fact.setRoleName(item.getRoleName());
-            fact.setDeptId(item.getDeptId() != null ? item.getDeptId() : bo.getDeptId());
+            fact.setRoleName(item.getRoleName() != null ? item.getRoleName() : emp.getEmployeeName());
+            fact.setDeptId(item.getDeptId() != null ? item.getDeptId()
+                : (bo.getDeptId() != null ? bo.getDeptId() : emp.getDeptId()));
             fact.setShareRatio(item.getShareRatio());
             fact.setOperatorId(operatorId);
             factMapper.insert(fact);

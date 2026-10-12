@@ -35,6 +35,7 @@ import org.dromara.common.web.core.BaseController;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -128,7 +129,7 @@ public class PerformanceFactController extends BaseController {
     @SaCheckPermission("perf:fact:supplement")
     @Log(title = "新签补录", businessType = BusinessType.INSERT)
     @PostMapping("/supplement-expect")
-    public R<Integer> supplementExpect(@Validated com.panjia.performance.domain.bo.ExpectSupplementBo bo) {
+    public R<Integer> supplementExpect(@Validated @RequestBody com.panjia.performance.domain.bo.ExpectSupplementBo bo) {
         return R.ok(queryService.createExpectSupplement(bo, LoginHelper.getUserId()));
     }
 
