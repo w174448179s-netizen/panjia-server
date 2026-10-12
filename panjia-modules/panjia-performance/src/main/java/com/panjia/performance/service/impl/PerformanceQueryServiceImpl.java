@@ -397,6 +397,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
                 StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled(), offset, pageSize);
         fillSearchConversion(rows);
 
+        // 实收金额权限：仅总监/超管可见，经纪人/店长等角色返回空值
+        if (!canSeeRealAmount()) {
+            for (PerformanceFactSearchVo row : rows) {
+                row.setRealAmount(null);
+                row.setRealConvertedAmount(null);
+            }
+        }
         return new PageResult<>(rows, total);
     }
 
@@ -500,6 +507,14 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 命中后仍返回该合同下全部分成行（与合同业绩页「展开可见同合同他人分成」口径一致）。
         assertSearchDetailInScope(rows);
         fillSearchDetailConversion(rows);
+
+        // 实收金额权限：仅总监/超管可见，经纪人/店长等角色返回空值
+        if (!canSeeRealAmount()) {
+            for (PerformanceSearchDetailVo row : rows) {
+                row.setRealAmount(null);
+                row.setRealConvertedAmount(null);
+            }
+        }
         return rows;
     }
 
@@ -730,6 +745,16 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * 实收金额可见权限：超管/总监可见；经纪人/店长/其他角色不可见。
+     * <p>
+     * 与前端 canSeeRealAmount 口径一致，防止通过接口直接获取实收金额。
+     */
+    private boolean canSeeRealAmount() {
+        return hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)
+            || hasRole("admin") || hasRole("finance") || hasRole("finance_supervisor");
     }
 
     /**
