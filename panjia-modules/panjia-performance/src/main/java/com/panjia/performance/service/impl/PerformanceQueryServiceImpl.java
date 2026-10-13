@@ -294,6 +294,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         return v == null ? 0L : ((Number) v).longValue();
     }
 
+    private BigDecimal toDecimal(Object v) {
+        return v == null ? BigDecimal.ZERO : new BigDecimal(v.toString());
+    }
+
     /**
      * 数据权限：经纪人角色只能查看本人业绩。
      * <p>
@@ -420,44 +424,52 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         PageResult<PerformanceFactSearchVo> result = new PageResult<>(rows, total);
-        // 汇总条：全量（同筛选口径、跨页）合计；按员工筛选时仅该员工命中明细，不按合同全量统计
+        // 汇总条：三个指标各按自身归属月统计（新签月/实收月/结佣月），跨页全量；
+        // 与列表行（合同全周期）口径不同，故合同数直接取列表 total
         result.setSummary(buildSearchSummary(period, effectiveDeptId, bizType, keyword, filterEmployeeId,
-            query.getSettled(), seeReal));
+            query.getSettled(), seeReal, total));
         return result;
     }
 
     /**
-     * 业绩查询汇总条：按业务类型分组聚合后按类型系数折算累加（折算口径与列表行一致）。
-     * 合同数为满足条件的合同总数，金额为合同行金额的全量合计（员工筛选时即该员工口径）。
+     * 业绩查询汇总条：按业务类型分组聚合后按类型系数折算累加。
+     * 三个指标各按自身归属月独立统计（新签＝新签月、实收＝实收月、结佣＝结佣月），
+     * 与列表行（合同全周期）不同源，故合同数直接取列表 total 传入。
      * 无实收查看权限时不返回实收汇总（与行数据置空一致）。
      */
     private Map<String, Object> buildSearchSummary(String period, Long deptId, String bizType, String keyword,
-                                                   Long employeeId, Boolean settled, boolean seeReal) {
+                                                   Long employeeId, Boolean settled, boolean seeReal,
+                                                   long contractCount) {
         List<Map<String, Object>> groups = factMapper.selectFactSearchSummary(period, deptId,
             StringUtils.trimToNull(bizType), keyword, employeeId, settled);
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(groups.stream()
             .map(g -> (String) g.get("bizType"))
             .filter(Objects::nonNull)
             .collect(Collectors.toSet()));
-        long contractCount = 0;
         BigDecimal totalExpect = BigDecimal.ZERO;
         BigDecimal totalExpectConverted = BigDecimal.ZERO;
         BigDecimal totalReal = BigDecimal.ZERO;
         BigDecimal totalRealConverted = BigDecimal.ZERO;
+        BigDecimal totalCommission = BigDecimal.ZERO;
+        BigDecimal totalCommissionConverted = BigDecimal.ZERO;
         for (Map<String, Object> g : groups) {
-            contractCount += toLong(g.get("contractCount"));
-            BigDecimal expect = g.get("totalExpectAmount") == null ? BigDecimal.ZERO : new BigDecimal(g.get("totalExpectAmount").toString());
-            BigDecimal real = g.get("totalRealAmount") == null ? BigDecimal.ZERO : new BigDecimal(g.get("totalRealAmount").toString());
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, (String) g.get("bizType"));
+            BigDecimal expect = toDecimal(g.get("totalExpectAmount"));
+            BigDecimal real = toDecimal(g.get("totalRealAmount"));
+            BigDecimal commission = toDecimal(g.get("totalCommissionAmount"));
             totalExpect = totalExpect.add(expect);
             totalExpectConverted = totalExpectConverted.add(conversionFactorPort.convert(expect, factor));
             totalReal = totalReal.add(real);
             totalRealConverted = totalRealConverted.add(conversionFactorPort.convert(real, factor));
+            totalCommission = totalCommission.add(commission);
+            totalCommissionConverted = totalCommissionConverted.add(conversionFactorPort.convert(commission, factor));
         }
         Map<String, Object> summary = new HashMap<>();
         summary.put("contractCount", contractCount);
         summary.put("totalExpectAmount", totalExpect);
         summary.put("totalExpectConvertedAmount", totalExpectConverted);
+        summary.put("totalCommissionAmount", totalCommission);
+        summary.put("totalCommissionConvertedAmount", totalCommissionConverted);
         if (seeReal) {
             summary.put("totalRealAmount", totalReal);
             summary.put("totalRealConvertedAmount", totalRealConverted);

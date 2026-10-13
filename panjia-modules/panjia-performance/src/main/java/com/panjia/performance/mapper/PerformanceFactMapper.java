@@ -1690,117 +1690,122 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("settled") Boolean settled);
 
     /**
-     * 完整业绩查询的全量汇总（汇总条）：与 {@link #selectFactSearchByContract} 完全同口径
-     * （合同全周期聚合、按员工筛选时仅该员工命中明细），不分页，按业务类型分组返回
-     * 合同数 / 新签业绩合计 / 实收业绩合计，折算后合计由 Service 按类型系数折算累加。
+     * 完整业绩查询的全量汇总（汇总条）：三个指标「各按自身归属月」独立统计，不再与列表同口径
+     * （列表行仍为合同全周期聚合，汇总条只看所选月份的事实）：
+     * <ul>
+     *   <li>新签合计：新签月（{@code pj_perf_fact.period}，ACTIVE PERF_EXPECT）；</li>
+     *   <li>实收合计：实收月（{@code pj_received_detail.period}，ACTIVE 明细）；</li>
+     *   <li>结佣合计：结佣月（{@code pj_commission_item.period}＝业绩归属月，文档明确非
+     *       approved_month；REVERSED 明细永久保留但不计入）。</li>
+     * </ul>
+     * 不分页，按业务类型分组返回三组金额，折算后合计由 Service 按类型系数折算累加。
      * <p>
-     * settled 过滤口径同 {@link #countFactSearchByContract}（EXISTS 任意满足单即算）。
+     * settled 仅作用于结佣这一组（已结佣＝APPROVED 明细；未结佣＝非 APPROVED 明细）；
+     * 合同数由调用方以列表 total 提供（不再由本查询返回）。
      */
     @Select("""
         <script>
-        WITH all_rows AS (
-            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
-                   f.period AS period,
-                   f.dept_id AS dept_id,
-                   f.employee_id AS employee_id,
-                   f.biz_type AS biz_type,
-                   f.order_no AS order_no,
-                   f.contract_no AS contract_no,
-                   f.property_address AS property_address,
-                   f.source_key AS source_key,
-                   f.employee_external_code AS emp_code,
-                   f.performance_amount AS amount,
-                   'E' AS src
+        WITH t AS (
+            -- ① 新签：按新签月（业绩归属月 pj_perf_fact.period）统计
+            SELECT f.biz_type AS biz_type,
+                   f.performance_amount AS expect_amt,
+                   CAST(0 AS numeric) AS real_amt,
+                   CAST(0 AS numeric) AS comm_amt
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
               AND f.fact_type = 'PERF_EXPECT'
               AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+              <if test="period != null and period != ''">
+                AND f.period = #{period}
+              </if>
+              <if test="deptId != null">
+                AND (f.dept_id = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                                AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="employeeId != null">
+                AND f.employee_id = #{employeeId}
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND f.biz_type = #{bizType}
+              </if>
+              <if test="keyword != null and keyword != ''">
+                AND (f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+              </if>
             UNION ALL
-            SELECT COALESCE(rc.order_no, rc.contract_no),
-                   rd.period,
-                   COALESCE(rd.dept_id, rc.dept_id),
-                   e.employee_id,
-                   rc.biz_type,
-                   rc.order_no,
-                   rc.contract_no,
-                   rc.property_address,
-                   rd.source_key,
-                   rd.employee_external_code,
+            -- ② 实收：按实收月（pj_received_detail.period）统计
+            SELECT rc.biz_type,
+                   CAST(0 AS numeric),
                    rd.performance_amount,
-                   'R'
+                   CAST(0 AS numeric)
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
             LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
             WHERE rd.detail_status = 'ACTIVE'
               AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
-        ),
-        kf AS (
-            SELECT * FROM all_rows
-            WHERE 1 = 1
-            <if test="period != null and period != ''">
-              AND period = #{period}
-            </if>
-            <if test="deptId != null">
-              AND (dept_id = #{deptId}
-                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = dept_id
-                              AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
-            </if>
-            <if test="employeeId != null">
-              AND employee_id = #{employeeId}
-            </if>
-            <if test="bizType != null and bizType != ''">
-              AND biz_type = #{bizType}
-            </if>
-            <if test="keyword != null and keyword != ''">
-              AND (contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-                OR property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
-            </if>
-        ),
-        contract_period AS (
-            SELECT biz_key, MAX(period) AS max_period
-            FROM kf
-            GROUP BY 1
-        ),
-        fact_agg AS (
-            SELECT cp.biz_key AS "bizKey",
-                   cp.max_period AS "period",
-                   MAX(ar.contract_no) AS "contractNo",
-                   MAX(ar.order_no) AS "orderNo",
-                   MAX(ar.biz_type) AS "bizType",
-                   COALESCE(SUM(CASE WHEN ar.src = 'E' THEN ar.amount ELSE 0 END), 0) AS "expectAmount",
-                   COALESCE(SUM(CASE WHEN ar.src = 'R' THEN ar.amount ELSE 0 END), 0) AS "realAmount"
-            FROM contract_period cp
-            JOIN all_rows ar ON ar.biz_key = cp.biz_key
-            <if test="employeeId != null">
-              WHERE ar.employee_id = #{employeeId}
-            </if>
-            GROUP BY cp.biz_key, cp.max_period
+              <if test="period != null and period != ''">
+                AND rd.period = #{period}
+              </if>
+              <if test="deptId != null">
+                AND (COALESCE(rd.dept_id, rc.dept_id) = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd
+                                WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id)
+                                  AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="employeeId != null">
+                AND e.employee_id = #{employeeId}
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND rc.biz_type = #{bizType}
+              </if>
+              <if test="keyword != null and keyword != ''">
+                AND (rc.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR rc.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR rc.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+              </if>
+            UNION ALL
+            -- ③ 结佣：按结佣月（业绩归属月 pj_commission_item.period）统计；REVERSED 明细永久保留但不计入
+            SELECT ci.biz_type,
+                   CAST(0 AS numeric),
+                   CAST(0 AS numeric),
+                   ci.amount
+            FROM pj_commission_item ci
+            WHERE ci.status &lt;&gt; 'REVERSED'
+              AND COALESCE(ci.order_no, ci.contract_no) IS NOT NULL
+              <if test="period != null and period != ''">
+                AND ci.period = #{period}
+              </if>
+              <if test="deptId != null">
+                AND (ci.dept_id = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = ci.dept_id
+                                AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="employeeId != null">
+                AND ci.employee_id = #{employeeId}
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND ci.biz_type = #{bizType}
+              </if>
+              <if test="keyword != null and keyword != ''">
+                AND (ci.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR ci.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                  OR ci.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+              </if>
+              <if test="settled != null and settled == true">
+                AND ci.status = 'APPROVED'
+              </if>
+              <if test="settled != null and settled == false">
+                AND ci.status &lt;&gt; 'APPROVED'
+              </if>
         )
-        SELECT fa."bizType" AS "bizType",
-               COUNT(*) AS "contractCount",
-               COALESCE(SUM(fa."expectAmount"), 0) AS "totalExpectAmount",
-               COALESCE(SUM(fa."realAmount"), 0) AS "totalRealAmount"
-        FROM fact_agg fa
-        <where>
-          <if test="settled != null and settled == true">
-            EXISTS (
-              SELECT 1 FROM pj_commission_application ca
-              WHERE ca.period = fa."period"
-                AND ca.contract_no IN (fa."contractNo", fa."orderNo")
-                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
-            )
-          </if>
-          <if test="settled != null and settled == false">
-            NOT EXISTS (
-              SELECT 1 FROM pj_commission_application ca
-              WHERE ca.period = fa."period"
-                AND ca.contract_no IN (fa."contractNo", fa."orderNo")
-                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
-            )
-          </if>
-        </where>
-        GROUP BY fa."bizType"
+        SELECT t.biz_type AS "bizType",
+               COALESCE(SUM(t.expect_amt), 0) AS "totalExpectAmount",
+               COALESCE(SUM(t.real_amt), 0) AS "totalRealAmount",
+               COALESCE(SUM(t.comm_amt), 0) AS "totalCommissionAmount"
+        FROM t
+        GROUP BY t.biz_type
         </script>
         """)
     List<Map<String, Object>> selectFactSearchSummary(
