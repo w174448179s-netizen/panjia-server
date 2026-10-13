@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.web.config.properties.XssProperties;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -73,6 +74,13 @@ public class XssFilter implements Filter {
         String method = request.getMethod();
         // GET DELETE 不过滤
         if (method == null || HttpMethod.GET.matches(method) || HttpMethod.DELETE.matches(method)) {
+            return true;
+        }
+        // multipart 请求不过滤：XssHttpServletRequestWrapper 虽对非 JSON 直返原始流，
+        // 但 getParameter* 重写可能在部分容器上触发提前解析，跳过更稳妥
+        String contentType = request.getContentType();
+        if (StringUtils.isNotEmpty(contentType)
+            && StringUtils.startsWithIgnoreCase(contentType, MediaType.MULTIPART_FORM_DATA_VALUE)) {
             return true;
         }
         return StringUtils.matches(url, excludes);

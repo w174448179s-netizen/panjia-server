@@ -1,5 +1,7 @@
 --- # 临时文件存储位置 避免临时文件被系统清理报错
-spring.servlet.multipart.location: /ruoyi/server/temp
+# 使用 Java 系统临时目录（默认 /tmp），确保所有部署环境（Docker / 宿主机 / 只读文件系统）均可写
+# 原硬编码 /ruoyi/server/temp 在容器以 --read-only 运行或卷挂载未生效时会导致 multipart 解析失败
+spring.servlet.multipart.location: ${java.io.tmpdir}
 
 --- # 监控中心配置
 spring.boot.admin.client:
