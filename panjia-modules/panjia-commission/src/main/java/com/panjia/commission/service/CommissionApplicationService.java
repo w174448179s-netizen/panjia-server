@@ -1489,6 +1489,19 @@ public class CommissionApplicationService {
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
+        // 按员工筛选时：结佣业绩列/合计展示该员工口径的新签业绩，而非申请单合同全量总额
+        Map<String, BigDecimal> empExpectMap = new HashMap<>();
+        if (query.getEmployeeId() != null) {
+            Set<String> empKeys = new HashSet<>();
+            for (PerformanceContractSummaryDTO c : contracts) {
+                if (StringUtils.isNotBlank(c.getOrderNo())) empKeys.add(c.getOrderNo());
+                if (StringUtils.isNotBlank(c.getContractNo())) empKeys.add(c.getContractNo());
+            }
+            for (List<String> chunk : chunkKeys(empKeys)) {
+                empExpectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriodForEmployee(chunk, query.getEmployeeId()));
+            }
+        }
+
         List<CommissionContractVo> all = new ArrayList<>(contracts.size());
         // 封账判定：行期间=申请单归属期间（跨期发起时≠实收期间），不同期间懒加载判定缓存
         Map<String, Boolean> closedCache = new HashMap<>();
@@ -1531,7 +1544,20 @@ public class CommissionApplicationService {
             // 封账按行期间判定（懒加载缓存，每个期间只回表一次）
             String rowPeriod = app.getPeriod();
             boolean rowClosed = closedCache.computeIfAbsent(rowPeriod, p -> periodCloseQueryPort.isClosed(p));
-            all.add(toContractVO(rowPeriod, rowClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType())));
+            CommissionContractVo vo = toContractVO(rowPeriod, rowClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType()));
+            // 按员工筛选时：金额改为该员工口径的新签业绩（覆盖申请单合同全量总额）
+            if (query.getEmployeeId() != null) {
+                BigDecimal empAmt = empExpectMap.get(c.getOrderNo());
+                if (empAmt == null) empAmt = empExpectMap.get(c.getContractNo());
+                BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
+                vo.setAmount(empAmt != null ? empAmt : BigDecimal.ZERO);
+                vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
+                // 新签业绩亦按员工口径展示；「已调整」标记来自合同级快照对比，员工口径下无意义，清除以免误展示「合同值→员工值」箭头
+                vo.setExpectedAdjusted(false);
+                vo.setOriginalExpectedAmount(null);
+                vo.setOriginalExpectedConvertedAmount(null);
+            }
+            all.add(vo);
         }
 
         // 三个业绩列表统一排序：签约/认购时间倒序 → 合同号(空取订单号)次序 → id 倒序兜底
@@ -1556,7 +1582,10 @@ public class CommissionApplicationService {
         List<CommissionContractVo> pageRows = new ArrayList<>(all.subList(from, to));
         // 结佣业绩「原值 → 调整后值」：仅对当前页批量查事实链最早值（避免全期间回表），
         // 与当前合计不一致时置调整标记（口径与每人明细 originalAmount 一致）
-        fillOriginalReceivedAmounts(period, pageRows, factorMap);
+        // 按员工筛选时金额已改为员工口径，合同级调整原值不再适用，跳过以免误展示箭头
+        if (query.getEmployeeId() == null) {
+            fillOriginalReceivedAmounts(period, pageRows, factorMap);
+        }
         // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
         fillContractPendingAdjust(pageRows);
         // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
@@ -1568,6 +1597,9 @@ public class CommissionApplicationService {
         Set<String> summaryKeys = new HashSet<>();
         long summaryDetailCount = 0L;
         BigDecimal summaryTotalAmount = BigDecimal.ZERO;
+        BigDecimal summaryConvertedAmount = BigDecimal.ZERO;
+        BigDecimal summaryExpectedAmount = BigDecimal.ZERO;
+        BigDecimal summaryExpectedConvertedAmount = BigDecimal.ZERO;
         for (CommissionContractVo vo : all) {
             if (StringUtils.isNotBlank(vo.getContractNo())) {
                 summaryKeys.add(vo.getContractNo());
@@ -1579,6 +1611,15 @@ public class CommissionApplicationService {
             if (vo.getAmount() != null) {
                 summaryTotalAmount = summaryTotalAmount.add(vo.getAmount());
             }
+            if (vo.getConvertedAmount() != null) {
+                summaryConvertedAmount = summaryConvertedAmount.add(vo.getConvertedAmount());
+            }
+            if (vo.getExpectedAmount() != null) {
+                summaryExpectedAmount = summaryExpectedAmount.add(vo.getExpectedAmount());
+            }
+            if (vo.getExpectedConvertedAmount() != null) {
+                summaryExpectedConvertedAmount = summaryExpectedConvertedAmount.add(vo.getExpectedConvertedAmount());
+            }
         }
         PageResult<CommissionContractVo> result = PageResult.build(pageRows, (long) total);
         Map<String, Object> summary = new HashMap<>();
@@ -1588,6 +1629,11 @@ public class CommissionApplicationService {
         summary.put("employeeCount", performanceQueryPort.countDistinctEmployeesByKeys(null, summaryKeys, FACT_TYPE_REAL));
         summary.put("detailCount", summaryDetailCount);
         summary.put("totalAmount", summaryTotalAmount);
+        // 折算后合计：结佣业绩折算后（totalConvertedAmount）与新签业绩折算后（totalExpectedConvertedAmount），
+        // 汇总条在原始合计旁并排展示（折算因子为查询期间生效因子）
+        summary.put("totalConvertedAmount", summaryConvertedAmount);
+        summary.put("totalExpectedAmount", summaryExpectedAmount);
+        summary.put("totalExpectedConvertedAmount", summaryExpectedConvertedAmount);
         result.setSummary(summary);
         return result;
     }
@@ -1689,6 +1735,16 @@ public class CommissionApplicationService {
         summary.put("detailCount", all.stream().mapToLong(CommissionContractVo::getDetailCount).sum());
         summary.put("totalAmount", all.stream()
             .map(r -> r.getAmount() != null ? r.getAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        // 折算后合计：结佣业绩折算后 + 新签业绩折算后，汇总条在原始合计旁并排展示
+        summary.put("totalConvertedAmount", all.stream()
+            .map(r -> r.getConvertedAmount() != null ? r.getConvertedAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        summary.put("totalExpectedAmount", all.stream()
+            .map(r -> r.getExpectedAmount() != null ? r.getExpectedAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        summary.put("totalExpectedConvertedAmount", all.stream()
+            .map(r -> r.getExpectedConvertedAmount() != null ? r.getExpectedConvertedAmount() : BigDecimal.ZERO)
             .reduce(BigDecimal.ZERO, BigDecimal::add));
         result.setSummary(summary);
         return result;
