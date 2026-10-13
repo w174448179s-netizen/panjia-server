@@ -200,11 +200,13 @@ public interface ReceivedRealFactMapper {
             -- 新签金额口径 = 实收月及之前全部 ACTIVE PERF_EXPECT 合计（当月+历史合并，
             -- 与 loadExpectItemFacts 2026-09-30 定稿一致）：冲正/红冲负数镜像落在当月，
             -- 旧「当月优先排斥历史」会把新签金额算成负数（2026-10-11 修复）
+            -- 按员工筛选时仅取该员工的新签明细（员工口径，与实收 amount 同口径）
             SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
                    SUM(pe.performance_amount) AS amt
             FROM pj_perf_fact pe
             WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
               AND pe.period &lt;= #{period}
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
             GROUP BY COALESCE(pe.order_no, pe.contract_no)
         )
             </when>
@@ -214,6 +216,7 @@ public interface ReceivedRealFactMapper {
                    SUM(pe.performance_amount) AS amt
             FROM pj_perf_fact pe
             WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
             GROUP BY COALESCE(pe.order_no, pe.contract_no)
         )
             </otherwise>
@@ -327,7 +330,20 @@ public interface ReceivedRealFactMapper {
                ra.business_date AS "businessDate",
                ra.period AS "period",
                'APPROVED' AS "receivedStatus",
-               ra.received_amount AS "amount",
+               -- 按员工筛选时行金额改为该员工在该审批单下的 ACTIVE 明细合计（员工口径），
+               -- 不筛员工时用审批单快照 received_amount（合同全量）
+               CASE WHEN #{employeeId} IS NOT NULL THEN
+                   COALESCE((
+                       SELECT SUM(dd.performance_amount)
+                       FROM pj_received_detail dd
+                       LEFT JOIN pj_people_employee e
+                              ON (e.employee_id = dd.employee_id
+                                  OR (dd.employee_id IS NULL AND e.employee_code = dd.employee_external_code))
+                       WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
+                         AND COALESCE(dd.employee_id, e.employee_id) = #{employeeId}
+                   ), 0)
+               ELSE ra.received_amount
+               END AS "amount",
                agg.detail_count AS "detailCount",
                agg.employee_count AS "employeeCount"
         FROM pj_perf_received_apply ra
