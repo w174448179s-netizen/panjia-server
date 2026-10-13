@@ -332,7 +332,11 @@ public interface ReceivedRealFactMapper {
                'APPROVED' AS "receivedStatus",
                -- 按员工筛选时行金额改为该员工在该审批单下的 ACTIVE 明细合计（员工口径），
                -- 不筛员工时用审批单快照 received_amount（合同全量）
-               CASE WHEN #{employeeId} IS NOT NULL THEN
+               -- 注意：不能用 CASE WHEN 参数 IS NOT NULL，PostgreSQL 在参数为 null 时
+               -- 无法推断数据类型（could not determine data type of parameter），
+               -- 改用 MyBatis choose 动态拼装两套 SQL 分支（注释中勿写井号花括号，MyBatis 会解析为占位符）
+               <choose>
+                 <when test="employeeId != null">
                    COALESCE((
                        SELECT SUM(dd.performance_amount)
                        FROM pj_received_detail dd
@@ -341,9 +345,12 @@ public interface ReceivedRealFactMapper {
                                   OR (dd.employee_id IS NULL AND e.employee_code = dd.employee_external_code))
                        WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
                          AND COALESCE(dd.employee_id, e.employee_id) = #{employeeId}
-                   ), 0)
-               ELSE ra.received_amount
-               END AS "amount",
+                   ), 0) AS "amount"
+                 </when>
+                 <otherwise>
+                   ra.received_amount AS "amount"
+                 </otherwise>
+               </choose>,
                agg.detail_count AS "detailCount",
                agg.employee_count AS "employeeCount"
         FROM pj_perf_received_apply ra

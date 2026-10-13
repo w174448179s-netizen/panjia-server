@@ -256,6 +256,34 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriodForEmployee(
+            java.util.Collection<String> bizKeys, Long employeeId) {
+        if (bizKeys == null || bizKeys.isEmpty() || employeeId == null) {
+            return Collections.emptyMap();
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getEmployeeId, employeeId)
+            .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
+                .or().in(PerformanceFact::getContractNo, bizKeys))
+            .select(PerformanceFact::getOrderNo, PerformanceFact::getContractNo,
+                PerformanceFact::getPerformanceAmount);
+        java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (PerformanceFact f : factMapper.selectList(wrapper)) {
+            BigDecimal amt = f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount();
+            if (StringUtils.isNotBlank(f.getOrderNo()) && wanted.contains(f.getOrderNo())) {
+                result.merge(f.getOrderNo(), amt, BigDecimal::add);
+            }
+            if (StringUtils.isNotBlank(f.getContractNo()) && wanted.contains(f.getContractNo())) {
+                result.merge(f.getContractNo(), amt, BigDecimal::add);
+            }
+        }
+        return result;
+    }
+
+    @Override
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId, String keyword) {
         if (isReal(factType)) {
             ReceivedRealFactPort port = realPort();

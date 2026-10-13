@@ -279,4 +279,16 @@ public interface CommissionPerformanceQueryPort {
      * @return bizKey → 应收合计；无事实的键不在结果中
      */
     Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriod(Collection<String> bizKeys);
+
+    /**
+     * 按业务键集合（订单号/合同号）<b>跨期间</b>汇总 ACTIVE PERF_EXPECT 应收金额，按员工过滤。
+     * <p>
+     * 用途：结佣发起页按员工筛选时，结佣业绩列展示该员工在新签事实中的业绩合计，而非合同全量。
+     * 同一事实同时计入其订单号键与合同号键（均非空时），调用方按输入键取值。
+     *
+     * @param bizKeys    订单号或合同号集合（不可为空）
+     * @param employeeId 员工 ID（不可为空；为空时请用 {@link #sumExpectAmountsByKeysCrossPeriod}）
+     * @return bizKey → 该员工应收合计；无事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriodForEmployee(Collection<String> bizKeys, Long employeeId);
 }

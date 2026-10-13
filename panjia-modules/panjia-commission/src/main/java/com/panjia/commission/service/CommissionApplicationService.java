@@ -1632,6 +1632,7 @@ public class CommissionApplicationService {
 
         // 结佣金额：订单号+合同号全部键一次批量查（分片防 SQL 膨胀），行级先订单号、未命中再合同号、仍未命中记 0；
         // 贝壳新签 order_no 误填成合同号的脏数据场景由合同号兜底命中
+        // 按员工筛选时用员工口径的新签业绩合计，否则用合同全量口径
         Map<String, BigDecimal> expectMap = new HashMap<>();
         Set<String> expectKeys = new HashSet<>();
         for (PerformanceContractSummaryDTO c : contracts) {
@@ -1643,7 +1644,11 @@ public class CommissionApplicationService {
             }
         }
         for (List<String> chunk : chunkKeys(expectKeys)) {
-            expectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(chunk));
+            if (query.getEmployeeId() != null) {
+                expectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriodForEmployee(chunk, query.getEmployeeId()));
+            } else {
+                expectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(chunk));
+            }
         }
 
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
