@@ -371,9 +371,23 @@ public class SalaryCalculationEngine {
             } else {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
                 baseSalary = bd(rank.path("baseSalary").asText("0"));
-                // 经纪人无个人新签业绩（提成来自结佣），落地 0
-              //  d.setNewSignPerformance(BigDecimal.ZERO);
-               // d.setNewSignRate(bd(rank.path("personalRate").asText("0")));
+
+                // 经纪人保底规则：当月工资 = MAX(保底工资, 个人新签提成)
+                // 仅当职级配置了保底工资（minSalary > 0）时生效；未配置则经纪人新签业绩不参与薪酬核算
+                // 个人新签提成 = 个人新签计薪业绩（折算后）× 当月最终提成比例（finalRate，与结佣提成同口径）
+                BigDecimal minSalary = bd(rank.path("minSalary").asText("0"));
+                if (minSalary.compareTo(BigDecimal.ZERO) > 0) {
+                    BigDecimal personalNewsignPerf = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
+                    personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(finalRate));
+                    // 保底补足 = MAX(保底工资, 个人新签提成) - 个人新签提成
+                    guaranteeFill = MoneyUtil.round2(minSalary.max(personalNewsign).subtract(personalNewsign));
+                    if (guaranteeFill.compareTo(BigDecimal.ZERO) < 0) {
+                        guaranteeFill = BigDecimal.ZERO;
+                    }
+                    d.setPersonalNewsignIncome(personalNewsign);
+                    d.setGuaranteeFill(guaranteeFill);
+                    d.setMinSalary(minSalary);
+                }
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
@@ -385,10 +399,12 @@ public class SalaryCalculationEngine {
             d.setBonus(MoneyUtil.round2(bonus));
             d.setOtherIncome(MoneyUtil.round2(otherIncome));
 
-            // 应发 = 提成 + 团队 + 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖（不含个人新签递延）
+            // 应发 = 提成 + 团队 + 个人新签（仅经纪人保底场景）+ 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖
+            // 注：店长个人新签递延不计入当月应发；经纪人仅当职级配置保底时才将个人新签提成计入
             BigDecimal fullAttendance = d.getFullAttendance() == null
                 ? BigDecimal.ZERO : d.getFullAttendance();
-            BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
+            BigDecimal agentNewsign = (role == EmployeeRole.AGENT) ? personalNewsign : BigDecimal.ZERO;
+            BigDecimal gross = commissionIncome.add(teamIncome).add(agentNewsign).add(guaranteeFill)
                 .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus).add(otherIncome)
                 .add(fullAttendance);
             // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
@@ -396,6 +412,14 @@ public class SalaryCalculationEngine {
                 BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
                 // 保底场景 gross = commissionIncome + teamIncome + guaranteeFill，应等于 minSalary + commissionIncome
                 BigDecimal expectedFloor = minSal.add(commissionIncome);
+                if (gross.compareTo(expectedFloor) < 0) {
+                    gross = expectedFloor;
+                }
+            }
+            // 经纪人保底触发时，兜底 gross 至少等于「保底工资 + 结佣提成 + 底薪」
+            if (role == EmployeeRole.AGENT && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
+                BigDecimal expectedFloor = minSal.add(commissionIncome).add(baseSalary);
                 if (gross.compareTo(expectedFloor) < 0) {
                     gross = expectedFloor;
                 }

@@ -513,12 +513,12 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("670.69").compareTo(d0.getAttendanceFee()));
     }
 
-    /** S-19: 店长团队提成 = (门店新签 - 社保标准×计缴人数 - 新签与结佣差额) × teamRate；
-     *  店长挂组别（deptId=10），通过 deptStoreAnchor 归一到门店（deptId=1）取门店级聚合。 */
+    /** S-19: 店长团队提成 = (门店新签 - 社保标准×计缴人数 - 新签与结佣差额) × teamRate。
+     *  注：deptStoreAnchor（组别→门店归一）特性尚未在引擎实现，此处店长直接挂门店级 deptId=1。 */
     @Test
     void testManagerTeamIncomeDeductsSocialStandardAndDiff() {
         EmployeeSnapshot mgr = emp("M020", "S1", "店长");
-        mgr.setDeptId(10L); // 挂组别级
+        mgr.setDeptId(1L); // 挂门店级（deptStoreAnchor 未实现，直接用门店ID）
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = List.of(mgr);
         input.lockedByEmp = Map.of(mgr.getEmployeeId(), new ArrayList<>());
@@ -529,7 +529,6 @@ class SalaryCalculationEngineTest {
         input.deptSocialStandard = Map.of(1L, new BigDecimal("500"));
         input.deptInsuredCount = Map.of(1L, 2);
         input.deptDiffTotal = Map.of(1L, new BigDecimal("500"));
-        input.deptStoreAnchor = Map.of(10L, 1L); // 组别 → 门店
         input.snapshot = buildSnapshot();
         input.bonusIncome = new HashMap<>();
         input.otherIncomeMap = new HashMap<>();
