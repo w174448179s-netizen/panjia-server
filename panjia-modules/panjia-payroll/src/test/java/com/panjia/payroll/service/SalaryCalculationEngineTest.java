@@ -45,7 +45,7 @@ class SalaryCalculationEngineTest {
             "points":{"penaltyFee":5,"gradeA":8.0,"gradeB":6.0,"deductA":0.0,"deductB":-0.02,"deductC":-0.04},
             "attendance":{"lateFee":20,"absentNoBaseFee":50,"absentWithBaseTimes":3,"workDaysPerMonth":21.75,"leaveFee":30}
           },
-          "conversion": {"FIRST_HAND":0.9024,"DEFAULT":0.96}
+          "conversion": {"一手房":0.9024,"DEFAULT":0.96}
         }
         """;
         RuleService svc = new RuleService(null, null, null, null, new tools.jackson.databind.ObjectMapper());
@@ -236,8 +236,8 @@ class SalaryCalculationEngineTest {
         EmployeeSnapshot e = emp("A2002", "A2", "经纪人");
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = List.of(e);
-        // 结佣 100000（FIRST_HAND）折算后 90240
-        input.lockedByEmp = Map.of(e.getEmployeeId(), List.of(item(e.getEmployeeId(), new BigDecimal("100000"), "FIRST_HAND")));
+        // 结佣 100000（一手房，biz_type 与业绩事实同为中文）折算后 90240
+        input.lockedByEmp = Map.of(e.getEmployeeId(), List.of(item(e.getEmployeeId(), new BigDecimal("100000"), "一手房")));
         input.newsignByEmp = new HashMap<>();
         input.deptNewSignTotal = new HashMap<>();
         input.snapshot = buildSnapshot();

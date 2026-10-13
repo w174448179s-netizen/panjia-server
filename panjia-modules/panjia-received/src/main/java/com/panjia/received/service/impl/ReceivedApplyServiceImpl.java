@@ -1416,6 +1416,34 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         PageResult<ReceivedApply> result = PageResult.build(records, page.getTotal());
         Map<String, Object> summary = new HashMap<>();
         summary.put("totalReceivedAmount", totalReceivedAmount);
+
+        // 折算后合计：新签业绩（应收）按业务类型分组金额 × 类型系数累加，汇总条与实收合计并排展示
+        // （实收不做折算；应收口径与列表行 / 详情「应收合计·折算后」一致）
+        BigDecimal totalExpectedAmount = BigDecimal.ZERO;
+        BigDecimal totalExpectedConvertedAmount = BigDecimal.ZERO;
+        QueryWrapper<ReceivedApply> bizWrapper = buildListCondition(query, effectiveDeptId);
+        bizWrapper.select("biz_type", "COALESCE(SUM(expected_amount), 0) AS total_expected_amount");
+        bizWrapper.groupBy("biz_type");
+        List<Map<String, Object>> bizRows = applyMapper.selectMaps(bizWrapper);
+        if (bizRows != null && !bizRows.isEmpty()) {
+            Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizRows.stream()
+                .map(m -> m.get("bizType") != null ? m.get("bizType") : m.get("biz_type"))
+                .filter(java.util.Objects::nonNull)
+                .map(String::valueOf)
+                .collect(java.util.stream.Collectors.toSet()));
+            for (Map<String, Object> m : bizRows) {
+                Object amtObj = m.get("totalExpectedAmount") != null ? m.get("totalExpectedAmount") : m.get("total_expected_amount");
+                BigDecimal amt = amtObj == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(amtObj));
+                Object bizObj = m.get("bizType") != null ? m.get("bizType") : m.get("biz_type");
+                String biz = bizObj == null ? null : String.valueOf(bizObj);
+                totalExpectedAmount = totalExpectedAmount.add(amt);
+                totalExpectedConvertedAmount = totalExpectedConvertedAmount.add(
+                    conversionFactorPort.convert(amt, conversionFactorPort.factorOf(factorMap, biz)));
+            }
+        }
+        summary.put("totalExpectedAmount", totalExpectedAmount);
+        summary.put("totalExpectedConvertedAmount", totalExpectedConvertedAmount);
+
         result.setSummary(summary);
         return result;
     }

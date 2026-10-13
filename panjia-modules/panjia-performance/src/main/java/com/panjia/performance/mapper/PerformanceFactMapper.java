@@ -112,6 +112,57 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                       @Param("factStatus") String factStatus,
                                                       @Param("selfEmployeeId") Long selfEmployeeId);
 
+    /**
+     * 全局汇总·按业务类型分组（与 selectManageSummary 同过滤条件）：
+     * 返回每组 bizType 与金额合计，供服务层按类型折算系数累加出「折算后合计」。
+     */
+    @Select("""
+        <script>
+        SELECT f.biz_type AS "bizType",
+               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
+        FROM pj_perf_fact f
+        WHERE
+        <choose>
+          <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
+          <otherwise>f.fact_status = 'ACTIVE'</otherwise>
+        </choose>
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
+          AND f.fact_type = #{factType}
+          <if test="deptId != null">
+            AND (f.dept_id = #{deptId}
+                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+          </if>
+          <if test="bizType != null and bizType != ''">
+            AND f.biz_type = #{bizType}
+          </if>
+          <if test="keyword != null and keyword != ''">
+            AND (
+              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
+              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
+            )
+          </if>
+          <if test="employeeId != null">
+            AND f.employee_id = #{employeeId}
+          </if>
+          <if test="selfEmployeeId != null">
+            AND f.employee_id = #{selfEmployeeId}
+          </if>
+        GROUP BY f.biz_type
+        </script>
+        """)
+    java.util.List<java.util.Map<String, Object>> selectManageSummaryByBizType(@Param("period") String period,
+                                                      @Param("factType") String factType,
+                                                      @Param("deptId") Long deptId,
+                                                      @Param("employeeId") Long employeeId,
+                                                      @Param("bizType") String bizType,
+                                                      @Param("keyword") String keyword,
+                                                      @Param("factStatus") String factStatus,
+                                                      @Param("selfEmployeeId") Long selfEmployeeId);
+
 
     /**
      * 查询指定期间/口径下出现过的业务类型（去重排序），供筛选下拉使用。
@@ -2077,11 +2128,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 业绩排行分页：按员工聚合新签业绩（PERF_EXPECT ACTIVE），金额降序。
      * <p>
-     * quarter 仅 periodType=QUARTER 时生效，过滤单季；periodType 仅供 service 层校验，
-     * SQL 本身按年份（+可选季度）聚合，与维度无关（行 = 员工，金额 = 该期间新签合计）。
+     * quarter 仅 periodType=QUARTER 时生效，过滤单季；month 仅 periodType=MONTH 时生效，过滤单月；
+     * periodType 仅供 service 层校验，SQL 本身按年份（+可选季度/月份）聚合，
+     * 与维度无关（行 = 员工，金额 = 该期间新签合计）。
      *
      * @param year     年份 YYYY（必填）
      * @param quarter  季度 1-4（可选）
+     * @param month    月份 1-12（可选）
      * @param deptId   部门 ID（含子部门；null 不限）
      * @param bizType  业务类型（可选）
      * @param offset   偏移
@@ -2105,6 +2158,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="quarter != null">
             AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
           </if>
+          <if test="month != null">
+            AND CAST(SUBSTRING(f.period, 6, 2) AS INT) = #{month}
+          </if>
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -2124,6 +2180,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<PerformanceRankVo> selectRankPage(
             @Param("year") String year,
             @Param("quarter") Integer quarter,
+            @Param("month") Integer month,
             @Param("deptId") Long deptId,
             @Param("bizType") String bizType,
             @Param("employeeId") Long employeeId,
@@ -2145,6 +2202,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="quarter != null">
             AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
           </if>
+          <if test="month != null">
+            AND CAST(SUBSTRING(f.period, 6, 2) AS INT) = #{month}
+          </if>
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -2161,6 +2221,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     long countRank(
             @Param("year") String year,
             @Param("quarter") Integer quarter,
+            @Param("month") Integer month,
             @Param("deptId") Long deptId,
             @Param("bizType") String bizType,
             @Param("employeeId") Long employeeId);

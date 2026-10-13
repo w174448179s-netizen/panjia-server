@@ -230,6 +230,20 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         summary.setDetailCount(toLong(stat.get("detailCount")));
         Object sum = stat.get("totalAmount");
         summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
+        // 折算后合计：按业务类型分组金额 × 该类型系数累加（口径与列表行 convertedAmount 一致）
+        List<Map<String, Object>> bizGroups = factMapper.selectManageSummaryByBizType(
+            period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizGroups.stream()
+            .map(g -> (String) g.get("bizType"))
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet()));
+        BigDecimal totalConverted = BigDecimal.ZERO;
+        for (Map<String, Object> g : bizGroups) {
+            BigDecimal amt = g.get("totalAmount") == null ? BigDecimal.ZERO : new BigDecimal(g.get("totalAmount").toString());
+            totalConverted = totalConverted.add(
+                conversionFactorPort.convert(amt, conversionFactorPort.factorOf(factorMap, (String) g.get("bizType"))));
+        }
+        summary.setTotalConvertedAmount(totalConverted);
         vo.setSummary(summary);
         return vo;
     }
@@ -628,10 +642,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         Long filterEmployeeId = null;
 
         String bizType = StringUtils.trimToNull(query.getBizType());
-        long total = factMapper.countRank(year, query.getQuarter(), effectiveDeptId, bizType, filterEmployeeId);
+        // 月份仅在「按月」维度生效，防止其他维度误带月份参数；范围非法（非 1-12）忽略
+        Integer month = "MONTH".equals(periodType) && query.getMonth() != null
+            && query.getMonth() >= 1 && query.getMonth() <= 12 ? query.getMonth() : null;
+        long total = factMapper.countRank(year, query.getQuarter(), month, effectiveDeptId, bizType, filterEmployeeId);
         List<PerformanceRankVo> rows = total == 0
             ? List.of()
-            : factMapper.selectRankPage(year, query.getQuarter(), effectiveDeptId, bizType, filterEmployeeId, offset, pageSize);
+            : factMapper.selectRankPage(year, query.getQuarter(), month, effectiveDeptId, bizType, filterEmployeeId, offset, pageSize);
         // rank 按当前页序号填充（跨页连续排名 = offset + 行号）
         long seq = offset + 1;
         for (PerformanceRankVo row : rows) {

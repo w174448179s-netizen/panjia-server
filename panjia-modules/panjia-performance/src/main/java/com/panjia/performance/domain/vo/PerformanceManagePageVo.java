@@ -50,5 +50,8 @@ public class PerformanceManagePageVo<T> {
 
         /** 金额合计（PERF_EXPECT=应收 / PERF_REAL=实收） */
         private BigDecimal totalAmount;
+
+        /** 折算后金额合计（按业务类型分组聚合后按类型系数折算累加，口径与列表行 convertedAmount 一致） */
+        private BigDecimal totalConvertedAmount;
     }
 }

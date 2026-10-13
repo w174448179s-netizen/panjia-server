@@ -20,6 +20,9 @@ public class PerformanceRankBo {
     /** 季度 1-4（periodType=QUARTER 时可选，为空查全年所有季度） */
     private Integer quarter;
 
+    /** 月份 1-12（periodType=MONTH 时可选，为空统计该年全部月份） */
+    private Integer month;
+
     /** 部门 ID（可选，含子部门；经纪人强制本人，总监不限制，店长/财务限本部门子树） */
     private Long deptId;
 
