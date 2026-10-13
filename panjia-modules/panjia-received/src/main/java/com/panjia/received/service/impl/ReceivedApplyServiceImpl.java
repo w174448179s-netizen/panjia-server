@@ -1390,16 +1390,26 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         // 全量实收合计：与列表完全同条件（不含排序）一次聚合，随 summary 返回；
         // 前端汇总条展示「本查询条件下的总实收」，不能只算当前页
         QueryWrapper<ReceivedApply> sumWrapper = buildListCondition(query, effectiveDeptId);
-        sumWrapper.select("COALESCE(SUM(received_amount), 0) AS total_received_amount");
-        List<Map<String, Object>> sumRows = applyMapper.selectMaps(sumWrapper);
         BigDecimal totalReceivedAmount = BigDecimal.ZERO;
-        if (sumRows != null && !sumRows.isEmpty() && sumRows.get(0) != null) {
-            Object v = sumRows.get(0).get("total_received_amount");
-            if (v == null) {
-                v = sumRows.get(0).get("totalReceivedAmount");
+        if (query.getEmployeeId() != null) {
+            // 按员工筛选：汇总该员工在满足条件单据下的 ACTIVE 明细合计（员工口径），
+            // 不能用单据级 received_amount 合计（含同合同其他角色人金额）
+            sumWrapper.select("id");
+            List<Object> applyIds = applyMapper.selectObjs(sumWrapper);
+            if (applyIds != null && !applyIds.isEmpty()) {
+                totalReceivedAmount = detailMapper.sumAmountByApplyIdsAndEmployee(applyIds, query.getEmployeeId());
             }
-            if (v != null) {
-                totalReceivedAmount = new BigDecimal(String.valueOf(v));
+        } else {
+            sumWrapper.select("COALESCE(SUM(received_amount), 0) AS total_received_amount");
+            List<Map<String, Object>> sumRows = applyMapper.selectMaps(sumWrapper);
+            if (sumRows != null && !sumRows.isEmpty() && sumRows.get(0) != null) {
+                Object v = sumRows.get(0).get("total_received_amount");
+                if (v == null) {
+                    v = sumRows.get(0).get("totalReceivedAmount");
+                }
+                if (v != null) {
+                    totalReceivedAmount = new BigDecimal(String.valueOf(v));
+                }
             }
         }
 

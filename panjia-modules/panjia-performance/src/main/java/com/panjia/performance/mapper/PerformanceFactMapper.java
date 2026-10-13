@@ -1639,6 +1639,128 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("settled") Boolean settled);
 
     /**
+     * 完整业绩查询的全量汇总（汇总条）：与 {@link #selectFactSearchByContract} 完全同口径
+     * （合同全周期聚合、按员工筛选时仅该员工命中明细），不分页，按业务类型分组返回
+     * 合同数 / 新签业绩合计 / 实收业绩合计，折算后合计由 Service 按类型系数折算累加。
+     * <p>
+     * settled 过滤口径同 {@link #countFactSearchByContract}（EXISTS 任意满足单即算）。
+     */
+    @Select("""
+        <script>
+        WITH all_rows AS (
+            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
+                   f.period AS period,
+                   f.dept_id AS dept_id,
+                   f.employee_id AS employee_id,
+                   f.biz_type AS biz_type,
+                   f.order_no AS order_no,
+                   f.contract_no AS contract_no,
+                   f.property_address AS property_address,
+                   f.source_key AS source_key,
+                   f.employee_external_code AS emp_code,
+                   f.performance_amount AS amount,
+                   'E' AS src
+            FROM pj_perf_fact f
+            WHERE f.fact_status = 'ACTIVE'
+              AND f.fact_type = 'PERF_EXPECT'
+              AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+            UNION ALL
+            SELECT COALESCE(rc.order_no, rc.contract_no),
+                   rd.period,
+                   COALESCE(rd.dept_id, rc.dept_id),
+                   e.employee_id,
+                   rc.biz_type,
+                   rc.order_no,
+                   rc.contract_no,
+                   rc.property_address,
+                   rd.source_key,
+                   rd.employee_external_code,
+                   rd.performance_amount,
+                   'R'
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+            WHERE rd.detail_status = 'ACTIVE'
+              AND COALESCE(rc.order_no, rc.contract_no) IS NOT NULL
+        ),
+        kf AS (
+            SELECT * FROM all_rows
+            WHERE 1 = 1
+            <if test="period != null and period != ''">
+              AND period = #{period}
+            </if>
+            <if test="deptId != null">
+              AND (dept_id = #{deptId}
+                   OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = dept_id
+                              AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+            </if>
+            <if test="employeeId != null">
+              AND employee_id = #{employeeId}
+            </if>
+            <if test="bizType != null and bizType != ''">
+              AND biz_type = #{bizType}
+            </if>
+            <if test="keyword != null and keyword != ''">
+              AND (contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR order_no ILIKE CONCAT('%', #{keyword}::text, '%')
+                OR property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+            </if>
+        ),
+        contract_period AS (
+            SELECT biz_key, MAX(period) AS max_period
+            FROM kf
+            GROUP BY 1
+        ),
+        fact_agg AS (
+            SELECT cp.biz_key AS "bizKey",
+                   cp.max_period AS "period",
+                   MAX(ar.contract_no) AS "contractNo",
+                   MAX(ar.order_no) AS "orderNo",
+                   MAX(ar.biz_type) AS "bizType",
+                   COALESCE(SUM(CASE WHEN ar.src = 'E' THEN ar.amount ELSE 0 END), 0) AS "expectAmount",
+                   COALESCE(SUM(CASE WHEN ar.src = 'R' THEN ar.amount ELSE 0 END), 0) AS "realAmount"
+            FROM contract_period cp
+            JOIN all_rows ar ON ar.biz_key = cp.biz_key
+            <if test="employeeId != null">
+              WHERE ar.employee_id = #{employeeId}
+            </if>
+            GROUP BY cp.biz_key, cp.max_period
+        )
+        SELECT fa."bizType" AS "bizType",
+               COUNT(*) AS "contractCount",
+               COALESCE(SUM(fa."expectAmount"), 0) AS "totalExpectAmount",
+               COALESCE(SUM(fa."realAmount"), 0) AS "totalRealAmount"
+        FROM fact_agg fa
+        <where>
+          <if test="settled != null and settled == true">
+            EXISTS (
+              SELECT 1 FROM pj_commission_application ca
+              WHERE ca.period = fa."period"
+                AND ca.contract_no IN (fa."contractNo", fa."orderNo")
+                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+            )
+          </if>
+          <if test="settled != null and settled == false">
+            NOT EXISTS (
+              SELECT 1 FROM pj_commission_application ca
+              WHERE ca.period = fa."period"
+                AND ca.contract_no IN (fa."contractNo", fa."orderNo")
+                AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
+            )
+          </if>
+        </where>
+        GROUP BY fa."bizType"
+        </script>
+        """)
+    List<Map<String, Object>> selectFactSearchSummary(
+            @Param("period") String period,
+            @Param("deptId") Long deptId,
+            @Param("bizType") String bizType,
+            @Param("keyword") String keyword,
+            @Param("employeeId") Long employeeId,
+            @Param("settled") Boolean settled);
+
+    /**
      * 完整业绩查询的业务类型下拉选项：在与列表完全相同的数据范围（期间/部门子树/经纪人本人）
      * 内，对 ACTIVE 应收（PERF_EXPECT）与实收（rd+rc）两侧的 biz_type 去重排序；
      * 不含关键字过滤，避免输入关键字后选项被清空。

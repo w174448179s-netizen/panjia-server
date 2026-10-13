@@ -398,13 +398,57 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         fillSearchConversion(rows);
 
         // 实收金额权限：仅总监/超管可见，经纪人/店长等角色返回空值
-        if (!canSeeRealAmount()) {
+        boolean seeReal = canSeeRealAmount();
+        if (!seeReal) {
             for (PerformanceFactSearchVo row : rows) {
                 row.setRealAmount(null);
                 row.setRealConvertedAmount(null);
             }
         }
-        return new PageResult<>(rows, total);
+        PageResult<PerformanceFactSearchVo> result = new PageResult<>(rows, total);
+        // 汇总条：全量（同筛选口径、跨页）合计；按员工筛选时仅该员工命中明细，不按合同全量统计
+        result.setSummary(buildSearchSummary(period, effectiveDeptId, bizType, keyword, filterEmployeeId,
+            query.getSettled(), seeReal));
+        return result;
+    }
+
+    /**
+     * 业绩查询汇总条：按业务类型分组聚合后按类型系数折算累加（折算口径与列表行一致）。
+     * 合同数为满足条件的合同总数，金额为合同行金额的全量合计（员工筛选时即该员工口径）。
+     * 无实收查看权限时不返回实收汇总（与行数据置空一致）。
+     */
+    private Map<String, Object> buildSearchSummary(String period, Long deptId, String bizType, String keyword,
+                                                   Long employeeId, Boolean settled, boolean seeReal) {
+        List<Map<String, Object>> groups = factMapper.selectFactSearchSummary(period, deptId,
+            StringUtils.trimToNull(bizType), keyword, employeeId, settled);
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(groups.stream()
+            .map(g -> (String) g.get("bizType"))
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet()));
+        long contractCount = 0;
+        BigDecimal totalExpect = BigDecimal.ZERO;
+        BigDecimal totalExpectConverted = BigDecimal.ZERO;
+        BigDecimal totalReal = BigDecimal.ZERO;
+        BigDecimal totalRealConverted = BigDecimal.ZERO;
+        for (Map<String, Object> g : groups) {
+            contractCount += toLong(g.get("contractCount"));
+            BigDecimal expect = g.get("totalExpectAmount") == null ? BigDecimal.ZERO : new BigDecimal(g.get("totalExpectAmount").toString());
+            BigDecimal real = g.get("totalRealAmount") == null ? BigDecimal.ZERO : new BigDecimal(g.get("totalRealAmount").toString());
+            BigDecimal factor = conversionFactorPort.factorOf(factorMap, (String) g.get("bizType"));
+            totalExpect = totalExpect.add(expect);
+            totalExpectConverted = totalExpectConverted.add(conversionFactorPort.convert(expect, factor));
+            totalReal = totalReal.add(real);
+            totalRealConverted = totalRealConverted.add(conversionFactorPort.convert(real, factor));
+        }
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("contractCount", contractCount);
+        summary.put("totalExpectAmount", totalExpect);
+        summary.put("totalExpectConvertedAmount", totalExpectConverted);
+        if (seeReal) {
+            summary.put("totalRealAmount", totalReal);
+            summary.put("totalRealConvertedAmount", totalRealConverted);
+        }
+        return summary;
     }
 
     @Override
