@@ -270,7 +270,7 @@ done
 if [ "$SRV_HEALTH" = "healthy" ]; then
     echo "[服务器] 修正 sys_oss_config（endpoint/domain_url/凭证 对齐 MinIO）..."
     docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" panjia-postgres psql -U "$POSTGRES_USER" -d "${POSTGRES_DB:-panjia}" -c \
-        "UPDATE sys_oss_config SET endpoint='${OSS_CFG_ENDPOINT}', domain_url='${OSS_CFG_DOMAIN}', bucket_name='panjia-file', access_key='${OSS_CFG_AK}', secret_key='${OSS_CFG_SK}', update_time=now() WHERE config_key IN ('minio','image');"
+        "UPDATE sys_oss_config SET endpoint='${OSS_CFG_ENDPOINT}', domain_url='${OSS_CFG_DOMAIN}', bucket_name='panjia-file', access_key='${OSS_CFG_AK}', secret_key='${OSS_CFG_SK}', update_time=now() WHERE config_key='minio';"
     # 重启使变更生效（幂等，新部署容器本就重建，仅多几秒）：
     #   · web    —— nginx.conf 新增 /oss/ 反代（bind-mount :ro，需 restart 重读）
     #   · server —— sys_oss_config 为直改库，OSS 客户端缓存需重启刷新

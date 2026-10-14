@@ -177,7 +177,7 @@ done
 if [ "$SRV_HEALTH" = "healthy" ]; then
     echo "[测试] 修正 sys_oss_config（endpoint/domain_url/凭证 对齐测试 MinIO）..."
     docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" panjia-test-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
-        "UPDATE sys_oss_config SET endpoint='minio:9000', domain_url='http://${SERVER_IP}:${TEST_WEB_PORT}/oss', bucket_name='panjia-file', access_key='${MINIO_ROOT_USER}', secret_key='${MINIO_ROOT_PASSWORD}', update_time=now() WHERE config_key IN ('minio','image');"
+        "UPDATE sys_oss_config SET endpoint='minio:9000', domain_url='http://${SERVER_IP}:${TEST_WEB_PORT}/oss', bucket_name='panjia-file', access_key='${MINIO_ROOT_USER}', secret_key='${MINIO_ROOT_PASSWORD}', update_time=now() WHERE config_key='minio';"
     # 重启使变更生效：web 重读（bind-mount nginx.conf）；server 刷新 OSS 客户端缓存
     docker compose restart web server
 else
