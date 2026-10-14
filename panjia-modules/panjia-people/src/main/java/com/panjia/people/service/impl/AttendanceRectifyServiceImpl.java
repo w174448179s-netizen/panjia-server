@@ -103,6 +103,34 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
         return PageResult.build(vos, page.getTotal());
     }
 
+    // ==================== 管理端查询 ====================
+
+    @Override
+    public PageResult<AttendanceRectifyVO> pageManage(AttendanceRectifyQuery query, PageQuery pageQuery) {
+        LocalDate monthStart = StringUtils.isBlank(query.getMonthStart()) ? null : parseMonth(query.getMonthStart());
+        LocalDate monthEnd = StringUtils.isBlank(query.getMonthEnd()) ? null : parseMonth(query.getMonthEnd());
+        LambdaQueryWrapper<AttendanceRectify> wrapper = new LambdaQueryWrapper<AttendanceRectify>()
+            .ge(monthStart != null, AttendanceRectify::getAttendMonth, monthStart)
+            .le(monthEnd != null, AttendanceRectify::getAttendMonth, monthEnd)
+            .eq(StringUtils.isNotBlank(query.getStatus()), AttendanceRectify::getStatus, query.getStatus());
+        // 姓名模糊：先定位员工 ID 集合（对齐 AttendanceServiceImpl.pageManage 口径）
+        if (StringUtils.isNotBlank(query.getEmployeeName())) {
+            List<Long> empIds = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+                    .select(Employee::getEmployeeId)
+                    .like(Employee::getEmployeeName, query.getEmployeeName().trim()))
+                .stream().map(Employee::getEmployeeId).toList();
+            if (empIds.isEmpty()) {
+                return PageResult.build(List.of(), 0L);
+            }
+            wrapper.in(AttendanceRectify::getEmployeeId, empIds);
+        }
+        wrapper.orderByDesc(AttendanceRectify::getAttendMonth).orderByDesc(AttendanceRectify::getId);
+        Page<AttendanceRectify> page = rectifyMapper.selectPage(pageQuery.build(), wrapper);
+        List<AttendanceRectifyVO> vos = page.getRecords().stream().map(this::toVO).toList();
+        enrich(vos);
+        return PageResult.build(vos, page.getTotal());
+    }
+
     // ==================== 提交申请 ====================
 
     @Override

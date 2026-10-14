@@ -63,6 +63,19 @@ public class AttendanceRectifyController extends BaseController {
     }
 
     /**
+     * 管理端申请记录分页（人事/总监，考勤管理「修改记录」Tab 用）。
+     *
+     * @param query     月份区间/状态/员工姓名条件
+     * @param pageQuery 分页参数
+     * @return 申请分页
+     */
+    @SaCheckPermission("people:attendance:list")
+    @GetMapping("/page")
+    public R<PageResult<AttendanceRectifyVO>> pageManage(AttendanceRectifyQuery query, PageQuery pageQuery) {
+        return R.ok(rectifyService.pageManage(query, pageQuery));
+    }
+
+    /**
      * 申请单详情（人事/总监，工作流审批弹窗用）。
      *
      * @param id 申请单 ID

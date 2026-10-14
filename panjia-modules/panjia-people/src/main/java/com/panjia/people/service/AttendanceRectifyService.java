@@ -25,6 +25,15 @@ public interface AttendanceRectifyService {
     PageResult<AttendanceRectifyVO> myPage(Long loginUserId, AttendanceRectifyQuery query, PageQuery pageQuery);
 
     /**
+     * 管理端申请记录分页（人事/总监，考勤管理「修改记录」Tab 用）。
+     *
+     * @param query     月份区间/状态/员工姓名条件
+     * @param pageQuery 分页参数
+     * @return 申请分页
+     */
+    PageResult<AttendanceRectifyVO> pageManage(AttendanceRectifyQuery query, PageQuery pageQuery);
+
+    /**
      * 提交修改申请（发起 Warm-Flow 流程，人事审核）。
      *
      * @param loginUserId 登录用户 ID（员工身份服务端强制解析）
