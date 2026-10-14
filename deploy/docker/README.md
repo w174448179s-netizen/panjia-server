@@ -13,6 +13,7 @@
 | `update-backend.sh` | **脚本② 后端更新**：构建镜像 → 传 tar → load → 只重建 server 容器（日常发版） | 否（本地用） |
 | `update-frontend.sh` | **脚本③ 前端更新**：构建 dist → rsync → nginx reload（日常发版） | 否（本地用） |
 | `build.sh` | 出包子命令：被上面三个脚本调用，也可单独跑（`--backend` / `--frontend`） | 否（本地用） |
+| `setup-test-env.sh` | **脚本④ 测试环境**：同机再建一套独立测试栈（独立库 `panjia_test`/端口/授权码），不动生产 | 否（本地用） |
 | `docker-compose.yml` | 5 个服务编排（postgres/redis/minio/server/web） | ✅ |
 | `.env.example` | 环境变量模板（服务器上首次自动生成 `.env`，含随机强密码） | ✅ |
 | `panjia-server-latest.tar` | 后端镜像（273MB，`docker load` 导入，不走 Docker Hub） | ✅ |
@@ -195,6 +196,10 @@ bash update-frontend.sh               # 只改了前端：构建+同步+reload
 bash deploy.sh <IP>
 ```
 
+> **双环境一次发版**：服务器上存在测试环境（`~/panjia-test`，由 `setup-test-env.sh` 创建）时，
+> `update-backend.sh` / `update-frontend.sh` 会自动「先更新测试、再更新生产」——
+> 只需跑一次脚本，测试（`:8081`）和生产（`:80`）同时生效，无需部署两次。
+
 ## 七、常见问题
 
 | 现象 | 处理 |
@@ -216,3 +221,53 @@ cd ~/panjia && ./stop.sh
 tar czf ~/panjia-data-$(date +%F).tgz data/
 ./start.sh
 ```
+
+## 九、同机搭建独立测试环境（可选）
+
+一台服务器上并存「生产 + 测试」两套栈，两套互相隔离、连两个不同的库。由 `setup-test-env.sh` 一键创建，**不动生产**（生产 compose / 脚本 / 容器 / 数据一律不碰）。
+
+### 隔离方式
+
+| 项目 | 生产 | 测试 |
+|------|------|------|
+| 部署目录 | `~/panjia` | `~/panjia-test` |
+| 容器名前缀 | `panjia-*` | `panjia-test-*` |
+| 前端端口 | 80 | **8081** |
+| PostgreSQL / 库名 | 5432 / `panjia` | **5433 / `panjia_test`** |
+| Redis 端口 | 6379 | **6380** |
+| MinIO API / 控制台 | 9000 / 9001 | **9002 / 9003** |
+| JVM | `-Xmx4096m` | **`-Xmx1024m`** |
+| 授权码 | 生产码 | **测试专用码** |
+
+### 前置
+
+- [ ] 测试栈用**独立的授权码**（授权管理后台单独生成）——**切勿复用生产码**。指纹 = `/etc/machine-id` + 数据卷 `instanceId`，同机复用同一授权码会被服务端多实例检测自动拉黑（连生产一起）。
+- [ ] 云安全组放行 **8081**。
+- [ ] 服务器已跑过 `deploy.sh`（`panjia-server:latest` 镜像已在，测试栈直接复用，不重传）。
+
+### 创建
+
+```bash
+cd panjia-server/deploy/docker
+PANJIA_TEST_AUTH_CODE=PJ-XXXX-XXXX-XXXX bash setup-test-env.sh   # 服务器信息读 server.env
+```
+
+脚本自动完成：建 `~/panjia-test` → 拷贝 compose/nginx/前端 → 容器名改 `panjia-test-*` → 生成 `.env`（随机强密码、端口错开、小 JVM）→ 起栈 → 建 MinIO 桶 → 等后端健康后修正测试库 `sys_oss_config`（图片直链指向 `http://IP:8081/oss`，不串生产）。
+
+完成后访问 `http://<服务器IP>:8081`。**重复执行安全**：`.env`/数据/授权码保留；拿到测试授权码后重跑一次即自动补齐。
+
+### 测试环境运维
+
+```bash
+ssh ubuntu@<服务器IP>
+cd ~/panjia-test
+./logs.sh          # 测试后端日志
+./restart.sh       # 重启测试栈
+sudo docker compose ps
+```
+
+测试后端发版（可选）：把新镜像 tar 传到 `~/panjia-test` 后
+`cd ~/panjia-test && sudo docker load -i panjia-server-latest.tar && sudo docker compose up -d --force-recreate server`（生产用 `update-backend.sh`，两者互不影响）。
+
+> 注意：日常代码发版**不需要**上面的手动操作——`update-backend.sh` / `update-frontend.sh`
+> 检测到 `~/panjia-test` 会自动双环境发版（见第六节）。上面的手动方式仅用于单独动测试环境。
