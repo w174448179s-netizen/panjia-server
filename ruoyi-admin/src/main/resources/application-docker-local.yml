@@ -30,3 +30,10 @@ panjia:
     db-name: panjia_test
     db-user: root
     db-pass: root
+  # License 授权码占位符（与 application-prod.yml 同款）：
+  # dev,docker-local profile 组合下 prod 配置不加载，若不在此声明，
+  # PANJIA_AUTH_CODE 环境变量无处生效，启动自动激活不会触发（T4 拒绝启动）。
+  # 首次/换机：run-local-backend.sh 传入 PANJIA_AUTH_CODE；激活成功后 token 落盘
+  # （panjia-local-license 卷 /data/panjia-license/.panjia_token），授权码即作废，无需长期保存
+  license:
+    auth-code: ${PANJIA_AUTH_CODE:}

@@ -12,25 +12,25 @@ services:
       # 运行时数据（不提交 Git）
       - ./data/postgres:/var/lib/postgresql/data
 
-  nginx-web:
-    image: nginx:1.31.1
-    container_name: nginx-web
+  # 与 deploy/docker 生产部署完全同构的入口：同源服务 前端 + /prod-api + /oss
+  # nginx.conf 直接复用 deploy/docker/nginx/nginx.conf（/prod-api → server:8080，
+  # /oss → minio:9000；本地后端容器由 run-local-backend.sh 以 network-alias server 接入）
+  web:
+    image: nginx:stable-alpine
+    container_name: panjia-local-web
     environment:
-      # 时区上海
       TZ: Asia/Shanghai
     ports:
       - "80:80"
-      - "443:443"
     volumes:
-      # 证书映射（Git 提交）
-      - ./config/nginx/cert:/etc/nginx/cert
-      # 配置文件映射（Git 提交）
-      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf
-      # 页面目录（Git 提交）
-      - ./config/nginx/html:/usr/share/nginx/html
+      # 配置文件（与客户部署同一份，Git 提交）
+      - ../../deploy/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 错误页（Git 提交）
+      - ../../deploy/docker/nginx/error:/var/www/panjia-error:ro
+      # 前端构建产物（pnpm build 输出，不提交 Git）
+      - ../../../panjia-ui/dist:/var/www/panjia-ui:ro
       # 日志目录（不提交 Git）
       - ./data/nginx/log:/var/log/nginx
-    privileged: true
 
   redis:
     image: redis:8.6.3
