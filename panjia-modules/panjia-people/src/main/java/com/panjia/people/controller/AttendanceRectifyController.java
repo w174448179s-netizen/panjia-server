@@ -1,6 +1,7 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaMode;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.domain.R;
@@ -76,14 +77,15 @@ public class AttendanceRectifyController extends BaseController {
     }
 
     /**
-     * 申请单详情（人事/总监，工作流审批弹窗用）。
+     * 申请单详情：人事/总监（people:attendance:list）可查看全部，供工作流审批弹窗/考勤管理「修改记录」用；
+     * 本人（people:attendance:my:query）可查看自己的申请，服务端做归属校验。
      *
      * @param id 申请单 ID
      * @return 申请单详情
      */
-    @SaCheckPermission("people:attendance:list")
+    @SaCheckPermission(value = {"people:attendance:my:query", "people:attendance:list"}, mode = SaMode.OR)
     @GetMapping("/{id}")
     public R<AttendanceRectifyVO> getByBizId(@PathVariable Long id) {
-        return R.ok(rectifyService.getByBizId(id));
+        return R.ok(rectifyService.getByBizId(LoginHelper.getUserId(), id));
     }
 }

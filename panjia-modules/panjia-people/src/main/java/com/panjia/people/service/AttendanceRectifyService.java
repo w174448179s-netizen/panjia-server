@@ -2,6 +2,7 @@ package com.panjia.people.service;
 
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
+import com.panjia.contracts.port.PeopleAttendanceRectifyQueryPort;
 import com.panjia.people.dto.AttendanceRectifyQuery;
 import com.panjia.people.dto.AttendanceRectifySubmitDTO;
 import com.panjia.people.dto.AttendanceRectifyVO;
@@ -11,8 +12,9 @@ import com.panjia.people.dto.AttendanceRectifyVO;
  * <p>
  * 审批动作全部经「我的待办」由 Warm-Flow 引擎按 flow_user 名单判权办理，
  * 业务侧只提供 申请提交 / 本人查询 / 审批详情查询 / 工作流事件回写，无业务直批入口。
+ * 另实现 {@link PeopleAttendanceRectifyQueryPort} 供导入域做「当月已有修改申请则禁止导入」卡点。
  */
-public interface AttendanceRectifyService {
+public interface AttendanceRectifyService extends PeopleAttendanceRectifyQueryPort {
 
     /**
      * 本人申请记录分页（服务端按登录用户强制本人数据）。
@@ -43,12 +45,14 @@ public interface AttendanceRectifyService {
     Long submit(Long loginUserId, AttendanceRectifySubmitDTO dto);
 
     /**
-     * 审批详情（人事待办弹窗用；归属判权由工作流引擎负责，此处不做本人校验）。
+     * 申请单详情：人事/总监持 people:attendance:list 可查看全部；
+     * 本人（people:attendance:my:query）仅可查看本人申请，服务端做归属校验。
      *
-     * @param id 申请单 ID
+     * @param loginUserId 登录用户 ID
+     * @param id          申请单 ID
      * @return 申请单详情
      */
-    AttendanceRectifyVO getByBizId(Long id);
+    AttendanceRectifyVO getByBizId(Long loginUserId, Long id);
 
     /**
      * 工作流事件回写：finish→生效修改+APPROVED；back→REJECTED 并清理实例；

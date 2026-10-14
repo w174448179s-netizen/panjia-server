@@ -1,5 +1,6 @@
 package com.panjia.people.service.impl;
 
+import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
@@ -211,10 +212,17 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
     // ==================== 审批详情 ====================
 
     @Override
-    public AttendanceRectifyVO getByBizId(Long id) {
+    public AttendanceRectifyVO getByBizId(Long loginUserId, Long id) {
         AttendanceRectify entity = rectifyMapper.selectById(id);
         if (entity == null) {
             throw new ServiceException("考勤修改申请不存在，id={}", id);
+        }
+        // 非人事/总监（无 people:attendance:list）仅可查看本人申请，防止越权查看他人记录
+        if (!StpUtil.hasPermission("people:attendance:list")) {
+            Long myEmployeeId = findEmployeeIdByUserId(loginUserId);
+            if (myEmployeeId == null || !myEmployeeId.equals(entity.getEmployeeId())) {
+                throw new ServiceException("无权查看该考勤修改申请");
+            }
         }
         AttendanceRectifyVO vo = toVO(entity);
         enrich(List.of(vo));
@@ -395,6 +403,27 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
         } catch (NumberFormatException e) {
             throw new ServiceException("【{}】必须为数字", FIELD_NAMES.get(field));
         }
+    }
+
+    // ==================== 导入卡点查询（PeopleAttendanceRectifyQueryPort） ====================
+
+    @Override
+    public boolean hasEffectiveRectify(String period) {
+        String t = StringUtils.trimToNull(period);
+        if (t == null) {
+            return false;
+        }
+        LocalDate monthStart;
+        try {
+            monthStart = t.length() == 7 ? YearMonth.parse(t).atDay(1) : LocalDate.parse(t).withDayOfMonth(1);
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+        // 待审批/已通过视为有效：导入（同人同月覆盖写）会冲掉申请依据或已生效的修改结果
+        return rectifyMapper.exists(new LambdaQueryWrapper<AttendanceRectify>()
+            .eq(AttendanceRectify::getAttendMonth, monthStart)
+            .in(AttendanceRectify::getStatus,
+                List.of(AttendanceRectify.STATUS_SUBMITTED, AttendanceRectify.STATUS_APPROVED)));
     }
 
     /** 涉及日期逐枚校验格式（yyyy-MM-dd，逗号分隔；可空） */

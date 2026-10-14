@@ -112,4 +112,13 @@ public interface AttendanceService extends PeopleAttendanceSyncPort {
      * @return 每日明细列表
      */
     List<AttendanceDetailVO> listMyDetails(Long userId, String attendMonth);
+
+    /**
+     * 查询指定员工某月的考勤每日明细（人事/总监，考勤管理「考勤汇总→详情」）。
+     *
+     * @param employeeId  员工 ID
+     * @param attendMonth 考勤月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    List<AttendanceDetailVO> listDetails(Long employeeId, String attendMonth);
 }

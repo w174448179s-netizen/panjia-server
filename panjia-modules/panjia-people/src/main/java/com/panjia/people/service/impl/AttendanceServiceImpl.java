@@ -238,32 +238,37 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
 
     @Override
     public List<AttendanceDetailVO> listMyDetails(Long userId, String attendMonth) {
-        LocalDate monthStart = parseYearMonth(attendMonth);
-        if (monthStart == null) {
-            return List.of();
-        }
         Long myEmployeeId = findEmployeeIdByUserId(userId);
         if (myEmployeeId == null) {
             return List.of();
         }
+        return listDetails(myEmployeeId, attendMonth);
+    }
+
+    @Override
+    public List<AttendanceDetailVO> listDetails(Long employeeId, String attendMonth) {
+        LocalDate monthStart = parseYearMonth(attendMonth);
+        if (monthStart == null || employeeId == null) {
+            return List.of();
+        }
         List<AttendanceDetail> details = attendanceDetailMapper.selectList(
             new LambdaQueryWrapper<AttendanceDetail>()
-                .eq(AttendanceDetail::getEmployeeId, myEmployeeId)
+                .eq(AttendanceDetail::getEmployeeId, employeeId)
                 .eq(AttendanceDetail::getAttendMonth, monthStart)
                 .orderByAsc(AttendanceDetail::getAttendDate));
         if (details.isEmpty()) {
             return List.of();
         }
-        Employee me = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
-            .eq(Employee::getEmployeeId, myEmployeeId)
+        Employee emp = employeeMapper.selectOne(new LambdaQueryWrapper<Employee>()
+            .eq(Employee::getEmployeeId, employeeId)
             .select(Employee::getEmployeeCode, Employee::getEmployeeName)
             .last("limit 1"));
         return details.stream().map(d -> {
             AttendanceDetailVO vo = new AttendanceDetailVO();
             BeanUtil.copyProperties(d, vo);
-            if (me != null) {
-                vo.setEmployeeCode(me.getEmployeeCode());
-                vo.setEmployeeName(me.getEmployeeName());
+            if (emp != null) {
+                vo.setEmployeeCode(emp.getEmployeeCode());
+                vo.setEmployeeName(emp.getEmployeeName());
             }
             return vo;
         }).toList();

@@ -135,10 +135,11 @@ public class XlsxFileParser implements FileParser {
                         }
                     }
                     if (col == null) {
-                        // 未映射列：存入 unmappedRawValues（key=列头文本），供考勤 Q+ 每日列等动态列消费
+                        // 未映射列：按列序号存入 unmappedRawValues（供考勤 Q+ 每日列等动态列按位置消费，
+                        // 避免「六/日」等重复列头相互覆盖丢失列位置）
                         String unmappedRaw = data.get(i);
                         if (unmappedRaw != null && !unmappedRaw.isBlank()) {
-                            row.getUnmappedRawValues().put(header, unmappedRaw.trim());
+                            row.getUnmappedRawValues().put(i, unmappedRaw.trim());
                         }
                         continue;
                     }

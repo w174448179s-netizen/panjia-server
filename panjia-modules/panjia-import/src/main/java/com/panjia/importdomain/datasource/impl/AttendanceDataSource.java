@@ -14,15 +14,15 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 考勤数据源（ATTENDANCE）。
  * <p>
- * V200 起对接钉钉《月度汇总》标准表：一行一人一月，行内没有考勤日期列，
- * 归属月取导入时选择的批次期间并归一为当月 1 日（同时写入 raw_json 供 sourceKey 使用）；
+ * V200 起对接钉钉《月度汇总》标准表：一行一人一月，归属月取导入时选择的批次期间
+ * 并归一为当月 1 日（同时写入 raw_json 供 sourceKey 使用）；行内 Q 列之后的每日考勤
+ * 结果列按「列位置」解析为 dailyStatus（起始列=当月 1 号），供员工域每日明细落库；
  * 模板映射的姓名/部门/出勤天数等指标随 raw_json 全量归档，必填/类型校验由
  * common-import-util 基础校验器完成，本类只做结构转换。
  */
@@ -66,20 +66,31 @@ public class AttendanceDataSource extends AbstractDataSource {
             rawJson.put("leaveDays", leaveDays);
             raw.setRawJson(writeJson(rawJson));
 
-            // 从未映射列（Excel Q+ 每日考勤结果列）解析每日状态
-            Map<String, String> unmapped = row.getUnmappedRawValues();
+            // 从未映射列按「列位置」解析每日状态：每日区块起始列 = 当月 1 号，依次递增。
+            // 钉钉《月度汇总》的每日列头为纯数字日（3、4…）或周末星期字符（六、日），
+            // 无法按文本解析，且「六/日」重复出现会相互覆盖，故改用列序号定位。
+            Map<Integer, String> unmapped = row.getUnmappedRawValues();
             if (unmapped != null && !unmapped.isEmpty() && monthStart != null) {
-                Map<String, String> dailyStatus = new LinkedHashMap<>();
-                YearMonth ym = YearMonth.from(monthStart);
-                for (Map.Entry<String, String> entry : unmapped.entrySet()) {
-                    LocalDate date = parseDailyHeader(entry.getKey(), ym);
-                    if (date != null) {
-                        dailyStatus.put(date.toString(), entry.getValue());
+                Integer firstDayIdx = firstDailyColumnIndex(sheet.getHeaders());
+                if (firstDayIdx != null) {
+                    YearMonth ym = YearMonth.from(monthStart);
+                    int maxDay = ym.lengthOfMonth();
+                    Map<String, String> dailyStatus = new LinkedHashMap<>();
+                    for (Map.Entry<Integer, String> entry : unmapped.entrySet()) {
+                        int day = entry.getKey() - firstDayIdx + 1;
+                        if (day < 1 || day > maxDay) {
+                            continue;
+                        }
+                        String status = entry.getValue() == null ? null : entry.getValue().trim();
+                        if (status == null || status.isEmpty()) {
+                            continue;
+                        }
+                        dailyStatus.put(ym.atDay(day).toString(), status);
                     }
-                }
-                if (!dailyStatus.isEmpty()) {
-                    rawJson.put("dailyStatus", dailyStatus);
-                    raw.setRawJson(writeJson(rawJson));
+                    if (!dailyStatus.isEmpty()) {
+                        rawJson.put("dailyStatus", dailyStatus);
+                        raw.setRawJson(writeJson(rawJson));
+                    }
                 }
             }
 
@@ -108,60 +119,39 @@ public class AttendanceDataSource extends AbstractDataSource {
         return (a == null ? BigDecimal.ZERO : a).add(b == null ? BigDecimal.ZERO : b);
     }
 
-    /** 钉钉列头日期解析模式：「N日」「M/D」「MM-DD」「YYYY-MM-DD」 */
-    private static final Pattern DAY_PATTERN = Pattern.compile("(\\d{1,2})日");
-    private static final Pattern SLASH_PATTERN = Pattern.compile("(\\d{1,2})/(\\d{1,2})");
-    private static final Pattern DASH_PATTERN = Pattern.compile("(\\d{1,2})-(\\d{1,2})");
+    /** 星期字符表头（周末列，无法转成日号，只能按列位置定位） */
+    private static final String WEEKDAY_HEADERS = "一二三四五六日";
 
-    /**
-     * 解析钉钉月度汇总 Excel 第 4 行的每日日期列头为 LocalDate。
-     * <p>
-     * 支持格式：{@code N日}（如"1日"）、{@code M/D}（如"10/1"）、
-     * {@code MM-DD}（如"10-01"）、{@code YYYY-MM-DD}（如"2026-10-01"）。
-     * 用 period 的年月补全缺失部分；解析失败返回 null（列跳过）。
-     *
-     * @param header 列头文本
-     * @param period 归属月（提供年/月上下文）
-     * @return 解析出的日期，失败返回 null
-     */
-    private LocalDate parseDailyHeader(String header, YearMonth period) {
-        if (header == null || header.isBlank()) {
+    /** 每日明细区块起始列：首个可识别为「日」的列头（纯数字 1-31 或星期字符）；无则返回 null */
+    private Integer firstDailyColumnIndex(List<String> headers) {
+        if (headers == null) {
             return null;
         }
-        String h = header.trim();
-        try {
-            // "2026-10-01" 标准格式
-            return LocalDate.parse(h);
-        } catch (DateTimeParseException ignored) {
-        }
-        // "N日" 格式：取日，用 period 的年月
-        Matcher m = DAY_PATTERN.matcher(h);
-        if (m.find()) {
-            int day = Integer.parseInt(m.group(1));
-            return safeDate(period, day);
-        }
-        // "M/D" 格式：月/日
-        m = SLASH_PATTERN.matcher(h);
-        if (m.find()) {
-            int month = Integer.parseInt(m.group(1));
-            int day = Integer.parseInt(m.group(2));
-            return safeDate(YearMonth.of(period.getYear(), month), day);
-        }
-        // "MM-DD" 格式
-        m = DASH_PATTERN.matcher(h);
-        if (m.find()) {
-            int month = Integer.parseInt(m.group(1));
-            int day = Integer.parseInt(m.group(2));
-            return safeDate(YearMonth.of(period.getYear(), month), day);
+        for (int i = 0; i < headers.size(); i++) {
+            if (isDailyColumnHeader(headers.get(i))) {
+                return i;
+            }
         }
         return null;
     }
 
-    /** 安全构造日期：日超出月份范围时返回 null */
-    private LocalDate safeDate(YearMonth ym, int day) {
-        if (day < 1 || day > ym.lengthOfMonth()) {
-            return null;
+    /** 列头是否属于每日日期列：周末星期字符，或 1-31 的纯数字日 */
+    private boolean isDailyColumnHeader(String header) {
+        if (header == null) {
+            return false;
         }
-        return ym.atDay(day);
+        String h = header.trim();
+        if (h.isEmpty()) {
+            return false;
+        }
+        if (WEEKDAY_HEADERS.contains(h)) {
+            return true;
+        }
+        try {
+            int day = Integer.parseInt(h);
+            return day >= 1 && day <= 31;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 }

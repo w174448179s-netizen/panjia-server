@@ -109,6 +109,19 @@ public class AttendanceController extends BaseController {
         return R.ok();
     }
 
+    /**
+     * 管理端考勤每日明细（考勤管理「考勤汇总→详情」）。
+     *
+     * @param employeeId  员工 ID
+     * @param attendMonth 考勤月份（yyyy-MM）
+     * @return 每日明细列表
+     */
+    @SaCheckPermission("people:attendance:list")
+    @GetMapping("/details")
+    public R<List<AttendanceDetailVO>> details(@RequestParam Long employeeId, @RequestParam String attendMonth) {
+        return R.ok(attendanceService.listDetails(employeeId, attendMonth));
+    }
+
     // ==================== 本人查询（全员，服务端强制本人数据） ====================
 
     /**
