@@ -196,9 +196,17 @@ bash update-frontend.sh               # 只改了前端：构建+同步+reload
 bash deploy.sh <IP>
 ```
 
-> **双环境一次发版**：服务器上存在测试环境（`~/panjia-test`，由 `setup-test-env.sh` 创建）时，
-> `update-backend.sh` / `update-frontend.sh` 会自动「先更新测试、再更新生产」——
-> 只需跑一次脚本，测试（`:8081`）和生产（`:80`）同时生效，无需部署两次。
+> **双环境发版顺序（重要）**：测试环境（`~/panjia-test`，由 `setup-test-env.sh` 创建）就绪后，
+> 发版**必须先发测试、验证通过后再发生产**，两个脚本用参数指定目标，绝不同时发：
+>
+> ```bash
+> bash update-backend.sh test     # ① 后端改动 → 只发测试（:8081）
+> # …… 测试环境验证通过 ……
+> bash update-backend.sh          # ② 再发生产（:80，默认 prod）
+>
+> bash update-frontend.sh test    # 前端同理：先 test
+> bash update-frontend.sh         # 再 prod
+> ```
 
 ## 七、常见问题
 
@@ -269,5 +277,5 @@ sudo docker compose ps
 测试后端发版（可选）：把新镜像 tar 传到 `~/panjia-test` 后
 `cd ~/panjia-test && sudo docker load -i panjia-server-latest.tar && sudo docker compose up -d --force-recreate server`（生产用 `update-backend.sh`，两者互不影响）。
 
-> 注意：日常代码发版**不需要**上面的手动操作——`update-backend.sh` / `update-frontend.sh`
-> 检测到 `~/panjia-test` 会自动双环境发版（见第六节）。上面的手动方式仅用于单独动测试环境。
+> 注意：日常发版**不需要**上面的手动操作——`update-backend.sh test` / `update-frontend.sh test`
+> 一条命令即可完成测试环境发版（见第六节）。上面的手动方式仅用于服务器上应急操作。
