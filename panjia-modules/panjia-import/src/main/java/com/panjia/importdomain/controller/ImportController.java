@@ -15,6 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -44,6 +45,26 @@ public class ImportController {
     private final ImportTemplateBridge templateBridge;
     private final RawDataQueryService rawDataQueryService;
     private final com.panjia.contracts.port.PerformanceExpectCheckPort expectCheckPort;
+    /** 考勤导入卡点（people 域实现；模块未装配时为 null，不阻断导入） */
+    private final ObjectProvider<com.panjia.contracts.port.PeopleAttendanceRectifyQueryPort> attendanceRectifyPortProvider;
+
+    /**
+     * 考勤导入前置卡点：当月已有经纪人的有效修改申请（待审批/已通过）时禁止导入。
+     * <p>
+     * 月度汇总为同人同月覆盖写，导入会冲掉申请依据或已生效的修改结果。
+     *
+     * @param period 归属月 YYYY-MM
+     * @return 拦截提示；null=放行
+     */
+    private String attendanceRectifyGateMsg(String period) {
+        com.panjia.contracts.port.PeopleAttendanceRectifyQueryPort port =
+            attendanceRectifyPortProvider.getIfAvailable();
+        if (port != null && port.hasEffectiveRectify(period)) {
+            return "该月考勤已存在经纪人的修改申请（待审批或已通过），导入会覆盖修改结果；"
+                + "请先处理完该月修改申请后再导入";
+        }
+        return null;
+    }
 
     /**
      * 文件上传导入。
@@ -71,6 +92,13 @@ public class ImportController {
         if (type == ImportSourceType.KE_RECEIVED || type == ImportSourceType.HISTORY_PAYROLL) {
             if (!expectCheckPort.hasAnyExpectFacts()) {
                 return R.fail("导入实收前请先导入当月（或之前月份）的新签业绩——当前系统中没有新签应收数据，实收无法匹配合同");
+            }
+        }
+        // 考勤导入卡点：当月已有经纪人的有效修改申请（待审批/已通过）时禁止导入
+        if (type == ImportSourceType.ATTENDANCE) {
+            String gate = attendanceRectifyGateMsg(period);
+            if (gate != null) {
+                return R.fail(gate);
             }
         }
         try {
@@ -224,11 +252,29 @@ public class ImportController {
     }
 
     /**
+     * 考勤重新归档/重归一化前置卡点：考勤批次且当月已有有效修改申请时拒绝。
+     *
+     * @param batchId 批次 ID
+     * @return 拦截提示；null=放行
+     */
+    private String attendanceGateForBatch(Long batchId) {
+        ImportBatch batch = importBatchService.getById(batchId);
+        if (batch == null || batch.getSourceType() != ImportSourceType.ATTENDANCE) {
+            return null;
+        }
+        return attendanceRectifyGateMsg(batch.getPeriod());
+    }
+
+    /**
      * 重归一化。
      */
     @SaCheckPermission("import:batch:renormalize")
     @PostMapping("/batches/{id}/renormalize")
     public R<Void> renormalize(@PathVariable Long id) {
+        String gate = attendanceGateForBatch(id);
+        if (gate != null) {
+            return R.fail(gate);
+        }
         importBatchService.renormalize(id);
         return R.ok();
     }
@@ -239,6 +285,10 @@ public class ImportController {
     @SaCheckPermission("import:batch:archive")
     @PostMapping("/batches/{id}/archive")
     public R<Void> archive(@PathVariable Long id) {
+        String gate = attendanceGateForBatch(id);
+        if (gate != null) {
+            return R.fail(gate);
+        }
         importBatchService.archive(id);
         return R.ok();
     }
