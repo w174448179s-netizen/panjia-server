@@ -98,7 +98,13 @@ Set-Location $configDir
 Write-Log "启动容器（docker compose up -d）..."
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-docker compose up -d 2>&1 | ForEach-Object { Write-Log "  $_" }
+docker compose up -d 2>&1 | ForEach-Object { Write-Host "  $_" }
+
+# frp 外网接入：config/frpc.toml 存在则一并拉起 frpc 容器（profile: frp）
+if (Test-Path "$configDir\frpc.toml") {
+    Write-Host "检测到 frpc.toml，启动 frp 外网接入..."
+    docker compose --profile frp up -d frpc 2>&1 | ForEach-Object { Write-Host "  $_" }
+}
 $upExit = $LASTEXITCODE
 $ErrorActionPreference = $prevEap
 

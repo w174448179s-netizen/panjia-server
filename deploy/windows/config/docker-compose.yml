@@ -77,6 +77,38 @@ services:
       retries: 3
       start_period: 60s
 
+  minio:
+    image: pgsty/minio:RELEASE.2026-04-17T00-00-00Z
+    container_name: panjia-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-panjia}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-panjia123456}
+    volumes:
+      - ../data/minio:/data
+    expose:
+      - "9000"
+      - "9001"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # frp 外网接入（可选）：安装时选择开启才启动（compose profile: frp）
+  # 凭证文件 config/frpc.toml 由安装器/管理员渲染；单隧道 3000+N → web:80
+  frpc:
+    image: snowdreamtech/frpc:0.71.0
+    container_name: panjia-frpc
+    restart: unless-stopped
+    profiles: ["frp"]
+    volumes:
+      - ../config/frpc.toml:/etc/frp/frpc.toml:ro
+    depends_on:
+      web:
+        condition: service_healthy
+
   web:
     image: nginx:stable-alpine
     container_name: panjia-web

@@ -66,6 +66,7 @@ Page custom AuthCodePage AuthCodePageLeave
 Var AuthCode
 Var hAuthCodePage
 Var hAuthCodeText
+Var FrpFlag
 
 ; ============================================================================
 ; 安装入口
@@ -131,6 +132,7 @@ Section "主程序" SecMain
     ; 释放配置文件
     SetOutPath "$INSTDIR\config"
     File "config\docker-compose.yml"
+    File /nonfatal "config\frpc-template.toml"
 
     SetOutPath "$INSTDIR\nginx"
     File "config\nginx.conf"
@@ -200,7 +202,17 @@ Section "主程序" SecMain
     DetailPrint "=========================================="
     DetailPrint ""
 
-    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\install.ps1" -InstallDir "$INSTDIR" -AuthCode "$AuthCode" -LicenseServer "${DEFAULT_LICENSE_SERVER}" -ImageTag "${DEFAULT_IMAGE_TAG}"'
+    ; 外网接入（frp）选择：由用户决定是否开启
+    ; 端口已固化在安装包的 frpc-template.toml 里（管理员按客户分配端口后构建）
+    StrCpy $FrpFlag ""
+    IfFileExists "$INSTDIR\config\frpc-template.toml" 0 frp_skip
+    MessageBox MB_YESNO|MB_ICONQUESTION "是否开启外网接入（frp 内网穿透）？$\n$\n选择「是」：可在任何地点通过 panjia.icu 访问本系统$\n选择「否」：仅本机 / 局域网访问（之后可随时开启，见 README）" IDYES frp_yes
+    Goto frp_skip
+frp_yes:
+    StrCpy $FrpFlag " -EnableFrp"
+frp_skip:
+
+    nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\scripts\install.ps1" -InstallDir "$INSTDIR" -AuthCode "$AuthCode" -LicenseServer "${DEFAULT_LICENSE_SERVER}" -ImageTag "${DEFAULT_IMAGE_TAG}"$FrpFlag'
     Pop $R0
 
     ${If} $R0 != 0

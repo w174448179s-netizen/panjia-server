@@ -7,6 +7,10 @@
 #   -AuthCode     授权码
 #   -LicenseServer 授权服务器地址（默认 https://panjia.icu）
 #   -ImageTag     镜像标签（默认 latest）
+#   -EnableFrp    开启 frp 外网接入（NSIS 弹窗选择「是」时传入；端口从
+#                 安装包内 config\frpc-template.toml 的 remotePort 读取，
+#                 或由 -FrpPort 显式指定）
+#   -FrpPort      frp 远端端口（第 N 号客户 = 3000+N），仅 -EnableFrp 时有效
 #
 # 说明：
 #   - 需要管理员权限，未提权时会自动弹出 UAC 自我重启
@@ -22,7 +26,9 @@ param(
     [string]$InstallDir = "C:\Program Files\Panjia",
     [string]$AuthCode = "",
     [string]$LicenseServer = "https://panjia.icu",
-    [string]$ImageTag = "latest"
+    [string]$ImageTag = "latest",
+    [switch]$EnableFrp,
+    [int]$FrpPort = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +51,10 @@ if (-not $isAdmin) {
             "-LicenseServer", ('"{0}"' -f $LicenseServer),
             "-ImageTag", ('"{0}"' -f $ImageTag)
         )
+        if ($EnableFrp) {
+            $argList += @("-EnableFrp")
+            if ($FrpPort -gt 0) { $argList += @("-FrpPort", "$FrpPort") }
+        }
         Start-Process -FilePath "powershell" -Verb RunAs -ArgumentList $argList | Out-Null
     } catch {
         Write-Host "提权被取消或失败: $_"
@@ -105,6 +115,10 @@ function Test-StepDone {
 # 注册重启后自动继续安装
 function Register-RestartContinue {
     $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\install.ps1`" -InstallDir `"$InstallDir`" -AuthCode `"$AuthCode`" -LicenseServer `"$LicenseServer`" -ImageTag `"$ImageTag`""
+    if ($EnableFrp) {
+        $cmd += " -EnableFrp"
+        if ($FrpPort -gt 0) { $cmd += " -FrpPort $FrpPort" }
+    }
     try {
         $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
         if (-not (Test-Path $regPath)) {
@@ -599,6 +613,8 @@ if (-not (Test-StepDone 4)) {
         $dbName = "panjia"
         $dbPassword = "Pg" + [guid]::NewGuid().ToString("N").Substring(0, 24) + "!"
         $redisPassword = "Rd" + [guid]::NewGuid().ToString("N").Substring(0, 24)
+        $minioUser = "panjia"
+        $minioPassword = "Mn" + [guid]::NewGuid().ToString("N").Substring(0, 24)
 
         $envContent = @"
 # 盘家智管环境配置（安装时自动生成）
@@ -611,6 +627,10 @@ POSTGRES_DB=$dbName
 
 # Redis
 REDIS_PASSWORD=$redisPassword
+
+# MinIO（图片/文件存储）
+MINIO_ROOT_USER=$minioUser
+MINIO_ROOT_PASSWORD=$minioPassword
 
 # 镜像标签
 IMAGE_TAG=$ImageTag
@@ -640,7 +660,9 @@ PANJIA_AUTH_CODE=$AuthCode
     "dbUser": "$dbUser",
     "dbName": "$dbName",
     "dbPassword": "$dbPassword",
-    "redisPassword": "$redisPassword"
+    "redisPassword": "$redisPassword",
+    "minioUser": "$minioUser",
+    "minioPassword": "$minioPassword"
 }
 "@
         $installInfo | Out-File -FilePath "$InstallDir\config\install-info.json" -Encoding UTF8
@@ -648,6 +670,55 @@ PANJIA_AUTH_CODE=$AuthCode
     }
 
     Set-Progress 4
+}
+
+# ==================== frp 外网接入判定（可选） ====================
+# 「安装 frpc 要提供选择」——三条来源（按优先级）：
+#   1. -EnableFrp 参数：NSIS 安装器弹窗选择「是」时传入（端口取 -FrpPort，
+#      未传则读安装包内 config\frpc-template.toml 的 remotePort 并渲染出 frpc.toml）
+#   2. $InstallDir\config\frpc.toml 已存在（管理员预渲染好的凭证文件）
+#   3. 都没有 → 不启用 frp（可事后把 frpc.toml 放进 config 再启动，见 README）
+# 不做交互式 Read-Host：NSIS 的 nsExec 在无控制台环境下运行，Read-Host 会挂起
+$frpcToml = "$InstallDir\config\frpc.toml"
+$frpcTemplate = "$PSScriptRoot\..\config\frpc-template.toml"
+$frpEnabled = $false
+$frpRemotePort = 0
+
+if ($EnableFrp) {
+    if ($FrpPort -gt 0) { $frpRemotePort = $FrpPort }
+    elseif (Test-Path $frpcTemplate) {
+        $tplText = Get-Content $frpcTemplate -Raw
+        if ($tplText -match 'remotePort\s*=\s*(\d+)') { $frpRemotePort = [int]$matches[1] }
+    }
+    if (-not (Test-Path $frpcToml)) {
+        if (-not (Test-Path $frpcTemplate)) {
+            Write-Log "选择开启 frp 但安装包未包含 frpc-template.toml（构建时未注入凭证），无法启用" "WARN"
+        } elseif ($frpRemotePort -le 0) {
+            Write-Log "选择开启 frp 但未获得端口（-FrpPort 未传且模板无 remotePort），无法启用" "WARN"
+        } else {
+            (Get-Content $frpcTemplate -Raw) -replace '__REMOTE_PORT__', "$frpRemotePort" |
+                Set-Content -Path $frpcToml -Encoding ASCII
+            Write-Log "frpc 配置已生成（remotePort=$frpRemotePort）"
+        }
+    }
+    if (Test-Path $frpcToml) { $frpEnabled = $true }
+}
+
+if (-not $frpEnabled -and (Test-Path $frpcToml)) {
+    $frpEnabled = $true
+    $frpcText = Get-Content $frpcToml -Raw
+    if ($frpcText -match 'remotePort\s*=\s*(\d+)') { $frpRemotePort = [int]$matches[1] }
+    Write-Log "检测到已存在的 frpc.toml（remotePort=$frpRemotePort），frp 将随安装启用"
+}
+
+if ($frpEnabled) {
+    if ($frpRemotePort -gt 0) {
+        Write-Log "外网接入：已启用（入口 http://panjia.icu:$frpRemotePort）"
+    } else {
+        Write-Log "外网接入：已启用（frpc.toml 未解析出 remotePort，以实际 frpc 注册为准）"
+    }
+} else {
+    Write-Log "外网接入：未启用（仅本机/局域网访问；如需开启见 README 的 frp 说明）"
 }
 
 # ==================== 步骤 5：加载 Docker 镜像（优先离线） ====================
@@ -730,6 +801,7 @@ if (-not (Test-StepDone 5)) {
     Import-DockerImage -ImageName "postgres:16.9" -LocalTarFile "$imagesDir\postgres.tar" -RemoteImage "postgres:16.9"
     Import-DockerImage -ImageName "redis:7-alpine" -LocalTarFile "$imagesDir\redis.tar" -RemoteImage "redis:7-alpine"
     Import-DockerImage -ImageName "nginx:stable-alpine" -LocalTarFile "$imagesDir\nginx.tar" -RemoteImage "nginx:stable-alpine"
+    Import-DockerImage -ImageName "pgsty/minio:RELEASE.2026-04-17T00-00-00Z" -LocalTarFile "$imagesDir\minio.tar" -RemoteImage "pgsty/minio:RELEASE.2026-04-17T00-00-00Z"
 
     Write-Log ""
     Write-Log "加载业务镜像..."
@@ -900,7 +972,12 @@ if (-not (Test-StepDone 6)) {
     Write-Log "启动容器（docker compose up -d）..."
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    docker compose up -d 2>&1 | ForEach-Object { Write-Log "  $_" }
+    # frp 已启用时带 --profile frp，让 frpc 容器一并拉起；未启用则完全跳过该服务
+    if ($frpEnabled) {
+        docker compose --profile frp up -d 2>&1 | ForEach-Object { Write-Log "  $_" }
+    } else {
+        docker compose up -d 2>&1 | ForEach-Object { Write-Log "  $_" }
+    }
     $upExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEap
     if ($upExit -ne 0) {
@@ -1020,6 +1097,47 @@ if (-not (Test-StepDone 6)) {
     $ErrorActionPreference = "Continue"
     docker compose ps 2>&1 | ForEach-Object { Write-Log "  $_" }
     $ErrorActionPreference = $prevEap
+
+    # ==================== OSS 自动配置（图片上传/回显） ====================
+    try {
+        $envLines = Get-Content "$configDir\.env" -ErrorAction Stop
+        $getEnv = { param($k) ($envLines | Where-Object { $_ -match "^\s*$k\s*=" } | Select-Object -First 1) -replace "^\s*$k\s*=\s*", "" }
+        $mu = & $getEnv "MINIO_ROOT_USER"; if (-not $mu) { $mu = "panjia" }
+        $mp = & $getEnv "MINIO_ROOT_PASSWORD"
+        $pgU = & $getEnv "POSTGRES_USER"; if (-not $pgU) { $pgU = "panjia" }
+        $pgD = & $getEnv "POSTGRES_DB"; if (-not $pgD) { $pgD = "panjia" }
+
+        # domain_url：frp 开启 → 外网入口；未开启 → 本机局域网 IP:WEB_PORT
+        $ossDomain = ""
+        if ($frpEnabled -and $frpRemotePort -gt 0) {
+            $ossDomain = "panjia.icu:$frpRemotePort/oss"
+        } else {
+            $lanIp = ""
+            try {
+                $lanIp = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+                    Select-Object -First 1).IPAddress
+            } catch {}
+            $webPortE = & $getEnv "WEB_PORT"; if (-not $webPortE) { $webPortE = "80" }
+            if ($lanIp) { $ossDomain = "${lanIp}:$webPortE/oss" }
+        }
+
+        if ($ossDomain) {
+            Write-Log ""
+            Write-Log "配置图片通道（domain_url=$ossDomain）..."
+            docker exec panjia-minio sh -c "mc alias set pj http://127.0.0.1:9000 '$mu' '$mp' >/dev/null 2>&1 && mc mb --ignore-existing pj/panjia-file" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "  [注意] 桶 panjia-file 自动创建失败；若上传报 NoSuchBucket 请联系技术人员" "WARN"
+            }
+            docker exec panjia-postgres psql -U $pgU -d $pgD -c "update sys_oss_config set endpoint='minio:9000', access_key='$mu', secret_key='$mp', domain_url='$ossDomain', bucket_name='panjia-file', update_time=now() where config_key='minio'" 2>&1 | ForEach-Object { Write-Log "  $_" }
+            docker exec panjia-postgres psql -U $pgU -d $pgD -c "update sys_oss set url='http://$ossDomain/panjia-file/'||file_name where service='minio'" 2>&1 | ForEach-Object { Write-Log "  $_" }
+            docker exec panjia-redis sh -c 'redis-cli -a "$REDIS_PASSWORD" DEL sys_oss' 2>&1 | Out-Null
+            Write-Log "图片通道配置完成"
+        }
+    } catch {
+        Write-Log "OSS 自动配置跳过：$_" "WARN"
+    }
+
     Set-Progress 6
 }
 

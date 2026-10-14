@@ -68,6 +68,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 UI_DIR="$(dirname "$PROJECT_DIR")/panjia-ui"
 IMAGE_TAG="latest"
+FRP_VERSION="0.71.0"
 NSIS_IMAGE="zachdeibert/nsis:latest"
 
 # 基础镜像列表（离线安装需要）
@@ -75,6 +76,8 @@ BASE_IMAGES=(
     "postgres:16.9"
     "redis:7-alpine"
     "nginx:stable-alpine"
+    "pgsty/minio:RELEASE.2026-04-17T00-00-00Z"
+    "snowdreamtech/frpc:${FRP_VERSION}"
 )
 
 SKIP_BUILD=0
@@ -359,8 +362,9 @@ elif [ "$ONLINE_MODE" = "0" ]; then
     echo "[$STEP_NUM/8] 导出基础镜像（离线安装）..."
 
     for img in "${BASE_IMAGES[@]}"; do
-        # 提取文件名：postgres:16.9 -> postgres.tar
-        name=$(echo "$img" | cut -d: -f1)
+        # 提取文件名：postgres:16.9 -> postgres.tar，pgsty/minio:xxx -> minio.tar，
+        # snowdreamtech/frpc:xxx -> frpc.tar（与 install.ps1 的加载清单一一对应）
+        name=$(basename "${img%%:*}")
         tar_file="$INSTALLER_DIR/images/${name}.tar"
 
         # 确保镜像已拉取
@@ -385,11 +389,39 @@ else
     echo "  客户端安装时从 Docker Hub 拉取基础镜像"
     # 清理旧的基础镜像 tar（如果有），避免误打包
     for img in "${BASE_IMAGES[@]}"; do
-        name=$(echo "$img" | cut -d: -f1)
+        name=$(basename "${img%%:*}")
         rm -f "$INSTALLER_DIR/images/${name}.tar"
     done
     echo ""
 fi
+
+# ==================== 4.6 生成 frpc 模板（可选，决定安装器是否提供外网接入选项） ====================
+echo ""
+echo "准备 frpc 接入模板（frp 外网接入）..."
+FRPC_TEMPLATE="${FRPC_TEMPLATE:-$(dirname "$INSTALLER_DIR")/../panjia-console/bin/frp/frpc.toml}"
+if [ -f "$FRPC_TEMPLATE" ]; then
+    # 保留 frpc.toml 的全局段（serverAddr/token 等），隧道段替换为单隧道
+    # panjia-app：remotePort 由每台客户机器的分配决定，构建时用 __REMOTE_PORT__ 占位，
+    # 安装时由 NSIS「是否开启外网接入」弹窗 + install.ps1 渲染为 config/frpc.toml
+    {
+        awk '/^\[\[proxies\]\]/{exit} {print}' "$FRPC_TEMPLATE"
+        cat <<'EOF'
+[[proxies]]
+name = "panjia-app"
+type = "tcp"
+localIP = "web"
+localPort = 80
+remotePort = __REMOTE_PORT__
+transport.useEncryption = true
+EOF
+    } > "$INSTALLER_DIR/config/frpc-template.toml"
+    echo "  ✓ frpc-template.toml 已生成（来源：$FRPC_TEMPLATE，安装器将提供外网接入选项）"
+else
+    rm -f "$INSTALLER_DIR/config/frpc-template.toml"
+    echo "  [跳过] 未找到 $FRPC_TEMPLATE（可用 FRPC_TEMPLATE=路径 指定）"
+    echo "         本次安装器不提供 frp 外网接入选项"
+fi
+echo ""
 
 # ==================== 5. 用 Docker 编译 NSIS ====================
 STEP_NUM=$((STEP_NUM + 1))

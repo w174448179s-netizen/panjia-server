@@ -136,11 +136,35 @@ sh build-upgrade.sh
 6. **等待安装**（5-15 分钟）：
    - 检查/安装 Docker Desktop
    - 加载 Docker 镜像（离线模式从本地加载，无需联网）
+   - **选择是否开启外网接入（frp）**——见下方「外网接入（frp）」
    - 启动所有服务并验证启动成功
    - 授权码在后端启动时自动激活（激活失败安装器会立即报错并提示处理方式）
 7. **完成** → 勾选"立即启动盘家智管"→ 完成
 
 安装完成后浏览器自动打开 http://localhost
+
+### 外网接入（frp，安装时可选）
+
+安装器会弹出「是否开启外网接入（frp 内网穿透）」选择：
+
+- **是**：安装自动完成 frpc 配置与启动，之后在任何地点通过 `http://panjia.icu:3000+N` 访问该客户的系统（页面/API/图片同源）。端口由管理员按客户分配后固化在安装包里（`frpc-template.toml`），客户无需填写。
+- **否**：仅本机/局域网访问（图片回显自动走 `局域网IP:80/oss`）。
+
+安装器是否提供该选项，取决于构建时是否注入了 frp 凭证模板（构建脚本会自动从 `panjia-console/bin/frp/frpc.toml` 生成 `config/frpc-template.toml`；给哪位客户构建就配好对应分配的端口段）。
+
+**安装后随时开启/关闭**（无需重装）：
+
+```powershell
+# 开启：让技术人员提供 frpc.toml（含分配的 remotePort），放到 安装目录\config\ 后：
+cd "C:\Program Files\Panjia\config"
+docker compose --profile frp up -d frpc
+# 再在「文件配置管理」把 minio 的 domain_url 设为 panjia.icu:3000+N/oss
+
+# 关闭：
+docker compose --profile frp stop frpc
+```
+
+开/关都不影响本机使用；frpc 容器随 start-app 自动拉起（检测到 `config\frpc.toml` 就启动）。
 
 ### 安装后使用
 
