@@ -1387,17 +1387,37 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         List<ReceivedApply> records = page.getRecords();
         fillContractMetrics(records);
 
-        // 全量实收合计：与列表完全同条件（不含排序）一次聚合，随 summary 返回；
-        // 前端汇总条展示「本查询条件下的总实收」，不能只算当前页
+        // 汇总与列表行口径：与列表完全同条件（不含排序）一次聚合，随 summary 返回；
+        // 未按员工筛选时为单据级（合同/订单）合计，按员工筛选时改为该员工自己的明细合计与应收份额
+        // （单据级金额含同合同其他角色人金额，员工筛选时必须只统计该员工自己的部分）
         QueryWrapper<ReceivedApply> sumWrapper = buildListCondition(query, effectiveDeptId);
         BigDecimal totalReceivedAmount = BigDecimal.ZERO;
+        BigDecimal totalExpectedAmount = BigDecimal.ZERO;
+        BigDecimal totalExpectedConvertedAmount = BigDecimal.ZERO;
+        List<Map<String, Object>> empAmountRows = null;
         if (query.getEmployeeId() != null) {
-            // 按员工筛选：汇总该员工在满足条件单据下的 ACTIVE 明细合计（员工口径），
-            // 不能用单据级 received_amount 合计（含同合同其他角色人金额）
             sumWrapper.select("id");
             List<Object> applyIds = applyMapper.selectObjs(sumWrapper);
             if (applyIds != null && !applyIds.isEmpty()) {
+                // 汇总该员工在满足条件单据下的 ACTIVE 明细合计（员工口径），不能用单据级 received_amount 合计
                 totalReceivedAmount = detailMapper.sumAmountByApplyIdsAndEmployee(applyIds, query.getEmployeeId());
+                // 每单该员工实收/应收合计：列表行展示用；应收按业务类型分组折算后累加得汇总
+                empAmountRows = detailMapper.selectEmployeeAmountsByApplyIds(applyIds, query.getEmployeeId());
+                Map<String, BigDecimal> expectedByBiz = new HashMap<>();
+                for (Map<String, Object> r : empAmountRows) {
+                    Object biz = r.get("bizType");
+                    Object amt = r.get("expectedAmount");
+                    BigDecimal a = amt == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(amt));
+                    expectedByBiz.merge(biz == null ? "" : String.valueOf(biz), a, BigDecimal::add);
+                }
+                Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(expectedByBiz.keySet());
+                for (Map.Entry<String, BigDecimal> e : expectedByBiz.entrySet()) {
+                    BigDecimal amt = e.getValue();
+                    String biz = e.getKey().isEmpty() ? null : e.getKey();
+                    totalExpectedAmount = totalExpectedAmount.add(amt);
+                    totalExpectedConvertedAmount = totalExpectedConvertedAmount.add(
+                        conversionFactorPort.convert(amt, conversionFactorPort.factorOf(factorMap, biz)));
+                }
             }
         } else {
             sumWrapper.select("COALESCE(SUM(received_amount), 0) AS total_received_amount");
@@ -1411,36 +1431,62 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     totalReceivedAmount = new BigDecimal(String.valueOf(v));
                 }
             }
+            // 折算后合计：新签业绩（应收）按业务类型分组金额 × 类型系数累加，汇总条与实收合计并排展示
+            // （实收不做折算；应收口径与列表行 / 详情「应收合计·折算后」一致）
+            QueryWrapper<ReceivedApply> bizWrapper = buildListCondition(query, effectiveDeptId);
+            bizWrapper.select("biz_type", "COALESCE(SUM(expected_amount), 0) AS total_expected_amount");
+            bizWrapper.groupBy("biz_type");
+            List<Map<String, Object>> bizRows = applyMapper.selectMaps(bizWrapper);
+            if (bizRows != null && !bizRows.isEmpty()) {
+                Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizRows.stream()
+                    .map(m -> m.get("bizType") != null ? m.get("bizType") : m.get("biz_type"))
+                    .filter(java.util.Objects::nonNull)
+                    .map(String::valueOf)
+                    .collect(java.util.stream.Collectors.toSet()));
+                for (Map<String, Object> m : bizRows) {
+                    Object amtObj = m.get("totalExpectedAmount") != null ? m.get("totalExpectedAmount") : m.get("total_expected_amount");
+                    BigDecimal amt = amtObj == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(amtObj));
+                    Object bizObj = m.get("bizType") != null ? m.get("bizType") : m.get("biz_type");
+                    String biz = bizObj == null ? null : String.valueOf(bizObj);
+                    totalExpectedAmount = totalExpectedAmount.add(amt);
+                    totalExpectedConvertedAmount = totalExpectedConvertedAmount.add(
+                        conversionFactorPort.convert(amt, conversionFactorPort.factorOf(factorMap, biz)));
+                }
+            }
+        }
+
+        // 按员工筛选：列表行金额改为该员工口径（实收明细合计 + 应收份额），
+        // 并清除合同级「原值 → 调整后」箭头（调整作用于单据级，员工口径下无意义）
+        if (empAmountRows != null) {
+            Map<String, Map<String, Object>> empByApply = new HashMap<>();
+            for (Map<String, Object> r : empAmountRows) {
+                empByApply.put(String.valueOf(r.get("applyId")), r);
+            }
+            Map<String, BigDecimal> rowFactorMap = conversionFactorPort.factorsOf(records.stream()
+                .map(ReceivedApply::getBizType).filter(StringUtils::isNotBlank)
+                .collect(java.util.stream.Collectors.toSet()));
+            for (ReceivedApply a : records) {
+                Map<String, Object> r = empByApply.get(String.valueOf(a.getId()));
+                BigDecimal empReceived = r == null || r.get("receivedAmount") == null
+                    ? BigDecimal.ZERO : new BigDecimal(String.valueOf(r.get("receivedAmount")));
+                BigDecimal empExpected = r == null || r.get("expectedAmount") == null
+                    ? BigDecimal.ZERO : new BigDecimal(String.valueOf(r.get("expectedAmount")));
+                a.setReceivedAmount(empReceived);
+                a.setExpectedAmount(empExpected);
+                a.setExpectedConvertedAmount(conversionFactorPort.convert(empExpected,
+                    conversionFactorPort.factorOf(rowFactorMap, a.getBizType())));
+                a.setReceivedAdjusted(false);
+                a.setOriginalReceivedAmount(null);
+                a.setOriginalReceivedConvertedAmount(null);
+                a.setExpectedAdjusted(false);
+                a.setOriginalExpectedAmount(null);
+                a.setOriginalExpectedConvertedAmount(null);
+            }
         }
 
         PageResult<ReceivedApply> result = PageResult.build(records, page.getTotal());
         Map<String, Object> summary = new HashMap<>();
         summary.put("totalReceivedAmount", totalReceivedAmount);
-
-        // 折算后合计：新签业绩（应收）按业务类型分组金额 × 类型系数累加，汇总条与实收合计并排展示
-        // （实收不做折算；应收口径与列表行 / 详情「应收合计·折算后」一致）
-        BigDecimal totalExpectedAmount = BigDecimal.ZERO;
-        BigDecimal totalExpectedConvertedAmount = BigDecimal.ZERO;
-        QueryWrapper<ReceivedApply> bizWrapper = buildListCondition(query, effectiveDeptId);
-        bizWrapper.select("biz_type", "COALESCE(SUM(expected_amount), 0) AS total_expected_amount");
-        bizWrapper.groupBy("biz_type");
-        List<Map<String, Object>> bizRows = applyMapper.selectMaps(bizWrapper);
-        if (bizRows != null && !bizRows.isEmpty()) {
-            Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizRows.stream()
-                .map(m -> m.get("bizType") != null ? m.get("bizType") : m.get("biz_type"))
-                .filter(java.util.Objects::nonNull)
-                .map(String::valueOf)
-                .collect(java.util.stream.Collectors.toSet()));
-            for (Map<String, Object> m : bizRows) {
-                Object amtObj = m.get("totalExpectedAmount") != null ? m.get("totalExpectedAmount") : m.get("total_expected_amount");
-                BigDecimal amt = amtObj == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(amtObj));
-                Object bizObj = m.get("bizType") != null ? m.get("bizType") : m.get("biz_type");
-                String biz = bizObj == null ? null : String.valueOf(bizObj);
-                totalExpectedAmount = totalExpectedAmount.add(amt);
-                totalExpectedConvertedAmount = totalExpectedConvertedAmount.add(
-                    conversionFactorPort.convert(amt, conversionFactorPort.factorOf(factorMap, biz)));
-            }
-        }
         summary.put("totalExpectedAmount", totalExpectedAmount);
         summary.put("totalExpectedConvertedAmount", totalExpectedConvertedAmount);
 

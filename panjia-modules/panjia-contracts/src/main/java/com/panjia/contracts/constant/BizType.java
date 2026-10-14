@@ -26,6 +26,8 @@ public final class BizType {
     public static final String SCORE_APPROVAL = "SCORE_APPROVAL";
     /** 提成点调整（员工业绩扣点，总监审批） */
     public static final String RATE_ADJUST = "RATE_ADJUST";
+    /** 考勤修改申请（经纪人发起，人事审批） */
+    public static final String ATTENDANCE_RECTIFY = "ATTENDANCE_RECTIFY";
 
     private BizType() {
     }

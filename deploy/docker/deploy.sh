@@ -81,7 +81,8 @@ fi
 # ==================== 2. 服务器：修加速源 + load 镜像 ====================
 info ">>> 步骤 2/3：服务器配置（加速源 + 导入镜像）"
 # PANJIA_AUTH_CODE 通过 env 显式传给远程 sudo bash（heredoc 是 quoted 的，不会自动透传）
-ssh -o ServerAliveInterval=30 "$SSH_TARGET" "sudo env PANJIA_AUTH_CODE='${PANJIA_AUTH_CODE:-}' bash" << 'REMOTE'
+# SERVER_IP 同法透传：sys_oss_config.domain_url 需要它拼图片直链
+ssh -o ServerAliveInterval=30 "$SSH_TARGET" "sudo env PANJIA_AUTH_CODE='${PANJIA_AUTH_CODE:-}' SERVER_IP='${SERVER_IP}' bash" << 'REMOTE'
 set -e
 cd /home/ubuntu/panjia
 
@@ -208,7 +209,23 @@ if docker compose config --services | grep -q '^minio$'; then
             echo "[服务器] 桶 '"$IMPORT_BUCKET"' 已存在"
         else
             mc mb "local/'"$IMPORT_BUCKET"'" && echo "[服务器] 已创建桶 '"$IMPORT_BUCKET"'"
-        fi'
+        fi
+        # 业务桶 panjia-file（sys_oss_config 默认 bucket，考勤截图等图片上传/展示）：
+        # 建桶 + 公开下载（access_policy=1 public，浏览器直链预览依赖匿名可读；归档桶不开放）
+        if mc ls local/panjia-file >/dev/null 2>&1; then
+            echo "[服务器] 桶 panjia-file 已存在"
+        else
+            mc mb local/panjia-file && echo "[服务器] 已创建桶 panjia-file"
+        fi
+        mc anonymous set download local/panjia-file >/dev/null && echo "[服务器] panjia-file 桶已开放公开下载"'
+    # sys_oss_config 修正参数（UPDATE 统一在 server 健康后执行，见下文）：
+    #   endpoint=minio:9000 —— server 容器走 compose 内网服务名（baseline 的 host.docker.internal 在 Linux 容器不可解析）
+    #   domain_url=http://IP/oss —— 浏览器图片直链，经 nginx /oss/ 反代到 minio:9000（minio 只绑 127.0.0.1）
+    #   凭证 = .env 的 MINIO_ROOT_USER/PASSWORD（baseline 的 ruoyi/ruoyi123 与服务器随机密码不符）
+    OSS_CFG_ENDPOINT='minio:9000'
+    OSS_CFG_DOMAIN="http://${SERVER_IP}/oss"
+    OSS_CFG_AK="${MINIO_ROOT_USER}"
+    OSS_CFG_SK="${MINIO_ROOT_PASSWORD}"
 else
     EXT_EP="${PANJIA_IMPORT_MINIO_ENDPOINT:?外置 MinIO 模式必须在 .env 配置 PANJIA_IMPORT_MINIO_ENDPOINT}"
     echo "[服务器] 外置 MinIO 模式：${EXT_EP}（内置 minio 容器不启动）"
@@ -222,7 +239,21 @@ else
             echo "[服务器] 桶 '"$IMPORT_BUCKET"' 已存在"
         else
             mc mb "ext/'"$IMPORT_BUCKET"'" && echo "[服务器] 已创建桶 '"$IMPORT_BUCKET"'"
-        fi'
+        fi
+        # 业务桶 panjia-file（图片上传/展示）：建桶 + 公开下载
+        if mc ls ext/panjia-file >/dev/null 2>&1; then
+            echo "[服务器] 桶 panjia-file 已存在"
+        else
+            mc mb ext/panjia-file && echo "[服务器] 已创建桶 panjia-file"
+        fi
+        mc anonymous set download ext/panjia-file >/dev/null && echo "[服务器] panjia-file 桶已开放公开下载"'
+    # sys_oss_config 修正参数：endpoint/domain_url 均为外置地址（server 容器与浏览器都直连外置机；
+    # 浏览器需能访问该地址 9000 端口），凭证 = .env 的外置账号
+    EXT_HOST="${EXT_EP#http://}"; EXT_HOST="${EXT_HOST#https://}"
+    OSS_CFG_ENDPOINT="${EXT_HOST}"
+    OSS_CFG_DOMAIN="${EXT_EP}"
+    OSS_CFG_AK="${PANJIA_IMPORT_MINIO_ACCESS_KEY}"
+    OSS_CFG_SK="${PANJIA_IMPORT_MINIO_SECRET_KEY}"
 fi
 
 echo "[服务器] 等待后端 server 健康（宽限 ~150 秒，不阻断部署）..."
@@ -232,6 +263,23 @@ for i in $(seq 1 30); do
     [ "$SRV_HEALTH" = "healthy" ] && break
     sleep 5
 done
+
+# sys_oss_config 修正 + 重启生效（必须在 server 健康后执行：
+# 全新部署时 Flyway 迁移约 1-2 分钟建完表，提前 UPDATE 会因表不存在被 set -e 中断部署；
+# server 未健康时不拖死部署，降级为告警，恢复后重跑一次 --skip-upload 自动补齐）
+if [ "$SRV_HEALTH" = "healthy" ]; then
+    echo "[服务器] 修正 sys_oss_config（endpoint/domain_url/凭证 对齐 MinIO）..."
+    docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" panjia-postgres psql -U "$POSTGRES_USER" -d "${POSTGRES_DB:-panjia}" -c \
+        "UPDATE sys_oss_config SET endpoint='${OSS_CFG_ENDPOINT}', domain_url='${OSS_CFG_DOMAIN}', bucket_name='panjia-file', access_key='${OSS_CFG_AK}', secret_key='${OSS_CFG_SK}', update_time=now() WHERE config_key IN ('minio','image');"
+    # 重启使变更生效（幂等，新部署容器本就重建，仅多几秒）：
+    #   · web    —— nginx.conf 新增 /oss/ 反代（bind-mount :ro，需 restart 重读）
+    #   · server —— sys_oss_config 为直改库，OSS 客户端缓存需重启刷新
+    echo "[服务器] 重启 web / server（OSS 反代与配置生效）..."
+    docker compose restart web server
+else
+    echo "[WARN] server 未健康：sys_oss_config 修正与 /oss/ 反代重启未执行"
+    echo "         待 server 恢复后重跑 bash deploy.sh <IP> --skip-upload 自动补齐（幂等）"
+fi
 
 echo "[服务器] 当前容器状态："
 docker compose ps
