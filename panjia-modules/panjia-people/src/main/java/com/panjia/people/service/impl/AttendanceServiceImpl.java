@@ -9,6 +9,7 @@ import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.port.PeopleAttendanceMetricsQueryPort;
 import com.panjia.people.domain.AttendanceDetail;
 import com.panjia.people.domain.AttendanceRecord;
+import com.panjia.people.domain.AttendanceRectify;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.dto.AttendanceDetailVO;
 import com.panjia.people.dto.AttendanceQuery;
@@ -16,6 +17,7 @@ import com.panjia.people.dto.AttendanceSaveDTO;
 import com.panjia.people.dto.AttendanceVO;
 import com.panjia.people.mapper.AttendanceDetailMapper;
 import com.panjia.people.mapper.AttendanceRecordMapper;
+import com.panjia.people.mapper.AttendanceRectifyMapper;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.AttendanceApprovalService;
@@ -65,6 +67,7 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
 
     private final AttendanceRecordMapper attendanceMapper;
     private final AttendanceDetailMapper attendanceDetailMapper;
+    private final AttendanceRectifyMapper rectifyMapper;
     private final EmployeeMapper employeeMapper;
     private final DeptPort deptPort;
     private final AttendanceApprovalService approvalService;
@@ -158,6 +161,9 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         // 月份允许变更，但原月与目标月任一锁定都拒绝（提交后数据不可动）
         assertNotLocked(monthPeriod(record.getAttendMonth()));
         assertNotLocked(monthPeriod(dto.getAttendMonth()));
+        // 在途修改申请期间同一条记录冻结：原月与目标月都不允许人事直接改
+        assertNoInflightRectify(record.getEmployeeId(), record.getAttendMonth());
+        assertNoInflightRectify(record.getEmployeeId(), dto.getAttendMonth());
         // 员工归属不允许通过编辑修改；月份变更仍需避开同人同月冲突
         if (!Objects.equals(record.getEmployeeId(), dto.getEmployeeId())) {
             throw new ServiceException("不允许修改考勤记录的员工归属");
@@ -186,7 +192,8 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         if (ids == null || ids.isEmpty()) {
             return;
         }
-        Set<String> months = attendanceMapper.selectByIds(ids).stream()
+        List<AttendanceRecord> records = attendanceMapper.selectByIds(ids);
+        Set<String> months = records.stream()
             .map(AttendanceRecord::getAttendMonth)
             .filter(Objects::nonNull)
             .map(this::monthPeriod)
@@ -195,6 +202,16 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         if (!locked.isEmpty()) {
             throw new ServiceException("期间 {} 考勤已提交审批（或已通过），不能删除明细；如需调整请先撤销/驳回审批",
                 String.join("、", locked.stream().sorted().toList()));
+        }
+        // 在途修改申请期间记录冻结：删除与会改变申请依据，一并拒绝
+        Set<String> inflight = inflightRectifyKeys(
+            records.stream().map(AttendanceRecord::getEmployeeId).filter(Objects::nonNull).collect(Collectors.toSet()),
+            records.stream().map(AttendanceRecord::getAttendMonth).filter(Objects::nonNull).collect(Collectors.toSet()));
+        for (AttendanceRecord record : records) {
+            if (inflight.contains(rectifyKey(record.getEmployeeId(), record.getAttendMonth()))) {
+                throw new ServiceException("该员工 {} 已有在途的考勤修改申请，审批完成前不能删除考勤记录",
+                    monthPeriod(record.getAttendMonth()));
+            }
         }
         attendanceMapper.deleteByIds(ids);
     }
@@ -543,6 +560,39 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         if (StringUtils.isNotBlank(period) && approvalService.isPeriodLocked(period)) {
             throw new ServiceException("期间 {} 考勤已提交审批（或已通过），不能修改明细；如需调整请先撤销/驳回审批", period);
         }
+    }
+
+    /**
+     * 在途修改申请校验：该员工该月存在待审批（SUBMITTED）的考勤修改申请时，
+     * 禁止人事直接改/删同一条考勤记录——否则经纪人的申请依据会被改动，形成双写覆盖。
+     */
+    private void assertNoInflightRectify(Long employeeId, LocalDate month) {
+        if (employeeId == null || month == null) {
+            return;
+        }
+        if (!inflightRectifyKeys(List.of(employeeId), List.of(month)).isEmpty()) {
+            throw new ServiceException("该员工 {} 已有在途的考勤修改申请，审批完成前不能直接增删改考勤记录",
+                monthPeriod(month));
+        }
+    }
+
+    /** 在途修改申请命中集合（key=employeeId|attendMonth）；一次批量查询，避免逐条查库 */
+    private Set<String> inflightRectifyKeys(Collection<Long> employeeIds, Collection<LocalDate> months) {
+        if (employeeIds.isEmpty() || months.isEmpty()) {
+            return Set.of();
+        }
+        return rectifyMapper.selectList(new LambdaQueryWrapper<AttendanceRectify>()
+                .in(AttendanceRectify::getEmployeeId, employeeIds)
+                .in(AttendanceRectify::getAttendMonth, months)
+                .eq(AttendanceRectify::getStatus, AttendanceRectify.STATUS_SUBMITTED))
+            .stream()
+            .map(r -> rectifyKey(r.getEmployeeId(), r.getAttendMonth()))
+            .collect(Collectors.toSet());
+    }
+
+    /** 在途申请集合键（写入与判定口径一致） */
+    private String rectifyKey(Long employeeId, LocalDate month) {
+        return employeeId + "|" + month;
     }
 
     // ==================== 跨域查询（PeopleAttendanceMetricsQueryPort） ====================
