@@ -1477,7 +1477,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     conversionFactorPort.factorOf(rowFactorMap, a.getBizType())));
                 a.setReceivedAdjusted(false);
                 a.setOriginalReceivedAmount(null);
-                a.setOriginalReceivedConvertedAmount(null);
                 a.setExpectedAdjusted(false);
                 a.setOriginalExpectedAmount(null);
                 a.setOriginalExpectedConvertedAmount(null);

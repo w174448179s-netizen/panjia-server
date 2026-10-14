@@ -420,7 +420,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (!seeReal) {
             for (PerformanceFactSearchVo row : rows) {
                 row.setRealAmount(null);
-                row.setRealConvertedAmount(null);
             }
         }
         PageResult<PerformanceFactSearchVo> result = new PageResult<>(rows, total);
@@ -449,7 +448,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         BigDecimal totalExpect = BigDecimal.ZERO;
         BigDecimal totalExpectConverted = BigDecimal.ZERO;
         BigDecimal totalReal = BigDecimal.ZERO;
-        BigDecimal totalRealConverted = BigDecimal.ZERO;
         BigDecimal totalCommission = BigDecimal.ZERO;
         BigDecimal totalCommissionConverted = BigDecimal.ZERO;
         for (Map<String, Object> g : groups) {
@@ -460,7 +458,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             totalExpect = totalExpect.add(expect);
             totalExpectConverted = totalExpectConverted.add(conversionFactorPort.convert(expect, factor));
             totalReal = totalReal.add(real);
-            totalRealConverted = totalRealConverted.add(conversionFactorPort.convert(real, factor));
             totalCommission = totalCommission.add(commission);
             totalCommissionConverted = totalCommissionConverted.add(conversionFactorPort.convert(commission, factor));
         }
@@ -472,7 +469,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         summary.put("totalCommissionConvertedAmount", totalCommissionConverted);
         if (seeReal) {
             summary.put("totalRealAmount", totalReal);
-            summary.put("totalRealConvertedAmount", totalRealConverted);
         }
         return summary;
     }
@@ -582,7 +578,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (!canSeeRealAmount()) {
             for (PerformanceSearchDetailVo row : rows) {
                 row.setRealAmount(null);
-                row.setRealConvertedAmount(null);
             }
         }
         return rows;
@@ -1496,7 +1491,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectAmount(), factor));
             row.setOriginalExpectConvertedAmount(
                 conversionFactorPort.convert(row.getExpectOriginalAmount(), factor));
-            row.setRealConvertedAmount(conversionFactorPort.convert(row.getRealAmount(), factor));
             row.setCommissionConvertedAmount(conversionFactorPort.convert(row.getCommissionAmount(), factor));
         }
     }
@@ -1519,7 +1513,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, row.getFactId());
             row.setOriginalExpectConvertedAmount(conversionFactorPort.convert(row.getOriginalExpectAmount(), factor));
             row.setExpectConvertedAmount(conversionFactorPort.convert(row.getExpectAmount(), factor));
-            row.setRealConvertedAmount(conversionFactorPort.convert(row.getRealAmount(), factor));
         }
     }
 }

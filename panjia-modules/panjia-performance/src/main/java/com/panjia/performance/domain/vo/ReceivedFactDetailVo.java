@@ -74,10 +74,4 @@ public class ReceivedFactDetailVo implements Serializable {
 
     /** 应收业绩折算后原始金额（originalExpectedAmount × conversionFactor） */
     private BigDecimal originalConvertedAmount;
-
-    /** 实收业绩折算后金额（amount × conversionFactor） */
-    private BigDecimal convertedAmount;
-
-    /** 实收业绩折算后原始金额（originalAmount × conversionFactor） */
-    private BigDecimal originalReceivedConvertedAmount;
 }

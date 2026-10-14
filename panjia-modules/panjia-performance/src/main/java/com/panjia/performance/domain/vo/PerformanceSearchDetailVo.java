@@ -63,9 +63,6 @@ public class PerformanceSearchDetailVo {
     /** 调整后业绩折算后金额（expectAmount × conversionFactor） */
     private BigDecimal expectConvertedAmount;
 
-    /** 实收业绩折算后金额（realAmount × conversionFactor） */
-    private BigDecimal realConvertedAmount;
-
     /** 是否已结算（存在有效结佣明细） */
     private Boolean settled;
 

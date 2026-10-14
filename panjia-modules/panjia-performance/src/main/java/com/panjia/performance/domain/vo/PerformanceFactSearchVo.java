@@ -53,9 +53,6 @@ public class PerformanceFactSearchVo {
     /** 调整前新签业绩折算后金额（expectOriginalAmount × 本行 bizType 的折算因子） */
     private BigDecimal originalExpectConvertedAmount;
 
-    /** 实收业绩折算后金额（realAmount × 本行 bizType 的折算因子） */
-    private BigDecimal realConvertedAmount;
-
     /** 结佣业绩折算后金额（commissionAmount × 本行 bizType 的折算因子） */
     private BigDecimal commissionConvertedAmount;
 

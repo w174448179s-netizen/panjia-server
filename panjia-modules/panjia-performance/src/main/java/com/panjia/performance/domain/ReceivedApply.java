@@ -103,10 +103,6 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private BigDecimal originalExpectedConvertedAmount;
 
-    /** 实收业绩折算后（非入库字段；列表查询时按 bizType 折算） */
-    @TableField(exist = false)
-    private BigDecimal receivedConvertedAmount;
-
     /**
      * 实收已被调整（非入库字段；展示标记）。
      * <p>当前 ACTIVE PERF_REAL 合计 ≠ 事实链最早值（结佣调整 AMOUNT 生效）时置 true，
@@ -122,10 +118,6 @@ public class ReceivedApply implements Serializable {
      */
     @TableField(exist = false)
     private BigDecimal originalReceivedAmount;
-
-    /** 调整前实收的折算后金额（非入库字段；originalReceivedAmount × 同一折算因子） */
-    @TableField(exist = false)
-    private BigDecimal originalReceivedConvertedAmount;
 
     /** 是否存在审批中的实收调整单（非入库字段；SUBMITTED/APPROVED 状态） */
     @TableField(exist = false)

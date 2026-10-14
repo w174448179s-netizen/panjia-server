@@ -97,12 +97,4 @@ public class ReceivedAdjust implements Serializable {
     /** 部门名称（展示用，sys_dept 批量回填） */
     @TableField(exist = false)
     private String deptName;
-
-    /** 调整前实收·折算后金额（展示用，按 bizType 因子回填） */
-    @TableField(exist = false)
-    private BigDecimal convertedOriginalAmount;
-
-    /** 调整后实收·折算后金额（展示用，按 bizType 因子回填） */
-    @TableField(exist = false)
-    private BigDecimal convertedTargetAmount;
 }

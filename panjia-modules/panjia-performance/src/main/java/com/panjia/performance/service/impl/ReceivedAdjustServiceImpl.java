@@ -9,7 +9,6 @@ import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionGatePort;
-import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.ReceivedAdjust;
@@ -84,7 +83,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
     private final com.panjia.contracts.port.CommissionPerformanceQueryPort performanceQueryPort;
     private final ApprovalPort approvalPort;
     private final IPeriodCloseService periodCloseService;
-    private final ConversionFactorPort conversionFactorPort;
     private final DeptService deptService;
     /** 结佣闸门（实现 bean 在 panjia-commission，缺失时跳过校验） */
     private final ObjectProvider<CommissionGatePort> commissionGatePortProvider;
@@ -103,7 +101,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
         Page<ReceivedAdjust> page = receivedAdjustMapper.selectPage(pageQuery.build(), wrapper);
         List<ReceivedAdjust> records = page.getRecords();
         fillDeptNames(records);
-        fillConvertedAmounts(records);
         return PageResult.build(records, page.getTotal());
     }
 
@@ -154,21 +151,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             if (r.getDeptId() != null) {
                 r.setDeptName(deptNameMap.get(r.getDeptId()));
             }
-        }
-    }
-
-    /** 批量回填折算后金额：PERF_REAL 折算因子按业务类型（同合同统一），与详情/实收明细同口径 */
-    private void fillConvertedAmounts(List<ReceivedAdjust> records) {
-        if (records == null || records.isEmpty()) {
-            return;
-        }
-        Set<String> bizTypes = records.stream()
-            .map(ReceivedAdjust::getBizType).filter(StringUtils::isNotBlank).collect(Collectors.toSet());
-        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
-        for (ReceivedAdjust r : records) {
-            BigDecimal factor = conversionFactorPort.factorOf(factorMap, r.getBizType());
-            r.setConvertedOriginalAmount(conversionFactorPort.convert(r.getOriginalAmount(), factor));
-            r.setConvertedTargetAmount(conversionFactorPort.convert(r.getTargetAmount(), factor));
         }
     }
 
@@ -407,9 +389,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
                 }
             }
         }
-        Set<String> bizTypes = facts.stream()
-            .map(PerformanceFactSummaryDTO::getBizType).collect(Collectors.toSet());
-        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizTypes);
         List<AdjustFactDetailVo> rows = new ArrayList<>(facts.size());
         for (PerformanceFactSummaryDTO f : facts) {
             AdjustFactDetailVo row = new AdjustFactDetailVo();
@@ -432,9 +411,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             row.setDeltaAmount(MoneyUtil.round2(delta));
             row.setAfterAmount(MoneyUtil.round2(amount.add(delta)));
             row.setTarget(delta.signum() != 0);
-            BigDecimal factor = conversionFactorPort.factorOf(factorMap, f.getBizType());
-            row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
-            row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), factor));
             rows.add(row);
         }
         dto.setDetails(rows);
