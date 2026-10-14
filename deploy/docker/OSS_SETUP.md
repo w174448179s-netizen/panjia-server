@@ -13,6 +13,8 @@
 
 `sys_oss` 表每条文件的 `url` = `http://{domain_url}/{bucket}/{file_name}`，是**绝对 URL 存库**——所以改配置只影响新文件，存量 URL 要用脚本第 5 步重建。
 
+> **frp 客户机整栈模式（新客户默认）**：客户入口 = `panjia.icu:3000+N`（一条隧道 → 客户机自己 nginx:80），domain_url 填 `panjia.icu:3000+N/oss`——与 docker 直连部署的 `IP:端口/oss` 口径完全一致。0 号开发机 preview 例外：`panjia.icu:3100/minio`。详见 `panjia-console/bin/frp/README.md`。
+
 ## 一点五、本地开发环境（Mac）的对齐方式
 
 本地基础设施（postgres/redis/minio）由 `script/docker/docker-compose.yml` 启动（compose 项目名 `docker`，网络 `docker_default`），后端容器 `panjia-local-backend` 是手动 `docker run` 的，默认在 `bridge` 网络——**必须先接入 MinIO 所在网络**，endpoint 才能用和生产一致的 `minio:9000`：
@@ -22,7 +24,7 @@ docker network connect docker_default panjia-local-backend
 ```
 
 - 已持久化：`docker restart` 后仍生效；**但容器重建（docker rm 后重新 run）需要重新执行**上面的命令
-- 本地 `sys_oss_config`：`endpoint=minio:9000`（与生产一致）；`domain_url=panjia.icu:3000/minio`（走 frp → 本地 vite 的 `/minio` 代理，属浏览器回显通道，各环境必须各配各的）
+- 本地 `sys_oss_config`：`endpoint=minio:9000`（与生产一致）；`domain_url=panjia.icu:3100/minio`（走 frp 3010 隧道 → panjia.icu nginx 的 `/minio` 反代，属浏览器回显通道，各环境必须各配各的）
 - 本地 MinIO 账号：ruoyi/ruoyi123（compose 里 `MINIO_ROOT_USER/PASSWORD`）
 
 ## 二、新服务器接入步骤（照抄即可）
