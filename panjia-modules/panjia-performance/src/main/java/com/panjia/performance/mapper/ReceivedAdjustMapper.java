@@ -61,7 +61,8 @@ public interface ReceivedAdjustMapper extends BaseMapperPlus<ReceivedAdjust, Rec
      * <p>
      * 供实收合同列表「调整审批中」标记与目标金额预演，投影结构与
      * {@code PerformanceAdjustMapper.doSelectPendingByBizKeys} 对齐
-     * （adjustType 固定 RECEIVED_AMOUNT，factType 语义 PERF_REAL）。
+     * （2026-10-14 三类型重构后 adjustType 取单据真实值 AMOUNT/DEDUCT/INCREASE，
+     * 历史单 adjust_type 为空按 AMOUNT；factType 语义 PERF_REAL）。
      *
      * @param period 归属期间
      * @param keys   业务键集合（合同号/订单号混合）
@@ -74,7 +75,7 @@ public interface ReceivedAdjustMapper extends BaseMapperPlus<ReceivedAdjust, Rec
                order_no AS "orderNo",
                id AS "id",
                adjust_no AS "adjustNo",
-               'RECEIVED_AMOUNT' AS "adjustType",
+               COALESCE(adjust_type, 'AMOUNT') AS "adjustType",
                target_amount AS "targetAmount",
                original_amount AS "originalAmount",
                payload_json AS "payloadJson"

@@ -55,6 +55,12 @@ public class ReceivedAdjust implements Serializable {
     /** 业务类型（一手房/房产金融/二手房等，创建时从实收合同回填） */
     private String bizType;
 
+    /**
+     * 调整类型 code（2026-10-14 三类型重构）：AMOUNT=业绩调整（总额不变）、
+     * DEDUCT=业绩扣减、INCREASE=业绩增加；历史单为 null，读取按 AMOUNT 语义处理。
+     */
+    private String adjustType;
+
     /** 分摊快照 JSON（AddMemberPayload：contractTotal/afterTotal/allocations，before+delta 绝对值语义） */
     private String payloadJson;
 

@@ -30,6 +30,9 @@ public class ReceivedAdjustBo implements Serializable {
     /** 业务类型（一手房/房产金融等） */
     private String bizType;
 
+    /** 调整类型（AMOUNT/DEDUCT/INCREASE；可空） */
+    private String adjustType;
+
     /** 关键字（调整单号/合同号/订单号模糊） */
     private String keyword;
 }

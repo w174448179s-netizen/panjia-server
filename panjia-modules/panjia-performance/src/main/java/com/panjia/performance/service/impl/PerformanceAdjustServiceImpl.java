@@ -33,6 +33,7 @@ import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionGatePort;
 import com.panjia.contracts.port.ConversionFactorPort;
+import com.panjia.contracts.port.ReceivedRealFactPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -129,6 +130,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      */
     private final ObjectProvider<CommissionGatePort> commissionGatePortProvider;
 
+    /**
+     * 实收事实端口（新签调整审批通过后联动实收：业绩调整按比例、业绩扣减同额，直接生效不再审批）。
+     * 实现 bean 在 panjia-received（performance 不反向依赖 received），ObjectProvider 惰性取用，
+     * 端口实现缺失时跳过联动，保证本模块上下文可独立启动。
+     */
+    private final ObjectProvider<ReceivedRealFactPort> receivedRealFactPortProvider;
+
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(PerformanceAdjustBo query, PageQuery pageQuery) {
         // §3.6 数据权限：所有登录用户仅本部门（含下级）。未传 deptId 强制本部门，越权传他部门直接拒绝
@@ -160,10 +168,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (records == null || records.isEmpty()) {
             return;
         }
-        // 合同级调整不回填员工（ADD_MEMBER 例外：employeeId=新角色人，列表需显示新人姓名）
+        // 合同级调整不回填员工（含新角色人的单例外：employeeId=第一个新角色人，列表需显示新人姓名）
         Set<Long> employeeIds = records.stream()
             .filter(r -> r.getEmployeeId() != null
-                && (!SCOPE_CONTRACT.equals(r.getAdjustScope()) || r.getAdjustType() == AdjustType.ADD_MEMBER))
+                && (!SCOPE_CONTRACT.equals(r.getAdjustScope()) || hasNewMembers(r)))
             .map(PerformanceAdjust::getEmployeeId)
             .collect(Collectors.toSet());
         Set<Long> deptIds = new HashSet<>();
@@ -186,8 +194,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
 
         for (PerformanceAdjust r : records) {
-            // 合同级：清空员工信息，避免误导（ADD_MEMBER 例外：显示新角色人）
-            if (SCOPE_CONTRACT.equals(r.getAdjustScope()) && r.getAdjustType() != AdjustType.ADD_MEMBER) {
+            // 合同级：清空员工信息，避免误导（含新角色人的单例外：显示新角色人）
+            if (SCOPE_CONTRACT.equals(r.getAdjustScope()) && !hasNewMembers(r)) {
                 r.setEmployeeId(null);
                 r.setEmployeeName(null);
             } else if (r.getEmployeeId() != null) {
@@ -234,7 +242,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 回填 ADD_MEMBER 单据的「调整后合同业绩合计」：解析 payload.afterTotal；
+     * 回填合同级单据的「调整后合同业绩合计」：解析 payload.afterTotal
+     * （ADD_MEMBER 历史单与 AMOUNT/DEDUCT/INCREASE 三类型统一快照均含该字段）；
      * 旧快照无该字段时回退原合同总额（2026-09-29 前单据均为总额不变）。
      */
     private void fillAddMemberAfterTotal(List<PerformanceAdjust> records) {
@@ -242,13 +251,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             return;
         }
         for (PerformanceAdjust r : records) {
-            if (r.getAdjustType() != AdjustType.ADD_MEMBER) {
+            if (!SCOPE_CONTRACT.equals(r.getAdjustScope())) {
                 continue;
             }
             BigDecimal afterTotal = null;
             AddMemberPayload payload = parseAddMemberPayload(r.getPayloadJson());
             if (payload != null) {
                 afterTotal = payload.getAfterTotal();
+            }
+            if (afterTotal == null && r.getAdjustType() != AdjustType.ADD_MEMBER) {
+                continue;
             }
             r.setAfterTotalAmount(afterTotal != null ? MoneyUtil.round2(afterTotal)
                 : (r.getOriginalAmount() != null ? MoneyUtil.round2(r.getOriginalAmount()) : null));
@@ -381,8 +393,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (StringUtils.isNotBlank(targetContractNo)) {
             List<AdjustFactDetailVo> details =
                 factMapper.selectAdjustFactDetails(period, adjust.getOrderNo(), targetContractNo, factType);
-            // 增加角色人（ADD_MEMBER）：分摊展示语义与金额调整完全不同，独立处理后直接返回
-            if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+            // 含新角色人的合同级单（ADD_MEMBER 历史单 / 三类型加人单）：
+            // 分摊展示语义与纯金额调整不同，独立处理后直接返回
+            if (hasNewMembers(adjust)) {
                 applyAddMemberDetail(adjust, dto, details);
                 return dto;
             }
@@ -547,10 +560,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
         }
         if (SCOPE_CONTRACT.equals(scope)) {
-            // 合同级支持金额调整、增加角色人、业绩冲正
-            if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.ADD_MEMBER
-                && adjustType != AdjustType.MANUAL_OFFSET) {
-                throw new ServiceException("合同级调整仅支持金额调整、增加角色人或业绩冲正");
+            // 合同级（2026-10-14 重构）：业绩调整/业绩扣减/业绩增加（三类型均可增加角色人）、业绩冲正；
+            // 增加角色人（ADD_MEMBER）已并入三类型，禁止新建（历史单保留展示）
+            if (adjustType == AdjustType.ADD_MEMBER) {
+                throw new ServiceException("「增加角色人」已并入业绩调整/业绩扣减/业绩增加，请重新选择调整类型");
+            }
+            if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.DEDUCT
+                && adjustType != AdjustType.INCREASE && adjustType != AdjustType.MANUAL_OFFSET) {
+                throw new ServiceException("合同级调整仅支持业绩调整、业绩扣减、业绩增加或业绩冲正");
             }
             if (StringUtils.isBlank(dto.getContractNo()) || StringUtils.isBlank(dto.getFactType())) {
                 throw new ServiceException("合同级调整缺少合同号或事实口径");
@@ -606,15 +623,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             normalizeManualOffsetItems(dto);
         }
 
-        // ==================== 增加角色人（ADD_MEMBER，2026-09-28） ====================
-        // 给合同手工多加一个人分业绩：新人金额 X，优先从指定行精确扣除，剩余由未指定行
-        // 按业绩占比等比分摊，合同总额不变。校验 + 分摊预演快照见 prepareAddMember
-        if (adjustType == AdjustType.ADD_MEMBER) {
-            dto.setPayloadJson(prepareAddMember(dto));
-        } else if (adjustType == AdjustType.AMOUNT && SCOPE_CONTRACT.equals(scope)
+        // ==================== 合同级三类型（AMOUNT/DEDUCT/INCREASE，2026-10-14 重构） ====================
+        // 三类型统一走「明细指定值 + 可选新角色人」prepare：总额规则（调整=总额不变/扣减=须减少/增加=
+        // 须增加）与扣减实收不足拦截见 prepareContractTargets；明细指定值为空时 AMOUNT 保持旧等比分摊模式
+        if ((adjustType == AdjustType.AMOUNT || adjustType == AdjustType.DEDUCT
+            || adjustType == AdjustType.INCREASE) && SCOPE_CONTRACT.equals(scope)
             && dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty()) {
-            // 合同级金额调整指定值模式（可编辑表格，2026-09-28）：校验并快照明细「调整后金额/占比」
-            dto.setPayloadJson(prepareContractAmountTargets(dto));
+            dto.setPayloadJson(prepareContractTargets(dto, adjustType));
         }
 
         // 2. 计算原始金额 + 验证目标金额
@@ -627,8 +642,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 if (dto.getDeltaAmount() != null) {
                     targetAmt = originalAmt.add(dto.getDeltaAmount());
                 } else {
-                    throw new ServiceException("金额调整缺少目标金额");
+                    throw new ServiceException("业绩调整缺少目标金额");
                 }
+            }
+            dto.setTargetAmount(targetAmt);
+        } else if (adjustType == AdjustType.DEDUCT || adjustType == AdjustType.INCREASE) {
+            // 业绩扣减/增加：targetAmount 由 prepareContractTargets 按明细指定值 + 新人金额算出（=调整后合计）
+            if (targetAmt == null) {
+                throw new ServiceException("业绩扣减/增加缺少明细指定值，无法确定调整后金额");
             }
             dto.setTargetAmount(targetAmt);
         } else if (adjustType == AdjustType.MANUAL_OFFSET) {
@@ -1077,13 +1098,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 合同级：MANUAL_OFFSET 业绩冲正；ADD_MEMBER 增加角色人（当期生效）；
-            // AMOUNT 原月=调整月走金额调整，跨月走业绩冲销（§4.6）
+            // 合同级：MANUAL_OFFSET 业绩冲正；ADD_MEMBER 增加角色人（历史单，当期生效）；
+            // AMOUNT/DEDUCT/INCREASE 三类型（2026-10-14）走「指定值 + 可选新人 + 实收联动」统一路径；
+            // AMOUNT 旧单（无 afterTotal 快照）原月=调整月走金额调整，跨月走业绩冲销（§4.6）
             // originalPeriod 已在封账校验前解析
             if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
                 executeManualOffsetAdjust(adjust, operatorId);
             } else if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 executeAddMemberAdjust(adjust, operatorId);
+            } else if (adjust.getAdjustType() == AdjustType.DEDUCT
+                || adjust.getAdjustType() == AdjustType.INCREASE
+                || (adjust.getAdjustType() == AdjustType.AMOUNT && isUnifiedContractTargets(adjust))) {
+                executeContractTargetsAdjust(adjust, operatorId);
             } else if (originalPeriod.equals(adjust.getPeriod())) {
                 executeContractAmountAdjust(adjust, operatorId);
             } else {
@@ -1121,6 +1147,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         return commissionGatePortProvider.getIfAvailable();
     }
 
+    /** 实收事实端口（端口实现缺失时返回 null，实收联动跳过）。 */
+    private ReceivedRealFactPort receivedRealPort() {
+        return receivedRealFactPortProvider.getIfAvailable();
+    }
+
     /**
      * 校验指定合同 + 业绩归属月的结佣是否已审批锁定（LOCKED）。
      * <p>结佣已审批通过并计入工资后，新签事实调整会破坏一致性，必须先作废结佣单再调整。
@@ -1149,13 +1180,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         } else {
             subject = "员工" + resolveEmployeeName(adjust.getEmployeeId());
         }
-        // 增加角色人：employeeId=新角色人，审批标题带上新人姓名
-        if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+        // 含新角色人的合同级单（ADD_MEMBER 历史单 / 三类型加人单）：employeeId=第一个新人，审批标题带上新人姓名
+        if (hasNewMembers(adjust)) {
             subject = subject + "｜新人" + resolveEmployeeName(adjust.getEmployeeId());
         }
         String bizTitle = switch (adjust.getAdjustType()) {
             case MANUAL_OFFSET -> "业绩冲正";
-            default -> "业绩调整";
+            case ADD_MEMBER -> "增加角色人";
+            // AMOUNT=业绩调整 / DEDUCT=业绩扣减 / INCREASE=业绩增加（2026-10-14 起 desc 即类型名）
+            default -> adjust.getAdjustType().getDesc();
         };
         ApprovalStartCmd cmd = ApprovalStartCmd.of(
             text(adjust.getAdjustNo()),
@@ -1629,19 +1662,36 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod(), performanceDelta);
     }
 
-    // ==================== 增加角色人（ADD_MEMBER，2026-09-28） ====================
+    // ==================== 合同级三类型统一 prepare（2026-10-14） ====================
 
     /**
-     * 合同级金额调整（AMOUNT）指定值模式：校验明细指定行并序列化 payloadJson 快照。
+     * 合同级三类型（业绩调整 AMOUNT / 业绩扣减 DEDUCT / 业绩增加 INCREASE，2026-10-14 重构）
+     * 统一 prepare：明细指定值 + 可选新角色人清单，校验并序列化 payloadJson 快照。
      * <p>
-     * 校验：指定行须归属本合同；Σ指定行目标金额 + 未指定行当前金额 = 目标金额（targetAmount）。
-     * 同时生成 allocations 预演快照（before=当前金额、delta=目标-当前），供单据详情按行精确回填；
-     * 执行时按指定值精确落库（见 {@link #executeContractAmountAdjust}），不再等比分摊。
+     * 总额规则（afterTotal = Σ指定行目标 + 未指定行现值 + Σ新人金额）：
+     * <ul>
+     *   <li>AMOUNT 业绩调整：afterTotal 必须等于原合同总额，否则拒绝保存；</li>
+     *   <li>DEDUCT 业绩扣减：afterTotal 必须小于原总额；且逐被扣经纪人校验
+     *       「新签扣减额 ≤ 该人实收金额」（无实收则不联动、不校验），不足拒绝发起；</li>
+     *   <li>INCREASE 业绩增加：afterTotal 必须大于原总额。</li>
+     * </ul>
+     * 快照含 detailTargets（执行权威依据）+ newMembers + allocations 预演（before/delta，
+     * 详情展示与实收联动共用）+ contractTotal/afterTotal；dto.targetAmount 回填为 afterTotal。
+     * 实收联动规则见执行端 {@link #linkReceivedForAdjust}。
      *
-     * @param dto 创建请求（含 detailTargets / targetAmount）
-     * @return payloadJson（明细指定值快照 + 分摊预演）
+     * @param dto        创建请求（含 detailTargets / 可选 newMembers）
+     * @param adjustType 调整类型（AMOUNT / DEDUCT / INCREASE）
+     * @return payloadJson（明细指定值 + 新角色人 + 分摊预演快照）
      */
-    private String prepareContractAmountTargets(PerformanceAdjustCreateBo dto) {
+    private String prepareContractTargets(PerformanceAdjustCreateBo dto, AdjustType adjustType) {
+        // 含新人时仅支持当期调整（新事实挂合同既有事实所在期间，跨月无意义）
+        boolean hasMembers = dto.getNewMembers() != null
+            && dto.getNewMembers().stream().anyMatch(m -> m != null && m.getEmployeeId() != null);
+        if (hasMembers && StringUtils.isNotBlank(dto.getOriginalPeriod())
+            && !dto.getOriginalPeriod().equals(dto.getPeriod())) {
+            throw new ServiceException("增加角色人仅支持当期调整，不支持跨月");
+        }
+
         List<PerformanceFact> facts = loadActiveFactsForAdjust(
             dto.getPeriod(), dto.getFactType(), dto.getOrderNo(), dto.getContractNo());
         if (facts == null || facts.isEmpty()) {
@@ -1649,7 +1699,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         Map<Long, PerformanceFact> factById = facts.stream()
             .collect(Collectors.toMap(PerformanceFact::getId, f -> f));
+        BigDecimal total = facts.stream()
+            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // 1. 明细指定值校验：指定行须归属本合同；占比不为负
         List<AdjustDetailTargetBo> validTargets = new ArrayList<>();
         Map<Long, BigDecimal> targetAmountByFact = new HashMap<>();
         BigDecimal coveredSum = BigDecimal.ZERO;
@@ -1673,13 +1727,56 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .filter(f -> !coveredIds.contains(f.getId()))
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (dto.getTargetAmount() == null
-            || MoneyUtil.round2(coveredSum.add(uncoveredSum)).compareTo(MoneyUtil.round2(dto.getTargetAmount())) != 0) {
-            throw new ServiceException("明细调整后金额合计({})与目标金额({})不一致，请检查录入或刷新数据后重试",
-                MoneyUtil.round2(coveredSum.add(uncoveredSum)), dto.getTargetAmount());
+
+        // 2. 新角色人清单（可空）：金额>0、占比不为负、清单内判重、不得已在合同既有事实中
+        List<AddMemberItemBo> requestMembers = new ArrayList<>();
+        if (dto.getNewMembers() != null) {
+            for (AddMemberItemBo item : dto.getNewMembers()) {
+                if (item != null && item.getEmployeeId() != null) {
+                    requestMembers.add(item);
+                }
+            }
+        }
+        Set<Long> existingEmpIds = facts.stream()
+            .map(PerformanceFact::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Set<Long> requestEmpIds = new HashSet<>();
+        for (AddMemberItemBo m : requestMembers) {
+            if (m.getAmount() == null || m.getAmount().signum() <= 0) {
+                throw new ServiceException("新角色人业绩金额缺失或不大于 0：employeeId={}", m.getEmployeeId());
+            }
+            if (m.getShareRatio() != null && m.getShareRatio().signum() < 0) {
+                throw new ServiceException("新角色人业绩比例不能为负：employeeId={}", m.getEmployeeId());
+            }
+            if (!requestEmpIds.add(m.getEmployeeId())) {
+                throw new ServiceException("同一员工不能重复添加为新角色人：employeeId={}", m.getEmployeeId());
+            }
+            if (existingEmpIds.contains(m.getEmployeeId())) {
+                throw new ServiceException("员工已在此合同业绩中，请直接调整其业绩金额：employeeId={}", m.getEmployeeId());
+            }
+        }
+        BigDecimal newX = requestMembers.stream()
+            .map(m -> MoneyUtil.round2(m.getAmount()))
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        // 3. 类型总额规则
+        BigDecimal afterTotal = MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newX));
+        BigDecimal contractTotal = MoneyUtil.round2(total);
+        if (adjustType == AdjustType.AMOUNT && afterTotal.compareTo(contractTotal) != 0) {
+            throw new ServiceException("业绩调整必须保证修改后合同金额不变（当前 {} → {}），请检查各行金额",
+                contractTotal, afterTotal);
+        }
+        if (adjustType == AdjustType.DEDUCT && afterTotal.compareTo(contractTotal) >= 0) {
+            throw new ServiceException("业绩扣减要求修改后合同金额小于原金额（当前 {} → {}）",
+                contractTotal, afterTotal);
+        }
+        if (adjustType == AdjustType.INCREASE && afterTotal.compareTo(contractTotal) <= 0) {
+            throw new ServiceException("业绩增加要求修改后合同金额大于原金额（当前 {} → {}）",
+                contractTotal, afterTotal);
         }
 
-        // 预演快照：复用 Alloc 结构（before=当前金额、delta=目标-当前），详情展示与执行共用
+        // 4. 分摊预演快照（before=当前金额、delta=目标-当前；未指定行 delta=0），详情展示与实收联动共用
         Set<Long> factEmployeeIds = facts.stream()
             .map(PerformanceFact::getEmployeeId)
             .filter(id -> id != null)
@@ -1701,13 +1798,136 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             allocations.add(alloc);
         }
 
+        // 5. 业绩扣减实收校验：逐被扣经纪人「新签扣减额 ≤ 该人实收金额」，不足拒绝发起
+        if (adjustType == AdjustType.DEDUCT) {
+            assertReceivedEnoughForDeduct(dto, allocations);
+        }
+
+        // 6. 新角色人档案信息（一次 IN 批量查工号/姓名/部门），组装快照
+        List<AddMemberPayload.NewMember> memberSnapshots = new ArrayList<>(requestMembers.size());
+        if (!requestMembers.isEmpty()) {
+            List<Long> memberIds = requestMembers.stream().map(AddMemberItemBo::getEmployeeId).toList();
+            Map<Long, Map<String, Object>> empMap = new HashMap<>();
+            for (Map<String, Object> row : adjustMapper.employeeNames(memberIds)) {
+                empMap.put(((Number) row.get("employeeId")).longValue(), row);
+            }
+            for (AddMemberItemBo m : requestMembers) {
+                Map<String, Object> empRow = empMap.get(m.getEmployeeId());
+                if (empRow == null) {
+                    throw new ServiceException("员工档案不存在：employeeId={}", m.getEmployeeId());
+                }
+                if (m.getDeptId() == null || m.getDeptId() <= 0) {
+                    Object empDeptId = empRow.get("deptId");
+                    if (empDeptId == null) {
+                        throw new ServiceException("员工档案未配置部门，无法确定业绩归属部门：employeeId={}", m.getEmployeeId());
+                    }
+                    m.setDeptId(((Number) empDeptId).longValue());
+                }
+            }
+            List<Long> memberDeptIds = requestMembers.stream()
+                .map(AddMemberItemBo::getDeptId).filter(Objects::nonNull).distinct().toList();
+            Map<Long, String> deptNameMap = new HashMap<>();
+            for (Map<String, Object> row : adjustMapper.deptNames(memberDeptIds)) {
+                deptNameMap.put(((Number) row.get("deptId")).longValue(), String.valueOf(row.get("deptName")));
+            }
+            for (AddMemberItemBo m : requestMembers) {
+                Map<String, Object> empRow = empMap.get(m.getEmployeeId());
+                AddMemberPayload.NewMember snap = new AddMemberPayload.NewMember();
+                snap.setEmployeeId(m.getEmployeeId());
+                snap.setEmployeeCode(toStringOrNull(empRow.get("employeeCode")));
+                snap.setEmployeeName(toStringOrNull(empRow.get("employeeName")));
+                snap.setDeptId(m.getDeptId());
+                snap.setDeptName(deptNameMap.get(m.getDeptId()));
+                snap.setRoleType(StringUtils.defaultIfBlank(m.getRoleType(), "合作人"));
+                snap.setAmount(MoneyUtil.round2(m.getAmount()));
+                snap.setNewShareRatio(m.getShareRatio() == null ? null : MoneyUtil.round6(m.getShareRatio()));
+                memberSnapshots.add(snap);
+            }
+            // 列表展示新人姓名（对齐 ADD_MEMBER 口径）：employeeId/deptId=第一个新角色人
+            AddMemberItemBo firstMember = requestMembers.get(0);
+            dto.setEmployeeId(firstMember.getEmployeeId());
+            dto.setDeptId(firstMember.getDeptId());
+        }
+
+        // 7. dto 回填 + payload 组装（targetAmount=调整后合计，执行按快照 detailTargets 落库）
+        dto.setTargetAmount(afterTotal);
         AddMemberPayload payload = new AddMemberPayload();
         payload.setDetailTargets(validTargets);
-        payload.setContractTotal(MoneyUtil.round2(facts.stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-            .reduce(BigDecimal.ZERO, BigDecimal::add)));
+        payload.setContractTotal(contractTotal);
+        payload.setAfterTotal(afterTotal);
         payload.setAllocations(allocations);
+        if (!memberSnapshots.isEmpty()) {
+            payload.setMembers(memberSnapshots);
+            // 顶层单新人字段写第一个新人：兼容审批标题、结佣镜像等旧读取方（执行/展示以 members 为权威）
+            AddMemberPayload.NewMember firstSnap = memberSnapshots.get(0);
+            payload.setNewEmployeeId(firstSnap.getEmployeeId());
+            payload.setEmployeeCode(firstSnap.getEmployeeCode());
+            payload.setEmployeeName(firstSnap.getEmployeeName());
+            payload.setDeptId(firstSnap.getDeptId());
+            payload.setDeptName(firstSnap.getDeptName());
+            payload.setRoleType(firstSnap.getRoleType());
+            payload.setAmount(firstSnap.getAmount());
+            payload.setNewShareRatio(firstSnap.getNewShareRatio());
+        }
         return JsonUtils.toJsonString(payload);
+    }
+
+    /**
+     * 业绩扣减实收校验（2026-10-14）：合同已有实收业绩时，逐被扣经纪人校验
+     * 「新签扣减额 ≤ 该人实收金额」（业绩扣多少实收扣多少，实收不足则扣不动）；
+     * 该人无实收记录时不联动实收、不校验。端口缺失或无实收直接放行。
+     *
+     * @param dto         创建请求（合同号/订单号）
+     * @param allocations 分摊预演快照（逐事实行 before/delta，含员工姓名）
+     */
+    private void assertReceivedEnoughForDeduct(PerformanceAdjustCreateBo dto,
+                                               List<AddMemberPayload.Alloc> allocations) {
+        ReceivedRealFactPort port = receivedRealPort();
+        if (port == null) {
+            return;
+        }
+        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(
+            null, dto.getOrderNo(), dto.getContractNo());
+        if (received == null || received.isEmpty()) {
+            return;
+        }
+        // 按经纪人聚合实收金额
+        Map<Long, BigDecimal> recvByEmp = new HashMap<>();
+        for (PerformanceFactSummaryDTO r : received) {
+            if (r.getEmployeeId() == null) {
+                continue;
+            }
+            recvByEmp.merge(r.getEmployeeId(),
+                r.getAmount() == null ? BigDecimal.ZERO : r.getAmount(), BigDecimal::add);
+        }
+        if (recvByEmp.isEmpty()) {
+            return;
+        }
+        // 按经纪人聚合新签扣减额（allocations 为事实行粒度，一人可能多行）
+        Map<Long, BigDecimal> deltaByEmp = new HashMap<>();
+        Map<Long, String> nameByEmp = new HashMap<>();
+        for (AddMemberPayload.Alloc alloc : allocations) {
+            if (alloc.getEmployeeId() == null || alloc.getDelta() == null) {
+                continue;
+            }
+            deltaByEmp.merge(alloc.getEmployeeId(), alloc.getDelta(), BigDecimal::add);
+            nameByEmp.putIfAbsent(alloc.getEmployeeId(), alloc.getEmployeeName());
+        }
+        for (Map.Entry<Long, BigDecimal> entry : deltaByEmp.entrySet()) {
+            BigDecimal delta = MoneyUtil.round2(entry.getValue());
+            if (delta.signum() >= 0) {
+                continue;
+            }
+            BigDecimal recv = recvByEmp.get(entry.getKey());
+            if (recv == null || recv.signum() <= 0) {
+                continue;
+            }
+            if (delta.abs().compareTo(recv) > 0) {
+                throw new ServiceException("员工「{}」实收金额 {} 不足：新签扣减额 {} 不能超过其实收金额",
+                    nameByEmp.getOrDefault(entry.getKey(), String.valueOf(entry.getKey())),
+                    MoneyUtil.round2(recv), delta.abs());
+            }
+        }
     }
 
     /**
@@ -1781,295 +2001,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 增加角色人创建准备：校验 + 分摊预演快照 + payload 构建。
-     * <p>
-     * 语义：给合同手工多加一个或多个角色人分业绩——新人金额合计 X，优先从指定行（deductions）
-     * 精确扣除，剩余由未指定行按业绩占比等比分摊，默认合同总额不变。执行见 {@link #executeAddMemberAdjust}。
-     * <p>
-     * 2026-10-11 起支持一张调整单添加多个新角色人（{@code dto.newMembers}）；
-     * 清单为空时回退 newEmployeeId/newAmount 等旧单字段（单人）。
-     * <p>
-     * 支持指定值模式（2026-09-28 可编辑表格）：dto.detailTargets 非空时，既有行按指定
-     * 「调整后金额/占比」精确指定，跳过 deductions/等比分摊逻辑，payload 以 detailTargets
-     * 为执行权威依据。自 2026-09-29 起允许同时调整合同总额（afterTotal ≠ contractTotal，
-     * 前端提交前二次确认），不再强制 Σtargets + 新人金额 = 原合同总额。
-     * <p>
-     * 本方法除构建 payload 外，还会回填 dto 的 employeeId/deptId（=第一个新角色人，列表展示用）、
-     * targetAmount（=全部新人金额合计，供后续统一构建调整单使用）、originalPeriod（强制置空，
-     * ADD_MEMBER 的新事实必然挂到合同既有事实所在期间，跨月无意义）。
-     *
-     * @param dto 创建请求（含 newMembers 或旧版 newEmployeeId/newRoleType/newAmount/newShareRatio/newDeptId/deductions/detailTargets）
-     * @return payloadJson（全部新角色人快照 + 指定扣除/明细指定值 + 分摊预演）
-     */
-    private String prepareAddMember(PerformanceAdjustCreateBo dto) {
-        if (StringUtils.isNotBlank(dto.getOriginalPeriod()) && !dto.getOriginalPeriod().equals(dto.getPeriod())) {
-            throw new ServiceException("增加角色人仅支持当期调整，不支持跨月");
-        }
-
-        // 1. 组装新角色人清单：newMembers 非空优先；为空回退旧版单新人字段
-        List<AddMemberItemBo> requestMembers = new ArrayList<>();
-        if (dto.getNewMembers() != null && !dto.getNewMembers().isEmpty()) {
-            for (AddMemberItemBo item : dto.getNewMembers()) {
-                if (item != null && item.getEmployeeId() != null) {
-                    requestMembers.add(item);
-                }
-            }
-        } else if (dto.getNewEmployeeId() != null) {
-            AddMemberItemBo legacy = new AddMemberItemBo();
-            legacy.setEmployeeId(dto.getNewEmployeeId());
-            legacy.setRoleType(dto.getNewRoleType());
-            legacy.setAmount(dto.getNewAmount());
-            legacy.setShareRatio(dto.getNewShareRatio());
-            legacy.setDeptId(dto.getNewDeptId());
-            requestMembers.add(legacy);
-        }
-        if (requestMembers.isEmpty()) {
-            throw new ServiceException("增加角色人缺少新角色人员工");
-        }
-        // 每人金额/占比校验 + 清单内员工判重（同一员工不允许在同一张单里重复添加）
-        Set<Long> requestEmpIds = new HashSet<>();
-        for (AddMemberItemBo m : requestMembers) {
-            if (m.getAmount() == null || m.getAmount().signum() <= 0) {
-                throw new ServiceException("新角色人业绩金额缺失或不大于 0：employeeId={}", m.getEmployeeId());
-            }
-            // 占比允许为 0：金额被全部扣减的角色人，其业绩比例可同步归零
-            if (m.getShareRatio() != null && m.getShareRatio().signum() < 0) {
-                throw new ServiceException("新角色人业绩比例不能为负：employeeId={}", m.getEmployeeId());
-            }
-            if (!requestEmpIds.add(m.getEmployeeId())) {
-                throw new ServiceException("同一员工不能重复添加为新角色人：employeeId={}", m.getEmployeeId());
-            }
-        }
-        BigDecimal newX = requestMembers.stream()
-            .map(m -> MoneyUtil.round2(m.getAmount()))
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        List<PerformanceFact> facts = loadActiveFactsForAdjust(
-            dto.getPeriod(), dto.getFactType(), dto.getOrderNo(), dto.getContractNo());
-        if (facts == null || facts.isEmpty()) {
-            throw new ServiceException("合同下未找到有效业绩事实，无法增加角色人：{}", dto.getContractNo());
-        }
-        // period 为空时从查到的既有事实取期间（ADD_MEMBER 新事实必然挂到合同既有事实所在期间）
-        if (StringUtils.isBlank(dto.getPeriod())) {
-            dto.setPeriod(facts.get(0).getPeriod());
-        }
-        // 新角色人须不在合同既有有效事实中（已在的人直接走明细级金额调整）
-        Set<Long> existingEmpIds = facts.stream()
-            .map(PerformanceFact::getEmployeeId)
-            .filter(java.util.Objects::nonNull)
-            .collect(Collectors.toSet());
-        for (AddMemberItemBo m : requestMembers) {
-            if (existingEmpIds.contains(m.getEmployeeId())) {
-                throw new ServiceException("员工已在此合同业绩中，请直接调整其业绩金额：employeeId={}", m.getEmployeeId());
-            }
-        }
-        BigDecimal total = facts.stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-        Map<Long, PerformanceFact> factById = facts.stream()
-            .collect(Collectors.toMap(PerformanceFact::getId, f -> f));
-
-        // 指定值模式（可编辑表格，2026-09-28）：既有行按「调整后金额/占比」精确指定；
-        // 非空时跳过 deductions 指定扣除与等比分摊逻辑。
-        // 2026-09-29 起允许同时调整合同总额：afterTotal（=Σ指定行目标+未指定行现值+全部新人金额）
-        // 可与 total 不等，前端提交前已二次确认；执行时以 afterTotal 做完整性校验。
-        boolean hasTargets = dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty();
-        List<AdjustDetailTargetBo> validTargets = new ArrayList<>();
-        Map<Long, BigDecimal> targetAmountByFact = new HashMap<>();
-        BigDecimal afterTotal;
-        if (hasTargets) {
-            BigDecimal coveredSum = BigDecimal.ZERO;
-            Set<Long> coveredIds = new HashSet<>();
-            for (AdjustDetailTargetBo t : dto.getDetailTargets()) {
-                if (t == null || t.getFactId() == null || t.getTargetAmount() == null) {
-                    continue;
-                }
-                if (factById.get(t.getFactId()) == null) {
-                    throw new ServiceException("指定调整行不在该合同业绩明细中：factId={}", t.getFactId());
-                }
-                // 占比允许为 0：金额被全部扣减的角色人，其业绩比例可同步归零
-                if (t.getShareRatio() != null && t.getShareRatio().signum() < 0) {
-                    throw new ServiceException("角色占比不能为负：factId={}", t.getFactId());
-                }
-                validTargets.add(t);
-                coveredIds.add(t.getFactId());
-                targetAmountByFact.put(t.getFactId(), MoneyUtil.round2(t.getTargetAmount()));
-                coveredSum = coveredSum.add(t.getTargetAmount());
-            }
-            BigDecimal uncoveredSum = facts.stream()
-                .filter(f -> !coveredIds.contains(f.getId()))
-                .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-            afterTotal = MoneyUtil.round2(coveredSum.add(uncoveredSum).add(newX));
-        } else {
-            // 旧模式（deductions 指定扣除 + 等比分摊）合同总额必不变，新人金额合计不得超过原合计
-            afterTotal = MoneyUtil.round2(total);
-            if (newX.compareTo(total) > 0) {
-                throw new ServiceException("新角色人业绩金额合计({})超过合同当前业绩合计({})，会导致其他明细为负",
-                    MoneyUtil.round2(newX), MoneyUtil.round2(total));
-            }
-        }
-
-        // 指定扣除：过滤合法行（amount>0 且 factId 归属本合同、单行扣除不超行金额）
-        List<AdjustDeductionBo> validDeductions = new ArrayList<>();
-        BigDecimal deductSum = BigDecimal.ZERO;
-        if (!hasTargets && dto.getDeductions() != null) {
-            for (AdjustDeductionBo d : dto.getDeductions()) {
-                if (d == null || d.getFactId() == null || d.getAmount() == null || d.getAmount().signum() <= 0) {
-                    continue;
-                }
-                PerformanceFact target = factById.get(d.getFactId());
-                if (target == null) {
-                    throw new ServiceException("指定扣除行不在该合同业绩明细中：factId={}", d.getFactId());
-                }
-                BigDecimal current = target.getPerformanceAmount() == null ? BigDecimal.ZERO : target.getPerformanceAmount();
-                if (d.getAmount().compareTo(current) > 0) {
-                    throw new ServiceException("指定扣除金额超过该行当前业绩：factId={}", d.getFactId());
-                }
-                validDeductions.add(d);
-                deductSum = deductSum.add(d.getAmount());
-            }
-        }
-        if (!hasTargets && deductSum.compareTo(newX) > 0) {
-            throw new ServiceException("指定扣除合计({})超过新角色人业绩金额合计({})",
-                MoneyUtil.round2(deductSum), MoneyUtil.round2(newX));
-        }
-
-        // 新角色人档案信息：一次 IN 批量查工号/姓名，部门用前端传值否则兜底档案部门
-        List<Long> memberIds = requestMembers.stream().map(AddMemberItemBo::getEmployeeId).toList();
-        Map<Long, Map<String, Object>> empMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.employeeNames(memberIds)) {
-            empMap.put(((Number) row.get("employeeId")).longValue(), row);
-        }
-        for (AddMemberItemBo m : requestMembers) {
-            Map<String, Object> empRow = empMap.get(m.getEmployeeId());
-            if (empRow == null) {
-                throw new ServiceException("员工档案不存在：employeeId={}", m.getEmployeeId());
-            }
-            if (m.getDeptId() == null || m.getDeptId() <= 0) {
-                Object empDeptId = empRow.get("deptId");
-                if (empDeptId == null) {
-                    throw new ServiceException("员工档案未配置部门，无法确定业绩归属部门：employeeId={}", m.getEmployeeId());
-                }
-                m.setDeptId(((Number) empDeptId).longValue());
-            }
-        }
-        // 部门名一次 IN 批量查（详情/在途虚拟行展示）
-        List<Long> memberDeptIds = requestMembers.stream()
-            .map(AddMemberItemBo::getDeptId).filter(java.util.Objects::nonNull).distinct().toList();
-        Map<Long, String> deptNameMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.deptNames(memberDeptIds)) {
-            deptNameMap.put(((Number) row.get("deptId")).longValue(), String.valueOf(row.get("deptName")));
-        }
-        // dto 回填供后续统一构建调整单（employeeId/deptId=第一个新角色人、targetAmount=新人金额合计）
-        AddMemberItemBo firstMember = requestMembers.get(0);
-        dto.setEmployeeId(firstMember.getEmployeeId());
-        dto.setDeptId(firstMember.getDeptId());
-        dto.setTargetAmount(newX);
-        dto.setOriginalPeriod(null);
-
-        // 分摊预演快照（发起时金额）：指定行精确扣、剩余从未指定行按占比扣（尾差补最大行）；
-        // 指定值模式下既有行 delta 已按 targets 精确计算，无需等比部分
-        BigDecimal ratioDeduct = hasTargets ? BigDecimal.ZERO : MoneyUtil.round2(newX.subtract(deductSum));
-        Set<Long> assignedFactIds = validDeductions.stream()
-            .map(AdjustDeductionBo::getFactId).collect(Collectors.toSet());
-        List<PerformanceFact> unassigned = facts.stream()
-            .filter(f -> !assignedFactIds.contains(f.getId())).toList();
-        if (ratioDeduct.signum() > 0 && unassigned.isEmpty()) {
-            // 全部行都被指定时，剩余部分按全部行占比兜底
-            unassigned = facts;
-        }
-        Map<Long, BigDecimal> ratioByFact = new HashMap<>();
-        if (ratioDeduct.signum() > 0 && !unassigned.isEmpty()) {
-            List<BigDecimal> unassignedAmounts = unassigned.stream()
-                .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-                .toList();
-            BigDecimal[] ratioParts = MoneyUtil.allocateByAmount(unassignedAmounts, ratioDeduct.negate());
-            for (int i = 0; i < unassigned.size(); i++) {
-                ratioByFact.put(unassigned.get(i).getId(), ratioParts[i]);
-            }
-        }
-        List<AddMemberPayload.Alloc> allocations = new ArrayList<>();
-        // 事实表无姓名列，批量从员工档案回填姓名入快照
-        Set<Long> factEmployeeIds = facts.stream()
-            .map(PerformanceFact::getEmployeeId)
-            .filter(id -> id != null)
-            .collect(Collectors.toSet());
-        Map<Long, String> factNameMap = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.employeeNames(factEmployeeIds.stream().toList())) {
-            factNameMap.put(((Number) row.get("employeeId")).longValue(), String.valueOf(row.get("employeeName")));
-        }
-        for (PerformanceFact f : facts) {
-            AddMemberPayload.Alloc alloc = new AddMemberPayload.Alloc();
-            alloc.setFactId(f.getId());
-            alloc.setEmployeeId(f.getEmployeeId());
-            alloc.setEmployeeName(f.getEmployeeId() != null ? factNameMap.get(f.getEmployeeId()) : null);
-            alloc.setBefore(f.getPerformanceAmount());
-            BigDecimal delta = BigDecimal.ZERO;
-            if (hasTargets) {
-                // 指定值模式：delta = 指定调整后金额 - 当前金额；未指定行不变
-                BigDecimal target = targetAmountByFact.get(f.getId());
-                if (target != null) {
-                    BigDecimal current = f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount();
-                    delta = MoneyUtil.round2(target.subtract(current));
-                }
-            } else {
-                for (AdjustDeductionBo d : validDeductions) {
-                    if (d.getFactId().equals(f.getId())) {
-                        delta = delta.subtract(d.getAmount());
-                        break;
-                    }
-                }
-                BigDecimal part = ratioByFact.get(f.getId());
-                if (part != null) {
-                    delta = delta.add(part);
-                }
-            }
-            alloc.setDelta(MoneyUtil.round2(delta));
-            allocations.add(alloc);
-        }
-
-        // 组装全部新角色人快照
-        List<AddMemberPayload.NewMember> memberSnapshots = new ArrayList<>(requestMembers.size());
-        for (AddMemberItemBo m : requestMembers) {
-            Map<String, Object> empRow = empMap.get(m.getEmployeeId());
-            AddMemberPayload.NewMember snap = new AddMemberPayload.NewMember();
-            snap.setEmployeeId(m.getEmployeeId());
-            snap.setEmployeeCode(toStringOrNull(empRow.get("employeeCode")));
-            snap.setEmployeeName(toStringOrNull(empRow.get("employeeName")));
-            snap.setDeptId(m.getDeptId());
-            snap.setDeptName(deptNameMap.get(m.getDeptId()));
-            snap.setRoleType(StringUtils.defaultIfBlank(m.getRoleType(), "合作人"));
-            snap.setAmount(MoneyUtil.round2(m.getAmount()));
-            snap.setNewShareRatio(m.getShareRatio() == null ? null : MoneyUtil.round6(m.getShareRatio()));
-            memberSnapshots.add(snap);
-        }
-
-        AddMemberPayload payload = new AddMemberPayload();
-        payload.setMembers(memberSnapshots);
-        // 顶层单新人字段写第一个新人：兼容结佣镜像、2026-10-11 前旧读取器（执行/展示以 members 为权威）
-        AddMemberPayload.NewMember firstSnap = memberSnapshots.get(0);
-        payload.setNewEmployeeId(firstSnap.getEmployeeId());
-        payload.setEmployeeCode(firstSnap.getEmployeeCode());
-        payload.setEmployeeName(firstSnap.getEmployeeName());
-        payload.setDeptId(firstSnap.getDeptId());
-        payload.setDeptName(firstSnap.getDeptName());
-        payload.setRoleType(firstSnap.getRoleType());
-        payload.setAmount(firstSnap.getAmount());
-        payload.setNewShareRatio(firstSnap.getNewShareRatio());
-        payload.setContractTotal(MoneyUtil.round2(total));
-        payload.setAfterTotal(afterTotal);
-        if (hasTargets) {
-            payload.setDetailTargets(validTargets);
-        } else {
-            payload.setDeductions(validDeductions);
-        }
-        payload.setAllocations(allocations);
-        return JsonUtils.toJsonString(payload);
-    }
-
-    /**
      * 解析增加角色人快照，解析失败返回 null（执行按无指定扣除全等比分摊兜底）。
      */
     private AddMemberPayload parseAddMemberPayload(String payloadJson) {
@@ -2082,6 +2013,22 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             log.warn("[调整单] 增加角色人快照解析失败，按全等比分摊兜底：payload={}", payloadJson, e);
             return null;
         }
+    }
+
+    /**
+     * 合同级调整单是否含新角色人（2026-10-14 起 AMOUNT/DEDUCT/INCREASE 三类型均可加人）：
+     * ADD_MEMBER 历史单恒 true；三类型按 payload.members 判定（旧 AMOUNT 指定值单无 members 为 false）。
+     * 列表员工回填、审批标题、详情展示的「加人」特判统一走本方法。
+     */
+    private boolean hasNewMembers(PerformanceAdjust adjust) {
+        if (!SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
+            return false;
+        }
+        if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+            return true;
+        }
+        AddMemberPayload payload = parseAddMemberPayload(adjust.getPayloadJson());
+        return payload != null && !payload.effectiveMembers().isEmpty();
     }
 
     /**
@@ -2244,6 +2191,165 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         if (adjust.getTargetAmount() != null) {
             dto.setTargetAmount(adjust.getTargetAmount());
+        }
+    }
+
+    /**
+     * 是否走三类型统一执行路径（2026-10-14 起新建的 AMOUNT 合同级单）：
+     * prepareContractTargets 快照必含 afterTotal；此前旧 AMOUNT 指定值单无该字段，保持旧执行路径。
+     */
+    private boolean isUnifiedContractTargets(PerformanceAdjust adjust) {
+        AddMemberPayload payload = parseAddMemberPayload(adjust.getPayloadJson());
+        return payload != null && payload.getAfterTotal() != null;
+    }
+
+    /**
+     * 合同级三类型（业绩调整 AMOUNT / 业绩扣减 DEDUCT / 业绩增加 INCREASE，2026-10-14）统一执行：
+     * 既有行按 payload.detailTargets 精确 supersede + 逐条插入新角色人事实行
+     * （复用 {@link #executeAddMemberByTargets}，含 afterTotal 完整性校验与 factId 后继续接）；
+     * 新签落库后按类型联动实收（{@link #linkReceivedForAdjust}，业绩增加不联动）。
+     */
+    private void executeContractTargetsAdjust(PerformanceAdjust adjust, Long operatorId) {
+        AddMemberPayload payload = parseAddMemberPayload(adjust.getPayloadJson());
+        if (payload == null || payload.getDetailTargets() == null || payload.getDetailTargets().isEmpty()) {
+            throw new ServiceException("调整单缺少明细指定值快照，无法执行：adjustId={}", adjust.getId());
+        }
+        List<AddMemberPayload.NewMember> members = payload.effectiveMembers();
+        BigDecimal newAmount = members.stream()
+            .map(m -> m.getAmount() == null ? BigDecimal.ZERO : MoneyUtil.round2(m.getAmount()))
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        List<PerformanceFact> facts = loadActiveFactsForAdjust(
+            adjust.getPeriod(), adjust.getFactType(), adjust.getOrderNo(), adjust.getContractNo());
+        if (facts == null || facts.isEmpty()) {
+            throw new ServiceException("合同下未找到有效业绩事实：contractNo={}", adjust.getContractNo());
+        }
+        // 新角色人不得已在合同当前事实中，快照内也不允许重复（同 ADD_MEMBER 执行口径）
+        Set<Long> memberEmpIds = new HashSet<>();
+        for (AddMemberPayload.NewMember m : members) {
+            if (m.getEmployeeId() == null) {
+                throw new ServiceException("新角色人快照缺少员工 ID：adjustId={}", adjust.getId());
+            }
+            if (!memberEmpIds.add(m.getEmployeeId())) {
+                throw new ServiceException("新角色人快照存在重复员工，终止执行：adjustId={}, employeeId={}",
+                    adjust.getId(), m.getEmployeeId());
+            }
+            for (PerformanceFact f : facts) {
+                if (m.getEmployeeId().equals(f.getEmployeeId())) {
+                    throw new ServiceException("该员工已在此合同业绩中，不能重复增加：adjustId={}, employeeId={}",
+                        adjust.getId(), m.getEmployeeId());
+                }
+            }
+        }
+
+        executeAddMemberByTargets(adjust, facts, payload, members, newAmount, operatorId);
+        // 实收联动：业绩调整按比例、业绩扣减同额；业绩增加不联动（提交时已弹窗提醒）
+        linkReceivedForAdjust(adjust, payload, operatorId);
+        log.info("[调整单-三类型] 执行完成：adjustId={}, type={}, contractNo={}, memberCount={}, newAmount={}",
+            adjust.getId(), adjust.getAdjustType().getCode(), adjust.getContractNo(), members.size(),
+            MoneyUtil.round2(newAmount));
+    }
+
+    /**
+     * 新签调整实收联动（2026-10-14）：新签落库后同事务直接调整实收明细（直接生效，不再二次审批）。
+     * <ul>
+     *   <li>业绩调整(AMOUNT)：逐经纪人 实收调整额 = 新签调整额 × 该人实收金额 ÷ 该人调整前新签金额
+     *       （该人无实收或调整前新签为 0 跳过；新角色人无实收天然不联动）；</li>
+     *   <li>业绩扣减(DEDUCT)：业绩扣多少实收扣多少——逐被扣经纪人（新签变动&lt;0）实收同额扣减；</li>
+     *   <li>业绩增加(INCREASE)：不联动。</li>
+     * </ul>
+     * 落地：该经纪人各 ACTIVE 实收明细按金额占比分摊调整额（{@link MoneyUtil#allocateByAmount}，
+     * 尾差补最大行，与新签同口径），逐条按指定金额 supersede；合同聚合由实收域自动重算，
+     * 结佣域经冲销事件自动联动。任一行调整后金额为负（实收在审批期间被其他链路减少）
+     * 则抛异常整体回滚留痕。端口缺失或合同无实收时跳过。
+     */
+    private void linkReceivedForAdjust(PerformanceAdjust adjust, AddMemberPayload payload, Long operatorId) {
+        AdjustType type = adjust.getAdjustType();
+        if (type != AdjustType.AMOUNT && type != AdjustType.DEDUCT) {
+            return;
+        }
+        ReceivedRealFactPort port = receivedRealPort();
+        if (port == null) {
+            log.warn("[调整单-实收联动] 实收端口缺失，跳过联动：adjustId={}", adjust.getId());
+            return;
+        }
+        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(
+            null, adjust.getOrderNo(), adjust.getContractNo());
+        if (received == null || received.isEmpty()) {
+            return;
+        }
+        // 按经纪人聚合实收明细行
+        Map<Long, List<PerformanceFactSummaryDTO>> detailsByEmp = new HashMap<>();
+        for (PerformanceFactSummaryDTO r : received) {
+            if (r.getEmployeeId() != null && r.getFactId() != null) {
+                detailsByEmp.computeIfAbsent(r.getEmployeeId(), k -> new ArrayList<>()).add(r);
+            }
+        }
+        // 按经纪人聚合新签变动额/调整前金额（allocations 为事实行粒度，一人可能多行）
+        Map<Long, BigDecimal> deltaByEmp = new HashMap<>();
+        Map<Long, BigDecimal> beforeByEmp = new HashMap<>();
+        if (payload.getAllocations() != null) {
+            for (AddMemberPayload.Alloc alloc : payload.getAllocations()) {
+                if (alloc.getEmployeeId() == null) {
+                    continue;
+                }
+                deltaByEmp.merge(alloc.getEmployeeId(),
+                    alloc.getDelta() == null ? BigDecimal.ZERO : alloc.getDelta(), BigDecimal::add);
+                beforeByEmp.merge(alloc.getEmployeeId(),
+                    alloc.getBefore() == null ? BigDecimal.ZERO : alloc.getBefore(), BigDecimal::add);
+            }
+        }
+        for (Map.Entry<Long, List<PerformanceFactSummaryDTO>> entry : detailsByEmp.entrySet()) {
+            Long employeeId = entry.getKey();
+            BigDecimal delta = MoneyUtil.round2(deltaByEmp.getOrDefault(employeeId, BigDecimal.ZERO));
+            if (MoneyUtil.isZero(delta)) {
+                continue;
+            }
+            BigDecimal recvTotal = entry.getValue().stream()
+                .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (recvTotal.signum() <= 0) {
+                continue;
+            }
+            BigDecimal recvAdjust;
+            if (type == AdjustType.AMOUNT) {
+                BigDecimal before = beforeByEmp.getOrDefault(employeeId, BigDecimal.ZERO);
+                if (before.signum() <= 0) {
+                    continue;
+                }
+                // 实收调整额 = 新签调整额 × 实收金额 ÷ 调整前新签金额（高分位中间精度，round2 落库）
+                recvAdjust = MoneyUtil.round2(
+                    delta.multiply(recvTotal).divide(before, 8, RoundingMode.HALF_UP));
+            } else {
+                // DEDUCT：只对被扣的人同额扣（delta>0 的行不联动实收）
+                if (delta.signum() >= 0) {
+                    continue;
+                }
+                recvAdjust = delta;
+            }
+            if (MoneyUtil.isZero(recvAdjust)) {
+                continue;
+            }
+            List<PerformanceFactSummaryDTO> empDetails = entry.getValue();
+            List<BigDecimal> amounts = empDetails.stream()
+                .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+                .toList();
+            BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, recvAdjust);
+            for (int i = 0; i < empDetails.size(); i++) {
+                if (MoneyUtil.isZero(parts[i])) {
+                    continue;
+                }
+                PerformanceFactSummaryDTO detail = empDetails.get(i);
+                BigDecimal newAmount = MoneyUtil.round2(amounts.get(i).add(parts[i]));
+                if (newAmount.signum() < 0) {
+                    throw new ServiceException("实收联动失败：员工({})实收明细调整后金额为负"
+                        + "（实收可能已被其他链路调整），终止执行并整体回滚：adjustId={}, detailId={}",
+                        employeeId, adjust.getId(), detail.getFactId());
+                }
+                port.adjustDetailAmount(detail.getFactId(), newAmount, operatorId, adjust.getId());
+            }
+            log.info("[调整单-实收联动] adjustId={}, type={}, employeeId={}, 新签调整额={}, 实收调整额={}",
+                adjust.getId(), type.getCode(), employeeId, delta, recvAdjust);
         }
     }
 

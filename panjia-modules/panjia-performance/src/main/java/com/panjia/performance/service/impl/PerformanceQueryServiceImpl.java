@@ -1055,8 +1055,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (contractNos == null || contractNos.isEmpty()) {
             return;
         }
-        // PERF_REAL 在途实收调整单查实收调整表（2026-10-12 拆表）；实收单类型为 RECEIVED_AMOUNT，
-        // 下方仅做命中识别（非 AMOUNT/ADD_MEMBER 不做金额分摊预演），与拆表前行为一致
+        // PERF_REAL 在途实收调整单查实收调整表（2026-10-12 拆表）。
+        // 2026-10-14 三类型重构后新签/实收在途单均为 AMOUNT/DEDUCT/INCREASE + payload 指定值快照，
+        // 统一走 applyPendingTargets 逐人预演（含新人虚拟行）；历史 ADD_MEMBER 与等比 AMOUNT 旧单走旧分支。
         List<Map<String, Object>> contractPendings = "PERF_REAL".equals(factType)
             ? receivedAdjustMapper.doSelectPendingByBizKeys(period, new HashSet<>(contractNos))
             : adjustMapper.doSelectPendingByBizKeys(period, factType, new HashSet<>(contractNos));
@@ -1072,6 +1073,15 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         Map<String, Object> pending = contractPendings.get(0);
         Object type = pending.get("adjustType");
         String adjustType = type == null ? null : type.toString();
+        AddMemberPayload targetsPayload = parseAddMemberPayload(pending.get("payloadJson"));
+        boolean targetsMode = targetsPayload != null && (
+            (targetsPayload.getDetailTargets() != null && !targetsPayload.getDetailTargets().isEmpty())
+                || !targetsPayload.effectiveMembers().isEmpty());
+        // 三类型指定值/加人单（2026-10-14 起，新签与实收同构）：按 payload 快照逐人预演
+        if (targetsMode) {
+            applyPendingTargets(rows, period, factType, adjustType, targetsPayload);
+            return;
+        }
         // 增加角色人（ADD_MEMBER）：合同总额不变，按发起时 payload 快照逐人预演（含新人 0→X 虚拟行）
         if ("ADD_MEMBER".equals(adjustType)) {
             applyPendingAddMember(rows, period, factType, pending);
@@ -1182,7 +1192,81 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     }
 
     /**
-     * 解析增加角色人快照（payload_json），解析失败返回 null（跳过逐行预演/还原，不影响主流程）。
+     * 合同管理明细：三类型在途单（AMOUNT/DEDUCT/INCREASE，2026-10-14 起新签/实收同构）逐行预演。
+     * <p>
+     * 与 {@link #applyPendingAddMember} 同口径：既有行按 payload.allocations 快照
+     * （factId 优先、employeeId 兜底）回填 adjustPendingDelta/Amount；新角色人尚无事实行，
+     * 按 payload.members 合成虚拟行（amount=null，0 → X）。区别仅在标记类型取单据真实 adjustType。
+     */
+    private void applyPendingTargets(List<PerformanceManageVo> rows, String period, String factType,
+                                     String adjustType, AddMemberPayload payload) {
+        List<AddMemberPayload.NewMember> members = payload.effectiveMembers();
+        if (payload.getAllocations() == null) {
+            return;
+        }
+        Map<Long, AddMemberPayload.Alloc> allocByFact = new HashMap<>();
+        Map<Long, AddMemberPayload.Alloc> allocByEmployee = new HashMap<>();
+        for (AddMemberPayload.Alloc a : payload.getAllocations()) {
+            if (a.getFactId() != null) {
+                allocByFact.put(a.getFactId(), a);
+            }
+            if (a.getEmployeeId() != null) {
+                allocByEmployee.putIfAbsent(a.getEmployeeId(), a);
+            }
+        }
+        for (PerformanceManageVo row : rows) {
+            if (Boolean.TRUE.equals(row.getAdjustPending())) {
+                continue; // 明细级优先，不叠加
+            }
+            AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
+            if (alloc == null && row.getEmployeeId() != null) {
+                alloc = allocByEmployee.get(row.getEmployeeId());
+            }
+            if (alloc == null) {
+                continue;
+            }
+            BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
+            BigDecimal delta = alloc.getDelta() != null ? alloc.getDelta() : BigDecimal.ZERO;
+            row.setAdjustPending(true);
+            row.setAdjustPendingType(adjustType);
+            row.setAdjustPendingDelta(delta);
+            row.setAdjustPendingAmount(MoneyUtil.round2(amt.add(delta)));
+        }
+        // 新角色人虚拟行：合同字段从既有行复制，保证后续折算填充（按 bizType）口径一致
+        PerformanceManageVo sample = rows.get(0);
+        for (AddMemberPayload.NewMember nm : members) {
+            BigDecimal newAmount = nm.getAmount() != null
+                ? MoneyUtil.round2(nm.getAmount()) : BigDecimal.ZERO;
+            PerformanceManageVo member = new PerformanceManageVo();
+            member.setFactType(factType);
+            member.setPeriod(period);
+            member.setFactStatus("ACTIVE");
+            member.setOrderNo(sample.getOrderNo());
+            member.setContractNo(sample.getContractNo());
+            member.setBizType(sample.getBizType());
+            member.setFeeItem(sample.getFeeItem());
+            member.setPropertyAddress(sample.getPropertyAddress());
+            member.setBusinessDate(sample.getBusinessDate());
+            member.setEmployeeId(nm.getEmployeeId());
+            member.setEmployeeCode(nm.getEmployeeCode());
+            member.setEmployeeName(nm.getEmployeeName());
+            member.setDeptPath(nm.getDeptName());
+            member.setRoleType(nm.getRoleType());
+            member.setRoleName(nm.getRoleType());
+            member.setShareRatio(nm.getNewShareRatio());
+            member.setAmount(null);
+            member.setOriginalAmount(null);
+            member.setAdjustPending(true);
+            member.setAdjustPendingType(adjustType);
+            member.setAdjustPendingAmount(newAmount);
+            member.setAdjustPendingDelta(newAmount);
+            member.setSettled(false);
+            rows.add(member);
+        }
+    }
+
+    /**
+     * 解析增加角色人/三类型指定值快照（payload_json），解析失败返回 null（跳过逐行预演/还原，不影响主流程）。
      */
     private AddMemberPayload parseAddMemberPayload(Object payloadJson) {
         if (payloadJson == null || StringUtils.isBlank(payloadJson.toString())) {

@@ -109,6 +109,31 @@ public interface ReceivedRealFactPort {
     /** 明细级金额调整：单条实收明细 supersede 为 targetAmount。明细不存在返回 null。 */
     Long adjustDetailAmount(Long detailId, BigDecimal targetAmount, Long operatorId, Long adjustId);
 
+    /**
+     * 明细级金额 + 角色占比调整（实收调整三类型指定值模式用）：
+     * 单条实收明细 supersede 为 targetAmount，shareRatio 非空时同步更新角色占比。明细不存在返回 null。
+     */
+    Long adjustDetailAmount(Long detailId, BigDecimal targetAmount, BigDecimal shareRatio,
+                            Long operatorId, Long adjustId);
+
+    /**
+     * 新增实收角色人明细（实收调整三类型「增加角色人」用）：
+     * 以模板明细为基准复制合同/期间/费用项/审批单归属等基础字段，覆盖员工/角色/金额/占比，
+     * sourceKey 使用 MANUAL-RADJ-{adjustId} 虚拟锚点避开导入幂等键，插入新 ACTIVE 行并刷新合同聚合。
+     *
+     * @param templateDetailId 模板实收明细 ID（合同既有任一 ACTIVE 明细）
+     * @param employeeId       新员工 ID
+     * @param employeeCode     新员工工号
+     * @param deptId           新部门 ID（null=跟随模板）
+     * @param roleType         角色类型
+     * @param amount           实收金额
+     * @param shareRatio       角色占比（可空）
+     * @return 新明细 ID；模板不存在返回 null
+     */
+    Long addMemberDetail(Long templateDetailId, Long employeeId, String employeeCode, Long deptId,
+                         String roleType, BigDecimal amount, BigDecimal shareRatio,
+                         Long operatorId, Long adjustId);
+
     /** 明细级冲销（结佣调整 VOID）：单行置 REVERSED + reversal_type=MANUAL_ADJUST + adjust_id，不插新行。 */
     void voidDetail(Long detailId, Long operatorId, Long adjustId);
 

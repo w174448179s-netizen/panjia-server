@@ -185,13 +185,72 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long adjustDetailAmount(Long detailId, BigDecimal targetAmount, Long operatorId, Long adjustId) {
+        return adjustDetailAmount(detailId, targetAmount, null, operatorId, adjustId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long adjustDetailAmount(Long detailId, BigDecimal targetAmount, BigDecimal shareRatio,
+                                   Long operatorId, Long adjustId) {
         ReceivedDetail oldDetail = detailMapper.selectById(detailId);
         if (oldDetail == null) {
             return null;
         }
         ReceivedDetail patch = new ReceivedDetail();
         patch.setPerformanceAmount(MoneyUtil.round2(targetAmount));
+        if (shareRatio != null) {
+            patch.setShareRatio(shareRatio);
+        }
         return supersede(oldDetail, patch, operatorId, adjustId).getId();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long addMemberDetail(Long templateDetailId, Long employeeId, String employeeCode, Long deptId,
+                                String roleType, BigDecimal amount, BigDecimal shareRatio,
+                                Long operatorId, Long adjustId) {
+        ReceivedDetail template = detailMapper.selectById(templateDetailId);
+        if (template == null) {
+            return null;
+        }
+        ReceivedDetail n = new ReceivedDetail();
+        n.setContractId(template.getContractId());
+        n.setEmployeeId(employeeId);
+        n.setDeptId(deptId != null ? deptId : template.getDeptId());
+        n.setEmployeeExternalCode(employeeCode);
+        n.setRoleType(roleType);
+        n.setRoleName(roleType);
+        n.setShareRatio(shareRatio);
+        n.setPerformanceAmount(MoneyUtil.round2(amount == null ? BigDecimal.ZERO : amount));
+        n.setFeeItem(template.getFeeItem());
+        n.setPeriod(template.getPeriod());
+        n.setEffectiveDate(template.getEffectiveDate());
+        n.setExpireDate(null);
+        // sourceKey 用 MANUAL-RADJ 虚拟锚点：避开导入事实幂等键，同一调整单重试时键稳定
+        String orderNo = "";
+        String contractNo = "";
+        ReceivedContract contract = contractMapper.selectById(template.getContractId());
+        if (contract != null) {
+            orderNo = contract.getOrderNo() == null ? "" : contract.getOrderNo();
+            contractNo = contract.getContractNo() == null ? "" : contract.getContractNo();
+        }
+        n.setSourceKey(orderNo + "|" + contractNo + "|MANUAL-RADJ-" + adjustId + "-" + employeeId
+            + "|" + (template.getFeeItem() == null ? "" : template.getFeeItem())
+            + "|" + (roleType == null ? "" : roleType));
+        // 手工新增行不归属任何导入批次/归一化记录/原始实收审批单
+        n.setSourceBatchId(null);
+        n.setNormalizedRecordId(null);
+        n.setReceivedApplyId(template.getReceivedApplyId());
+        n.setDetailStatus(STATUS_ACTIVE);
+        n.setAdjustId(adjustId);
+        n.setReversalType(null);
+        n.setRefundOfDetailId(null);
+        n.setOperatorId(operatorId);
+        detailMapper.insert(n);
+        refreshContractAggregate(n.getContractId());
+        log.info("[实收新增角色人] 明细插入完成：templateDetailId={}, newDetailId={}, adjustId={}, employeeId={}",
+            templateDetailId, n.getId(), adjustId, employeeId);
+        return n.getId();
     }
 
     @Override
