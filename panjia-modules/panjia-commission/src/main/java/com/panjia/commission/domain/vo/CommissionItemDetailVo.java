@@ -131,4 +131,7 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 增加角色人虚拟行标记（审批中新角色人尚无明细行，由 payload 快照合成展示） */
     private Boolean newMemberPending;
+
+    /** 实收金额（同合同+员工+角色 当前 ACTIVE 实收明细金额合计） */
+    private BigDecimal receivedAmount;
 }

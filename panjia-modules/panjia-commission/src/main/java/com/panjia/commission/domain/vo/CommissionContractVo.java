@@ -128,4 +128,7 @@ public class CommissionContractVo implements Serializable {
 
     /** 审批中调整后结佣合计（AMOUNT 预演；ADD_MEMBER 为新人金额，前端仅展示标记） */
     private BigDecimal adjustPendingAmount;
+
+    /** 实收金额合计（PERF_REAL 事实当前 ACTIVE 金额求和，即客户实际到账） */
+    private BigDecimal receivedAmount;
 }

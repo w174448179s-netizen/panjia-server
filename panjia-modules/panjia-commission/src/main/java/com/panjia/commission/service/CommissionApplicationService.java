@@ -1600,6 +1600,7 @@ public class CommissionApplicationService {
         BigDecimal summaryConvertedAmount = BigDecimal.ZERO;
         BigDecimal summaryExpectedAmount = BigDecimal.ZERO;
         BigDecimal summaryExpectedConvertedAmount = BigDecimal.ZERO;
+        BigDecimal summaryReceivedAmount = BigDecimal.ZERO;
         for (CommissionContractVo vo : all) {
             if (StringUtils.isNotBlank(vo.getContractNo())) {
                 summaryKeys.add(vo.getContractNo());
@@ -1620,6 +1621,9 @@ public class CommissionApplicationService {
             if (vo.getExpectedConvertedAmount() != null) {
                 summaryExpectedConvertedAmount = summaryExpectedConvertedAmount.add(vo.getExpectedConvertedAmount());
             }
+            if (vo.getReceivedAmount() != null) {
+                summaryReceivedAmount = summaryReceivedAmount.add(vo.getReceivedAmount());
+            }
         }
         PageResult<CommissionContractVo> result = PageResult.build(pageRows, (long) total);
         Map<String, Object> summary = new HashMap<>();
@@ -1634,6 +1638,7 @@ public class CommissionApplicationService {
         summary.put("totalConvertedAmount", summaryConvertedAmount);
         summary.put("totalExpectedAmount", summaryExpectedAmount);
         summary.put("totalExpectedConvertedAmount", summaryExpectedConvertedAmount);
+        summary.put("totalReceivedAmount", summaryReceivedAmount);
         result.setSummary(summary);
         return result;
     }
@@ -1746,6 +1751,9 @@ public class CommissionApplicationService {
         summary.put("totalExpectedConvertedAmount", all.stream()
             .map(r -> r.getExpectedConvertedAmount() != null ? r.getExpectedConvertedAmount() : BigDecimal.ZERO)
             .reduce(BigDecimal.ZERO, BigDecimal::add));
+        summary.put("totalReceivedAmount", all.stream()
+            .map(r -> r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
         result.setSummary(summary);
         return result;
     }
@@ -1768,6 +1776,8 @@ public class CommissionApplicationService {
         vo.setAmount(c.getExpectedAmount());
         vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
         vo.setExpectedConvertedAmount(conversionFactorPort.convert(c.getExpectedAmount(), factor));
+        // 实收金额 = PERF_REAL 合计（审批单快照 received_amount）
+        vo.setReceivedAmount(c.getAmount());
         vo.setStatus("AVAILABLE");
         return vo;
     }
@@ -1919,6 +1929,8 @@ public class CommissionApplicationService {
             vo.setAmount(c.getExpectedAmount());
             vo.setDetailCount(c.getDetailCount());
         }
+        // 实收金额 = PERF_REAL 事实合计（合同维度，c.amount 来自 FACT_TYPE_REAL 查询）
+        vo.setReceivedAmount(c.getAmount());
         // 折算后金额：合同维度聚合行无 factId，按本行 bizType 的因子折算（同一合同同一因子，应收/实收同因子）
         vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
         vo.setExpectedConvertedAmount(conversionFactorPort.convert(vo.getExpectedAmount(), factor));

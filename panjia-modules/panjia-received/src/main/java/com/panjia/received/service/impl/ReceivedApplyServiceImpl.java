@@ -1956,12 +1956,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     private void insertApply(ReceivedApply apply) {
-        try {
-            applyMapper.insert(apply);
-        } catch (DuplicateKeyException e) {
-            throw new ServiceException("合同 " + apply.getContractNo() + " " + apply.getPeriod()
-                + " 月已存在未完结实收审批单，请刷新");
-        }
+        // 撞唯一索引时原样抛 DuplicateKeyException，由外层建单循环 catch 后跳过（单条不炸整批）。
+        // 严禁在此包装成 ServiceException——外层循环 catch (DuplicateKeyException) 接不住，
+        // 会穿透导致整批回滚（2026-03 历史批次建单事件 FAILED 即此原因）。
+        applyMapper.insert(apply);
     }
 
     private void bindFacts(List<Long> detailIds, Long applyId) {

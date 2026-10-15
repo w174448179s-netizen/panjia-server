@@ -129,6 +129,16 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             JOIN pj_received_detail rdr ON rdr.source_key = sk.source_key
                AND rdr.detail_status = 'REVERSED'
             ORDER BY sk.source_key, rdr.id ASC
+        ),
+        active_received AS (
+            -- 当前 ACTIVE 实收明细按合同+员工+角色聚合（跨期合计，与结佣口径一致）
+            SELECT rc.contract_no, rc.order_no,
+                   rd.employee_external_code AS emp_code, rd.role_type,
+                   SUM(rd.performance_amount) AS recv_amt
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            WHERE rd.detail_status = 'ACTIVE'
+            GROUP BY 1, 2, 3, 4
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
@@ -190,7 +200,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                END AS "originalAmount",
                (caj.id IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
-               ci.status AS "status"
+               ci.status AS "status",
+               COALESCE(arc.recv_amt, 0) AS "receivedAmount"
         FROM pj_commission_item ci
         -- 绑定事实仅用于调整链：f.adjust_id 判结佣调整、同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
@@ -200,6 +211,10 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         LEFT JOIN reversed_expect re ON ci.fact_type = 'PERF_EXPECT'
               AND re.source_key = ci.source_key
         LEFT JOIN reversed_real rr ON rr.source_key = ci.source_key
+        LEFT JOIN active_received arc
+               ON (arc.order_no = ci.order_no OR arc.contract_no = ci.contract_no)
+              AND arc.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND arc.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN rd_active_expect rae
                ON ci.fact_type = 'PERF_REAL'
               AND rae.period IS NOT DISTINCT FROM ci.period
