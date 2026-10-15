@@ -55,7 +55,7 @@ fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
 
 echo ""
 echo "=========================================="
-echo " 盘家智管 — 后端更新【$ENV_NAME环境】→ $SSH_TARGET"
+echo " 盘家智管 — 后端更新【${ENV_NAME}环境】→ $SSH_TARGET"
 echo "=========================================="
 
 # ---- 前置校验 ----
@@ -63,12 +63,12 @@ ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1
     || fail "SSH 连不上 ${SSH_TARGET}（先 ssh-copy-id）"
 if [ "$DEPLOY_ENV" = "test" ]; then
     ssh -o BatchMode=yes "$SSH_TARGET" "test -f $TARGET_DIR/docker-compose.yml" 2>/dev/null \
-        || fail "服务器上未找到测试环境 $TARGET_DIR，请先运行 setup-test-env.sh"
-    info "目标：测试环境 $TARGET_DIR（$TARGET_URL）"
+        || fail "服务器上未找到测试环境 ${TARGET_DIR}，请先运行 setup-test-env.sh"
+    info "目标：测试环境 ${TARGET_DIR}（${TARGET_URL}）"
 else
     ssh -o BatchMode=yes "$SSH_TARGET" "test -f $TARGET_DIR/docker-compose.yml" 2>/dev/null \
-        || fail "服务器上未找到生产部署 $TARGET_DIR，请先运行 deploy.sh"
-    info "目标：生产环境 $TARGET_DIR（$TARGET_URL）"
+        || fail "服务器上未找到生产部署 ${TARGET_DIR}，请先运行 deploy.sh"
+    info "目标：生产环境 ${TARGET_DIR}（${TARGET_URL}）"
 fi
 
 # ---- 1. 本地构建 ----
@@ -83,7 +83,7 @@ scp -q "$IMAGE_TAR" "$SSH_TARGET:$TARGET_DIR/"
 ok " 上传完成 → $TARGET_DIR"
 
 # ---- 3. 服务器：load + 只重建目标环境的 server 容器 ----
-info ">>> 步骤 3/4：服务器导入镜像并重建【$ENV_NAME】server 容器"
+info ">>> 步骤 3/4：服务器导入镜像并重建【${ENV_NAME}】server 容器"
 ssh -o ServerAliveInterval=30 "$SSH_TARGET" sudo bash << REMOTE
 set -e
 cd $TARGET_DIR
@@ -113,7 +113,7 @@ done
 
 echo ""
 echo "=========================================="
-ok " 后端更新完成【$ENV_NAME环境】！$TARGET_URL"
+ok " 后端更新完成【${ENV_NAME}环境】！$TARGET_URL"
 if [ "$DEPLOY_ENV" = "test" ]; then
     echo "  测试验证通过后，再发生产：bash update-backend.sh"
 else

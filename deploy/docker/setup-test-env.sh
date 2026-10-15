@@ -79,6 +79,7 @@ ssh -o ServerAliveInterval=30 "$SSH_TARGET" "sudo env \
   TEST_MINIO_CONSOLE_PORT='${TEST_MINIO_CONSOLE_PORT}' \
   TEST_IMAGE_TAG='${TEST_IMAGE_TAG}' \
   TEST_AUTH_CODE='${TEST_AUTH_CODE}' \
+  TEST_OWNER='${SERVER_USER}' \
   bash" << 'REMOTE'
 set -e
 
@@ -86,7 +87,7 @@ echo "[测试] 目标目录：$TEST_DIR"
 
 # ---- 1. 前置检查：生产已部署 + 镜像已 load ----
 [ -f "$PROD_DIR/docker-compose.yml" ] \
-    || { echo "[测试] 未找到生产部署 $PROD_DIR，请先跑 deploy.sh"; exit 1; }
+    || { echo "[测试] 未找到生产部署 ${PROD_DIR}，请先跑 deploy.sh"; exit 1; }
 docker image inspect "panjia-server:${TEST_IMAGE_TAG}" >/dev/null 2>&1 \
     || { echo "[测试] 缺少镜像 panjia-server:${TEST_IMAGE_TAG}，请先跑 deploy.sh 导入镜像"; exit 1; }
 
@@ -143,6 +144,14 @@ else
     fi
 fi
 
+# ---- 4.5 把配置类文件交还给 SSH 用户（本块以 sudo 运行，mkdir 出来的目录归 root，
+#      会导致本地 scp/rsync 直写时报 Permission denied）。绝不 chown ./data 与 ./logs：
+#      它们归容器内用户（postgres=999 等），改了属主会让容器启动/运行失败。----
+chown "$TEST_OWNER:$TEST_OWNER" "$TEST_DIR"
+chown -R "$TEST_OWNER:$TEST_OWNER" "$TEST_DIR/web" "$TEST_DIR/nginx"
+chown "$TEST_OWNER:$TEST_OWNER" "$TEST_DIR/.env" "$TEST_DIR"/*.yml "$TEST_DIR"/*.sh 2>/dev/null || true
+echo "[测试] 目录属主已交还 $TEST_OWNER（data/logs 保持容器属主不变）"
+
 cd "$TEST_DIR"
 set -a; . ./.env; set +a
 
@@ -194,7 +203,7 @@ ok " 服务器端配置完成"
 echo ""
 echo "=========================================="
 ok " 测试环境已创建：http://$SERVER_IP:$TEST_WEB_PORT"
-echo "  测试库：$TEST_DB（独立 postgres 容器，与生产 panjia 完全隔离）"
+echo "  测试库：${TEST_DB}（独立 postgres 容器，与生产 panjia 完全隔离）"
 echo "  目录：  ssh $SSH_TARGET 'cd $TEST_DIR'"
 echo "  日志：  ssh $SSH_TARGET 'cd $TEST_DIR && ./logs.sh'"
 echo ""

@@ -130,7 +130,7 @@ for i in $(seq 1 60); do
   [ "$CODE" != "000" ] && [ "$CODE" != "502" ] && break
   sleep 5
 done
-echo "后端就绪（HTTP $CODE）"
+echo "后端就绪（HTTP ${CODE}）"
 docker exec "$REDIS_C" sh -c 'redis-cli -a "$REDIS_PASSWORD" DEL sys_oss' >/dev/null 2>&1
 echo -n "图片通道自检 /oss/minio/health/live: "
 OSSCHK=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' --max-time 8 "http://127.0.0.1:$PORT/oss/minio/health/live")
@@ -138,5 +138,5 @@ echo "$OSSCHK"
 case "$OSSCHK" in
   "200 text/html"*) echo "[X] /oss/ 落到了前端 SPA fallback——nginx.conf 里没有 /oss/ location，人工检查第 6 步";;
   200*)             echo "[OK] 全链路就绪。domain_url=http://$DOMAIN  页面重新登录后上传/回显验证即可。";;
-  *)                echo "[X] /oss/ 通道异常（$OSSCHK）——docker compose logs web 查看 nginx 错误";;
+  *)                echo "[X] /oss/ 通道异常（${OSSCHK}）——docker compose logs web 查看 nginx 错误";;
 esac
