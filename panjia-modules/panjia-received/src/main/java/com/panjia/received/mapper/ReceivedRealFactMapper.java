@@ -331,7 +331,7 @@ public interface ReceivedRealFactMapper {
                ra.period AS "period",
                'APPROVED' AS "receivedStatus",
                -- 按员工筛选时行金额改为该员工在该审批单下的 ACTIVE 明细合计（员工口径），
-               -- 不筛员工时用审批单快照 received_amount（合同全量）
+               -- 不筛员工时取该审批单 ACTIVE 明细实时合计（含已生效实收调整；快照见 originalAmount）
                -- 注意：不能用 CASE WHEN 参数 IS NOT NULL，PostgreSQL 在参数为 null 时
                -- 无法推断数据类型（could not determine data type of parameter），
                -- 改用 MyBatis choose 动态拼装两套 SQL 分支（注释中勿写井号花括号，MyBatis 会解析为占位符）
@@ -348,9 +348,16 @@ public interface ReceivedRealFactMapper {
                    ), 0) AS "amount"
                  </when>
                  <otherwise>
-                   ra.received_amount AS "amount"
+                   COALESCE((
+                       SELECT SUM(dd.performance_amount)
+                       FROM pj_received_detail dd
+                       WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
+                   ), ra.received_amount) AS "amount"
                  </otherwise>
                </choose>,
+               -- 调整前实收合计：审批单 received_amount 快照（审批通过时点值；
+               -- 实收调整执行后快照不回头改，与实时 amount 的差即实收调整带来的变化）
+               ra.received_amount AS "originalAmount",
                agg.detail_count AS "detailCount",
                agg.employee_count AS "employeeCount"
         FROM pj_perf_received_apply ra
@@ -402,6 +409,11 @@ public interface ReceivedRealFactMapper {
     /**
      * 批量查合同维度「调整前」实收金额合计：以各业务键当前 ACTIVE rd 的 sourceKey 为准，
      * 沿明细链（同 source_key，含历史 REVERSED rd）取 id 最早一条金额求和。
+     * <p>
+     * 实收调整「增加角色人」例外：新人行是凭空新增的链（source_key 含 MANUAL-RADJ 标记，
+     * 2026-10-14 三类型重构），调整前该角色在合同上不存在，其链按 0 计入原额；
+     * 否则新人金额会被同时计入「原值」与「现值」（钱只是从既有角色人转到新人，
+     * 业绩调整合同总额不变），虚增一个新人金额。
      */
     @Select("""
         <script>
@@ -433,7 +445,9 @@ public interface ReceivedRealFactMapper {
             <if test="period != null and period != ''">AND h.period = #{period}</if>
         ),
         orig AS (
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, x.performance_amount AS amt
+            SELECT DISTINCT ON (sk.source_key) sk.source_key,
+                   CASE WHEN sk.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                        ELSE x.performance_amount END AS amt
             FROM sk
             JOIN pj_received_detail x ON x.source_key = sk.source_key
             ORDER BY sk.source_key, x.id ASC

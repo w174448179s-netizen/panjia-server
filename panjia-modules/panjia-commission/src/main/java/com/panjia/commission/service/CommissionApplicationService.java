@@ -1586,6 +1586,9 @@ public class CommissionApplicationService {
         if (query.getEmployeeId() == null) {
             fillOriginalReceivedAmounts(period, pageRows, factorMap);
         }
+        // 实收金额「原值 → 调整后值」：rd 链原值与当前合计不一致时置标记（实收调整已生效；
+        // 行集跨期（行期间=申请单期间），链原值传 null 跨期查，键集已限定行集范围）
+        fillRealAmountOriginals(pageRows);
         // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
         fillContractPendingAdjust(pageRows);
         // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
@@ -1717,7 +1720,16 @@ public class CommissionApplicationService {
             }
             c.setExpectedAmount(amount != null ? amount : BigDecimal.ZERO);
             // 发起页不显示期间封账状态（还没选结佣期间），period 留空
-            all.add(toAvailableContractVO(c, conversionFactorPort.factorOf(factorMap, c.getBizType())));
+            CommissionContractVo row = toAvailableContractVO(c, conversionFactorPort.factorOf(factorMap, c.getBizType()));
+            // 实收金额「原值 → 调整后值」：快照（审批通过时点）≠ 实时合计说明实收调整已生效；
+            // 员工口径下 amount 已是该员工实时合计，与合同级快照不可比，跳过
+            if (query.getEmployeeId() == null && c.getOriginalAmount() != null
+                && row.getReceivedAmount() != null
+                && c.getOriginalAmount().compareTo(row.getReceivedAmount()) != 0) {
+                row.setReceivedAmountAdjusted(true);
+                row.setOriginalReceivedAmount(c.getOriginalAmount());
+            }
+            all.add(row);
         }
 
         int total = all.size();
@@ -1780,6 +1792,51 @@ public class CommissionApplicationService {
         vo.setReceivedAmount(c.getAmount());
         vo.setStatus("AVAILABLE");
         return vo;
+    }
+
+    /**
+     * 批量填充列表行的实收金额调整前合计（rd sourceKey 链最早金额，实收加人新人行按 0）。
+     * <p>
+     * 与「实收审批」列表同口径：订单号键优先、合同号键兜底；链原值 ≠ 当前 ACTIVE 合计时置
+     * {@code receivedAmountAdjusted} 并留存原值，供前端展示「原值 → 调整后值」。
+     * 业绩调整（AMOUNT）总额不变时两者相等，不置标记。
+     */
+    private void fillRealAmountOriginals(List<CommissionContractVo> pageRows) {
+        if (pageRows == null || pageRows.isEmpty()) {
+            return;
+        }
+        Set<String> keys = new HashSet<>();
+        for (CommissionContractVo r : pageRows) {
+            if (StringUtils.isNotBlank(r.getContractNo())) {
+                keys.add(r.getContractNo());
+            }
+            if (StringUtils.isNotBlank(r.getOrderNo())) {
+                keys.add(r.getOrderNo());
+            }
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        Map<String, BigDecimal> origMap = performanceQueryPort.sumOriginalAmountsByKeys(null, keys, FACT_TYPE_REAL);
+        if (origMap == null || origMap.isEmpty()) {
+            return;
+        }
+        for (CommissionContractVo vo : pageRows) {
+            if (vo.getReceivedAmount() == null) {
+                continue;
+            }
+            BigDecimal original = null;
+            if (StringUtils.isNotBlank(vo.getOrderNo())) {
+                original = origMap.get(vo.getOrderNo());
+            }
+            if (original == null && StringUtils.isNotBlank(vo.getContractNo())) {
+                original = origMap.get(vo.getContractNo());
+            }
+            if (original != null && original.compareTo(vo.getReceivedAmount()) != 0) {
+                vo.setReceivedAmountAdjusted(true);
+                vo.setOriginalReceivedAmount(original);
+            }
+        }
     }
 
     /**

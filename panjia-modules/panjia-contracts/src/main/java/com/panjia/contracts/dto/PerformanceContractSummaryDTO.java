@@ -40,6 +40,12 @@ public class PerformanceContractSummaryDTO implements Serializable {
     /** 合同业绩金额合计（事实原样值求和） */
     private BigDecimal amount;
 
+    /**
+     * 调整前金额合计（可空；仅实收审批通过行 listApprovedApplies 返回——审批单 received_amount 快照，
+     * 与实时 amount 不一致时说明实收调整已生效，供展示「原值 → 调整后值」）。
+     */
+    private BigDecimal originalAmount;
+
     /** 应收业绩合计（PERF_REAL 查询时附带的同合同 PERF_EXPECT 合计，§3.4 差异判定用；可能为 null） */
     private BigDecimal expectedAmount;
 

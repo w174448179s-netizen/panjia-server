@@ -93,37 +93,6 @@ public interface ReceivedAdjustMapper extends BaseMapperPlus<ReceivedAdjust, Rec
                                                        @Param("keys") java.util.Collection<String> keys);
 
     /**
-     * 按业务键集合批量查询已执行（EXECUTED）的实收调整单，取调整前原值。
-     * <p>
-     * 供实收明细列表展示「原值 → 调整后值」：实收调整执行后 pj_received_detail 金额已更新为
-     * 调整后值，调整前原值需从本表 original_amount 快照取。同一合同同期间多次调整时取最新一单
-     * （id DESC），其 original_amount 即为最近一次调整前的合计。
-     *
-     * @param period 归属期间
-     * @param keys   业务键集合（合同号/订单号混合）
-     * @return 每行含 bizKey/orderNo/originalAmount/targetAmount
-     */
-    @Select("""
-        <script>
-        SELECT DISTINCT ON (contract_no, order_no)
-               contract_no AS "bizKey",
-               order_no AS "orderNo",
-               original_amount AS "originalAmount",
-               target_amount AS "targetAmount"
-        FROM pj_perf_received_adjust
-        WHERE status = 'EXECUTED'
-          <if test="period != null and period != ''">AND period = #{period}</if>
-          AND (contract_no IN
-        <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
-            OR order_no IN
-        <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>)
-        ORDER BY contract_no, order_no, id DESC
-        </script>
-        """)
-    List<Map<String, Object>> doSelectExecutedByBizKeys(@Param("period") String period,
-                                                        @Param("keys") java.util.Collection<String> keys);
-
-    /**
      * 实收调整列表「业务类型」下拉：按数据范围（期间/部门子树/员工）取可见单据的去重业务类型。
      */
     @Select("""

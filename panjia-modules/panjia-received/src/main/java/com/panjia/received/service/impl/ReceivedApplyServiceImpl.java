@@ -77,6 +77,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private final PerformanceFactMapper factMapper;
     private final com.panjia.received.mapper.ReceivedContractMapper contractMapper;
     private final com.panjia.received.mapper.ReceivedDetailMapper detailMapper;
+    private final com.panjia.received.mapper.ReceivedRealFactMapper realFactMapper;
     private final ApprovalPort approvalPort;
     private final ConfigService configService;
     private final TaskExecutor taskExecutor;
@@ -1630,8 +1631,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 keys.add(apply.getOrderNo());
             }
         }
-        // period → bizKey → 已执行调整单（originalAmount/targetAmount）
-        Map<String, Map<String, Map<String, Object>>> executedByPeriod = new HashMap<>();
+        // period → bizKey → 实收链原值（当前 ACTIVE rd 的 sourceKey 链最早金额合计，含 REVERSED 历史；
+        // 多次调整取最初原值，与每人明细 originalAmount 求和同口径）
+        Map<String, Map<String, BigDecimal>> originalByPeriod = new HashMap<>();
         // period → bizKey → 审批中调整单（targetAmount）
         Map<String, Map<String, Map<String, Object>>> pendingByPeriod = new HashMap<>();
         for (Map.Entry<String, Set<String>> entry : keysByPeriodForAdjust.entrySet()) {
@@ -1640,15 +1642,15 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             if (keys.isEmpty()) {
                 continue;
             }
-            List<Map<String, Object>> executed = receivedAdjustMapper.doSelectExecutedByBizKeys(period, keys);
-            Map<String, Map<String, Object>> execMap = new HashMap<>();
-            for (Map<String, Object> e : executed) {
-                String bk = e.get("bizKey") == null ? null : e.get("bizKey").toString();
-                if (bk != null) {
-                    execMap.put(bk, e);
+            Map<String, BigDecimal> origMap = new HashMap<>();
+            for (Map<String, Object> row : realFactMapper.selectOriginalAmountsByKeys(period, keys)) {
+                Object bk = row.get("bizKey");
+                Object amt = row.get("originalAmount");
+                if (bk != null && amt != null) {
+                    origMap.put(bk.toString(), new BigDecimal(amt.toString()));
                 }
             }
-            executedByPeriod.put(period, execMap);
+            originalByPeriod.put(period, origMap);
 
             List<Map<String, Object>> pendings = receivedAdjustMapper.doSelectPendingByBizKeys(period, keys);
             Map<String, Map<String, Object>> pendMap = new HashMap<>();
@@ -1679,17 +1681,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
                 // 实收业绩展示实时值（pj_received_detail ACTIVE 合计，含已生效实收调整）；
-                // 调整前原值从 pj_perf_received_adjust 已执行单的 original_amount 快照取（执行后 rd 金额已更新），
+                // 调整前原值取 rd 链最早金额合计（含 REVERSED 历史；多次调整取最初，与每人明细同口径），
                 // 与实时值不一致时置「已调整」，供前端展示「原值 → 调整后值」
                 if (m.getReceivedAmount() != null) {
-                    BigDecimal originalReceived = null;
-                    Map<String, Map<String, Object>> execMap = executedByPeriod.get(apply.getPeriod());
-                    if (execMap != null) {
-                        Map<String, Object> exec = matchAdjustByBizKey(execMap, apply.getContractNo(), apply.getOrderNo());
-                        if (exec != null && exec.get("originalAmount") != null) {
-                            originalReceived = new BigDecimal(exec.get("originalAmount").toString());
-                        }
-                    }
+                    Map<String, BigDecimal> origMap = originalByPeriod.get(apply.getPeriod());
+                    BigDecimal originalReceived = matchChainOriginal(origMap, apply.getContractNo(), apply.getOrderNo());
                     boolean receivedAdjusted = originalReceived != null
                         && originalReceived.compareTo(m.getReceivedAmount()) != 0;
                     apply.setReceivedAdjusted(receivedAdjusted);
@@ -1721,6 +1717,26 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 }
             }
         }
+    }
+
+    /**
+     * 按订单号优先、合同号兜底从链原值 Map 取该行的调整前实收合计。
+     * <p>
+     * {@code selectOriginalAmountsByKeys} 对同一张实收合同会同时按 order_no / contract_no
+     * 两个键各输出一行（金额相同）；行有订单号时按订单号精确取（同合同号挂多订单防串单），
+     * 查不到再退化合同号键。
+     */
+    private BigDecimal matchChainOriginal(Map<String, BigDecimal> origMap, String rowContractNo, String rowOrderNo) {
+        if (origMap == null || origMap.isEmpty()) {
+            return null;
+        }
+        if (StringUtils.isNotBlank(rowOrderNo) && origMap.containsKey(rowOrderNo)) {
+            return origMap.get(rowOrderNo);
+        }
+        if (StringUtils.isNotBlank(rowContractNo)) {
+            return origMap.get(rowContractNo);
+        }
+        return null;
     }
 
     /**
@@ -1792,6 +1808,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             bizType == null ? java.util.Collections.emptySet() : java.util.Collections.singleton(bizType));
         BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
         BigDecimal recvSum = BigDecimal.ZERO;
+        BigDecimal originalRecvSum = BigDecimal.ZERO;
         BigDecimal expectConvertedSum = BigDecimal.ZERO;
         BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
         for (ReceivedFactDetailVo f : facts) {
@@ -1802,33 +1819,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 f.setOriginalConvertedAmount(conversionFactorPort.convert(f.getOriginalExpectedAmount(), factor));
             }
             if (f.getAmount() != null) recvSum = recvSum.add(f.getAmount());
+            // 实收行级原值（rd 链最早 REVERSED 金额，无链=当前值；MANUAL-RADJ 新人行=0）求和=合同原值合计
+            originalRecvSum = originalRecvSum.add(f.getOriginalAmount() != null ? f.getOriginalAmount()
+                : (f.getAmount() != null ? f.getAmount() : BigDecimal.ZERO));
             if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
             if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
         }
         // 实收合计取实收明细实时合计（rd ACTIVE，含已生效实收调整）；
-        // 调整前原值从 pj_perf_received_adjust 已执行单的 original_amount 快照取，展示「原值 → 调整后值」
+        // 调整前原值=每人行链原值求和（多次调整取最初，与每人明细「原值 → 调整后值」同口径），
+        // 与实时值不一致时置「已调整」；业绩调整（AMOUNT）总额不变时合计无箭头、仅个人行有箭头
         apply.setReceivedAmount(recvSum);
-        BigDecimal originalReceived = null;
-        if (StringUtils.isNotBlank(apply.getContractNo()) || StringUtils.isNotBlank(apply.getOrderNo())) {
-            Set<String> keys = new LinkedHashSet<>();
-            if (StringUtils.isNotBlank(apply.getContractNo())) {
-                keys.add(apply.getContractNo());
-            }
-            if (StringUtils.isNotBlank(apply.getOrderNo())) {
-                keys.add(apply.getOrderNo());
-            }
-            List<Map<String, Object>> executed = receivedAdjustMapper.doSelectExecutedByBizKeys(apply.getPeriod(), keys);
-            for (Map<String, Object> e : executed) {
-                if (e.get("originalAmount") != null) {
-                    originalReceived = new BigDecimal(e.get("originalAmount").toString());
-                    break;
-                }
-            }
-        }
-        boolean receivedAdjusted = originalReceived != null && originalReceived.compareTo(recvSum) != 0;
+        boolean receivedAdjusted = originalRecvSum.compareTo(recvSum) != 0;
         apply.setReceivedAdjusted(receivedAdjusted);
         if (receivedAdjusted) {
-            apply.setOriginalReceivedAmount(originalReceived);
+            apply.setOriginalReceivedAmount(originalRecvSum);
         }
         apply.setExpectedConvertedAmount(expectConvertedSum);
         // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）

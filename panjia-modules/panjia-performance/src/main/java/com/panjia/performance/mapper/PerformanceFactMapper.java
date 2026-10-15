@@ -463,6 +463,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                rd.role_name AS "roleName",
                rd.share_ratio AS "shareRatio",
                rd.performance_amount AS "amount",
+               -- 调整前原值：同 source_key 链最早一条 REVERSED 明细金额；实收加人调整新插行（MANUAL-RADJ 标记）无前序链按 0；
+               -- 无链（未调整）回退当前值，前端按 originalAmount ≠ amount 判定「已调整」
+               CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                    ELSE COALESCE((SELECT rdr.performance_amount FROM pj_received_detail rdr
+                                   WHERE rdr.source_key = rd.source_key AND rdr.detail_status = 'REVERSED'
+                                   ORDER BY rdr.id ASC LIMIT 1), rd.performance_amount) END AS "originalAmount",
                rd.source_key AS "sourceKey",
                FALSE AS "manualAdjust"
         FROM pj_received_detail rd
@@ -853,7 +859,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * （当月+历史合并，与建单 loadExpectItemFacts 2026-09-30 定稿一致）——
      * 冲正/红冲负数镜像落在实收月，旧「当月优先排斥历史」会把应收算成负数（2026-10-11 修复）。
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
-     * 实收侧（rd）暂无调整链，originalAmount = amount、receivedAdjusted 恒为 false。
+     * 实收原值同样沿 rd 的 sourceKey 链取最早 REVERSED 金额（实收调整 supersede 产生链），
+     * receivedAdjusted 标记链上存在 REVERSED 或为「增加角色人」新人行（MANUAL-RADJ，原值按 0）。
      * orderNo 非空时按订单号限定（合同号非空再加合同号=双键精确，同合同号挂多订单防跨订单配对）；
      * orderNo 为空（历史单据）退化合同号双列 OR 旧口径；合同号与订单号都为空时不匹配任何行；
      * degradeToContract=true（调用方双侧闸门判定两侧订单都唯一）时新签侧退化仅按合同号配对，
@@ -953,8 +960,21 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COALESCE(oe.orig_amt, ae.exp_amt) AS "originalExpectedAmount",
                (oe.orig_amt IS NOT NULL) AS "expectedAdjusted",
                rd.performance_amount AS "amount",
-               rd.performance_amount AS "originalAmount",
-               FALSE AS "receivedAdjusted"
+               -- 实收原值沿 rd 的 sourceKey 链取最早 REVERSED 金额（与新签 originalExpectedAmount 同口径）；
+               -- 实收调整「增加角色人」新人行（MANUAL-RADJ 虚拟锚点）无前序，调整前按 0 展示（0 → X）
+               CASE
+                   WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                   ELSE COALESCE((
+                       SELECT rdr.performance_amount
+                       FROM pj_received_detail rdr
+                       WHERE rdr.source_key = rd.source_key
+                         AND rdr.detail_status = 'REVERSED'
+                       ORDER BY rdr.id ASC LIMIT 1), rd.performance_amount)
+               END AS "originalAmount",
+               (rd.source_key LIKE '%|MANUAL-RADJ-%' OR EXISTS (
+                   SELECT 1 FROM pj_received_detail rdr
+                   WHERE rdr.source_key = rd.source_key
+                     AND rdr.detail_status = 'REVERSED')) AS "receivedAdjusted"
         FROM rc
         JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
@@ -1503,6 +1523,17 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             </if>
             ORDER BY pf.source_key, pf.id ASC
         ),
+        reversed_real AS (
+            -- 实收侧每个 source_key 最早一条 REVERSED rd 金额（实收调整 supersede 链原值）
+            SELECT DISTINCT ON (rdr.source_key)
+                   rdr.source_key, rdr.performance_amount
+            FROM pj_received_detail rdr
+            WHERE rdr.detail_status = 'REVERSED'
+            <if test="period != null and period != ''">
+              AND rdr.period = #{period}
+            </if>
+            ORDER BY rdr.source_key, rdr.id ASC
+        ),
         fact_agg AS (
             SELECT cp.biz_key AS "bizKey",
                    cp.max_period AS "period",
@@ -1515,12 +1546,20 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    COALESCE(SUM(CASE WHEN ar.src = 'E'
                                      THEN COALESCE(re.performance_amount, ar.amount) ELSE 0 END), 0) AS "expectOriginalAmount",
                    COALESCE(SUM(CASE WHEN ar.src = 'R' THEN ar.amount ELSE 0 END), 0) AS "realAmount",
+                   -- 实收原值合计：链上最早 REVERSED 金额；实收加人新人行（MANUAL-RADJ）按 0 计
+                   COALESCE(SUM(CASE WHEN ar.src = 'R'
+                                     THEN CASE WHEN ar.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                                               ELSE COALESCE(rr.performance_amount, ar.amount) END
+                                     ELSE 0 END), 0) AS "realOriginalAmount",
+                   BOOL_OR(ar.src = 'R' AND (rr.source_key IS NOT NULL
+                                             OR ar.source_key LIKE '%|MANUAL-RADJ-%')) AS "realAdjusted",
                    BOOL_OR(ar.adjust_id IS NOT NULL) AS "hasAdjust",
                    COUNT(DISTINCT COALESCE(ar.employee_id::text, ar.emp_code)) AS "employeeCount",
                    COUNT(*) AS "detailCount"
             FROM contract_period cp
             JOIN all_rows ar ON ar.biz_key = cp.biz_key
             LEFT JOIN reversed_expect re ON re.source_key = ar.source_key
+            LEFT JOIN reversed_real rr ON rr.source_key = ar.source_key AND ar.src = 'R'
             <if test="employeeId != null">
               WHERE ar.employee_id = #{employeeId}
             </if>
@@ -1535,6 +1574,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                fa."expectAmount",
                fa."expectOriginalAmount",
                fa."realAmount",
+               fa."realOriginalAmount",
+               fa."realAdjusted",
                fa."hasAdjust",
                fa."employeeCount",
                fa."detailCount",
@@ -1926,6 +1967,26 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                     AND rdx.role_type IS NOT DISTINCT FROM f.role_type),
                  0
                ) AS "realAmount",
+               COALESCE(
+                 -- 配对实收行的链原值合计（最早 REVERSED 金额；MANUAL-RADJ 新人行按 0），
+                 -- 与 realAmount 不一致时前端展示「原值 → 调整后值」
+                 (SELECT SUM(CASE WHEN rdx.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                                  ELSE COALESCE((
+                                      SELECT rdr.performance_amount
+                                      FROM pj_received_detail rdr
+                                      WHERE rdr.source_key = rdx.source_key
+                                        AND rdr.detail_status = 'REVERSED'
+                                      ORDER BY rdr.id ASC LIMIT 1), rdx.performance_amount) END)
+                  FROM pj_received_detail rdx
+                  JOIN pj_received_contract rc ON rc.id = rdx.contract_id
+                  WHERE rdx.detail_status = 'ACTIVE'
+                    AND rdx.period = f.period
+                    AND (rc.order_no = f.order_no OR rc.contract_no = f.contract_no
+                         OR rc.order_no = f.contract_no OR rc.contract_no = f.order_no)
+                    AND rdx.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                    AND rdx.role_type IS NOT DISTINCT FROM f.role_type),
+                 0
+               ) AS "originalRealAmount",
                (ci.id IS NOT NULL) AS "settled",
                ca.lock_time AS "settleDate",
                (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust"

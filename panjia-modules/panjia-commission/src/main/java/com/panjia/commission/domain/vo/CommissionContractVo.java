@@ -131,4 +131,13 @@ public class CommissionContractVo implements Serializable {
 
     /** 实收金额合计（PERF_REAL 事实当前 ACTIVE 金额求和，即客户实际到账） */
     private BigDecimal receivedAmount;
+
+    /**
+     * 调整前实收金额合计（当前 ACTIVE rd 的 sourceKey 链最早金额求和，实收加人新人行按 0；
+     * 仅 {@link #receivedAmountAdjusted}=true 时有值，供展示「原值 → 调整后值」）。
+     */
+    private BigDecimal originalReceivedAmount;
+
+    /** 实收金额已被实收调整（链原值 ≠ 当前合计；业绩调整 AMOUNT 总额不变时不置标记） */
+    private Boolean receivedAmountAdjusted;
 }

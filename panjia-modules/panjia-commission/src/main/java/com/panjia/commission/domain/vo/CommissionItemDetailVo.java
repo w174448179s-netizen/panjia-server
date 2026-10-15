@@ -134,4 +134,7 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 实收金额（同合同+员工+角色 当前 ACTIVE 实收明细金额合计） */
     private BigDecimal receivedAmount;
+
+    /** 实收金额（调整前：配对 rd 行 sourceKey 链最早 REVERSED 金额，实收加人新人行按 0；未调整时 = receivedAmount） */
+    private BigDecimal originalReceivedAmount;
 }

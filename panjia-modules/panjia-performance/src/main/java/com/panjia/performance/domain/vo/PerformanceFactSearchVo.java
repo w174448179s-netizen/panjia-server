@@ -41,6 +41,12 @@ public class PerformanceFactSearchVo {
     /** 实收业绩金额合计（ACTIVE 的 PERF_REAL） */
     private BigDecimal realAmount;
 
+    /** 实收金额合计（调整前：rd sourceKey 链最早 REVERSED 金额，实收加人新人行按 0；未调整时 = realAmount） */
+    private BigDecimal realOriginalAmount;
+
+    /** 实收业绩是否已被实收调整（链上存在 REVERSED 或含实收加人新人行） */
+    private Boolean realAdjusted;
+
     /** 是否有调整（EXISTS pj_perf_adjust WHERE contract_no = ?） */
     private Boolean hasAdjust;
 

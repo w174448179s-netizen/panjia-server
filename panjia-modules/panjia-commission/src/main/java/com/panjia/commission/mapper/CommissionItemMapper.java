@@ -139,6 +139,26 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
             WHERE rd.detail_status = 'ACTIVE'
             GROUP BY 1, 2, 3, 4
+        ),
+        reversed_rd_chain AS (
+            -- rd 全量链最早 REVERSED 金额（实收调整 supersede 链原值，一次预聚合替代逐行相关子查询）
+            SELECT DISTINCT ON (source_key) source_key, performance_amount
+            FROM pj_received_detail
+            WHERE detail_status = 'REVERSED'
+            ORDER BY source_key, id ASC
+        ),
+        original_received AS (
+            -- 与 active_received 同配对的 ACTIVE rd 行，逐行取链原值求和
+            -- （实收加人新人行 MANUAL-RADJ 无前序，按 0 计，与新签 MANUAL-ADJ 同口径）
+            SELECT rc.contract_no, rc.order_no,
+                   rd.employee_external_code AS emp_code, rd.role_type,
+                   SUM(CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                            ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END) AS orig_recv_amt
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN reversed_rd_chain rrc ON rrc.source_key = rd.source_key
+            WHERE rd.detail_status = 'ACTIVE'
+            GROUP BY 1, 2, 3, 4
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
@@ -201,7 +221,9 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                (caj.id IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
                ci.status AS "status",
-               COALESCE(arc.recv_amt, 0) AS "receivedAmount"
+               COALESCE(arc.recv_amt, 0) AS "receivedAmount",
+               -- 配对实收行的链原值合计：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
+               COALESCE(orc.orig_recv_amt, 0) AS "originalReceivedAmount"
         FROM pj_commission_item ci
         -- 绑定事实仅用于调整链：f.adjust_id 判结佣调整、同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
@@ -215,6 +237,10 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ON (arc.order_no = ci.order_no OR arc.contract_no = ci.contract_no)
               AND arc.emp_code IS NOT DISTINCT FROM ci.employee_code
               AND arc.role_type IS NOT DISTINCT FROM ci.role_type
+        LEFT JOIN original_received orc
+               ON (orc.order_no = ci.order_no OR orc.contract_no = ci.contract_no)
+              AND orc.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND orc.role_type IS NOT DISTINCT FROM ci.role_type
         LEFT JOIN rd_active_expect rae
                ON ci.fact_type = 'PERF_REAL'
               AND rae.period IS NOT DISTINCT FROM ci.period
