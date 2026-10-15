@@ -55,14 +55,21 @@ public class AttendanceDataSource extends AbstractDataSource {
             raw.setAttendDate(monthStart);
             raw.setLateCount(integer(row, "lateCount"));
             raw.setAbsentDays(decimal(row, "absentDays"));
-            // 请假天数 = 事假 + 病假（合计参与算薪扣款）
+            // 请假天数：V210 起病假拆为「诊所类证明」「二甲医院以上」两列；
+            // sickLeaveDays 为 V200/简版旧模板的病假合计列（新模板不存在时为 null）。
+            // leaveDays = 事假 + 两类病假（+旧版病假合计），参与算薪扣款。
             BigDecimal personalLeave = decimal(row, "personalLeaveDays");
-            BigDecimal sickLeave = decimal(row, "sickLeaveDays");
-            BigDecimal leaveDays = sumNullable(personalLeave, sickLeave);
+            BigDecimal sickLeaveLegacy = decimal(row, "sickLeaveDays");
+            BigDecimal sickClinicLeave = decimal(row, "sickClinicLeaveDays");
+            BigDecimal sickHospitalLeave = decimal(row, "sickHospitalLeaveDays");
+            BigDecimal leaveDays = sumNullable(personalLeave,
+                sumNullable(sickLeaveLegacy, sumNullable(sickClinicLeave, sickHospitalLeave)));
             raw.setLeaveDays(leaveDays);
-            // 补入 raw_json，供归一化阶段消费（extraJson）与未来按日拆分留痕
+            // 补入 raw_json，供归一化阶段消费（extraJson）与聚合器按类拆分
             rawJson.put("personalLeaveDays", personalLeave);
-            rawJson.put("sickLeaveDays", sickLeave);
+            rawJson.put("sickLeaveDays", sickLeaveLegacy);
+            rawJson.put("sickClinicLeaveDays", sickClinicLeave);
+            rawJson.put("sickHospitalLeaveDays", sickHospitalLeave);
             rawJson.put("leaveDays", leaveDays);
             raw.setRawJson(writeJson(rawJson));
 

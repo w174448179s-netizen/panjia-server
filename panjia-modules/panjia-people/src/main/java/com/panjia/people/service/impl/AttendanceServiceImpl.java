@@ -460,6 +460,11 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         record.setLateMinutes(summary.getLateMinutes() == null ? 0 : summary.getLateMinutes());
         record.setMissingCardCount(summary.getMissingCardCount() == null ? 0 : summary.getMissingCardCount());
         record.setAbsentDays(summary.getAbsentDays() == null ? BigDecimal.ZERO : summary.getAbsentDays());
+        // 请假三类分项（旧模板/历史导入分项为 null 时补 0）
+        record.setPersonalLeaveDays(summary.getPersonalLeaveDays() == null ? BigDecimal.ZERO : summary.getPersonalLeaveDays());
+        record.setSickClinicDays(summary.getSickClinicDays() == null ? BigDecimal.ZERO : summary.getSickClinicDays());
+        record.setSickHospitalDays(summary.getSickHospitalDays() == null ? BigDecimal.ZERO : summary.getSickHospitalDays());
+        // 合计以聚合器口径为准（事假+两类病假+旧版病假合计列）
         record.setLeaveDays(summary.getLeaveDays() == null ? BigDecimal.ZERO : summary.getLeaveDays());
     }
 
@@ -470,7 +475,19 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
         AttendanceRecord record = new AttendanceRecord();
         record.setEmployeeId(dto.getEmployeeId());
         record.setAttendMonth(dto.getAttendMonth());
-        record.setLeaveDays(dto.getLeaveDays() == null ? BigDecimal.ZERO : dto.getLeaveDays());
+        BigDecimal personal = dto.getPersonalLeaveDays() == null ? BigDecimal.ZERO : dto.getPersonalLeaveDays();
+        BigDecimal sickClinic = dto.getSickClinicDays() == null ? BigDecimal.ZERO : dto.getSickClinicDays();
+        BigDecimal sickHospital = dto.getSickHospitalDays() == null ? BigDecimal.ZERO : dto.getSickHospitalDays();
+        record.setPersonalLeaveDays(personal);
+        record.setSickClinicDays(sickClinic);
+        record.setSickHospitalDays(sickHospital);
+        // 新前端传三类分项：合计=三项之和；旧前端仅传 leaveDays（分项全为 null）：沿用合计
+        boolean splitsProvided = dto.getPersonalLeaveDays() != null
+            || dto.getSickClinicDays() != null || dto.getSickHospitalDays() != null;
+        BigDecimal leaveDays = splitsProvided
+            ? personal.add(sickClinic).add(sickHospital)
+            : (dto.getLeaveDays() == null ? BigDecimal.ZERO : dto.getLeaveDays());
+        record.setLeaveDays(leaveDays);
         record.setAbsentDays(dto.getAbsentDays() == null ? BigDecimal.ZERO : dto.getAbsentDays());
         record.setLateCount(dto.getLateCount() == null ? 0 : dto.getLateCount());
         record.setLateMinutes(dto.getLateMinutes() == null ? 0 : dto.getLateMinutes());
@@ -625,6 +642,9 @@ public class AttendanceServiceImpl implements AttendanceService, PeopleAttendanc
             dto.setImportedFee(BigDecimal.ZERO);
             dto.setLateCount(r.getLateCount() == null ? 0 : r.getLateCount());
             dto.setAbsentDays(r.getAbsentDays() == null ? BigDecimal.ZERO : r.getAbsentDays());
+            dto.setPersonalLeaveDays(r.getPersonalLeaveDays() == null ? BigDecimal.ZERO : r.getPersonalLeaveDays());
+            dto.setSickClinicDays(r.getSickClinicDays() == null ? BigDecimal.ZERO : r.getSickClinicDays());
+            dto.setSickHospitalDays(r.getSickHospitalDays() == null ? BigDecimal.ZERO : r.getSickHospitalDays());
             dto.setLeaveDays(r.getLeaveDays() == null ? BigDecimal.ZERO : r.getLeaveDays());
             result.put(r.getEmployeeId(), dto);
         }

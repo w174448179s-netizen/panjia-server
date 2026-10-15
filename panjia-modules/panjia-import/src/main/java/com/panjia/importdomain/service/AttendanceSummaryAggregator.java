@@ -91,6 +91,10 @@ public class AttendanceSummaryAggregator {
             dto.setLateCount(firstNonNull(dto.getLateCount(), raw.getLateCount()));
             dto.setAbsentDays(firstNonNull(dto.getAbsentDays(), raw.getAbsentDays()));
             dto.setLeaveDays(firstNonNull(dto.getLeaveDays(), raw.getLeaveDays()));
+            // 请假分项（V210 病假拆两列）：事假 / 病假（诊所类证明）/ 病假（二甲医院以上）
+            dto.setPersonalLeaveDays(firstNonNull(dto.getPersonalLeaveDays(), dec(extra, "personalLeaveDays")));
+            dto.setSickClinicDays(firstNonNull(dto.getSickClinicDays(), dec(extra, "sickClinicLeaveDays")));
+            dto.setSickHospitalDays(firstNonNull(dto.getSickHospitalDays(), dec(extra, "sickHospitalLeaveDays")));
         }
         return new ArrayList<>(byCode.values());
     }
@@ -188,6 +192,9 @@ public class AttendanceSummaryAggregator {
             dto.setLateCount(intOf(extra, "lateCount"));
             dto.setAbsentDays(dec(extra, "absentDays"));
             dto.setLeaveDays(dec(extra, "leaveDays"));
+            // 历史模板事假单列，病假为合计列（sickLeaveDays）：仅透传事假，
+            // 病假合计由引擎经 leaveDays 差额走 leaveFee 旧规则兜底
+            dto.setPersonalLeaveDays(dec(extra, "personalLeaveDays"));
             out.add(dto);
         }
         return out;

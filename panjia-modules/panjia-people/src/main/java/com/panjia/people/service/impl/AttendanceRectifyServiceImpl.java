@@ -61,18 +61,25 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
     private static final DateTimeFormatter PERIOD_FMT = DateTimeFormatter.ofPattern("yyyy-MM");
 
     /** 可修改字段白名单：field → 中文名 */
-    private static final Map<String, String> FIELD_NAMES = Map.of(
-        "attendDays", "出勤天数",
-        "restDays", "休息天数",
-        "lateCount", "迟到次数",
-        "lateMinutes", "迟到分钟",
-        "missingCardCount", "缺卡次数",
-        "absentDays", "旷工天数",
-        "leaveDays", "请假天数",
-        "remark", "备注");
+    private static final Map<String, String> FIELD_NAMES = Map.ofEntries(
+        Map.entry("attendDays", "出勤天数"),
+        Map.entry("restDays", "休息天数"),
+        Map.entry("lateCount", "迟到次数"),
+        Map.entry("lateMinutes", "迟到分钟"),
+        Map.entry("missingCardCount", "缺卡次数"),
+        Map.entry("absentDays", "旷工天数"),
+        Map.entry("leaveDays", "请假天数"),
+        Map.entry("personalLeaveDays", "事假天数"),
+        Map.entry("sickClinicDays", "病假（诊所类证明）天数"),
+        Map.entry("sickHospitalDays", "病假（二甲医院以上）天数"),
+        Map.entry("remark", "备注"));
 
     /** 整数字段（非负） */
     private static final Set<String> INT_FIELDS = Set.of("lateCount", "lateMinutes", "missingCardCount");
+
+    /** 请假三类分项：任一被修改时，合计请假天数按分项之和重算（V210 导入口径） */
+    private static final Set<String> LEAVE_SPLIT_FIELDS =
+        Set.of("personalLeaveDays", "sickClinicDays", "sickHospitalDays");
 
     private final AttendanceRectifyMapper rectifyMapper;
     private final AttendanceRecordMapper attendanceMapper;
@@ -300,8 +307,16 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
         if (record == null) {
             throw new ServiceException("该月考勤记录不存在，修改无法生效");
         }
+        boolean splitChanged = false;
         for (RectifyChangeItem item : items) {
             applyField(record, item.getField(), item.getNewValue());
+            splitChanged = splitChanged || LEAVE_SPLIT_FIELDS.contains(item.getField());
+        }
+        if (splitChanged) {
+            // 分项口径下合计 = 事假 + 病假诊所 + 病假二甲，保持与导入/保存逻辑一致
+            record.setLeaveDays(nz(record.getPersonalLeaveDays())
+                .add(nz(record.getSickClinicDays()))
+                .add(nz(record.getSickHospitalDays())));
         }
         if (attendanceMapper.updateById(record) == 0) {
             throw new ServiceException("考勤记录已被他人修改，生效失败，请重新审批");
@@ -319,6 +334,9 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
             case "restDays" -> record.setRestDays(parseDecimal(field, newValue));
             case "absentDays" -> record.setAbsentDays(parseDecimal(field, newValue));
             case "leaveDays" -> record.setLeaveDays(parseDecimal(field, newValue));
+            case "personalLeaveDays" -> record.setPersonalLeaveDays(parseDecimal(field, newValue));
+            case "sickClinicDays" -> record.setSickClinicDays(parseDecimal(field, newValue));
+            case "sickHospitalDays" -> record.setSickHospitalDays(parseDecimal(field, newValue));
             case "lateCount" -> record.setLateCount(parseInt(field, newValue));
             case "lateMinutes" -> record.setLateMinutes(parseInt(field, newValue));
             case "missingCardCount" -> record.setMissingCardCount(parseInt(field, newValue));
@@ -372,6 +390,9 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
             case "restDays" -> record.getRestDays();
             case "absentDays" -> record.getAbsentDays();
             case "leaveDays" -> record.getLeaveDays();
+            case "personalLeaveDays" -> record.getPersonalLeaveDays();
+            case "sickClinicDays" -> record.getSickClinicDays();
+            case "sickHospitalDays" -> record.getSickHospitalDays();
             case "lateCount" -> record.getLateCount();
             case "lateMinutes" -> record.getLateMinutes();
             case "missingCardCount" -> record.getMissingCardCount();
@@ -403,6 +424,10 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
         } catch (NumberFormatException e) {
             throw new ServiceException("【{}】必须为数字", FIELD_NAMES.get(field));
         }
+    }
+
+    private static BigDecimal nz(BigDecimal v) {
+        return v == null ? BigDecimal.ZERO : v;
     }
 
     // ==================== 导入卡点查询（PeopleAttendanceRectifyQueryPort） ====================

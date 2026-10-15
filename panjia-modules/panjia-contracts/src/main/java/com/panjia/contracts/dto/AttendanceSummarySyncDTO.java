@@ -43,6 +43,15 @@ public class AttendanceSummarySyncDTO implements Serializable {
     /** 旷工天数 */
     private BigDecimal absentDays;
 
-    /** 请假天数（事假+病假合计） */
+    /** 事假天数（V210 钉钉模板拆分） */
+    private BigDecimal personalLeaveDays;
+
+    /** 病假天数-诊所类证明（V210 钉钉模板拆分） */
+    private BigDecimal sickClinicDays;
+
+    /** 病假天数-二甲医院以上（V210 钉钉模板拆分） */
+    private BigDecimal sickHospitalDays;
+
+    /** 请假天数（事假+病假三类合计；V200 旧模板为事假+病假合计） */
     private BigDecimal leaveDays;
 }

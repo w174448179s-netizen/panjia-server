@@ -66,6 +66,8 @@ class ImportTemplateStaticValidationTest {
         "employeeName", "attendanceGroup", "deptName", "position", "userId",
         "attendDays", "restDays", "lateMinutes", "missingCardCount",
         "weekendOvertime", "holidayOvertime",
+        // ATTENDANCE V210 病假拆分为「诊所类证明」「二甲医院以上」两列（V120005）
+        "sickClinicLeaveDays", "sickHospitalLeaveDays",
         // POINTS
         "pointDate", "score", "violationCount",
         // POINTS V200 填报时间（V120019/V120020 submit_time 映射）

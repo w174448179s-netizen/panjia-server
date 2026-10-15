@@ -86,6 +86,15 @@ public class AttendanceApprovalVO implements Serializable {
 
         private BigDecimal leaveDays;
 
+        /** 事假天数 */
+        private BigDecimal personalLeaveDays;
+
+        /** 病假（诊所类证明）天数 */
+        private BigDecimal sickClinicDays;
+
+        /** 病假（二甲医院以上）天数 */
+        private BigDecimal sickHospitalDays;
+
         private String remark;
     }
 }

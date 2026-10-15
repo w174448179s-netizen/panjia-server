@@ -25,7 +25,19 @@ public class AttendanceSaveDTO {
     @NotNull(message = "考勤月份不能为空")
     private LocalDate attendMonth;
 
-    /** 请假天数（事假+病假合计，非负） */
+    /** 事假天数（非负；与两类病假同时传入时 leaveDays 取三项合计） */
+    @DecimalMin(value = "0", message = "事假天数不能小于 0")
+    private BigDecimal personalLeaveDays;
+
+    /** 病假天数-诊所类证明（非负） */
+    @DecimalMin(value = "0", message = "病假（诊所类证明）天数不能小于 0")
+    private BigDecimal sickClinicDays;
+
+    /** 病假天数-二甲医院以上（非负） */
+    @DecimalMin(value = "0", message = "病假（二甲医院以上）天数不能小于 0")
+    private BigDecimal sickHospitalDays;
+
+    /** 请假天数（事假+病假合计，非负；旧前端兼容：未传三类分项时以此为准） */
     @DecimalMin(value = "0", message = "请假天数不能小于 0")
     private BigDecimal leaveDays;
 

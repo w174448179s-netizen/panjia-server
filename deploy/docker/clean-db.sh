@@ -2,9 +2,11 @@
 # ============================================================================
 # 盘家智管 — 清库脚本（上线前清洗测试/预发布脏数据）
 #
-# 清什么：业务运行数据 + 工作流实例 + 调度/重试运行记录 + Redis + MinIO 业务文件
-# 保留什么：Flyway 版本表、系统菜单/字典/角色/OSS 配置、工作流定义、任务配置、AI 配置、
-#           算薪规则、期间配置、sys_dept/sys_user（上线前录入的正式组织和账号）
+# 清什么：DROP 整库所有表（含 flyway_schema_history）+ Redis + MinIO 业务文件
+# 重启后：server 启动时 Flyway 从 V1 全量重放迁移，重建全部表并重灌种子数据
+#         （系统菜单/字典/角色/OSS 配置/sys_config/admin 账号/算薪规则/工作流定义等）
+# 注意：非迁移管理的配置不会被重建 —— AI(sai_*) 配置、调度(sj_*)命名空间/任务、
+#       MinIO 桶内文件等，清后需重新配置；admin 密码会重置为迁移里的默认值(admin123)
 #
 # 用法（Mac 本地执行，服务器信息读本目录 server.env）：
 #   bash clean-db.sh prod                       # 清生产库（危险！）
@@ -64,17 +66,17 @@ echo "=========================================="
 
 # ---- 前置校验 ----
 info ">>> 连通性检查"
-ssh -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1 \
+ssh -n -o ConnectTimeout=8 -o BatchMode=yes "$SSH_TARGET" "echo ok" >/dev/null 2>&1 \
     || fail "SSH 连不上 ${SSH_TARGET}"
-ssh -o BatchMode=yes "$SSH_TARGET" "test -f $TARGET_DIR/docker-compose.yml" 2>/dev/null \
+ssh -n -o BatchMode=yes "$SSH_TARGET" "test -f $TARGET_DIR/docker-compose.yml" 2>/dev/null \
     || fail "服务器上未找到 ${ENV_NAME} 部署 $TARGET_DIR"
 ok " 目标环境：${ENV_NAME} ${TARGET_DIR}（DB: ${DB_NAME}，容器前缀: ${CONTAINER_PREFIX}-*）"
 
 # ---- 二次确认 ----
 if ! $DRY_RUN; then
     echo ""
-    printf '%b[确认]%b 即将清空【%b%s%b】业务数据，保留种子/配置表。\n' \
-        "$YELLOW" "$NC" "$RED" "$ENV_NAME" "$NC"
+    printf '%b[确认]%b 即将 DROP 整库所有表（含 Flyway 历史），重启后 Flyway 全量重建【%s】。\n' \
+        "$YELLOW" "$NC" "$ENV_NAME"
     printf '%b[确认]%b 输入 %bYES%b 继续，其它任意键退出：' "$YELLOW" "$NC" "$RED" "$NC"
     read -r CONFIRM
     [ "$CONFIRM" != "YES" ] && { echo "已取消"; exit 0; }
@@ -109,13 +111,12 @@ echo '[2/5] 停 server...'
 cd "\$TARGET"
 docker compose stop server
 
-echo '[3/5] TRUNCATE 业务表...'
-SQL=\$(docker exec -e PGPASSWORD="\$POSTGRES_PASSWORD" \${PREFIX}-postgres \
-    psql -U "\$POSTGRES_USER" -d "\$DB" -Atc "SELECT 'TRUNCATE TABLE ' || string_agg(tablename, ', ') || ' RESTART IDENTITY CASCADE;' FROM pg_tables WHERE schemaname='public' AND tablename NOT IN ('flyway_schema_history','sys_user','sys_role','sys_role_dept','sys_role_menu','sys_user_role','sys_user_post','sys_menu','sys_dict_type','sys_dict_data','sys_dept','sys_post','sys_oss_config','sys_config','sys_social','sys_client','flow_category','flow_definition','flow_node','flow_spel','flow_skip','flow_user','sj_job','sj_job_executor','sj_namespace','sj_group_config','sai_model_provider','sai_model_config','sai_app','sai_agent','sai_agent_skill','sai_agent_mcp_server','sai_mcp_server','sai_skill','sai_skill_file','sai_openapi_user','sai_user','sai_resource','sai_store_instance','sai_user_agent','pj_payroll_policy_rule','pj_payroll_rank_rule','pj_payroll_conversion_rule','pj_payroll_dept_monthly_config','pj_payroll_rate_adjust','pj_perf_period_close');")
-echo "  SQL 长度: \${#SQL}"
+echo '[3/5] DROP 整库所有表（含 flyway_schema_history）...'
 docker exec -e PGPASSWORD="\$POSTGRES_PASSWORD" \${PREFIX}-postgres \
-    psql -U "\$POSTGRES_USER" -d "\$DB" -v ON_ERROR_STOP=1 -c "\$SQL"
-echo '  DB 清完'
+    psql -U "\$POSTGRES_USER" -d "\$DB" -v ON_ERROR_STOP=1 \
+    -c 'DROP SCHEMA IF EXISTS public CASCADE;' \
+    -c 'CREATE SCHEMA public;'
+echo '  DB 已全清（重启后 Flyway 从 V1 全量重建）'
 
 echo '[4/5] Redis FLUSHDB + MinIO 清桶内文件...'
 docker exec \${PREFIX}-redis redis-cli -a "\$REDIS_PASSWORD" FLUSHDB 2>/dev/null \
@@ -127,9 +128,9 @@ for bucket in panjia-file panjia-archive; do
     && echo "  MinIO \$bucket 清空" || echo "  MinIO \$bucket 跳过"
 done
 
-echo '[5/5] 起 server...'
+echo '[5/5] 起 server（Flyway 全量重放，可能较久）...'
 cd "\$TARGET"
-docker compose up -d --wait --wait-timeout 300 server
+docker compose up -d --wait --wait-timeout 600 server
 echo "========== 清库完成 =========="
 echo "备份: \$BACKUP"
 echo "恢复: gunzip -c \$BACKUP | docker exec -i \${PREFIX}-postgres psql -U \$POSTGRES_USER -d \$DB"

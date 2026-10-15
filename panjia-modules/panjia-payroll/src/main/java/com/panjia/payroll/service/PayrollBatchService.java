@@ -273,6 +273,7 @@ public class PayrollBatchService {
                                                               Map<Long, List<RateAdjustItem>> rateAdjustItems) {
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
         input.employees = employees;
+        input.period = period;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
 
         // ====== 多期间规则快照构建（结佣提成统一按业绩归属月取规则，2026-10-12 改） ======
@@ -480,7 +481,8 @@ public class PayrollBatchService {
             }
         }
 
-        // 入职月数：EmployeeSnapshot 暂无 hireDate 字段，默认 1（后续由 people 域补齐）
+        // 个税累计月数：暂统一默认 1；EmployeeSnapshot.hireDate 已提供（用于入职当月底薪折算），
+        // 个税累计月数口径待税务规则专项迭代时再启用，避免影响在职员工个税
         input.monthsEmployed = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
             input.monthsEmployed.put(e.getEmployeeId(), 1);

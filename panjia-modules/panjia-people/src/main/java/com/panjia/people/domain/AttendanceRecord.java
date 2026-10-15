@@ -41,7 +41,16 @@ public class AttendanceRecord implements Serializable {
     /** 考勤月份（当月 1 日） */
     private LocalDate attendMonth;
 
-    /** 请假天数（事假+病假合计，月合计） */
+    /** 事假天数（月合计，V210 拆分） */
+    private BigDecimal personalLeaveDays;
+
+    /** 病假天数-诊所类证明（月合计，V210 拆分） */
+    private BigDecimal sickClinicDays;
+
+    /** 病假天数-二甲医院以上（月合计，V210 拆分） */
+    private BigDecimal sickHospitalDays;
+
+    /** 请假天数（事假+病假三类合计，月合计） */
     private BigDecimal leaveDays;
 
     /** 旷工天数（月合计） */

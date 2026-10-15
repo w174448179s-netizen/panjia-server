@@ -43,7 +43,7 @@ class SalaryCalculationEngineTest {
             "housingFund":0,
             "tax":{"threshold":5000,"deductSocial":true,"brackets":[{"min":0,"rate":0.03,"quick":0},{"min":3000,"rate":0.10,"quick":210}]},
             "points":{"penaltyFee":5,"gradeA":8.0,"gradeB":6.0,"deductA":0.0,"deductB":-0.02,"deductC":-0.04},
-            "attendance":{"lateFee":20,"absentNoBaseFee":50,"absentWithBaseTimes":3,"workDaysPerMonth":21.75,"leaveFee":30}
+            "attendance":{"lateFee":20,"absentNoBaseFee":50,"absentWithBaseTimes":3,"personalLeaveFee":50,"personalLeaveDeductDailyWage":true,"sickClinicWithBaseFee":30,"sickClinicNoBaseFee":20,"sickHospitalWithBaseFee":20,"sickHospitalNoBaseFee":0,"leaveFee":50}
           },
           "conversion": {"一手房":0.9024,"DEFAULT":0.96}
         }
@@ -469,12 +469,18 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("500.00").compareTo(d.getFullAttendance()));
     }
 
-    /** S-12: 考勤扣款 — 迟到×20；无底薪旷工×50；有底薪旷工按 3 倍日工资；请假=天数×leaveFee(30)；导入金额兼容叠加 */
+    /**
+     * S-12（2026-10 规则）: 考勤扣款。归属期 2026-07（31 天），日工资 = 底薪/31。
+     * A2 无底薪：迟到 3×20 + 旷工 2×(50×3) + 事假 1×50 + 病假诊所 1×20 + 病假二甲 1×0 + 导入 10 = 440
+     * A0 底薪 4500（日工资 4500/31=145.161290）：
+     *   迟到 20 + 旷工 3×145.161290 + 事假 (50+145.161290) + 病假诊所 30 + 病假二甲 20 = 700.65
+     */
     @Test
     void testAttendanceFeeFromMetrics() {
         EmployeeSnapshot a2 = emp("A2010", "A2", "经纪人"); // 无底薪（baseSalary=0）
         EmployeeSnapshot a0 = emp("A0010", "A0", "经纪人"); // 底薪 4500
         SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-07";
         input.employees = List.of(a2, a0);
         input.lockedByEmp = Map.of(a2.getEmployeeId(), new ArrayList<>(), a0.getEmployeeId(), new ArrayList<>());
         input.newsignByEmp = new HashMap<>();
@@ -491,26 +497,103 @@ class SalaryCalculationEngineTest {
         input.qualifiedApprenticeCount = new HashMap<>();
         input.apprenticeCommission = new HashMap<>();
 
-        // A2（无底薪）：迟到 3 次 + 旷工 2 天 + 导入金额 10 → 3×20 + 2×50 + 10 = 170
+        // A2（无底薪）：迟到 3 次 + 旷工 2 天 + 事假 1 天 + 两类病假各 1 天 + 导入金额 10
         AttendanceMetricsDTO m2 = new AttendanceMetricsDTO();
         m2.setImportedFee(new BigDecimal("10"));
         m2.setLateCount(3);
         m2.setAbsentDays(new BigDecimal("2"));
-        m2.setLeaveDays(BigDecimal.ZERO);
-        // A0（底薪 4500，日工资 = 4500/21.75 = 206.896552）：
-        //   迟到 1 次 20 + 旷工 1 天 3×206.896552 + 请假 1 天×leaveFee 30 = 670.689656 → 670.69
+        m2.setPersonalLeaveDays(BigDecimal.ONE);
+        m2.setSickClinicDays(BigDecimal.ONE);
+        m2.setSickHospitalDays(BigDecimal.ONE);
+        // A0（底薪 4500）：迟到 1 次 + 旷工 1 天 + 事假 1 天 + 两类病假各 1 天
         AttendanceMetricsDTO m0 = new AttendanceMetricsDTO();
         m0.setImportedFee(BigDecimal.ZERO);
         m0.setLateCount(1);
         m0.setAbsentDays(BigDecimal.ONE);
-        m0.setLeaveDays(BigDecimal.ONE);
+        m0.setPersonalLeaveDays(BigDecimal.ONE);
+        m0.setSickClinicDays(BigDecimal.ONE);
+        m0.setSickHospitalDays(BigDecimal.ONE);
         input.attendanceMetrics = Map.of(a2.getEmployeeId(), m2, a0.getEmployeeId(), m0);
 
         List<PayrollDetail> details = engine.calculate(input);
         PayrollDetail d2 = details.stream().filter(x -> x.getEmployeeId().equals(a2.getEmployeeId())).findFirst().orElseThrow();
         PayrollDetail d0 = details.stream().filter(x -> x.getEmployeeId().equals(a0.getEmployeeId())).findFirst().orElseThrow();
-        assertEquals(0, new BigDecimal("170.00").compareTo(d2.getAttendanceFee()));
-        assertEquals(0, new BigDecimal("670.69").compareTo(d0.getAttendanceFee()));
+        assertEquals(0, new BigDecimal("440.00").compareTo(d2.getAttendanceFee()));
+        assertEquals(0, new BigDecimal("700.65").compareTo(d0.getAttendanceFee()));
+    }
+
+    /** 旧版合计请假兜底：仅有 leaveDays（无三类分项）时按 leaveFee(50)/天扣款，2 天 = 100 */
+    @Test
+    void testAttendanceFeeLegacyLeaveDaysFallback() {
+        EmployeeSnapshot a2 = emp("A2011", "A2", "经纪人");
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-07";
+        input.employees = List.of(a2);
+        input.lockedByEmp = Map.of(a2.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = new HashMap<>();
+        input.snapshot = buildSnapshot();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(a2.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(a2.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        AttendanceMetricsDTO m = new AttendanceMetricsDTO();
+        m.setLateCount(0);
+        m.setAbsentDays(BigDecimal.ZERO);
+        // 分项显式置 0（模拟迁移后的存量行），合计 leaveDays=2
+        m.setPersonalLeaveDays(BigDecimal.ZERO);
+        m.setSickClinicDays(BigDecimal.ZERO);
+        m.setSickHospitalDays(BigDecimal.ZERO);
+        m.setLeaveDays(new BigDecimal("2"));
+        input.attendanceMetrics = Map.of(a2.getEmployeeId(), m);
+
+        PayrollDetail d = engine.calculate(input).get(0);
+        assertEquals(0, new BigDecimal("100.00").compareTo(d.getAttendanceFee()));
+    }
+
+    /**
+     * 入职当月底薪折算（总监 D，底薪 6000，归属期 2026-07 共 31 天）：
+     * 7-15 入职 → 在职 17 天（含入职日）→ 底薪 = 6000/31×17 = 3290.32，应发 = 底薪 + 全勤 500 = 3790.32；
+     * 7-1 入职 → 满月底薪 6000，应发 6500。
+     */
+    @Test
+    void testNewHireBaseSalaryProration() {
+        EmployeeSnapshot mid = emp("D1001", "D", "总监");
+        mid.setHireDate(java.time.LocalDate.of(2026, 7, 15));
+        EmployeeSnapshot first = emp("D1002", "D", "总监");
+        first.setHireDate(java.time.LocalDate.of(2026, 7, 1));
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-07";
+        input.employees = List.of(mid, first);
+        input.lockedByEmp = Map.of(mid.getEmployeeId(), new ArrayList<>(), first.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = new HashMap<>();
+        input.snapshot = buildSnapshot();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mid.getEmployeeId(), 1, first.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(mid.getEmployeeId(), factsA(), first.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = new HashMap<>();
+        input.apprenticeCommission = new HashMap<>();
+
+        List<PayrollDetail> details = engine.calculate(input);
+        PayrollDetail dMid = details.stream().filter(x -> x.getEmployeeId().equals(mid.getEmployeeId())).findFirst().orElseThrow();
+        PayrollDetail dFirst = details.stream().filter(x -> x.getEmployeeId().equals(first.getEmployeeId())).findFirst().orElseThrow();
+        assertEquals(0, new BigDecimal("3290.32").compareTo(dMid.getBaseSalary()));
+        assertEquals(0, new BigDecimal("3790.32").compareTo(dMid.getGross()));
+        assertEquals(0, new BigDecimal("6000.00").compareTo(dFirst.getBaseSalary()));
+        assertEquals(0, new BigDecimal("6500.00").compareTo(dFirst.getGross()));
     }
 
     /** S-19: 店长团队提成 = (门店新签 - 社保标准×计缴人数 - 新签与结佣差额) × teamRate。

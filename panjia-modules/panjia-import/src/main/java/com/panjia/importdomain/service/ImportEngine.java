@@ -995,6 +995,9 @@ public class ImportEngine {
                 extra.put("leaveDays", decimal(json, "leaveDays"));
                 extra.put("personalLeaveDays", decimal(json, "personalLeaveDays"));
                 extra.put("sickLeaveDays", decimal(json, "sickLeaveDays"));
+                // V210 病假拆分为「诊所类证明」「二甲医院以上」两列
+                extra.put("sickClinicLeaveDays", decimal(json, "sickClinicLeaveDays"));
+                extra.put("sickHospitalLeaveDays", decimal(json, "sickHospitalLeaveDays"));
                 extra.put("attendDays", decimal(json, "attendDays"));
                 extra.put("restDays", decimal(json, "restDays"));
                 nr.setExtraJson(toJson(extra));

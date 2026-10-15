@@ -59,6 +59,13 @@ public class EmployeeSnapshot implements Serializable {
      */
     private String position;
 
+    /**
+     * 入职日期（员工主数据事实，null=未登记）。
+     * <p>
+     * 算薪用途：入职当月按「入职日至月底天数 × 日工资」折算底薪（日工资=底薪/当月天数）。
+     */
+    private LocalDate hireDate;
+
     // ==================== 职级（时点生效，salary_fact LEVEL） ====================
 
     /** 职级编码（A0~A5 / S1 / S2，取快照月所在闭开区间切片） */

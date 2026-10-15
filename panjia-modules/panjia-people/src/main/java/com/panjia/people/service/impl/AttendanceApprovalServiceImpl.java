@@ -320,6 +320,9 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
             row.setMissingCardCount(r.getMissingCardCount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(r.getMissingCardCount()));
             row.setAbsentDays(r.getAbsentDays() == null ? BigDecimal.ZERO : r.getAbsentDays());
             row.setLeaveDays(r.getLeaveDays() == null ? BigDecimal.ZERO : r.getLeaveDays());
+            row.setPersonalLeaveDays(r.getPersonalLeaveDays() == null ? BigDecimal.ZERO : r.getPersonalLeaveDays());
+            row.setSickClinicDays(r.getSickClinicDays() == null ? BigDecimal.ZERO : r.getSickClinicDays());
+            row.setSickHospitalDays(r.getSickHospitalDays() == null ? BigDecimal.ZERO : r.getSickHospitalDays());
             row.setRemark(r.getRemark());
             return row;
         }).toList();
@@ -379,6 +382,9 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
                     row.setMissingCardCount(dec(r.path("missingCardCount")));
                     row.setAbsentDays(dec(r.path("absentDays")));
                     row.setLeaveDays(dec(r.path("leaveDays")));
+                    row.setPersonalLeaveDays(dec(r.path("personalLeaveDays")));
+                    row.setSickClinicDays(dec(r.path("sickClinicDays")));
+                    row.setSickHospitalDays(dec(r.path("sickHospitalDays")));
                     row.setRemark(textOrNull(r.path("remark")));
                     rows.add(row);
                 }

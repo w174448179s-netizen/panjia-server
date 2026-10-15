@@ -43,6 +43,8 @@ public class SalaryCalculationEngine {
      */
     public static class CalcInput {
         public List<EmployeeSnapshot> employees;
+        /** 算薪归属期间（YYYY-MM）：日工资按当月自然天数计算，入职当月底薪按入职日至月底折算 */
+        public String period;
         /** employeeId -> 已审批结佣明细（PERF_REAL，原样取用不折算：P5/S-14/P15） */
         public Map<Long, List<CommissionItemDTO>> lockedByEmp;
         /** employeeId -> 新签业绩明细（PERF_EXPECT，折算） */
@@ -395,6 +397,23 @@ public class SalaryCalculationEngine {
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
 
+            // 日工资 = 底薪 / 当月自然天数（2026-10 改：不再用 21.75 工作日口径）。
+            // 入职当月：底薪 = 入职日（含）至月底天数 × 日工资；非入职月发满月底薪。
+            // dailyWageFull 始终以满月底薪为基（请假/旷工扣款同口径），不受折算影响。
+            YearMonth periodMonth = resolvePeriodMonth(input);
+            int monthDays = periodMonth.lengthOfMonth();
+            BigDecimal dailyWageFull = baseSalary.signum() > 0
+                ? baseSalary.divide(BigDecimal.valueOf(monthDays), 6, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+            BigDecimal payableBaseSalary = baseSalary;
+            if (baseSalary.signum() > 0 && emp.getHireDate() != null
+                && YearMonth.from(emp.getHireDate()).equals(periodMonth)
+                && emp.getHireDate().getDayOfMonth() > 1) {
+                int employedDays = monthDays - emp.getHireDate().getDayOfMonth() + 1;
+                payableBaseSalary = MoneyUtil.round2(dailyWageFull.multiply(BigDecimal.valueOf(employedDays)));
+                d.setBaseSalary(payableBaseSalary);
+            }
+
             // 奖金 / 其他收入（手工录入按 itemType 分流，分别落工资明细列）
             BigDecimal bonus = input.bonusIncome == null ? BigDecimal.ZERO
                 : input.bonusIncome.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
@@ -409,7 +428,7 @@ public class SalaryCalculationEngine {
                 ? BigDecimal.ZERO : d.getFullAttendance();
             BigDecimal agentNewsign = (role == EmployeeRole.AGENT) ? personalNewsign : BigDecimal.ZERO;
             BigDecimal gross = commissionIncome.add(teamIncome).add(agentNewsign).add(guaranteeFill)
-                .add(storeIncome).add(baseSalary).add(mentorBonus).add(bonus).add(otherIncome)
+                .add(storeIncome).add(payableBaseSalary).add(mentorBonus).add(bonus).add(otherIncome)
                 .add(fullAttendance);
             // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
             if (role == EmployeeRole.MANAGER && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
@@ -420,10 +439,10 @@ public class SalaryCalculationEngine {
                     gross = expectedFloor;
                 }
             }
-            // 经纪人保底触发时，兜底 gross 至少等于「保底工资 + 结佣提成 + 底薪」
+            // 经纪人保底触发时，兜底 gross 至少等于「保底工资 + 结佣提成 + 当月应付底薪」
             if (role == EmployeeRole.AGENT && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
                 BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
-                BigDecimal expectedFloor = minSal.add(commissionIncome).add(baseSalary);
+                BigDecimal expectedFloor = minSal.add(commissionIncome).add(payableBaseSalary);
                 if (gross.compareTo(expectedFloor) < 0) {
                     gross = expectedFloor;
                 }
@@ -471,12 +490,16 @@ public class SalaryCalculationEngine {
             }
             d.setHousingFund(MoneyUtil.round2(housingFund));
 
-            // 考勤扣款（设计文档 §2.6 第 16 项 / S-12）：
+            // 考勤扣款（2026-10 规则，按 policy.attendance 配置驱动）：
             //   考勤扣款 = 迟到次数 × lateFee
-            //            + 旷工天数 ×（有底薪 ? absentWithBaseTimes × 日工资 : absentNoBaseFee）
-            //            + 请假天数 × leaveFee（事假+病假合计天数 × 规则配置的每日扣款额）
+            //            + 旷工天数 × 旷工日扣款
+            //            + 事假天数 ×（personalLeaveFee + 一天日工资，仅底薪员工扣日工资）
+            //            + 病假（诊所类证明）天数 ×（有底薪 ? sickClinicWithBaseFee : sickClinicNoBaseFee）
+            //            + 病假（二甲医院以上）天数 ×（有底薪 ? sickHospitalWithBaseFee : sickHospitalNoBaseFee）
+            //            + 旧版合计请假差额 × leaveFee（仅有合计、无分项的历史数据兜底）
             //            + 导入扣款金额（旧扁平模板 receivableAmount，兼容）
-            //   日工资 = 底薪 / workDaysPerMonth（21.75）
+            //   旷工日扣款：有底薪 = 日工资 × absentWithBaseTimes（3 倍）；无底薪 = absentNoBaseFee × 3
+            //   日工资 = 满月底薪 / 当月自然天数（dailyWageFull，与入职折算同口径）
             // DTO 只装事实（AttendanceMetricsDTO），扣款金额由本引擎按 policy.attendance 规则计算。
             BigDecimal attendanceFee = BigDecimal.ZERO;
             AttendanceMetricsDTO att = input.attendanceMetrics == null
@@ -484,12 +507,16 @@ public class SalaryCalculationEngine {
             if (att != null) {
                 JsonNode cfg = policy.path("attendance");
                 BigDecimal lateFee = bd(cfg.path("lateFee").asText("20"));
-                BigDecimal workDays = bd(cfg.path("workDaysPerMonth").asText("21.75"));
                 BigDecimal absentBaseTimes = bd(cfg.path("absentWithBaseTimes").asText("3"));
                 BigDecimal absentNoBaseFee = bd(cfg.path("absentNoBaseFee").asText("50"));
+                BigDecimal personalLeaveFee = bd(cfg.path("personalLeaveFee").asText("50"));
+                boolean personalLeaveDeductWage = cfg.path("personalLeaveDeductDailyWage").asBoolean(true);
+                BigDecimal sickClinicWithBaseFee = bd(cfg.path("sickClinicWithBaseFee").asText("30"));
+                BigDecimal sickClinicNoBaseFee = bd(cfg.path("sickClinicNoBaseFee").asText("20"));
+                BigDecimal sickHospitalWithBaseFee = bd(cfg.path("sickHospitalWithBaseFee").asText("20"));
+                BigDecimal sickHospitalNoBaseFee = bd(cfg.path("sickHospitalNoBaseFee").asText("0"));
                 BigDecimal leaveFee = bd(cfg.path("leaveFee").asText("50"));
-                BigDecimal dailyWage = workDays.signum() > 0
-                    ? baseSalary.divide(workDays, 6, RoundingMode.HALF_UP) : BigDecimal.ZERO;
+                boolean hasBase = baseSalary.signum() > 0;
 
                 if (att.getImportedFee() != null && att.getImportedFee().signum() > 0) {
                     attendanceFee = attendanceFee.add(att.getImportedFee());
@@ -497,13 +524,40 @@ public class SalaryCalculationEngine {
                 if (att.getLateCount() != null && lateFee.signum() > 0) {
                     attendanceFee = attendanceFee.add(lateFee.multiply(BigDecimal.valueOf(att.getLateCount())));
                 }
+                // 旷工：有底薪扣三倍日工资；无底薪扣 50×3（倍数同为 absentWithBaseTimes）
                 if (att.getAbsentDays() != null && att.getAbsentDays().signum() > 0) {
-                    BigDecimal perDay = baseSalary.signum() > 0
-                        ? absentBaseTimes.multiply(dailyWage) : absentNoBaseFee;
+                    BigDecimal perDay = hasBase
+                        ? dailyWageFull.multiply(absentBaseTimes)
+                        : absentNoBaseFee.multiply(absentBaseTimes);
                     attendanceFee = attendanceFee.add(att.getAbsentDays().multiply(perDay));
                 }
-                if (att.getLeaveDays() != null && att.getLeaveDays().signum() > 0 && leaveFee.signum() > 0) {
-                    attendanceFee = attendanceFee.add(att.getLeaveDays().multiply(leaveFee));
+                BigDecimal personalDays = nz(att.getPersonalLeaveDays());
+                BigDecimal sickClinicDays = nz(att.getSickClinicDays());
+                BigDecimal sickHospitalDays = nz(att.getSickHospitalDays());
+                // 事假：固定扣款 personalLeaveFee（50/天）+ 一天底薪（有底薪且规则开启时）
+                if (personalDays.signum() > 0) {
+                    BigDecimal perDay = personalLeaveFee;
+                    if (hasBase && personalLeaveDeductWage) {
+                        perDay = perDay.add(dailyWageFull);
+                    }
+                    attendanceFee = attendanceFee.add(personalDays.multiply(perDay));
+                }
+                // 病假（诊所类证明）：有底薪 30/天，无底薪 20/天
+                if (sickClinicDays.signum() > 0) {
+                    BigDecimal perDay = hasBase ? sickClinicWithBaseFee : sickClinicNoBaseFee;
+                    attendanceFee = attendanceFee.add(sickClinicDays.multiply(perDay));
+                }
+                // 病假（二甲医院以上）：有底薪 20/天，无底薪不扣
+                if (sickHospitalDays.signum() > 0) {
+                    BigDecimal perDay = hasBase ? sickHospitalWithBaseFee : sickHospitalNoBaseFee;
+                    attendanceFee = attendanceFee.add(sickHospitalDays.multiply(perDay));
+                }
+                // 旧版合计兜底：合计天数扣除已按三类规则计算的天数后，差额按 leaveFee 扣款
+                // （V210 之前导入/历史数据只有 leaveDays；新数据 leaveDays=三项合计，差额为 0）
+                BigDecimal splitDays = personalDays.add(sickClinicDays).add(sickHospitalDays);
+                BigDecimal legacyLeaveDays = nz(att.getLeaveDays()).subtract(splitDays).max(BigDecimal.ZERO);
+                if (legacyLeaveDays.signum() > 0 && leaveFee.signum() > 0) {
+                    attendanceFee = attendanceFee.add(legacyLeaveDays.multiply(leaveFee));
                 }
             }
             d.setAttendanceFee(MoneyUtil.round2(attendanceFee));
@@ -835,6 +889,25 @@ public class SalaryCalculationEngine {
     private static BigDecimal bd(String s) {
         if (s == null || s.isBlank()) return BigDecimal.ZERO;
         return new BigDecimal(s);
+    }
+
+    /** null 安全的 BigDecimal 归零 */
+    private static BigDecimal nz(BigDecimal v) {
+        return v == null ? BigDecimal.ZERO : v;
+    }
+
+    /**
+     * 解析算薪归属期间（YYYY-MM）为年月；缺失/非法时回退当前月（不阻断算薪）。
+     */
+    private YearMonth resolvePeriodMonth(CalcInput input) {
+        if (input.period != null && !input.period.isBlank()) {
+            try {
+                return YearMonth.parse(input.period.trim());
+            } catch (Exception e) {
+                log.warn("[算薪] 归属期间 {} 非法，日工资/入职折算回退当前月", input.period);
+            }
+        }
+        return YearMonth.now();
     }
 
 }
