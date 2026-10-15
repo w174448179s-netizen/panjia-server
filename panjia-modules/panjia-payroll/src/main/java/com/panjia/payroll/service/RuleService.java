@@ -18,6 +18,8 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -161,19 +163,49 @@ public class RuleService {
         root.put("snapshotVersion", refDate.toString());
 
         // rank: levelCode -> {baseSalary, baseRate, minSalary, teamRate, personalRate, ruleContent}
+        // 生效区间未覆盖 refDate 的职级：回退到最近一版（先取 effectiveFrom<=refDate 的最新版，
+        // 否则取最早的未来版），标记 fallback=true 并汇总 rankFallbacks 供预警，
+        // 避免员工职级有效但规则全部失效时被静默按 0 提点/0 底薪计算
         ObjectNode rankNode = root.putObject("rank");
+        ArrayNode rankFallbacks = root.putArray("rankFallbacks");
+        Map<String, List<RankRule>> ranksByLevel = new HashMap<>();
         for (RankRule r : ranks) {
-            if (r.getEffectiveFrom().isAfter(refDate) || r.getEffectiveTo().isBefore(refDate)) {
-                continue;
+            ranksByLevel.computeIfAbsent(r.getLevelCode(), k -> new ArrayList<>()).add(r);
+        }
+        for (Map.Entry<String, List<RankRule>> entry : ranksByLevel.entrySet()) {
+            List<RankRule> versions = entry.getValue();
+            versions.sort(Comparator.comparing(RankRule::getEffectiveFrom));
+            RankRule hit = null;
+            for (RankRule r : versions) {
+                if (!r.getEffectiveFrom().isAfter(refDate)
+                    && (r.getEffectiveTo() == null || !r.getEffectiveTo().isBefore(refDate))) {
+                    hit = r;
+                    break;
+                }
             }
-            ObjectNode rn = rankNode.putObject(r.getLevelCode());
-            rn.put("baseSalary", r.getBaseSalary().toString());
-            rn.put("baseRate", r.getBaseRate().toString());
-            rn.put("minSalary", r.getMinSalary().toString());
-            if (r.getTeamRate() != null) rn.put("teamRate", r.getTeamRate().toString());
-            if (r.getPersonalRate() != null) rn.put("personalRate", r.getPersonalRate().toString());
+            boolean fallback = false;
+            if (hit == null) {
+                fallback = true;
+                for (int i = versions.size() - 1; i >= 0; i--) {
+                    if (!versions.get(i).getEffectiveFrom().isAfter(refDate)) {
+                        hit = versions.get(i);
+                        break;
+                    }
+                }
+                if (hit == null) {
+                    hit = versions.get(0); // 全部为未来版本：取最早生效的一版
+                }
+                rankFallbacks.add(entry.getKey());
+            }
+            ObjectNode rn = rankNode.putObject(entry.getKey());
+            rn.put("baseSalary", hit.getBaseSalary().toString());
+            rn.put("baseRate", hit.getBaseRate().toString());
+            rn.put("minSalary", hit.getMinSalary().toString());
+            if (hit.getTeamRate() != null) rn.put("teamRate", hit.getTeamRate().toString());
+            if (hit.getPersonalRate() != null) rn.put("personalRate", hit.getPersonalRate().toString());
+            if (fallback) rn.put("fallback", true);
             try {
-                rn.set("ruleContent", objectMapper.readTree(r.getRuleContent() == null ? "{}" : r.getRuleContent()));
+                rn.set("ruleContent", objectMapper.readTree(hit.getRuleContent() == null ? "{}" : hit.getRuleContent()));
             } catch (Exception e) {
                 rn.putObject("ruleContent");
             }

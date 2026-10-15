@@ -12,17 +12,18 @@ import java.util.Map;
 final class FlowCodeMapping {
 
     /** bizType → flowCode */
-    private static final Map<String, String> BIZ_TO_FLOW = Map.of(
-        BizType.REAL_CONFIRM, "perf_received",
-        BizType.COMMISSION, "commission_apply",
-        BizType.PERF_ADJUST, "perf_adjust",
-        BizType.PERF_RECEIVED_ADJUST, "perf_received_adjust",
-        BizType.COMMISSION_ADJUST, "commission_adjust",
-        BizType.PAYROLL_BATCH, "payroll_batch",
-        BizType.ATTENDANCE_APPROVAL, "attendance_approval",
-        BizType.SCORE_APPROVAL, "score_approval",
-        BizType.RATE_ADJUST, "rate_adjust_approval",
-        BizType.ATTENDANCE_RECTIFY, "attendance_rectify"
+    private static final Map<String, String> BIZ_TO_FLOW = Map.ofEntries(
+        Map.entry(BizType.REAL_CONFIRM, "perf_received"),
+        Map.entry(BizType.COMMISSION, "commission_apply"),
+        Map.entry(BizType.PERF_ADJUST, "perf_adjust"),
+        Map.entry(BizType.PERF_RECEIVED_ADJUST, "perf_received_adjust"),
+        Map.entry(BizType.COMMISSION_ADJUST, "commission_adjust"),
+        Map.entry(BizType.PAYROLL_BATCH, "payroll_batch"),
+        Map.entry(BizType.PAYROLL_PROMOTION, "payroll_promotion"),
+        Map.entry(BizType.ATTENDANCE_APPROVAL, "attendance_approval"),
+        Map.entry(BizType.SCORE_APPROVAL, "score_approval"),
+        Map.entry(BizType.RATE_ADJUST, "rate_adjust_approval"),
+        Map.entry(BizType.ATTENDANCE_RECTIFY, "attendance_rectify")
     );
 
     /** flowCode → bizType（事件转译用逆映射） */

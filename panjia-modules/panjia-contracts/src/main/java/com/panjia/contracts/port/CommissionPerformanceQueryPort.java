@@ -9,7 +9,6 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 业绩事实跨域查询端口（performance 域对外契约，对结佣域唯一出口）。
@@ -46,6 +45,20 @@ public interface CommissionPerformanceQueryPort {
      * @return 事实摘要列表
      */
     List<PerformanceFactSummaryDTO> findActiveByEmployee(String period, Long employeeId, String factType);
+
+    /**
+     * 按员工 + 期间区间逐月汇总 ACTIVE 业绩事实原始金额
+     * （pj_perf_fact.performance_amount 原样求和，不折算、不按 factType 过滤）。
+     * <p>薪酬域职级晋升判定用：累计业绩 = [fromPeriod, toPeriod]（含两端，YYYY-MM
+     * 字符串区间）内 ACTIVE 事实按 (employeeId, period) 分组合计，调用方按各自
+     * 职级生效月截取累加。
+     *
+     * @param employeeIds 员工 ID 集合（不可为空）
+     * @param fromPeriod  起始期间 YYYY-MM（含）
+     * @param toPeriod    截止期间 YYYY-MM（含）
+     * @return "employeeId|period" → 该员工该月合计；无事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumActiveByEmployeePeriods(Collection<Long> employeeIds, String fromPeriod, String toPeriod);
 
     /**
      * 按事实 ID 集合查 ACTIVE 业绩事实（冲销联动 / 批量溯源用）。

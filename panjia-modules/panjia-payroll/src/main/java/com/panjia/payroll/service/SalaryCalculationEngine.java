@@ -120,6 +120,10 @@ public class SalaryCalculationEngine {
 
             String level = emp.getLevelCode() == null ? "A0" : emp.getLevelCode();
             JsonNode rank = snap.rank(level);
+            if (rank.path("fallback").asBoolean(false)) {
+                log.warn("员工 {} 职级 {} 在算薪日无生效规则，已按该职级最近一版规则兜底",
+                    emp.getEmployeeCode(), level);
+            }
 
             // 基础提点
             BigDecimal baseRate = bd(rank.path("baseRate").asText("0"));

@@ -93,6 +93,16 @@ public interface PeopleQueryPort {
     Collection<Long> findEmployeeIdsByLevels(Collection<String> levelCodes, LocalDate pointInMonth);
 
     /**
+     * 批量取多员工当前生效 LEVEL 事实的生效日期（职级晋升累计业绩窗口起点用）。
+     * <p>切片口径与 {@link #getSnapshotsAt} 一致：取该月月末所在闭开区间切片。
+     *
+     * @param employeeIds  员工 ID 集合
+     * @param pointInMonth 算薪月份内任意一天
+     * @return employeeId → 当前 LEVEL 事实 effective_date；无 LEVEL 事实的 ID 不在结果中
+     */
+    Map<Long, LocalDate> findLevelEffectiveDatesAt(Collection<Long> employeeIds, LocalDate pointInMonth);
+
+    /**
      * 查指定月份持有有效职级（LEVEL）事实的全体在职（ACTIVE/PARTTIME）员工 ID。
      * <p>算薪名单基线：凡当月在册且持有效职级事实的员工，即使无底薪/保底、当月
      * 零业绩，也必须进入算薪名单完成社保代扣/考勤等当月结算，否则会整月漏算。

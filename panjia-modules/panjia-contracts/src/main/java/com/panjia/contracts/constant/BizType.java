@@ -20,6 +20,8 @@ public final class BizType {
     public static final String COMMISSION_ADJUST = "COMMISSION_ADJUST";
     /** 薪酬批次 */
     public static final String PAYROLL_BATCH = "PAYROLL_BATCH";
+    /** 职级变动通知（算薪自动晋升/降级，财务/总监知会） */
+    public static final String PAYROLL_PROMOTION = "PAYROLL_PROMOTION";
     /** 考勤月度审批 */
     public static final String ATTENDANCE_APPROVAL = "ATTENDANCE_APPROVAL";
     /** 积分月度审批 */

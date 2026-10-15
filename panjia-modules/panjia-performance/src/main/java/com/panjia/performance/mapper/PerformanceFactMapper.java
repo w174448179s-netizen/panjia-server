@@ -2230,5 +2230,35 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("deptId") Long deptId,
             @Param("bizType") String bizType,
             @Param("employeeId") Long employeeId);
+
+    /**
+     * 按员工 + 期间区间逐月汇总 ACTIVE 业绩事实原始金额（职级晋升累计业绩用）。
+     * <p>口径：pj_perf_fact.performance_amount 原样求和（不折算、不按 factType 过滤），
+     * period 为 YYYY-MM 字符串，闭区间 [fromPeriod, toPeriod]。
+     *
+     * @param employeeIds 员工 ID 集合
+     * @param fromPeriod  起始期间 YYYY-MM（含）
+     * @param toPeriod    截止期间 YYYY-MM（含）
+     * @return 逐行 employeeId / period / totalAmount（无事实的员工月份不出行）
+     */
+    @Select("""
+        <script>
+        SELECT f.employee_id AS "employeeId",
+               f.period AS "period",
+               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
+        FROM pj_perf_fact f
+        WHERE f.fact_status = 'ACTIVE'
+          AND f.period &gt;= #{fromPeriod}
+          AND f.period &lt;= #{toPeriod}
+          AND f.employee_id IN
+          <foreach collection="employeeIds" item="eid" open="(" separator="," close=")">
+              #{eid}
+          </foreach>
+        GROUP BY f.employee_id, f.period
+        </script>
+        """)
+    List<Map<String, Object>> sumActiveByEmployeePeriods(@Param("employeeIds") Collection<Long> employeeIds,
+                                                         @Param("fromPeriod") String fromPeriod,
+                                                         @Param("toPeriod") String toPeriod);
 }
 

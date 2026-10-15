@@ -32,7 +32,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -119,6 +118,24 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
             .orderByAsc(PerformanceFact::getId);
         return toSummaries(factMapper.selectList(wrapper));
+    }
+
+    @Override
+    public Map<String, BigDecimal> sumActiveByEmployeePeriods(java.util.Collection<Long> employeeIds, String fromPeriod, String toPeriod) {
+        if (employeeIds == null || employeeIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, BigDecimal> result = new HashMap<>();
+        for (Map<String, Object> row : factMapper.sumActiveByEmployeePeriods(employeeIds, fromPeriod, toPeriod)) {
+            Object empId = row.get("employeeId");
+            Object period = row.get("period");
+            Object total = row.get("totalAmount");
+            if (empId == null || period == null || total == null) {
+                continue;
+            }
+            result.put(((Number) empId).longValue() + "|" + period, (BigDecimal) total);
+        }
+        return result;
     }
 
     @Override

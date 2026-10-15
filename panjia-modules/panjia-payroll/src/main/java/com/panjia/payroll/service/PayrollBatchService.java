@@ -87,6 +87,7 @@ public class PayrollBatchService {
     private final IRateAdjustService rateAdjustService;
     private final DeptMonthlyConfigService deptMonthlyConfigService;
     private final CommissionPerformanceQueryPort commissionPerformanceQueryPort;
+    private final PromotionService promotionService;
 
     // ==================== 创建 ====================
 
@@ -207,6 +208,23 @@ public class PayrollBatchService {
 
             // 4. 组装算薪输入
             SalaryCalculationEngine.CalcInput input = buildCalcInput(period, employees, lockedItems, newsignItems, ruleSnap, empMap, rateAdjustItems);
+
+            // 4.5 职级自动晋升/降级判定：必须在引擎计算之前——新职级一律次月 1 日生效，
+            // 本次算薪仍按旧职级，故写事实不影响下方引擎取数（员工快照已按批次月切片冻结）。
+            // 判定异常不阻断算薪主流程（留 error 日志人工介入，事实写入幂等可重算补齐）
+            try {
+                List<PromotionService.PromotionChange> promotions =
+                    promotionService.checkAndApply(batchId, period, employees, operatorId);
+                if (!promotions.isEmpty()) {
+                    log.info("[薪酬] 批次 {} 职级变动 {} 人：{}", period, promotions.size(),
+                        promotions.stream()
+                            .map(p -> p.employeeCode() + " " + p.fromLevel() + "→" + p.toLevel()
+                                + "(" + p.effectiveDate() + "生效, 累计业绩" + p.cumulativeAmount() + ")")
+                            .collect(Collectors.joining("；")));
+                }
+            } catch (Exception e) {
+                log.error("[薪酬] 批次 {} 职级晋升判定异常，跳过（不影响本次算薪）", period, e);
+            }
 
             // 5. 执行算薪
             List<PayrollDetail> details = engine.calculate(input);

@@ -2,6 +2,7 @@ package com.panjia.contracts.port;
 
 import com.panjia.contracts.dto.SalaryFactSyncDTO;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -37,4 +38,17 @@ public interface PeopleSalaryFactSyncPort {
      * @return 删除条数
      */
     int deleteHistoryFacts(String period);
+
+    /**
+     * 算薪职级自动晋升/降级：变更员工 LEVEL 事实（change_field='LEVEL'，
+     * 与员工域 changeFact 同口径：闭合生效日时点旧区间 → 插入新事实 → 写变更日志）。
+     * <p>幂等：生效日时点当前职级已与目标一致时跳过（同批次重复算薪安全）。
+     *
+     * @param employeeId    员工 ID
+     * @param newLevel      新职级编码
+     * @param effectiveDate 新事实生效日（晋升一律次月 1 日）
+     * @param operatorId    操作人 ID（算薪批次操作人）
+     * @return true=实际写入新事实；false=已是目标职级（幂等跳过）
+     */
+    boolean changeLevelFact(Long employeeId, String newLevel, LocalDate effectiveDate, Long operatorId);
 }

@@ -350,6 +350,19 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Map<Long, LocalDate> findLevelEffectiveDatesAt(Collection<Long> employeeIds, LocalDate pointInMonth) {
+        if (employeeIds == null || employeeIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDate point = monthEnd(pointInMonth);
+        Map<Long, LocalDate> result = new LinkedHashMap<>();
+        for (SalaryFact fact : salaryFactMapper.selectValuesAt(List.copyOf(employeeIds), FactType.LEVEL, point)) {
+            result.put(fact.getEmployeeId(), fact.getEffectiveDate());
+        }
+        return result;
+    }
+
+    @Override
     public com.panjia.contracts.snapshot.EmployeeSnapshot getEmployeeSnapshot(
             Long employeeId, LocalDate pointInMonth) {
         if (employeeId == null) {

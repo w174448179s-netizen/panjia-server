@@ -3,8 +3,10 @@ package com.panjia.people.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.SalaryFactSyncDTO;
 import com.panjia.contracts.port.PeopleSalaryFactSyncPort;
+import com.panjia.people.domain.ChangeLog;
 import com.panjia.people.domain.FactType;
 import com.panjia.people.domain.SalaryFact;
+import com.panjia.people.mapper.ChangeLogMapper;
 import com.panjia.people.mapper.SalaryFactMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,6 +46,7 @@ public class SalaryFactSyncAdapter implements PeopleSalaryFactSyncPort {
     public static final String FACT_CHANGE_FIELD = "HIST_IMPORT";
 
     private final SalaryFactMapper salaryFactMapper;
+    private final ChangeLogMapper changeLogMapper;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -168,5 +171,42 @@ public class SalaryFactSyncAdapter implements PeopleSalaryFactSyncPort {
             .lt(SalaryFact::getEffectiveDate, monthStart.plusMonths(1)));
         log.info("[算薪事实] 历史导入切片清理：period={}, 删除 {} 条", period, deleted);
         return deleted;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean changeLevelFact(Long employeeId, String newLevel, LocalDate effectiveDate, Long operatorId) {
+        if (employeeId == null || StringUtils.isBlank(newLevel) || effectiveDate == null) {
+            return false;
+        }
+        String target = newLevel.trim();
+        // 幂等：生效日时点当前职级已与目标一致（同批次重复算薪 / 人事已手工调整）则跳过
+        String current = salaryFactMapper.selectValueAt(employeeId, FactType.LEVEL, effectiveDate);
+        if (target.equals(current)) {
+            return false;
+        }
+        // 与员工域 changeFact 同口径：闭合生效日时点旧区间 → 插入新事实 → 写变更日志
+        salaryFactMapper.closeActiveAt(employeeId, FactType.LEVEL, effectiveDate);
+
+        SalaryFact fact = new SalaryFact();
+        fact.setEmployeeId(employeeId);
+        fact.setFactType(FactType.LEVEL);
+        fact.setValue(target);
+        fact.setEffectiveDate(effectiveDate);
+        fact.setChangeField(FactType.LEVEL.getCode());
+        salaryFactMapper.insert(fact);
+
+        ChangeLog changeLog = new ChangeLog();
+        changeLog.setEmployeeId(employeeId);
+        changeLog.setChangeField(FactType.LEVEL.getCode());
+        changeLog.setBeforeValue(current);
+        changeLog.setAfterValue(target);
+        changeLog.setEffectiveDate(effectiveDate);
+        changeLog.setOperatorId(operatorId);
+        changeLogMapper.insert(changeLog);
+
+        log.info("[算薪事实] 职级自动变更：employeeId={}, {} → {}, effective={}, operator={}",
+            employeeId, current, target, effectiveDate, operatorId);
+        return true;
     }
 }
