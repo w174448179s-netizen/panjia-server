@@ -11,15 +11,6 @@
 #   bash clean-db.sh test                       # 清测试库
 #   bash clean-db.sh prod <服务器IP> [SSH用户]   # 临时指定其它服务器
 #   bash clean-db.sh --dry-run test             # 只预演，不实际执行
-#
-# 执行步骤：
-#   1. 连接校验 + 目标环境确认
-#   2. pg_dump 备份到服务器 /tmp（保留 3 天，可手动删除）
-#   3. 停 server 容器（避免写入冲突）
-#   4. TRUNCATE 业务表（RESTART IDENTITY CASCADE）
-#   5. Redis FLUSHDB（带密码）
-#   6. MinIO 保留桶、清空桶内业务文件（不删桶、不动桶配置）
-#   7. 起 server 容器 + 健康检查
 # ============================================================================
 set -euo pipefail
 
@@ -59,27 +50,11 @@ else
     CONTAINER_PREFIX="panjia"
 fi
 
-# ---- 保留表清单（TRUNCATE SQL 的 NOT IN 排除名单） ----
-# 不能加引号包裹的字符串直接传远端，远端会自己展开
-RETENION_SQL="'flyway_schema_history',
-  'sys_user','sys_role','sys_role_dept','sys_role_menu','sys_user_role','sys_user_post',
-  'sys_menu','sys_dict_type','sys_dict_data','sys_dept','sys_post',
-  'sys_oss_config','sys_config','sys_social','sys_client',
-  'flow_category','flow_definition','flow_node','flow_spel','flow_skip','flow_user',
-  'sj_job','sj_job_executor','sj_namespace','sj_group_config',
-  'sai_model_provider','sai_model_config','sai_app','sai_agent','sai_agent_skill',
-  'sai_agent_mcp_server','sai_mcp_server','sai_skill','sai_skill_file',
-  'sai_openapi_user','sai_user','sai_resource','sai_store_instance','sai_user_agent',
-  'pj_payroll_policy_rule','pj_payroll_rank_rule','pj_payroll_conversion_rule',
-  'pj_payroll_dept_monthly_config','pj_payroll_rate_adjust',
-  'pj_perf_period_close'"
-
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { printf '%b[INFO]%b  %s\n' "$BLUE" "$NC" "$*"; }
 ok()    { printf '%b[OK]%b    %s\n' "$GREEN" "$NC" "$*"; }
 warn()  { printf '%b[WARN]%b  %s\n' "$YELLOW" "$NC" "$*"; }
 fail()  { printf '%b[FAIL]%b  %s\n' "$RED" "$NC" "$*"; exit 1; }
-run()   { if $DRY_RUN; then printf '%b[DRY-RUN]%b %s\n' "$YELLOW" "$NC" "$*"; else eval "$@"; fi }
 
 echo ""
 echo "=========================================="
@@ -106,62 +81,67 @@ if ! $DRY_RUN; then
 fi
 
 # ================================================================
-# 远端统一执行（本地 heredoc 加引号，所有变量远端自读）
+# 远端脚本（heredoc → 变量 → echo | ssh sudo bash）
+#   本地变量 $TARGET_DIR / $CONTAINER_PREFIX / $DB_NAME 在 << REMOTE 时展开
+#   远端变量 \$POSTGRES_PASSWORD 等用 \ 转义（远端自己读 .env）
 # ================================================================
-REMOTE_BLOCK="
+REMOTE_SCRIPT="$(cat << REMOTE
 set -e
-PREFIX='$CONTAINER_PREFIX'
-DB='$DB_NAME'
-RET='$RETENION_SQL'
+PREFIX='${CONTAINER_PREFIX}'
+DB='${DB_NAME}'
+TARGET='${TARGET_DIR}'
 
+# 读 .env（JAVA_OPTS 这类无引号多值行会让 bash 尝试执行 -Xmx... 当命令，exit 127；
+#   2>/dev/null 只吞输出不吞 exit code，必须 || true 否则 set -e 会炸）
 set -a
-. \"${TARGET_DIR}/.env\"
+. "\$TARGET/.env" 2>/dev/null || true
 set +a
 
 echo '[1/5] 备份...'
 TS=\$(date +%Y%m%d_%H%M%S)
-BACKUP=\"/tmp/\${PREFIX}-\${TS}.sql.gz\"
-docker exec -e PGPASSWORD=\"\$POSTGRES_PASSWORD\" \${PREFIX}-postgres \
-    pg_dump -U \"\$POSTGRES_USER\" -d \"\$DB\" | gzip > \"\$BACKUP\"
-ls -lh \"\$BACKUP\"
+BACKUP="/tmp/\${PREFIX}-\${TS}.sql.gz"
+docker exec -e PGPASSWORD="\$POSTGRES_PASSWORD" \${PREFIX}-postgres \
+    pg_dump -U "\$POSTGRES_USER" -d "\$DB" | gzip > "\$BACKUP"
+ls -lh "\$BACKUP"
 find /tmp -maxdepth 1 -name '\${PREFIX}-*.sql.gz' -mtime +3 -delete 2>/dev/null || true
 
 echo '[2/5] 停 server...'
-cd '${TARGET_DIR}'
+cd "\$TARGET"
 docker compose stop server
 
 echo '[3/5] TRUNCATE 业务表...'
-SQL=\$(docker exec -e PGPASSWORD=\"\$POSTGRES_PASSWORD\" \${PREFIX}-postgres \
-    psql -U \"\$POSTGRES_USER\" -d \"\$DB\" -Atc \"SELECT 'TRUNCATE TABLE ' || string_agg(tablename, ', ') || ' RESTART IDENTITY CASCADE;' FROM pg_tables WHERE schemaname='public' AND tablename NOT IN (\$RET);\")
-echo \"  SQL 长度: \${#SQL}\"
-docker exec -e PGPASSWORD=\"\$POSTGRES_PASSWORD\" \${PREFIX}-postgres \
-    psql -U \"\$POSTGRES_USER\" -d \"\$DB\" -v ON_ERROR_STOP=1 -c \"\$SQL\"
+SQL=\$(docker exec -e PGPASSWORD="\$POSTGRES_PASSWORD" \${PREFIX}-postgres \
+    psql -U "\$POSTGRES_USER" -d "\$DB" -Atc "SELECT 'TRUNCATE TABLE ' || string_agg(tablename, ', ') || ' RESTART IDENTITY CASCADE;' FROM pg_tables WHERE schemaname='public' AND tablename NOT IN ('flyway_schema_history','sys_user','sys_role','sys_role_dept','sys_role_menu','sys_user_role','sys_user_post','sys_menu','sys_dict_type','sys_dict_data','sys_dept','sys_post','sys_oss_config','sys_config','sys_social','sys_client','flow_category','flow_definition','flow_node','flow_spel','flow_skip','flow_user','sj_job','sj_job_executor','sj_namespace','sj_group_config','sai_model_provider','sai_model_config','sai_app','sai_agent','sai_agent_skill','sai_agent_mcp_server','sai_mcp_server','sai_skill','sai_skill_file','sai_openapi_user','sai_user','sai_resource','sai_store_instance','sai_user_agent','pj_payroll_policy_rule','pj_payroll_rank_rule','pj_payroll_conversion_rule','pj_payroll_dept_monthly_config','pj_payroll_rate_adjust','pj_perf_period_close');")
+echo "  SQL 长度: \${#SQL}"
+docker exec -e PGPASSWORD="\$POSTGRES_PASSWORD" \${PREFIX}-postgres \
+    psql -U "\$POSTGRES_USER" -d "\$DB" -v ON_ERROR_STOP=1 -c "\$SQL"
 echo '  DB 清完'
 
 echo '[4/5] Redis FLUSHDB + MinIO 清桶内文件...'
-docker exec \${PREFIX}-redis redis-cli -a \"\$REDIS_PASSWORD\" FLUSHDB 2>/dev/null \
+docker exec \${PREFIX}-redis redis-cli -a "\$REDIS_PASSWORD" FLUSHDB 2>/dev/null \
     && echo '  Redis 清完' || echo '  Redis 跳过'
 
-docker exec \${PREFIX}-minio mc alias set local http://127.0.0.1:9000 \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null 2>&1
+docker exec \${PREFIX}-minio mc alias set local http://127.0.0.1:9000 "\$MINIO_ROOT_USER" "\$MINIO_ROOT_PASSWORD" >/dev/null 2>&1
 for bucket in panjia-file panjia-archive; do
-  docker exec \${PREFIX}-minio mc rm --recursive --force \"local/\$bucket/\" 2>/dev/null \
-    && echo \"  MinIO \$bucket 清空\" || echo \"  MinIO \$bucket 跳过\"
+  docker exec \${PREFIX}-minio mc rm --recursive --force "local/\$bucket/" 2>/dev/null \
+    && echo "  MinIO \$bucket 清空" || echo "  MinIO \$bucket 跳过"
 done
 
 echo '[5/5] 起 server...'
-cd '${TARGET_DIR}'
+cd "\$TARGET"
 docker compose up -d --wait --wait-timeout 300 server
-echo \"========== 清库完成 ==========\"
-echo \"备份: \$BACKUP\"
-echo \"恢复: gunzip -c \$BACKUP | docker exec -i \${PREFIX}-postgres psql -U \\\$POSTGRES_USER -d \$DB\"
-"
+echo "========== 清库完成 =========="
+echo "备份: \$BACKUP"
+echo "恢复: gunzip -c \$BACKUP | docker exec -i \${PREFIX}-postgres psql -U \$POSTGRES_USER -d \$DB"
+REMOTE
+)"
 
 if $DRY_RUN; then
-    echo ">>> 预演模式：将执行以下远端脚本（实际不会发送）"
-    echo "$REMOTE_BLOCK"
+    echo ">>> 预演模式：以下为将发送到服务器的脚本（实际不会发送）"
+    echo "$REMOTE_SCRIPT"
 else
     info ">>> 远端执行清库"
-    ssh "$SSH_TARGET" sudo bash -c "$REMOTE_BLOCK"
+    echo "$REMOTE_SCRIPT" | ssh "$SSH_TARGET" sudo bash
     ok " 远端清库完成"
 fi
 
