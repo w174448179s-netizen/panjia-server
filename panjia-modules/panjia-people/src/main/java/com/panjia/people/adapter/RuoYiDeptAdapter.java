@@ -2,6 +2,7 @@ package com.panjia.people.adapter;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.people.config.PeopleProperties;
+import com.panjia.people.dto.DeptCategoryInfo;
 import com.panjia.people.dto.DeptNode;
 import com.panjia.people.port.DeptPort;
 import lombok.RequiredArgsConstructor;
@@ -276,6 +277,34 @@ public class RuoYiDeptAdapter implements DeptPort {
             result.put(category, list.get(0).getDeptId());
         });
         return result;
+    }
+
+    @Override
+    public List<DeptCategoryInfo> listActiveDeptCategories() {
+        List<SysDept> depts = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .eq(SysDept::getStatus, UserStatus.OK.getCode())
+            .eq(SysDept::getDelFlag, "0")
+            .orderByAsc(SysDept::getDeptId));
+        List<DeptCategoryInfo> result = new ArrayList<>(depts.size());
+        for (SysDept d : depts) {
+            DeptCategoryInfo info = new DeptCategoryInfo();
+            info.setDeptId(d.getDeptId());
+            info.setDeptName(d.getDeptName());
+            info.setDeptCategory(d.getDeptCategory());
+            result.add(info);
+        }
+        return result;
+    }
+
+    @Override
+    public void updateDeptCategory(Long deptId, String category) {
+        if (deptId == null) {
+            return;
+        }
+        SysDept update = new SysDept();
+        update.setDeptId(deptId);
+        update.setDeptCategory(category == null || category.isBlank() ? null : category.trim());
+        sysDeptMapper.updateById(update);
     }
 
     @Override

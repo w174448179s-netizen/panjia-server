@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -57,6 +58,16 @@ public class PayrollController {
     @PostMapping("/{id}/submit")
     public R<PayrollBatch> submit(@PathVariable Long id) {
         return R.ok(batchService.submit(id, LoginHelper.getUserId()));
+    }
+
+    /**
+     * 个税回补导入：外部个税系统（扣缴端）算税后回填，覆盖个税、重算实发、重汇总批次。
+     * 请求体：员工ID(字符串雪花) → 本月个税。权限沿用算薪权限（同一操作人）。
+     */
+    @SaCheckPermission("payroll:batch:calculate")
+    @PostMapping("/{id}/tax-import")
+    public R<PayrollBatch> importTax(@PathVariable Long id, @RequestBody Map<String, BigDecimal> taxByEmployeeId) {
+        return R.ok(batchService.importTax(id, taxByEmployeeId, LoginHelper.getUserId()));
     }
 
     /** 标记发放 */

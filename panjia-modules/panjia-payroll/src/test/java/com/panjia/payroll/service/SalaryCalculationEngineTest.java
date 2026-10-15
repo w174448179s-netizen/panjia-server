@@ -41,7 +41,7 @@ class SalaryCalculationEngineTest {
             "commercialInsurance":21,
             "dormitoryFee":0,
             "housingFund":0,
-            "tax":{"threshold":5000,"deductSocial":true,"brackets":[{"min":0,"rate":0.03,"quick":0},{"min":3000,"rate":0.10,"quick":210}]},
+            "tax":{"mode":"ENGINE","threshold":5000,"deductSocial":true,"brackets":[{"min":0,"rate":0.03,"quick":0},{"min":3000,"rate":0.10,"quick":210}]},
             "points":{"penaltyFee":5,"gradeA":8.0,"gradeB":6.0,"deductA":0.0,"deductB":-0.02,"deductC":-0.04},
             "attendance":{"lateFee":20,"absentNoBaseFee":50,"absentWithBaseTimes":3,"personalLeaveFee":50,"personalLeaveDeductDailyWage":true,"sickClinicWithBaseFee":30,"sickClinicNoBaseFee":20,"sickHospitalWithBaseFee":20,"sickHospitalNoBaseFee":0,"leaveFee":50}
           },

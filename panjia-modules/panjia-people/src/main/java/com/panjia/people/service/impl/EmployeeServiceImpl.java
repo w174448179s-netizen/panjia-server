@@ -11,10 +11,14 @@ import com.panjia.people.domain.SalaryFact;
 import com.panjia.people.domain.SalaryRecord;
 import com.panjia.people.dto.AccountUserInfo;
 import com.panjia.people.dto.ChangeLogVO;
+import com.panjia.people.dto.DeptCategoryInfo;
 import com.panjia.people.dto.EmployeeCreateDTO;
 import com.panjia.people.dto.EmployeeQuery;
 import com.panjia.people.dto.EmployeeUpdateDTO;
 import com.panjia.people.dto.EmployeeVO;
+import com.panjia.people.dto.VirtualEmployeeCandidateVO;
+import com.panjia.people.dto.VirtualEmployeeInitDTO;
+import com.panjia.people.dto.VirtualEmployeeInitResultVO;
 import com.panjia.people.mapper.ChangeLogMapper;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.mapper.SalaryFactMapper;
@@ -23,6 +27,7 @@ import com.panjia.people.port.AccountPort;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.EmployeeService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
@@ -33,6 +38,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +52,7 @@ import java.util.stream.Collectors;
  * 只依赖 Port 接口操作 sys_*；变更统一走 {@code changeFact}（闭开区间），
  * 部门/岗位变更同事务同步账户，离职禁用账户。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class EmployeeServiceImpl implements EmployeeService {
@@ -604,6 +611,106 @@ public class EmployeeServiceImpl implements EmployeeService {
             dto.setDeptId(v.getDeptId());
             result.put(category, dto);
         });
+        return result;
+    }
+
+    @Override
+    public List<VirtualEmployeeCandidateVO> listVirtualCandidates() {
+        List<DeptCategoryInfo> depts = deptPort.listActiveDeptCategories();
+        if (depts.isEmpty()) {
+            return List.of();
+        }
+        // 虚拟人判定口径与 findVirtualEmployeesByStoreGroups 一致：部门下 工号 = 店组编码
+        List<String> categories = depts.stream()
+            .map(DeptCategoryInfo::getDeptCategory)
+            .filter(StringUtils::isNotBlank)
+            .distinct()
+            .toList();
+        Map<String, Long> virtualIdByKey = new LinkedHashMap<>();
+        if (!categories.isEmpty()) {
+            List<Employee> virtuals = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+                .in(Employee::getDeptId, depts.stream().map(DeptCategoryInfo::getDeptId).toList())
+                .in(Employee::getEmployeeCode, categories));
+            for (Employee e : virtuals) {
+                virtualIdByKey.putIfAbsent(e.getDeptId() + "|" + e.getEmployeeCode(), e.getEmployeeId());
+            }
+        }
+        Map<Long, String> fullNames = deptPort.findDeptFullNames(
+            depts.stream().map(DeptCategoryInfo::getDeptId).toList());
+        List<VirtualEmployeeCandidateVO> result = new ArrayList<>(depts.size());
+        for (DeptCategoryInfo d : depts) {
+            VirtualEmployeeCandidateVO vo = new VirtualEmployeeCandidateVO();
+            vo.setDeptId(d.getDeptId());
+            vo.setDeptFullName(fullNames.getOrDefault(d.getDeptId(), d.getDeptName()));
+            vo.setDeptCategory(d.getDeptCategory());
+            Long vid = StringUtils.isBlank(d.getDeptCategory()) ? null
+                : virtualIdByKey.get(d.getDeptId() + "|" + d.getDeptCategory());
+            vo.setHasVirtual(vid != null);
+            vo.setVirtualEmployeeId(vid);
+            result.add(vo);
+        }
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public VirtualEmployeeInitResultVO initVirtualEmployees(List<VirtualEmployeeInitDTO> items, Long operatorId) {
+        VirtualEmployeeInitResultVO result = new VirtualEmployeeInitResultVO();
+        if (items == null || items.isEmpty()) {
+            return result;
+        }
+        // 批次内编码重复 → 直接拒绝
+        Set<String> batchCodes = new HashSet<>();
+        for (VirtualEmployeeInitDTO item : items) {
+            String code = item.getDeptCategory() == null ? "" : item.getDeptCategory().trim();
+            if (code.isEmpty()) {
+                throw new ServiceException("店组编码不能为空（部门 ID " + item.getDeptId() + "）");
+            }
+            if (!batchCodes.add(code)) {
+                throw new ServiceException("店组编码在本次提交中重复: " + code);
+            }
+        }
+        // 现有编码归属 + 部门名（一次查询两用）
+        List<DeptCategoryInfo> depts = deptPort.listActiveDeptCategories();
+        Map<String, Long> categoryOwner = new LinkedHashMap<>();
+        Map<Long, String> nameByDept = new LinkedHashMap<>();
+        for (DeptCategoryInfo d : depts) {
+            nameByDept.put(d.getDeptId(), d.getDeptName());
+            if (StringUtils.isNotBlank(d.getDeptCategory())) {
+                categoryOwner.putIfAbsent(d.getDeptCategory(), d.getDeptId());
+            }
+        }
+        for (VirtualEmployeeInitDTO item : items) {
+            String code = item.getDeptCategory().trim();
+            // 编码被其它部门占用 → 冲突剔除（防两店组同编码导致虚拟人挂靠错乱）
+            Long owner = categoryOwner.get(code);
+            if (owner != null && !owner.equals(item.getDeptId())) {
+                log.warn("[虚拟人初始化] 编码被其它部门占用：code={}, ownerDeptId={}, requestDeptId={}",
+                    code, owner, item.getDeptId());
+                result.getConflictedCodes().add(code);
+                continue;
+            }
+            // 1. 写入店组编码（sys_dept.dept_category）
+            deptPort.updateDeptCategory(item.getDeptId(), code);
+            // 2. 幂等建虚拟人：部门下工号=编码已存在则跳过
+            Long exists = employeeMapper.selectCount(new LambdaQueryWrapper<Employee>()
+                .eq(Employee::getDeptId, item.getDeptId())
+                .eq(Employee::getEmployeeCode, code));
+            if (exists != null && exists > 0) {
+                result.getSkippedCodes().add(code);
+                continue;
+            }
+            Employee v = new Employee();
+            v.setEmployeeCode(code);
+            v.setEmployeeName(nameByDept.getOrDefault(item.getDeptId(), code));
+            v.setDeptId(item.getDeptId());
+            v.setHireDate(LocalDate.now());
+            v.setStatus(EmployeeStatus.ACTIVE);
+            employeeMapper.insert(v);
+            result.getCreatedCodes().add(code);
+        }
+        log.info("[虚拟人初始化] operator={}, created={}, skipped={}, conflicted={}",
+            operatorId, result.getCreatedCodes(), result.getSkippedCodes(), result.getConflictedCodes());
         return result;
     }
 

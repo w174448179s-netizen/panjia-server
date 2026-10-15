@@ -606,10 +606,13 @@ public class SalaryCalculationEngine {
                 .add(pointsFee).add(otherDeduct);
             d.setDeduct(MoneyUtil.round2(deduct));
 
-            // 个税（累计预扣）
+            // 个税（累计预扣；EXTERNAL 模式置 0，待外部个税系统算税后导入回补）
+            // 缺省 EXTERNAL：系统内个税为简化试算不作为发放依据，需内部试算须在政策里显式配 mode=ENGINE
             BigDecimal netBeforeTax = gross.subtract(deduct);
-            BigDecimal tax = calcTax(emp, netBeforeTax, input, snap);
+            boolean externalTax = "EXTERNAL".equalsIgnoreCase(snap.tax().path("mode").asText("EXTERNAL"));
+            BigDecimal tax = externalTax ? BigDecimal.ZERO : calcTax(emp, netBeforeTax, input, snap);
             d.setTax(MoneyUtil.round2(tax));
+            d.setTaxSource(externalTax ? "EXTERNAL" : "ENGINE");
 
             // 最终发放
             BigDecimal net = netBeforeTax.subtract(tax);

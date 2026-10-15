@@ -61,6 +61,8 @@ public class PayrollDetail implements Serializable {
     private BigDecimal tax;
     private BigDecimal net;
     private BigDecimal employerSocial;
+    /** 个税来源：ENGINE=内部引擎试算，EXTERNAL=外部个税系统（扣缴端）导入回补 */
+    private String taxSource;
 
     // 业绩溯源（导出展示用，落地避免前端反推误差）
     /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */

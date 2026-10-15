@@ -496,6 +496,82 @@ public class PayrollBatchService {
         return input;
     }
 
+    // ==================== 个税回补（外部个税系统算税后导入） ====================
+
+    /**
+     * 个税回补导入：外部个税系统（自然人电子税务局扣缴端）算税后，按员工回填本月个税，
+     * 覆盖 {@code tax}、重算 {@code net = gross - deduct - tax}、重汇总批次合计，并留痕
+     * {@code tax_source = EXTERNAL}。
+     * <p>
+     * 时机：批次「已计算/审核中」（与重算相同的状态约束）——须在提交审批、锁定、发放前完成；
+     * 重新算薪会整批重建明细（tax 置回引擎口径），导入需重做，属预期。
+     * 幂等：重复导入按行覆盖；匹配不上的员工直接报错（整单回滚，不做部分导入）。
+     *
+     * @param taxByEmployeeId 员工ID(字符串，雪花 ID 前端以字符串传输) → 本月个税
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PayrollBatch importTax(Long batchId, Map<String, BigDecimal> taxByEmployeeId, Long operatorId) {
+        if (taxByEmployeeId == null || taxByEmployeeId.isEmpty()) {
+            throw new ServiceException("导入数据为空");
+        }
+        // 行锁串行化，与算薪互斥；可算薪状态（CALCULATED/REVIEWING 等）才允许回补
+        PayrollBatch batch = batchMapper.selectByIdForUpdate(batchId);
+        if (batch == null) throw new ServiceException("批次不存在");
+        batch.assertCanCalculate();
+
+        Map<Long, PayrollDetail> byEmp = detailMapper.selectByBatchId(batchId).stream()
+            .collect(Collectors.toMap(PayrollDetail::getEmployeeId, d -> d, (a, b) -> a));
+
+        // 先整单校验再落库：任一行匹配失败/金额非法即报错回滚，避免出现半导入状态
+        Map<Long, BigDecimal> normalized = new LinkedHashMap<>();
+        for (Map.Entry<String, BigDecimal> e : taxByEmployeeId.entrySet()) {
+            Long empId;
+            try {
+                empId = Long.valueOf(e.getKey());
+            } catch (NumberFormatException nfe) {
+                throw new ServiceException("非法员工ID：" + e.getKey());
+            }
+            PayrollDetail d = byEmp.get(empId);
+            if (d == null) {
+                throw new ServiceException("员工不在批次「" + batch.getPeriod() + "」中：employeeId=" + e.getKey());
+            }
+            BigDecimal tax = MoneyUtil.round2(e.getValue());
+            if (tax.compareTo(BigDecimal.ZERO) < 0) {
+                throw new ServiceException("个税不能为负：employeeId=" + e.getKey());
+            }
+            normalized.put(empId, tax);
+        }
+
+        for (Map.Entry<Long, BigDecimal> e : normalized.entrySet()) {
+            PayrollDetail d = byEmp.get(e.getKey());
+            d.setTax(e.getValue());
+            d.setTaxSource("EXTERNAL");
+            d.setNet(MoneyUtil.round2(
+                MoneyUtil.nvl(d.getGross()).subtract(MoneyUtil.nvl(d.getDeduct())).subtract(e.getValue())));
+            detailMapper.updateById(d);
+        }
+
+        // 重汇总批次合计（导入只影响 tax/net，gross/deduct 一并重算保持口径统一）
+        BigDecimal grossTotal = BigDecimal.ZERO, deductTotal = BigDecimal.ZERO,
+            taxTotal = BigDecimal.ZERO, netTotal = BigDecimal.ZERO;
+        for (PayrollDetail d : detailMapper.selectByBatchId(batchId)) {
+            grossTotal = grossTotal.add(MoneyUtil.nvl(d.getGross()));
+            deductTotal = deductTotal.add(MoneyUtil.nvl(d.getDeduct()));
+            taxTotal = taxTotal.add(MoneyUtil.nvl(d.getTax()));
+            netTotal = netTotal.add(MoneyUtil.nvl(d.getNet()));
+        }
+        batch.setGrossTotal(MoneyUtil.round2(grossTotal));
+        batch.setDeductTotal(MoneyUtil.round2(deductTotal));
+        batch.setTaxTotal(MoneyUtil.round2(taxTotal));
+        batch.setNetTotal(MoneyUtil.round2(netTotal));
+        batch.setOperatorId(operatorId);
+        batchMapper.updateById(batch);
+
+        log.info("[薪酬] 批次 {} 个税回补完成：{} 人导入，个税合计={}, 实发合计={}",
+            batchId, normalized.size(), taxTotal, netTotal);
+        return batch;
+    }
+
     // ==================== 状态流转（工作流驱动） ====================
 
     /**

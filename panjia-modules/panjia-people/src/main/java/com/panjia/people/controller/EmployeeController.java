@@ -20,6 +20,9 @@ import com.panjia.people.dto.EmployeeQuery;
 import com.panjia.people.dto.EmployeeUpdateDTO;
 import com.panjia.people.dto.EmployeeVO;
 import com.panjia.people.dto.PostOption;
+import com.panjia.people.dto.VirtualEmployeeCandidateVO;
+import com.panjia.people.dto.VirtualEmployeeInitDTO;
+import com.panjia.people.dto.VirtualEmployeeInitResultVO;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.port.PostRolePort;
 import com.panjia.people.service.EmployeeImportService;
@@ -126,6 +129,31 @@ public class EmployeeController extends BaseController {
     @GetMapping("/{employeeId}/history")
     public R<List<ChangeLogVO>> history(@PathVariable Long employeeId) {
         return R.ok(employeeService.getHistory(employeeId));
+    }
+
+    /**
+     * 店组虚拟人候选列表（全部启用部门 + 店组编码 + 是否已有虚拟人）。
+     *
+     * @return 候选行列表
+     */
+    @SaCheckPermission("people:employee:list")
+    @GetMapping("/virtual/candidates")
+    public R<List<VirtualEmployeeCandidateVO>> virtualCandidates() {
+        return R.ok(employeeService.listVirtualCandidates());
+    }
+
+    /**
+     * 一键新建店组虚拟人：写入店组编码 + 幂等补建虚拟人（不建登录账户/岗位/算薪事实）。
+     *
+     * @param items 待建项（部门 + 店组编码）
+     * @return 新建/跳过/冲突结果
+     */
+    @SaCheckPermission("people:employee:add")
+    @Log(title = "店组虚拟人初始化", businessType = BusinessType.INSERT)
+    @PostMapping("/virtual/init")
+    public R<VirtualEmployeeInitResultVO> initVirtualEmployees(
+            @Validated @RequestBody List<VirtualEmployeeInitDTO> items) {
+        return R.ok(employeeService.initVirtualEmployees(items, LoginHelper.getUserId()));
     }
 
     /**

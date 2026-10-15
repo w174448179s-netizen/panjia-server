@@ -6,6 +6,9 @@ import com.panjia.people.dto.EmployeeCreateDTO;
 import com.panjia.people.dto.EmployeeQuery;
 import com.panjia.people.dto.EmployeeUpdateDTO;
 import com.panjia.people.dto.EmployeeVO;
+import com.panjia.people.dto.VirtualEmployeeCandidateVO;
+import com.panjia.people.dto.VirtualEmployeeInitDTO;
+import com.panjia.people.dto.VirtualEmployeeInitResultVO;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
@@ -60,4 +63,21 @@ public interface EmployeeService extends PeopleQueryPort {
      * @return 变更记录视图
      */
     List<ChangeLogVO> getHistory(Long employeeId);
+
+    /**
+     * 店组虚拟人候选列表：全部启用部门 + 店组编码 + 是否已有虚拟人。
+     *
+     * @return 候选行列表（按部门 ID 升序）
+     */
+    List<VirtualEmployeeCandidateVO> listVirtualCandidates();
+
+    /**
+     * 一键新建店组虚拟人：先写入店组编码（sys_dept.dept_category），
+     * 再按「工号 = 店组编码、姓名 = 部门名」幂等补建虚拟人（不建登录账户/岗位/算薪事实）。
+     *
+     * @param items      待建项（部门 + 店组编码）
+     * @param operatorId 操作人 ID
+     * @return 新建/跳过/冲突结果
+     */
+    VirtualEmployeeInitResultVO initVirtualEmployees(List<VirtualEmployeeInitDTO> items, Long operatorId);
 }

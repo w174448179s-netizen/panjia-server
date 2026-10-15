@@ -1,5 +1,6 @@
 package com.panjia.people.port;
 
+import com.panjia.people.dto.DeptCategoryInfo;
 import com.panjia.people.dto.DeptNode;
 
 import java.util.Collection;
@@ -89,4 +90,19 @@ public interface DeptPort {
      * @return 门店 deptId → 部门名
      */
     Map<Long, String> findStoreDepts();
+
+    /**
+     * 列出全部正常状态部门的类别编码信息（店组虚拟人候选列表用）。
+     *
+     * @return 部门列表（deptId/deptName/deptCategory），按 deptId 升序
+     */
+    List<DeptCategoryInfo> listActiveDeptCategories();
+
+    /**
+     * 更新部门类别编码（店组编码，一键新建虚拟人时写入）。
+     *
+     * @param deptId   部门 ID
+     * @param category 类别编码；null/空白表示清除
+     */
+    void updateDeptCategory(Long deptId, String category);
 }
