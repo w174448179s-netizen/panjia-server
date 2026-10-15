@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -285,8 +286,18 @@ public class RuoYiDeptAdapter implements DeptPort {
             .eq(SysDept::getStatus, UserStatus.OK.getCode())
             .eq(SysDept::getDelFlag, "0")
             .orderByAsc(SysDept::getDeptId));
+        // 只保留「组」级部门：ancestors 段数 >= 3（根→门店→组）且为叶子（无启用子部门），
+        // 排除大区/门店——店组虚拟人只挂在组上
+        Set<Long> hasEnabledChildren = depts.stream()
+            .map(SysDept::getParentId)
+            .filter(pid -> pid != null)
+            .collect(Collectors.toSet());
         List<DeptCategoryInfo> result = new ArrayList<>(depts.size());
         for (SysDept d : depts) {
+            String[] chain = d.getAncestors() == null ? new String[0] : d.getAncestors().split(ANCESTORS_SEPARATOR);
+            if (chain.length < 3 || hasEnabledChildren.contains(d.getDeptId())) {
+                continue;
+            }
             DeptCategoryInfo info = new DeptCategoryInfo();
             info.setDeptId(d.getDeptId());
             info.setDeptName(d.getDeptName());
