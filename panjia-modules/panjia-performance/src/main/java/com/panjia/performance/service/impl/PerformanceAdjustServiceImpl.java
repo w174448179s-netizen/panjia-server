@@ -2199,7 +2199,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 结佣发起端以「新签已调整但实收未调整」闸门兜底拦截）：
      * <ul>
      *   <li>规则①：含新增角色人的调整不联动（新人在实收侧无对应行，金额映射由人工决定）；</li>
-     *   <li>规则②：调整后新签合计 &lt; 实收合计时不联动（提交端已同步放行，不再按实收余额阻断）；</li>
+     *   <li>规则②：调整后新签合计 &gt; 实收合计时不联动（新签仍覆盖实收，实收按到账事实
+     *       保留不动；新签 ≤ 实收时才联动。2026-10-16 修正：原写成小于号，方向反了）；</li>
      *   <li>规则③：新签人员集合与实收人员集合不匹配时不联动；</li>
      *   <li>规则②补充：DEDUCT 逐被扣经纪人扣减额超过其实收金额时不联动（提交端已放行）。</li>
      * </ul>
@@ -2249,7 +2250,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     alloc.getBefore() == null ? BigDecimal.ZERO : alloc.getBefore(), BigDecimal::add);
             }
         }
-        // 规则②：调整后新签合计 < 实收合计时不联动（实收缺口由人工实收调整处理）
+        // 规则②：调整后新签合计 > 实收合计时不联动（新签仍覆盖实收，实收按到账事实保留不动；
+        // 新签 ≤ 实收时才联动。2026-10-16 修正：原写成小于号，方向反了）
         BigDecimal receivedTotal = received.stream()
             .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -2259,8 +2261,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             afterTotal = payload.getContractTotal()
                 .add(deltaByEmp.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
         }
-        if (afterTotal != null && afterTotal.compareTo(receivedTotal) < 0) {
-            log.info("[调整单-实收联动] 调整后新签合计 {} 小于实收合计 {}，不联动实收：adjustId={}",
+        if (afterTotal != null && afterTotal.compareTo(receivedTotal) > 0) {
+            log.info("[调整单-实收联动] 调整后新签合计 {} 大于实收合计 {}，不联动实收：adjustId={}",
                 MoneyUtil.round2(afterTotal), MoneyUtil.round2(receivedTotal), adjust.getId());
             return;
         }

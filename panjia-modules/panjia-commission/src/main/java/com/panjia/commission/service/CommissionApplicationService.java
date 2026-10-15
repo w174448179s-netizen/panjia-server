@@ -809,7 +809,7 @@ public class CommissionApplicationService {
      * <p>
      * 背景：新签调整在以下场景不自动联动实收（执行端整单跳过，见
      * {@code PerformanceAdjustServiceImpl.linkReceivedForAdjust}）——含新增角色人、
-     * 新签与实收人员不匹配、调整后新签合计小于实收合计、扣减额超个人实收。
+     * 新签与实收人员不匹配、调整后新签合计大于实收合计、扣减额超个人实收。
      * 此类合同实收缺口须人工发起实收调整补齐；未补齐前禁止结佣，否则按旧实收
      * 口径结出的佣金与新签不一致。
      * <p>
