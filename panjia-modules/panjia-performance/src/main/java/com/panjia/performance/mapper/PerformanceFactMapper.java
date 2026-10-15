@@ -1151,6 +1151,37 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                                @Param("keys") Collection<String> keys);
 
     /**
+     * 判断业务键 ACTIVE 事实的 source_key 链是否存在 REVERSED 行（「是否已调整」判定用，不限期间）。
+     * <p>
+     * 口径：以各业务键当前 ACTIVE 事实的 source_key 集合为准，任一链上存在
+     * REVERSED 行即计入；调用方以返回值 &gt; 0 判定「已调整」（2026-10-15 结佣发起闸门用）。
+     *
+     * @param factType 事实口径
+     * @param keys     合同号/订单号业务键集合（不可为空，空集合由调用方拦截不发起 SQL）
+     * @return 存在 REVERSED 行的链数；0 = 从未调整
+     */
+    @Select("""
+        <script>
+        WITH sk AS (
+            SELECT DISTINCT f.source_key
+            FROM (VALUES
+              <foreach collection="keys" item="bk" separator=",">(#{bk})</foreach>
+            ) AS k(key)
+            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
+                               AND f.fact_type = #{factType}
+                               AND (f.contract_no = k.key OR f.order_no = k.key)
+            WHERE f.source_key IS NOT NULL
+        )
+        SELECT COUNT(*)
+        FROM sk
+        JOIN pj_perf_fact x ON x.source_key = sk.source_key
+                           AND x.fact_status = 'REVERSED'
+        </script>
+        """)
+    long existsReversedChainByKeys(@Param("factType") String factType,
+                                   @Param("keys") Collection<String> keys);
+
+    /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。
      * <p>
      * 按业务键聚合：一手房/房产金融/家装荐客以订单号为准（空回退合同号），

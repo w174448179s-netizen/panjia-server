@@ -1671,8 +1671,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 总额规则（afterTotal = Σ指定行目标 + 未指定行现值 + Σ新人金额）：
      * <ul>
      *   <li>AMOUNT 业绩调整：afterTotal 必须等于原合同总额，否则拒绝保存；</li>
-     *   <li>DEDUCT 业绩扣减：afterTotal 必须小于原总额；且逐被扣经纪人校验
-     *       「新签扣减额 ≤ 该人实收金额」（无实收则不联动、不校验），不足拒绝发起；</li>
+     *   <li>DEDUCT 业绩扣减：afterTotal 必须小于原总额；（2026-10-15 起）不再按实收余额
+     *       阻断提交，实收联动在执行端按规则跳过（见 {@link #linkReceivedForAdjust}）；</li>
      *   <li>INCREASE 业绩增加：afterTotal 必须大于原总额。</li>
      * </ul>
      * 快照含 detailTargets（执行权威依据）+ newMembers + allocations 预演（before/delta，
@@ -1798,11 +1798,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             allocations.add(alloc);
         }
 
-        // 5. 业绩扣减实收校验：逐被扣经纪人「新签扣减额 ≤ 该人实收金额」，不足拒绝发起
-        if (adjustType == AdjustType.DEDUCT) {
-            assertReceivedEnoughForDeduct(dto, allocations);
-        }
-
         // 6. 新角色人档案信息（一次 IN 批量查工号/姓名/部门），组装快照
         List<AddMemberPayload.NewMember> memberSnapshots = new ArrayList<>(requestMembers.size());
         if (!requestMembers.isEmpty()) {
@@ -1870,64 +1865,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             payload.setNewShareRatio(firstSnap.getNewShareRatio());
         }
         return JsonUtils.toJsonString(payload);
-    }
-
-    /**
-     * 业绩扣减实收校验（2026-10-14）：合同已有实收业绩时，逐被扣经纪人校验
-     * 「新签扣减额 ≤ 该人实收金额」（业绩扣多少实收扣多少，实收不足则扣不动）；
-     * 该人无实收记录时不联动实收、不校验。端口缺失或无实收直接放行。
-     *
-     * @param dto         创建请求（合同号/订单号）
-     * @param allocations 分摊预演快照（逐事实行 before/delta，含员工姓名）
-     */
-    private void assertReceivedEnoughForDeduct(PerformanceAdjustCreateBo dto,
-                                               List<AddMemberPayload.Alloc> allocations) {
-        ReceivedRealFactPort port = receivedRealPort();
-        if (port == null) {
-            return;
-        }
-        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(
-            null, dto.getOrderNo(), dto.getContractNo());
-        if (received == null || received.isEmpty()) {
-            return;
-        }
-        // 按经纪人聚合实收金额
-        Map<Long, BigDecimal> recvByEmp = new HashMap<>();
-        for (PerformanceFactSummaryDTO r : received) {
-            if (r.getEmployeeId() == null) {
-                continue;
-            }
-            recvByEmp.merge(r.getEmployeeId(),
-                r.getAmount() == null ? BigDecimal.ZERO : r.getAmount(), BigDecimal::add);
-        }
-        if (recvByEmp.isEmpty()) {
-            return;
-        }
-        // 按经纪人聚合新签扣减额（allocations 为事实行粒度，一人可能多行）
-        Map<Long, BigDecimal> deltaByEmp = new HashMap<>();
-        Map<Long, String> nameByEmp = new HashMap<>();
-        for (AddMemberPayload.Alloc alloc : allocations) {
-            if (alloc.getEmployeeId() == null || alloc.getDelta() == null) {
-                continue;
-            }
-            deltaByEmp.merge(alloc.getEmployeeId(), alloc.getDelta(), BigDecimal::add);
-            nameByEmp.putIfAbsent(alloc.getEmployeeId(), alloc.getEmployeeName());
-        }
-        for (Map.Entry<Long, BigDecimal> entry : deltaByEmp.entrySet()) {
-            BigDecimal delta = MoneyUtil.round2(entry.getValue());
-            if (delta.signum() >= 0) {
-                continue;
-            }
-            BigDecimal recv = recvByEmp.get(entry.getKey());
-            if (recv == null || recv.signum() <= 0) {
-                continue;
-            }
-            if (delta.abs().compareTo(recv) > 0) {
-                throw new ServiceException("员工「{}」实收金额 {} 不足：新签扣减额 {} 不能超过其实收金额",
-                    nameByEmp.getOrDefault(entry.getKey(), String.valueOf(entry.getKey())),
-                    MoneyUtil.round2(recv), delta.abs());
-            }
-        }
     }
 
     /**
@@ -2254,9 +2191,17 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 新签调整实收联动（2026-10-14）：新签落库后同事务直接调整实收明细（直接生效，不再二次审批）。
      * <ul>
      *   <li>业绩调整(AMOUNT)：逐经纪人 实收调整额 = 新签调整额 × 该人实收金额 ÷ 该人调整前新签金额
-     *       （该人无实收或调整前新签为 0 跳过；新角色人无实收天然不联动）；</li>
+     *       （该人无实收或调整前新签为 0 跳过）；</li>
      *   <li>业绩扣减(DEDUCT)：业绩扣多少实收扣多少——逐被扣经纪人（新签变动&lt;0）实收同额扣减；</li>
      *   <li>业绩增加(INCREASE)：不联动。</li>
+     * </ul>
+     * 不联动规则（2026-10-15，命中任一即整单跳过联动，实收缺口由人工实收调整处理，
+     * 结佣发起端以「新签已调整但实收未调整」闸门兜底拦截）：
+     * <ul>
+     *   <li>规则①：含新增角色人的调整不联动（新人在实收侧无对应行，金额映射由人工决定）；</li>
+     *   <li>规则②：调整后新签合计 &lt; 实收合计时不联动（提交端已同步放行，不再按实收余额阻断）；</li>
+     *   <li>规则③：新签人员集合与实收人员集合不匹配时不联动；</li>
+     *   <li>规则②补充：DEDUCT 逐被扣经纪人扣减额超过其实收金额时不联动（提交端已放行）。</li>
      * </ul>
      * 落地：该经纪人各 ACTIVE 实收明细按金额占比分摊调整额（{@link MoneyUtil#allocateByAmount}，
      * 尾差补最大行，与新签同口径），逐条按指定金额 supersede；合同聚合由实收域自动重算，
@@ -2278,6 +2223,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (received == null || received.isEmpty()) {
             return;
         }
+        // 规则①：含新增角色人的调整不联动实收
+        if (payload != null && !payload.effectiveMembers().isEmpty()) {
+            log.info("[调整单-实收联动] 含新增角色人，不联动实收：adjustId={}", adjust.getId());
+            return;
+        }
         // 按经纪人聚合实收明细行
         Map<Long, List<PerformanceFactSummaryDTO>> detailsByEmp = new HashMap<>();
         for (PerformanceFactSummaryDTO r : received) {
@@ -2297,6 +2247,49 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     alloc.getDelta() == null ? BigDecimal.ZERO : alloc.getDelta(), BigDecimal::add);
                 beforeByEmp.merge(alloc.getEmployeeId(),
                     alloc.getBefore() == null ? BigDecimal.ZERO : alloc.getBefore(), BigDecimal::add);
+            }
+        }
+        // 规则②：调整后新签合计 < 实收合计时不联动（实收缺口由人工实收调整处理）
+        BigDecimal receivedTotal = received.stream()
+            .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal afterTotal = payload.getAfterTotal();
+        if (afterTotal == null && payload.getContractTotal() != null) {
+            // 旧快照无 afterTotal 时兜底：调整前合同总额 + 新签变动合计
+            afterTotal = payload.getContractTotal()
+                .add(deltaByEmp.values().stream().reduce(BigDecimal.ZERO, BigDecimal::add));
+        }
+        if (afterTotal != null && afterTotal.compareTo(receivedTotal) < 0) {
+            log.info("[调整单-实收联动] 调整后新签合计 {} 小于实收合计 {}，不联动实收：adjustId={}",
+                MoneyUtil.round2(afterTotal), MoneyUtil.round2(receivedTotal), adjust.getId());
+            return;
+        }
+        // 规则③：新签人员集合与实收人员集合不匹配时不联动
+        Set<Long> expectEmpIds = payload.getAllocations() == null ? Set.of()
+            : payload.getAllocations().stream()
+                .map(AddMemberPayload.Alloc::getEmployeeId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (!expectEmpIds.equals(detailsByEmp.keySet())) {
+            log.info("[调整单-实收联动] 新签人员 {} 与实收人员 {} 不匹配，不联动实收：adjustId={}",
+                expectEmpIds, detailsByEmp.keySet(), adjust.getId());
+            return;
+        }
+        // 规则②补充：DEDUCT 逐被扣经纪人扣减额超过其实收金额时不联动（提交端已放行，不再阻断）
+        if (type == AdjustType.DEDUCT) {
+            for (Map.Entry<Long, BigDecimal> entry : deltaByEmp.entrySet()) {
+                BigDecimal delta = MoneyUtil.round2(entry.getValue());
+                if (delta.signum() >= 0) {
+                    continue;
+                }
+                BigDecimal recvTotal = detailsByEmp.getOrDefault(entry.getKey(), List.of()).stream()
+                    .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+                if (delta.abs().compareTo(recvTotal) > 0) {
+                    log.info("[调整单-实收联动] 员工 {} 新签扣减额 {} 超过其实收金额 {}，不联动实收：adjustId={}",
+                        entry.getKey(), delta.abs(), MoneyUtil.round2(recvTotal), adjust.getId());
+                    return;
+                }
             }
         }
         for (Map.Entry<Long, List<PerformanceFactSummaryDTO>> entry : detailsByEmp.entrySet()) {

@@ -615,6 +615,25 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findEmployeeMainDataByCodes(Collection<String> codes) {
+        if (codes == null || codes.isEmpty()) {
+            return Map.of();
+        }
+        List<Employee> list = employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+            .in(Employee::getEmployeeCode, codes));
+        Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> result = new LinkedHashMap<>();
+        for (Employee e : list) {
+            com.panjia.contracts.dto.EmployeeMainDataDTO dto = new com.panjia.contracts.dto.EmployeeMainDataDTO();
+            dto.setEmployeeId(e.getEmployeeId());
+            dto.setEmployeeCode(e.getEmployeeCode());
+            dto.setEmployeeName(e.getEmployeeName());
+            dto.setDeptId(e.getDeptId());
+            result.putIfAbsent(e.getEmployeeCode(), dto);
+        }
+        return result;
+    }
+
+    @Override
     public List<VirtualEmployeeCandidateVO> listVirtualCandidates() {
         List<DeptCategoryInfo> depts = deptPort.listActiveDeptCategories();
         if (depts.isEmpty()) {

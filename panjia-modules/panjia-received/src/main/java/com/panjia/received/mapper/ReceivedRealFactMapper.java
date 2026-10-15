@@ -417,7 +417,7 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
-        WITH k(key) AS (
+        WITH k(key) AS (VALUES
           <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
         ),
         hit AS (
@@ -461,6 +461,43 @@ public interface ReceivedRealFactMapper {
         """)
     List<Map<String, Object>> selectOriginalAmountsByKeys(@Param("period") String period,
                                                           @Param("keys") Collection<String> keys);
+
+    /**
+     * 判断业务键 ACTIVE 实收明细的 source_key 链是否存在 REVERSED 行
+     * （「实收是否已调整」判定用，不限归属期间，2026-10-15 结佣发起闸门用）。
+     * <p>
+     * 口径：以各业务键当前 ACTIVE rd 的 source_key 集合为准，任一链上存在
+     * REVERSED 明细即计入；调用方以返回值 &gt; 0 判定「已调整」。
+     *
+     * @param keys 合同号/订单号业务键集合（不可为空，空集合由调用方拦截不发起 SQL）
+     * @return 存在 REVERSED 行的链数；0 = 从未调整
+     */
+    @Select("""
+        <script>
+        WITH k(key) AS (VALUES
+          <foreach collection="keys" item="bk" separator=",">(CAST(#{bk} AS text))</foreach>
+        ),
+        hit AS (
+            SELECT rc.id
+            FROM k JOIN pj_received_contract rc ON rc.order_no = k.key
+            UNION
+            SELECT rc.id
+            FROM k JOIN pj_received_contract rc ON rc.contract_no = k.key
+        ),
+        sk AS (
+            SELECT DISTINCT rd.source_key
+            FROM hit h
+            JOIN pj_received_detail rd ON rd.contract_id = h.id
+                                     AND rd.detail_status = 'ACTIVE'
+                                     AND rd.source_key IS NOT NULL
+        )
+        SELECT COUNT(*)
+        FROM sk
+        JOIN pj_received_detail x ON x.source_key = sk.source_key
+                                 AND x.detail_status = 'REVERSED'
+        </script>
+        """)
+    long existsReversedChainByKeys(@Param("keys") Collection<String> keys);
 
     /** 历史工资导入批次 ACTIVE 实收明细（结佣 LOCKED 建单用；adjust_id 非空的调整新行不计入批次）。 */
     @Select("""

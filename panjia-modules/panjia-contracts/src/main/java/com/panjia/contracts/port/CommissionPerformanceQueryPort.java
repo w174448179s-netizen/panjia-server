@@ -165,6 +165,19 @@ public interface CommissionPerformanceQueryPort {
     Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, Collection<String> bizKeys, String factType);
 
     /**
+     * 判断业务键 ACTIVE 事实的 source_key 链是否存在 REVERSED 行（「是否已调整」判定用，不限期间）。
+     * <p>
+     * 口径：以各业务键当前 ACTIVE 事实的 source_key 集合为准，任一链上存在 REVERSED 行即返回 true。
+     * PERF_REAL 委托实收域（{@code pj_received_detail}），其余口径查 {@code pj_perf_fact}。
+     * 2026-10-15 结佣发起闸门用：新签（PERF_EXPECT）已调整而实收（PERF_REAL）未调整时拦截发起。
+     *
+     * @param bizKeys  合同号/订单号业务键集合（空集合返回 false，不发起 SQL）
+     * @param factType 事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return true = 已调整（存在 REVERSED 链）；false = 从未调整
+     */
+    boolean hasReversedChain(Collection<String> bizKeys, String factType);
+
+    /**
      * 合同级金额调整：按合同下指定口径各 ACTIVE 事实当前金额占比分摊
      * （targetAmount − 当前合计）差额，逐条 supersede 为新金额（结佣调整用）。
      * <p>

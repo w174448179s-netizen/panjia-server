@@ -143,6 +143,18 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return result;
     }
 
+    /**
+     * 「实收是否已调整」判定（2026-10-15 结佣发起闸门用）：业务键 ACTIVE 明细的
+     * source_key 链存在 REVERSED 行即 true；不限归属期间。
+     */
+    @Override
+    public boolean hasReversedChain(Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return false;
+        }
+        return realMapper.existsReversedChainByKeys(bizKeys) > 0;
+    }
+
     @Override
     public List<HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId) {
         if (period == null || period.isBlank() || batchId == null) {

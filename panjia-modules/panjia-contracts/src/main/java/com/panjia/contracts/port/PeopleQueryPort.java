@@ -31,6 +31,18 @@ public interface PeopleQueryPort {
     Map<String, Long> findEmployeeIdsByCodes(Collection<String> codes);
 
     /**
+     * 按员工工号批量查员工主数据（含归属部门）。
+     * <p>
+     * 实收导入写明细/合同时回填 dept_id 用：业绩查询的部门权限过滤依赖
+     * pj_received_detail.dept_id / pj_received_contract.dept_id，导入不写会导致
+     * 总监/财务等非超管角色实收合计恒为 0。
+     *
+     * @param codes 员工工号集合
+     * @return employeeCode → 主数据（employeeId/employeeCode/employeeName/deptId）；未匹配的不在结果中
+     */
+    Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findEmployeeMainDataByCodes(Collection<String> codes);
+
+    /**
      * 按员工姓名批量查员工引用（ID + 工号）。
      * <p>
      * 历史工资导入归一化用：天街历史表无工号列，只能按姓名匹配员工。

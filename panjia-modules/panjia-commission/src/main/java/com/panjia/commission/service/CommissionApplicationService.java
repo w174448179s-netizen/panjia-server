@@ -565,6 +565,10 @@ public class CommissionApplicationService {
         // 同合同多订单防串单：实收事实跨多个订单号时禁止按合同号整包建单（2026-10-12）
         assertSingleOrderScope(nonZeroFacts, contractNo);
 
+        // 新签已调整但实收未调整时拦截发起（2026-10-15 规则④：新签调整不自动联动实收的场景
+        // ——含新增角色人/人员不匹配/新签小于实收——实收缺口须人工实收调整补齐后方可结佣）
+        assertReceivedLinkedBeforeApply(nonZeroFacts, contractNo);
+
         // 员工归属：明细数据源为跨月新签事实（导入未匹配即拦截，必有人），无需兜底补齐
 
         // 合同快照（订单号/房源/签约时间取事实聚合值；跨门店合作单 dept_id 留空）
@@ -797,6 +801,51 @@ public class CommissionApplicationService {
         if (orderNos.size() > 1) {
             throw new ServiceException("合同 " + bizKey + " 下存在多个实收订单（" + String.join("、", orderNos)
                 + "），结佣须按订单分别发起，请在发起列表中选择具体订单后提交，勿直接用合同号发起");
+        }
+    }
+
+    /**
+     * 新签已调整但实收未调整时拦截结佣发起（2026-10-15 规则④）。
+     * <p>
+     * 背景：新签调整在以下场景不自动联动实收（执行端整单跳过，见
+     * {@code PerformanceAdjustServiceImpl.linkReceivedForAdjust}）——含新增角色人、
+     * 新签与实收人员不匹配、调整后新签合计小于实收合计、扣减额超个人实收。
+     * 此类合同实收缺口须人工发起实收调整补齐；未补齐前禁止结佣，否则按旧实收
+     * 口径结出的佣金与新签不一致。
+     * <p>
+     * 判定口径（与「原值 → 调整后值」展示一致）：业务键（合同号/订单号）ACTIVE 事实的
+     * source_key 链存在 REVERSED 行即「已调整」。新签（PERF_EXPECT）已调整
+     * 且实收（PERF_REAL）未调整 → 拦截。
+     *
+     * @param realFacts  本单 ACTIVE 实收事实（非零）
+     * @param contractNo 用户输入的合同号/订单号（提示文案用）
+     */
+    private void assertReceivedLinkedBeforeApply(List<PerformanceFactSummaryDTO> realFacts, String contractNo) {
+        Set<String> keys = new LinkedHashSet<>();
+        if (StringUtils.isNotBlank(contractNo)) {
+            keys.add(contractNo.trim());
+        }
+        for (PerformanceFactSummaryDTO f : realFacts) {
+            if (f == null) {
+                continue;
+            }
+            if (StringUtils.isNotBlank(f.getContractNo())) {
+                keys.add(f.getContractNo().trim());
+            }
+            if (StringUtils.isNotBlank(f.getOrderNo())) {
+                keys.add(f.getOrderNo().trim());
+            }
+        }
+        if (keys.isEmpty()) {
+            return;
+        }
+        boolean expectAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_EXPECT);
+        if (!expectAdjusted) {
+            return;
+        }
+        boolean realAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_REAL);
+        if (!realAdjusted) {
+            throw new ServiceException("合同 " + contractNo + " 新签有调整，请进行实收调整后发起");
         }
     }
 

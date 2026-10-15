@@ -1,9 +1,11 @@
 package com.panjia.received.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.ImportToReceivedPort;
+import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.received.domain.ReceivedContract;
 import com.panjia.received.domain.ReceivedDetail;
 import com.panjia.received.mapper.ReceivedContractMapper;
@@ -16,8 +18,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 导入批次 → 实收表写入实现（panjia-received 域）。
@@ -40,6 +44,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final ReceivedContractMapper contractMapper;
     private final ReceivedDetailMapper detailMapper;
+    private final PeopleQueryPort peopleQueryPort;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -55,8 +60,20 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             pageResult = importQueryPort.listByBatchId(batchId, pageNum, PAGE_SIZE);
             if (pageResult == null || pageResult.getRows() == null) break;
 
+            // 按页批量预查员工主数据（回填明细/合同 dept_id：部门权限过滤依赖，
+            // 不写会导致总监/财务等非超管角色实收合计恒为 0）
+            Set<String> pageCodes = new HashSet<>();
+            for (NormalizedRecordDTO record : pageResult.getRows()) {
+                if (isReceivedRecord(record, sourceType) && record.getEmployeeCode() != null) {
+                    pageCodes.add(record.getEmployeeCode());
+                }
+            }
+            Map<String, EmployeeMainDataDTO> empMap = peopleQueryPort.findEmployeeMainDataByCodes(pageCodes);
+
             for (NormalizedRecordDTO record : pageResult.getRows()) {
                 if (!isReceivedRecord(record, sourceType)) continue;
+
+                EmployeeMainDataDTO emp = record.getEmployeeCode() == null ? null : empMap.get(record.getEmployeeCode());
 
                 // 幂等检查：source_key 已存在 ACTIVE 明细 → 跳过（uk_received_detail_anchor 保证至多一条）
                 String sourceKey = buildDetailSourceKey(record, period);
@@ -74,7 +91,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
                         .eq(ReceivedContract::getSourceType, sourceType)
                         .last("LIMIT 1")));
                 if (contract == null) {
-                    contract = buildContract(record, period, sourceType, batchId);
+                    contract = buildContract(record, period, sourceType, batchId, emp);
                     contractMapper.insert(contract);
                     newContracts++;
                     log.info("[实收写入] 新建合同：id={}, orderNo={}, period={}",
@@ -82,7 +99,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
                 }
 
                 // 建明细
-                ReceivedDetail detail = buildDetail(record, contract.getId(), period, sourceKey, operatorId);
+                ReceivedDetail detail = buildDetail(record, contract.getId(), period, sourceKey, operatorId, emp);
                 detailMapper.insert(detail);
                 newDetails++;
 
@@ -154,7 +171,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             + period;
     }
 
-    private ReceivedContract buildContract(NormalizedRecordDTO r, String period, String sourceType, Long batchId) {
+    private ReceivedContract buildContract(NormalizedRecordDTO r, String period, String sourceType, Long batchId, EmployeeMainDataDTO emp) {
         ReceivedContract c = new ReceivedContract();
         c.setOrderNo(r.getOrderNo());
         c.setContractNo(r.getContractNo());
@@ -168,7 +185,8 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         }
         c.setBatchId(batchId);
         c.setSourceType(sourceType);
-        // 部门暂从归一化拿不到（deptFullName 是字符串，后续加 PeopleQueryPort），先留 null
+        // 部门取该合同首条记录员工的归属部门（部门权限过滤依赖此字段）
+        c.setDeptId(emp != null ? emp.getDeptId() : null);
         c.setPropertyAddress(r.getPropertyAddress());
         c.setContractAmount(r.getOriginAmount() != null ? r.getOriginAmount() : BigDecimal.ZERO);
         c.setPeriodTotalReceived(BigDecimal.ZERO);
@@ -176,10 +194,14 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         return c;
     }
 
-    private ReceivedDetail buildDetail(NormalizedRecordDTO r, Long contractId, String period, String sourceKey, Long operatorId) {
+    private ReceivedDetail buildDetail(NormalizedRecordDTO r, Long contractId, String period, String sourceKey, Long operatorId, EmployeeMainDataDTO emp) {
         ReceivedDetail d = new ReceivedDetail();
         d.setContractId(contractId);
-        // employeeId 暂留 null（归一化只有 employeeCode 字符串），后续加 PeopleQueryPort 查
+        // 员工主数据：employeeId + deptId 一并回填（部门权限过滤依赖 dept_id）
+        if (emp != null) {
+            d.setEmployeeId(emp.getEmployeeId());
+            d.setDeptId(emp.getDeptId());
+        }
         d.setEmployeeExternalCode(r.getEmployeeCode());
         d.setRoleType(r.getRoleType());
         d.setRoleName(r.getRoleName());

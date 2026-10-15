@@ -350,6 +350,22 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         return result;
     }
 
+    /**
+     * 「是否已调整」判定（2026-10-15 结佣发起闸门用）：业务键 ACTIVE 事实的
+     * source_key 链存在 REVERSED 行即 true；PERF_REAL 委托实收域，其余查 pj_perf_fact。
+     */
+    @Override
+    public boolean hasReversedChain(java.util.Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return false;
+        }
+        if (isReal(factType)) {
+            ReceivedRealFactPort port = realPort();
+            return port != null && port.hasReversedChain(bizKeys);
+        }
+        return factMapper.existsReversedChainByKeys(factType, bizKeys) > 0;
+    }
+
     // ==================== 历史工资导入（HISTORY_PAYROLL）结佣建单支撑 ====================
 
     @Override

@@ -92,6 +92,18 @@ public interface ReceivedRealFactPort {
      */
     Map<String, BigDecimal> sumOriginalAmountsByKeys(String period, Collection<String> bizKeys);
 
+    /**
+     * 判断业务键 ACTIVE 实收明细的 source_key 链是否存在 REVERSED 行
+     * （「实收是否已调整」判定用，不限归属期间）。
+     * <p>
+     * 口径：以各业务键当前 ACTIVE rd 的 source_key 集合为准，任一链上存在 REVERSED
+     * 明细即返回 true。2026-10-15 结佣发起闸门用：新签已调整而实收未调整时拦截发起。
+     *
+     * @param bizKeys 合同号/订单号业务键集合（空集合返回 false，不发起 SQL）
+     * @return true = 实收已调整；false = 从未调整
+     */
+    boolean hasReversedChain(Collection<String> bizKeys);
+
     /** 历史工资导入批次实收明细（ACTIVE，结佣 LOCKED 建单用；adjust_id 非空的调整新行不计入批次）。 */
     List<HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId);
 
