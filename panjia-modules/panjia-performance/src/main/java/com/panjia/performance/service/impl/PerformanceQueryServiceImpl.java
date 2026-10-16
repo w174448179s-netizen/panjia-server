@@ -1361,10 +1361,15 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         // 2. 合同级已执行调整（多单链式调整按 id 倒序逐单逆向回退）：
-        //    AMOUNT：无 fact_id 痕迹，按等比不变性用当前金额逆向分摊（与执行时按原始金额分摊结果一致）；
-        //    ADD_MEMBER：合同总额不变，按 payload 快照逐人反转——既有行加回扣减额（935→835 还原为 935），
-        //    新角色人行归零（0→100 的原口径为 0）。执行后既有事实已被替代（新 id、同 source_key），
-        //    故 payload.factId 不能与当前行等值，须经旧事实 source_key / 员工+角色 映射。
+        //    有 allocations 快照的单（ADD_MEMBER 与三类型 AMOUNT/DEDUCT/INCREASE）按快照逐人反转——
+        //    既有行加回 −delta，新角色人行工作值归零（0→X 的原口径为 0）；
+        //    执行后既有事实已被替代（新 id、同 source_key），故 payload.factId 不能与当前行等值，
+        //    须经旧事实 source_key / 员工+角色 映射；
+        //    旧 AMOUNT 单（无快照）按等比不变性用当前金额逆向分摊（与执行时按原始金额分摊结果一致）。
+        //    实收口径（PERF_REAL）的调整落在 pj_perf_received_adjust，其原值已由明细 SQL 沿 rd 链算出，此处跳过。
+        if ("PERF_REAL".equals(factType)) {
+            return;
+        }
         if (contractNos == null || contractNos.size() != 1) {
             return; // 多合同混合场景键无法区分，不做还原（明细弹窗为单合同）
         }
@@ -1379,12 +1384,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (executed.isEmpty()) {
             return;
         }
-        // 预取各 ADD_MEMBER 快照中的旧事实（执行后多为 REVERSED）：factId → sourceKey/员工/角色
+        // 预取各快照中的旧事实（执行后多为 REVERSED）：factId → sourceKey/员工/角色。
+        // ADD_MEMBER 与三类型 AMOUNT/DEDUCT/INCREASE 均带 allocations 快照，统一预取。
         Set<Long> payloadFactIds = new HashSet<>();
         for (Map<String, Object> adj : executed) {
-            if (!"ADD_MEMBER".equals(String.valueOf(adj.get("adjustType")))) {
-                continue;
-            }
             AddMemberPayload payload = parseAddMemberPayload(adj.get("payloadJson"));
             if (payload == null || payload.getAllocations() == null) {
                 continue;
@@ -1409,7 +1412,14 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         }
         for (Map<String, Object> adj : executed) {
             String adjustType = String.valueOf(adj.get("adjustType"));
-            if ("AMOUNT".equals(adjustType)) {
+            AddMemberPayload payload = parseAddMemberPayload(adj.get("payloadJson"));
+            boolean hasAllocations = payload != null && payload.getAllocations() != null
+                && !payload.getAllocations().isEmpty();
+            if (hasAllocations) {
+                // 三类型（AMOUNT 指定值/DEDUCT/INCREASE）与 ADD_MEMBER 统一按快照逐行反转
+                reverseAddMemberAdjust(rows, working, payload, oldFactById);
+            } else if ("AMOUNT".equals(adjustType)) {
+                // 旧 AMOUNT 单（无快照）：按占比等比分摊执行，逆推按当前金额等比逆向分摊还原
                 Object targetObj = adj.get("targetAmount");
                 Object originalObj = adj.get("originalAmount");
                 if (targetObj == null || originalObj == null) {
@@ -1421,8 +1431,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
                 for (int i = 0; i < n; i++) {
                     working[i] = MoneyUtil.round2(working[i].subtract(parts[i]));
                 }
-            } else if ("ADD_MEMBER".equals(adjustType)) {
-                reverseAddMemberAdjust(rows, working, parseAddMemberPayload(adj.get("payloadJson")), oldFactById);
             }
         }
         for (int i = 0; i < n; i++) {

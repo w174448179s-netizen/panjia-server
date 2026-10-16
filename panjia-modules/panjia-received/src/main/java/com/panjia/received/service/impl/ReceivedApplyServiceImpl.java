@@ -1634,6 +1634,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         // period → bizKey → 实收链原值（当前 ACTIVE rd 的 sourceKey 链最早金额合计，含 REVERSED 历史；
         // 多次调整取最初原值，与每人明细 originalAmount 求和同口径）
         Map<String, Map<String, BigDecimal>> originalByPeriod = new HashMap<>();
+        // period → bizKey → 是否「已调整」（链上存在 REVERSED 或 MANUAL-RADJ 新人行；不受金额是否变影响）
+        Map<String, Map<String, Boolean>> adjustedByPeriod = new HashMap<>();
         // period → bizKey → 审批中调整单（targetAmount）
         Map<String, Map<String, Map<String, Object>>> pendingByPeriod = new HashMap<>();
         for (Map.Entry<String, Set<String>> entry : keysByPeriodForAdjust.entrySet()) {
@@ -1643,14 +1645,21 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 continue;
             }
             Map<String, BigDecimal> origMap = new HashMap<>();
+            Map<String, Boolean> adjMap = new HashMap<>();
             for (Map<String, Object> row : realFactMapper.selectOriginalAmountsByKeys(period, keys)) {
                 Object bk = row.get("bizKey");
                 Object amt = row.get("originalAmount");
                 if (bk != null && amt != null) {
                     origMap.put(bk.toString(), new BigDecimal(amt.toString()));
                 }
+                Object adjusted = row.get("adjusted");
+                if (bk != null && adjusted != null) {
+                    adjMap.put(bk.toString(), Boolean.TRUE.equals(adjusted)
+                        || "true".equalsIgnoreCase(String.valueOf(adjusted)));
+                }
             }
             originalByPeriod.put(period, origMap);
+            adjustedByPeriod.put(period, adjMap);
 
             List<Map<String, Object>> pendings = receivedAdjustMapper.doSelectPendingByBizKeys(period, keys);
             Map<String, Map<String, Object>> pendMap = new HashMap<>();
@@ -1681,16 +1690,18 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
                 // 实收业绩展示实时值（pj_received_detail ACTIVE 合计，含已生效实收调整）；
-                // 调整前原值取 rd 链最早金额合计（含 REVERSED 历史；多次调整取最初，与每人明细同口径），
-                // 与实时值不一致时置「已调整」，供前端展示「原值 → 调整后值」
+                // 「已调整」以链存在性为准（source_key 链存在 REVERSED 或 MANUAL-RADJ 新人行），
+                // 调整前原值取 rd 链最早金额合计（含 REVERSED 历史；多次调整取最初，与每人明细同口径）；
+                // AMOUNT 类调整总额不变时原值=现值，仅靠金额比较会漏标，故不以金额是否变作为判定
                 if (m.getReceivedAmount() != null) {
-                    Map<String, BigDecimal> origMap = originalByPeriod.get(apply.getPeriod());
-                    BigDecimal originalReceived = matchChainOriginal(origMap, apply.getContractNo(), apply.getOrderNo());
-                    boolean receivedAdjusted = originalReceived != null
-                        && originalReceived.compareTo(m.getReceivedAmount()) != 0;
+                    BigDecimal originalReceived = matchChainOriginal(
+                        originalByPeriod.get(apply.getPeriod()), apply.getContractNo(), apply.getOrderNo());
+                    boolean receivedAdjusted = matchChainAdjusted(
+                        adjustedByPeriod.get(apply.getPeriod()), apply.getContractNo(), apply.getOrderNo());
                     apply.setReceivedAdjusted(receivedAdjusted);
                     if (receivedAdjusted) {
-                        apply.setOriginalReceivedAmount(originalReceived);
+                        apply.setOriginalReceivedAmount(
+                            originalReceived != null ? originalReceived : m.getReceivedAmount());
                     }
                     apply.setReceivedAmount(m.getReceivedAmount());
                 }
@@ -1737,6 +1748,30 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             return origMap.get(rowContractNo);
         }
         return null;
+    }
+
+    /**
+     * 按订单号优先、合同号兜底从「已调整」标记 Map 取该行的实收链调整标记
+     * （匹配口径与 {@link #matchChainOriginal} 一致）。
+     * <p>
+     * 标记来源为 {@code selectOriginalAmountsByKeys.adjusted}：链上存在 REVERSED（supersede 冲销）
+     * 或 MANUAL-RADJ 新人行即已调整，不受金额是否变化影响，避免 AMOUNT 类总额不变时漏标。
+     *
+     * @param adjustedMap period 内 bizKey → 是否已调整（可空）
+     * @return true=该行实收链已调整；无匹配或未知按 false
+     */
+    private boolean matchChainAdjusted(Map<String, Boolean> adjustedMap,
+                                       String rowContractNo, String rowOrderNo) {
+        if (adjustedMap == null || adjustedMap.isEmpty()) {
+            return false;
+        }
+        if (StringUtils.isNotBlank(rowOrderNo) && adjustedMap.containsKey(rowOrderNo)) {
+            return Boolean.TRUE.equals(adjustedMap.get(rowOrderNo));
+        }
+        if (StringUtils.isNotBlank(rowContractNo) && adjustedMap.containsKey(rowContractNo)) {
+            return Boolean.TRUE.equals(adjustedMap.get(rowContractNo));
+        }
+        return false;
     }
 
     /**

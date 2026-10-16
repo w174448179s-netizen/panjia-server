@@ -146,6 +146,33 @@ public interface ReceivedRealFactPort {
                          String roleType, BigDecimal amount, BigDecimal shareRatio,
                          Long operatorId, Long adjustId);
 
+    /**
+     * 无实收明细时也创建实收明细（2026-10-16 新签调整联动扩展）：
+     * 合同已在 {@code pj_received_contract} 有壳但无明细（尚未到账），或连壳都没有（未到账时手工建），
+     * 直接按合同号/订单号 + period 定位或创建实收合同壳后插入一条实收明细。
+     * <p>
+     * 用途：新签调整三类型同额联动实收，当合同整体无实收明细时，仍需为有变动的经纪人自动生成
+     * 对应金额的实收明细（虚拟实收），后续真实实收到账直接合并对齐。
+     * <p>
+     * sourceKey 用 MANUAL-RADJ-{adjustId}-{employeeId} 虚拟锚点，source_type 壳标记为 MANUAL。
+     *
+     * @param orderNo      订单号（可空）
+     * @param contractNo   合同号
+     * @param period       归属期间 YYYY-MM（新签事实所在期间）
+     * @param bizType      业务类型（新签事实）
+     * @param employeeId   员工 ID
+     * @param employeeCode 员工工号
+     * @param deptId       部门 ID（空则随合同壳）
+     * @param roleType     角色类型
+     * @param amount       实收金额（delta 同额；可为负）
+     * @param shareRatio   角色占比（可空）
+     * @return 新明细 ID
+     */
+    Long createDetailFromContract(String orderNo, String contractNo, String period, String bizType,
+                                  Long employeeId, String employeeCode, Long deptId,
+                                  String roleType, BigDecimal amount, BigDecimal shareRatio,
+                                  Long operatorId, Long adjustId);
+
     /** 明细级冲销（结佣调整 VOID）：单行置 REVERSED + reversal_type=MANUAL_ADJUST + adjust_id，不插新行。 */
     void voidDetail(Long detailId, Long operatorId, Long adjustId);
 

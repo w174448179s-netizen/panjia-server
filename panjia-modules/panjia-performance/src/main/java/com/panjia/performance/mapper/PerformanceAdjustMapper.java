@@ -254,12 +254,14 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
     /**
      * 批量查询已执行的合同级调整单（含链式多次调整，新→旧排列，供逆向还原每人调整前金额）。
      * <p>
-     * 覆盖两类合同级调整：
+     * 覆盖合同级调整：
      * <ul>
-     *   <li>AMOUNT：执行时按占比分摊到各事实但不落 fact_id 级痕迹，分摊具有等比不变性，
+     *   <li>AMOUNT 旧单：执行时按占比分摊到各事实但不落 fact_id 级痕迹且无快照，分摊具有等比不变性，
      *       可用当前金额 + 逆向分摊精确还原调整前金额；</li>
      *   <li>ADD_MEMBER：合同总额不变，逐人扣减/新人 0→X 记录在 payload_json，
-     *       服务层按快照逐行反转。</li>
+     *       服务层按快照逐行反转；</li>
+     *   <li>DEDUCT/INCREASE 及指定值 AMOUNT（2026-10-14 三类型重构）：执行按 payload.detailTargets
+     *       逐行指定值 supersede + 逐条插入新角色人，展示还原统一按 payload.allocations 快照逐行反转。</li>
      * </ul>
      *
      * @param period    归属期间
@@ -283,7 +285,7 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
           AND fact_type = #{factType}
           AND status = 'EXECUTED'
           AND adjust_scope = 'CONTRACT'
-          AND adjust_type IN ('AMOUNT', 'ADD_MEMBER')
+          AND adjust_type IN ('AMOUNT', 'ADD_MEMBER', 'DEDUCT', 'INCREASE')
           AND contract_no IN
         <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>
         ORDER BY id DESC

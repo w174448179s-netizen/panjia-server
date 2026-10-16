@@ -267,6 +267,84 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public Long createDetailFromContract(String orderNo, String contractNo, String period, String bizType,
+                                         Long employeeId, String employeeCode, Long deptId,
+                                         String roleType, BigDecimal amount, BigDecimal shareRatio,
+                                         Long operatorId, Long adjustId) {
+        // 1. 找或建实收合同壳：按 orderNo 优先，contractNo 退化，不限 sourceType
+        ReceivedContract contract = null;
+        if (orderNo != null && !orderNo.isBlank()) {
+            contract = contractMapper.selectOne(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedContract>()
+                    .eq(ReceivedContract::getOrderNo, orderNo)
+                    .eq(ReceivedContract::getPeriod, period)
+                    .last("LIMIT 1"));
+        }
+        if (contract == null && contractNo != null && !contractNo.isBlank()) {
+            contract = contractMapper.selectOne(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedContract>()
+                    .eq(ReceivedContract::getContractNo, contractNo)
+                    .eq(ReceivedContract::getPeriod, period)
+                    .last("LIMIT 1"));
+        }
+        if (contract == null) {
+            // 合同无实收壳：手工建一条 MANUAL 壳（后续真实实收到账自动合并到同一个 contract_id 聚合）
+            contract = new ReceivedContract();
+            contract.setOrderNo(orderNo);
+            contract.setContractNo(contractNo);
+            contract.setBizType(bizType);
+            contract.setPeriod(period);
+            contract.setSourceType("MANUAL");
+            contract.setPeriodTotalReceived(BigDecimal.ZERO);
+            contract.setItemCount(0);
+            contractMapper.insert(contract);
+            log.info("[实收-无壳建壳] 合同无实收合同壳，自动创建：adjustId={}, contractNo={}, orderNo={}",
+                adjustId, contractNo, orderNo);
+        }
+        Long contractId = contract.getId();
+
+        // 2. 组装实收明细行
+        ReceivedDetail n = new ReceivedDetail();
+        n.setContractId(contractId);
+        n.setEmployeeId(employeeId);
+        n.setDeptId(deptId != null ? deptId : contract.getDeptId());
+        n.setEmployeeExternalCode(employeeCode);
+        n.setRoleType(roleType);
+        n.setRoleName(roleType);
+        n.setShareRatio(shareRatio != null ? shareRatio : BigDecimal.ONE);
+        n.setPerformanceAmount(MoneyUtil.round2(amount == null ? BigDecimal.ZERO : amount));
+        n.setFeeItem(null); // 合同壳无 feeItem 模板，空值即可
+        n.setPeriod(period);
+        // effectiveDate 兜底：合同壳 businessDate → 或默认 today
+        java.time.LocalDate eff = null;
+        if (contract.getBusinessDate() != null) {
+            eff = contract.getBusinessDate().toLocalDate();
+        }
+        if (eff == null) {
+            eff = java.time.LocalDate.now();
+        }
+        n.setEffectiveDate(eff);
+        n.setExpireDate(null);
+        // sourceKey：新签调整 MANUAL-RADJ 虚拟锚点（不撞导入幂等键）
+        String on = orderNo == null ? "" : orderNo;
+        String cn = contractNo == null ? "" : contractNo;
+        n.setSourceKey(on + "|" + cn + "|MANUAL-RADJ-" + adjustId + "-" + employeeId
+            + "|" + (roleType == null ? "" : roleType));
+        n.setSourceBatchId(null);
+        n.setNormalizedRecordId(null);
+        n.setReceivedApplyId(null); // 手工虚拟实收不归属任何审批单
+        n.setDetailStatus(STATUS_ACTIVE);
+        n.setAdjustId(adjustId);
+        n.setOperatorId(operatorId);
+        detailMapper.insert(n);
+        refreshContractAggregate(contractId);
+        log.info("[实收-无壳建行] adjustId={}, employeeId={}, amount={}, contractId={}",
+            adjustId, employeeId, n.getPerformanceAmount(), contractId);
+        return n.getId();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public void voidDetail(Long detailId, Long operatorId, Long adjustId) {
         ReceivedDetail detail = detailMapper.selectById(detailId);
         if (detail == null) {

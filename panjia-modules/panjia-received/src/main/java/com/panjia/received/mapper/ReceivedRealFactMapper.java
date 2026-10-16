@@ -414,6 +414,9 @@ public interface ReceivedRealFactMapper {
      * 2026-10-14 三类型重构），调整前该角色在合同上不存在，其链按 0 计入原额；
      * 否则新人金额会被同时计入「原值」与「现值」（钱只是从既有角色人转到新人，
      * 业绩调整合同总额不变），虚增一个新人金额。
+     * <p>
+     * 同时输出 {@code adjusted} 标记：链上存在 REVERSED 或为 MANUAL-RADJ 新人行即「已调整」，
+     * 供列表在「原值=现值」（如 AMOUNT 类总额不变的重分配）时仍能标注调整发生。
      */
     @Select("""
         <script>
@@ -451,9 +454,19 @@ public interface ReceivedRealFactMapper {
             FROM sk
             JOIN pj_received_detail x ON x.source_key = sk.source_key
             ORDER BY sk.source_key, x.id ASC
+        ),
+        rev AS (
+            SELECT DISTINCT sk2.source_key
+            FROM sk sk2
+            JOIN pj_received_detail y ON y.source_key = sk2.source_key
+                                     AND y.detail_status = 'REVERSED'
         )
         SELECT sk.key AS "bizKey",
-               COALESCE(SUM(orig.amt), 0) AS "originalAmount"
+               COALESCE(SUM(orig.amt), 0) AS "originalAmount",
+               -- 链上存在 REVERSED（supersede 冲销）或为实收加人新人行（MANUAL-RADJ）即「已调整」；
+               -- AMOUNT 类调整总额不变时原值=当前值，仅靠金额比较会漏标，故以链存在性为准
+               BOOL_OR(sk.source_key LIKE '%|MANUAL-RADJ-%'
+                       OR sk.source_key IN (SELECT source_key FROM rev)) AS "adjusted"
         FROM sk
         LEFT JOIN orig ON orig.source_key = sk.source_key
         GROUP BY sk.key
