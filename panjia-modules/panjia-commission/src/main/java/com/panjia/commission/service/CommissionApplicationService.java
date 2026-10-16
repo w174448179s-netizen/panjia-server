@@ -839,6 +839,12 @@ public class CommissionApplicationService {
         if (keys.isEmpty()) {
             return;
         }
+        // 在途新签调整（审批中/已通过未执行）尚未 supersede 事实，链上无 REVERSED 行，
+        // 下面的「已调整」口径判不出来；但调整后金额会变，必须先拦下（2026-10-17 TGCF2608393000 漏拦案例）
+        if (performanceQueryPort.hasInflightExpectAdjust(keys)) {
+            throw new ServiceException("合同 " + contractNo
+                + " 存在审批中的新签调整单，请先完成调整审批（并联动实收）后再发起结佣");
+        }
         boolean expectAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_EXPECT);
         if (!expectAdjusted) {
             return;

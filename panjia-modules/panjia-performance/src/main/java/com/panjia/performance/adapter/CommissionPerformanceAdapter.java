@@ -366,6 +366,21 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         return factMapper.existsReversedChainByKeys(factType, bizKeys) > 0;
     }
 
+    /**
+     * 「是否有在途新签调整单」判定（2026-10-17 结佣发起闸门补强用）：
+     * pj_perf_adjust 状态 SUBMITTED/APPROVED（进行中未执行）且业务键命中合同号/订单号即 true。
+     */
+    @Override
+    public boolean hasInflightExpectAdjust(java.util.Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return false;
+        }
+        return adjustMapper.selectCount(new LambdaQueryWrapper<PerformanceAdjust>()
+            .in(PerformanceAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
+            .and(w -> w.in(PerformanceAdjust::getContractNo, bizKeys)
+                .or().in(PerformanceAdjust::getOrderNo, bizKeys))) > 0;
+    }
+
     // ==================== 历史工资导入（HISTORY_PAYROLL）结佣建单支撑 ====================
 
     @Override

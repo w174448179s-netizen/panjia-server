@@ -178,6 +178,18 @@ public interface CommissionPerformanceQueryPort {
     boolean hasReversedChain(Collection<String> bizKeys, String factType);
 
     /**
+     * 判断业务键下是否存在<b>进行中</b>的新签业绩调整单（SUBMITTED/APPROVED，未执行）。
+     * <p>
+     * 2026-10-17 结佣发起闸门补强：在途新签调整尚未 supersede 事实（无 REVERSED 链），
+     * {@link #hasReversedChain} 判不出来；但调整后金额会变，此时放行结佣会按旧快照结错。
+     * 有在途新签调整单 → 拦截发起，提示先完成调整审批。
+     *
+     * @param bizKeys 合同号/订单号业务键集合（空集合返回 false，不发起 SQL）
+     * @return true = 存在审批中/已通过未执行的新签调整单
+     */
+    boolean hasInflightExpectAdjust(Collection<String> bizKeys);
+
+    /**
      * 合同级金额调整：按合同下指定口径各 ACTIVE 事实当前金额占比分摊
      * （targetAmount − 当前合计）差额，逐条 supersede 为新金额（结佣调整用）。
      * <p>
