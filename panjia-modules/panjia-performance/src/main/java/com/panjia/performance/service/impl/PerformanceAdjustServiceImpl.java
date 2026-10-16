@@ -2292,16 +2292,22 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 1. 逐新签角色行：按（员工+角色）同额联动实收（新增角色人除外，在步骤 3 处理）
         for (Map.Entry<Long, Map<String, BigDecimal>> empEntry : deltaByEmpRole.entrySet()) {
             Long employeeId = empEntry.getKey();
+            // 新增角色人的实收行在步骤 3 统一处理
+            if (memberEmpIds.contains(employeeId)) {
+                continue;
+            }
             Map<String, List<PerformanceFactSummaryDTO>> empReceived = receivedByEmpRole.get(employeeId);
             for (Map.Entry<String, BigDecimal> roleEntry : empEntry.getValue().entrySet()) {
                 BigDecimal delta = MoneyUtil.round2(roleEntry.getValue());
-                if (MoneyUtil.isZero(delta) || memberEmpIds.contains(employeeId)) {
-                    continue;
-                }
+                // 该新签角色行本次无变化（delta=0）
+                boolean unchanged = MoneyUtil.isZero(delta);
                 String role = roleEntry.getKey();
                 List<PerformanceFactSummaryDTO> matched = empReceived == null ? null : empReceived.get(role);
                 if (matched != null && !matched.isEmpty()) {
                     // 命中同（员工+角色）实收行：同额联动（含 INCREASE——新签增多少实收就增多少）
+                    if (unchanged) {
+                        continue;
+                    }
                     adjustReceivedRows(port, matched, delta, adjust.getId(), operatorId);
                     log.info("[调整单-实收联动] adjustId={}, employeeId={}, role={}, 新签同额={}, 实收命中 {} 行同额联动",
                         adjust.getId(), employeeId, role, delta, matched.size());
@@ -2309,6 +2315,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 }
                 if (empReceived != null && !empReceived.isEmpty()) {
                     // 角色口径不一致：退化为按该员工实收行等比分摊（兜底，不新建行，避免重复行）
+                    if (unchanged) {
+                        continue;
+                    }
                     List<PerformanceFactSummaryDTO> all = empReceived.values().stream()
                         .flatMap(List::stream).toList();
                     adjustReceivedRows(port, all, delta, adjust.getId(), operatorId);
@@ -2316,7 +2325,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                         + "退化为按该员工 {} 条实收行等比分摊", adjust.getId(), employeeId, role, all.size());
                     continue;
                 }
-                // 该员工实收侧完全无行（尚未到账）：按新签角色行镜像建实收行（同额，正负均建）
+                // 该员工实收侧完全无行：
+                // ① 合同已有实收、但该员工在实收侧不存在 → 不凭空建实收行（否则会出现「实收不存在的人」
+                //    的虚假金额变动行）；仅告警，人数不一致问题由实收导入/审批环节拦截；
+                // ② 合同整体无实收（hasAnyReceived=false）→ 按新签全字段镜像建行、金额=delta，
+                //    且 delta=0 的角色行也一并建出，保证实收合同人员与新签一一对应（如 A-100/B+100/C0）。
+                if (hasAnyReceived) {
+                    log.warn("[调整单-实收联动] adjustId={}, employeeId={}, role={}, delta={} 在实收侧不存在"
+                        + "（新签多出的人员），不凭空建实收行", adjust.getId(), employeeId, role, delta);
+                    continue;
+                }
                 String roleArg = StringUtils.isBlank(role) ? null : role;
                 Long createdId;
                 if (templateDetailId != null) {

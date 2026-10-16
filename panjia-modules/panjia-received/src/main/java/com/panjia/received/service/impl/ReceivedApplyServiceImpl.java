@@ -481,16 +481,14 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 adjustId, period, contractNo);
             return 0;
         }
-        // 按订单号分组建单（同历史批次口径：0 元行不绑定、不计数；空订单号跳过）
+        // 按订单号分组建单：业绩调整联动场景下实收金额=新签调整差额，
+        // 合同整体无实收、且调整净额为 0（如 A-100/B+100 的重分配）时也要建单，
+        // 且差额为 0 的角色行（C=0）同样挂单，保证实收合同人员与新签一一对应（空订单号跳过）。
         Map<String, List<com.panjia.received.domain.ReceivedDetail>> rowsByOrder = new LinkedHashMap<>();
         Map<String, com.panjia.received.domain.ReceivedContract> contractByOrder = new HashMap<>();
         for (com.panjia.received.domain.ReceivedDetail d : rows) {
             com.panjia.received.domain.ReceivedContract c = contractById.get(d.getContractId());
             if (c == null || StringUtils.isBlank(c.getOrderNo())) {
-                continue;
-            }
-            if (d.getPerformanceAmount() == null
-                || d.getPerformanceAmount().compareTo(BigDecimal.ZERO) == 0) {
                 continue;
             }
             rowsByOrder.computeIfAbsent(c.getOrderNo(), k -> new ArrayList<>()).add(d);
@@ -520,9 +518,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             BigDecimal realSum = group.stream()
                 .map(r -> r.getPerformanceAmount() == null ? BigDecimal.ZERO : r.getPerformanceAmount())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            if (realSum.compareTo(BigDecimal.ZERO) == 0) {
-                continue;
-            }
             Long uniqueDeptId = uniqueDetailDeptId(group, contractByOrder.get(bizKey));
             BigDecimal expectedAmount = expectedMap.getOrDefault(bizKey, BigDecimal.ZERO);
             try {
@@ -616,6 +611,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         ExpectMatchKeys matchKeys = ExpectMatchKeys.build(contractByOrder);
         matchKeys.retainGloballyDegradable(globallyDegradableContracts(matchKeys.degradeCandidates()));
         Map<String, BigDecimal> expectTotalByOrder = new HashMap<>();
+        // 新签侧去重人员（当月优先），用于「新签-实收人数一致性」校验
+        Map<String, Set<Long>> expectEmpsByOrder = new HashMap<>();
         if (!matchKeys.isEmpty()) {
             LambdaQueryWrapper<PerformanceFact> expectQ = new LambdaQueryWrapper<PerformanceFact>()
                 .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
@@ -630,6 +627,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             }
             Map<String, BigDecimal> currentMonthTotal = new HashMap<>();
             Map<String, BigDecimal> historyTotal = new HashMap<>();
+            Map<String, Set<Long>> currentMonthEmps = new HashMap<>();
+            Map<String, Set<Long>> historyEmps = new HashMap<>();
             for (PerformanceFact e : factMapper.selectList(expectQ)) {
                 BigDecimal amt = nvlAmount(e.getPerformanceAmount());
                 if (amt.signum() == 0) {
@@ -642,12 +641,23 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 String fp = e.getPeriod();
                 if (period.equals(fp)) {
                     currentMonthTotal.merge(targetOrderNo, amt, BigDecimal::add);
+                    if (e.getEmployeeId() != null) {
+                        currentMonthEmps.computeIfAbsent(targetOrderNo, k -> new LinkedHashSet<>())
+                            .add(e.getEmployeeId());
+                    }
                 } else if (fp != null && fp.compareTo(period) < 0) {
                     historyTotal.merge(targetOrderNo, amt, BigDecimal::add);
+                    if (e.getEmployeeId() != null) {
+                        historyEmps.computeIfAbsent(targetOrderNo, k -> new LinkedHashSet<>())
+                            .add(e.getEmployeeId());
+                    }
                 }
             }
             expectTotalByOrder.putAll(historyTotal);
             currentMonthTotal.forEach(expectTotalByOrder::put);
+            // 人员口径与金额口径一致：当月有非零新签则只取当月人员，否则取历史人员
+            expectEmpsByOrder.putAll(historyEmps);
+            currentMonthEmps.forEach(expectEmpsByOrder::put);
         }
         // ===== 4. 活跃审批单批量预加载（判重维度同匹配口径） =====
         Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, matchKeys);
@@ -703,8 +713,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     created++;
                     continue;
                 }
-                // 合同维度判定：订单到账合计 vs 订单跨月新签合计
-                boolean needManual = needManualReview(realSum, expectedAmount);
+                // 合同维度判定：订单到账合计 vs 订单跨月新签合计；
+                // 新增「新签-实收人数一致性」闸门：新签与实收的去重人员集合不一致（如新签 3 人、
+                // 实收 2 人）时，即使实收金额 ≥ 新签金额也强制人工审批（卡审批中），不得自动通过。
+                Set<Long> expectEmps = expectEmpsByOrder.getOrDefault(orderNo, Set.of());
+                Set<Long> realEmps = rows.stream()
+                    .map(com.panjia.received.domain.ReceivedDetail::getEmployeeId)
+                    .filter(id -> id != null)
+                    .collect(Collectors.toSet());
+                boolean rosterMismatch = !expectEmps.isEmpty() && !expectEmps.equals(realEmps);
+                if (rosterMismatch) {
+                    log.info("[实收审批] 新签-实收人数不一致，转人工审批：orderNo={}, expectEmps={}, realEmps={}",
+                        orderNo, expectEmps, realEmps);
+                }
+                boolean needManual = rosterMismatch || needManualReview(realSum, expectedAmount);
                 if (needManual) {
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
@@ -808,7 +830,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     /**
      * 评估单张 DRAFT 实收审批单（新签补触发）：按该单自身合同号+订单号双键（双侧闸门兼容脏数据）
-     * 取当月优先新签合计；有新签且实收 ≥ 新签 → 自动通过并 emit；实收 < 新签 → 转人工审批；
+     * 取当月优先新签合计；有新签且实收 ≥ 新签<b>且新签/实收人员一致</b> → 自动通过并 emit；
+     * 实收 &lt; 新签 或 人员不一致 → 转人工审批；
      * 无对应新签（其他订单先到/双键不中且禁退化）→ 保持 DRAFT 等下次触发。
      *
      * @return 本单是否自动通过
@@ -823,8 +846,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
         BigDecimal realSum = nvlAmount(apply.getReceivedAmount());
         apply.setExpectedAmount(expectTotal);
-        if (realSum.compareTo(expectTotal) >= 0) {
-            // 实收 ≥ 新签 → 自动通过 + emit 实收通过事件
+        // 新签-实收人数一致性闸门：人员集合不一致（如新签 3 人、实收 2 人）时强制人工审批，
+        // 即使实收金额 ≥ 新签金额也不自动通过。
+        Set<Long> expectEmps = expectEmpIdsByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
+        Set<Long> realEmps = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .eq(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId, apply.getId())
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"))
+            .stream()
+            .map(com.panjia.received.domain.ReceivedDetail::getEmployeeId)
+            .filter(id -> id != null)
+            .collect(Collectors.toSet());
+        boolean rosterMismatch = !expectEmps.isEmpty() && !expectEmps.equals(realEmps);
+        if (realSum.compareTo(expectTotal) >= 0 && !rosterMismatch) {
+            // 实收 ≥ 新签 且 人员一致 → 自动通过 + emit 实收通过事件
             apply.setStatus(ReceivedApplyStatus.APPROVED);
             apply.setApproverId(operatorId);
             apply.setApproveTime(LocalDateTime.now());
@@ -834,10 +869,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal);
             return true;
         }
-        // 实收 < 新签 → 启动人工审批工作流（与导入时"有新签但不足"路径一致）
+        // 实收 < 新签 或 人数不一致 → 启动人工审批工作流（与导入时"有新签但不足"路径一致）
         startWorkflow(apply, apply.getApplicantId(), Set.of());
-        log.info("[实收审批] 新签触发人工审批（实收不足）：applyNo={}, orderNo={}, received={}, expect={}",
-            apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal);
+        log.info("[实收审批] 新签触发人工审批（实收不足或人数不一致）：applyNo={}, orderNo={}, received={},"
+            + " expect={}, rosterMismatch={}", apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal,
+            rosterMismatch);
         return false;
     }
 
@@ -906,24 +942,39 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     /**
      * 按「当月优先」口径计算该实收审批单对应的 ACTIVE PERF_EXPECT 新签金额合计。
      * 建单分流后的新签补触发、重算合计、详情顶部应收合计共用<b>唯一入口</b>。
-     * <p>金额口径：当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 回退历史（&lt;当月）合计。
+     * <p>金额口径见 {@link #expectFactsByBizKey}。
+     */
+    private BigDecimal sumExpectByBizKey(String period, String orderNo, String contractNo) {
+        return currentMonthPrioritySum(expectFactsByBizKey(period, orderNo, contractNo), period);
+    }
+
+    /**
+     * 该实收审批单对应的新签（ACTIVE PERF_EXPECT）去重员工集合（当月优先口径，零金额行不计）。
+     * <p>用于「新签-实收人数一致性」校验：双侧人数/人员不一致时必须转人工审批，不得自动通过。
+     */
+    private Set<Long> expectEmpIdsByBizKey(String period, String orderNo, String contractNo) {
+        return currentMonthPriorityEmpIds(expectFactsByBizKey(period, orderNo, contractNo), period);
+    }
+
+    /**
+     * 按「当月优先」口径取该 bizKey 对应的 ACTIVE PERF_EXPECT 新签事实（金额合计/人数校验共用唯一取数入口）。
      * <p>匹配口径（2026-10-11 双侧闸门定稿）：
      * <ul>
      *   <li>合同号+订单号齐全：双键精确；未命中时经 {@link #canDegradeExpectToReceived}
      *       双侧闸门（新签事实/实收合同全局订单都唯一）才退化按合同号汇总——兼容贝壳新签
-     *       orderNo 误填成合同号；同合同多订单双键不中返回 0（走人工，宁可不自动通过也不串单）；</li>
+     *       orderNo 误填成合同号；同合同多订单双键不中返回空（走人工，宁可不自动通过也不串单）；</li>
      *   <li>订单号为空（历史单据）：退化旧口径 contract_no/order_no 双键 OR；</li>
      *   <li>合同号为空：按订单号。</li>
      * </ul>
      */
-    private BigDecimal sumExpectByBizKey(String period, String orderNo, String contractNo) {
+    private List<PerformanceFact> expectFactsByBizKey(String period, String orderNo, String contractNo) {
         if (period == null) {
-            return BigDecimal.ZERO;
+            return List.of();
         }
         boolean hasContract = StringUtils.isNotBlank(contractNo);
         boolean hasOrder = StringUtils.isNotBlank(orderNo);
         if (!hasContract && !hasOrder) {
-            return BigDecimal.ZERO;
+            return List.of();
         }
         if (hasContract && hasOrder) {
             List<PerformanceFact> precise = factMapper.selectList(
@@ -933,21 +984,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     .eq(PerformanceFact::getContractNo, contractNo)
                     .eq(PerformanceFact::getOrderNo, orderNo));
             if (!precise.isEmpty()) {
-                return currentMonthPrioritySum(precise, period);
+                return precise;
             }
             if (canDegradeExpectToReceived(contractNo)) {
                 log.warn("[实收审批] 新签双键未命中且新签/实收两侧订单唯一，退化按合同号汇总：contractNo={}, orderNo={}",
                     contractNo, orderNo);
-                List<PerformanceFact> degraded = factMapper.selectList(
+                return factMapper.selectList(
                     new LambdaQueryWrapper<PerformanceFact>()
                         .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
                         .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
                         .eq(PerformanceFact::getContractNo, contractNo));
-                return currentMonthPrioritySum(degraded, period);
             }
             log.warn("[实收审批] 新签双键未命中且两侧不满足订单唯一，不退化合同号匹配：contractNo={}, orderNo={}",
                 contractNo, orderNo);
-            return BigDecimal.ZERO;
+            return List.of();
         }
         // 历史单据/缺键：合同号在时走旧 OR 宽松口径，否则按订单号
         LambdaQueryWrapper<PerformanceFact> q = new LambdaQueryWrapper<PerformanceFact>()
@@ -959,7 +1009,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         } else {
             q.eq(PerformanceFact::getOrderNo, orderNo);
         }
-        return currentMonthPrioritySum(factMapper.selectList(q), period);
+        return factMapper.selectList(q);
     }
 
     /** 当月优先合计：当月有非零事实只取当月，否则取历史（&lt; period）合计，零金额行不计。 */
@@ -981,6 +1031,24 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             }
         }
         return hasCurrent ? currentSum : historySum;
+    }
+
+    /** 当月优先员工集合：当月有非零事实只取当月员工，否则取历史（&lt; period）员工，零金额行不计。 */
+    private Set<Long> currentMonthPriorityEmpIds(List<PerformanceFact> facts, String period) {
+        Set<Long> current = new LinkedHashSet<>();
+        Set<Long> history = new LinkedHashSet<>();
+        for (PerformanceFact e : facts) {
+            if (nvlAmount(e.getPerformanceAmount()).signum() == 0 || e.getEmployeeId() == null) {
+                continue;
+            }
+            String fp = e.getPeriod();
+            if (period.equals(fp)) {
+                current.add(e.getEmployeeId());
+            } else if (fp != null && fp.compareTo(period) < 0) {
+                history.add(e.getEmployeeId());
+            }
+        }
+        return current.isEmpty() ? history : current;
     }
 
     /**
