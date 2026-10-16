@@ -1067,6 +1067,9 @@ public class ImportEngine {
                 nr.setContractNo(str(json, "contractNo"));
                 nr.setPropertyAddress(str(json, "propertyAddress"));
                 nr.setSignDate(str(json, "signDate"));
+                // 空角色回填行带 feeItem=贷款服务费（ImportEngine 回填时写入 jsonMap），
+                // 透传到实收明细，供详情页按费用项唯一匹配新签事实
+                nr.setFeeItem(str(json, "feeItem"));
             }
             case ATTENDANCE -> {
                 nr.setReceivableAmount(decimal(json, "leaveAmount"));
