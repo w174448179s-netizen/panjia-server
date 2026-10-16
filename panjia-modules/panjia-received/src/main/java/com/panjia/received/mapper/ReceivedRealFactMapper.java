@@ -563,4 +563,55 @@ public interface ReceivedRealFactMapper {
     List<ReceivedDetail> selectActiveDetailsByContract(@Param("period") String period,
                                                         @Param("orderNo") String orderNo,
                                                         @Param("contractNo") String contractNo);
+
+    /**
+     * 取合同下某员工的新签（PERF_EXPECT）事实镜像字段。
+     * <p>
+     * 业务规则：合同无实收时联动建的虚拟实收 = <b>新签的全字段镜像</b>，仅金额不同
+     * （金额 = 该人新签变动 delta）。故壳级 biz_type/business_date/dept_id/property_address、
+     * 明细级 employee_code/dept_id/role_type/role_name/share_ratio 均回源新签事实。
+     * employeeId 非空时精确取该员工的行；号源口径与实收一致（contractNo 可能传订单号）。
+     */
+    @Select("""
+        <script>
+        SELECT f.id AS "factId",
+               'PERF_EXPECT' AS "factType",
+               f.fact_status AS "factStatus",
+               f.period AS "period",
+               f.business_date AS "businessDate",
+               f.employee_id AS "employeeId",
+               f.employee_external_code AS "employeeCode",
+               f.dept_id AS "deptId",
+               f.biz_type AS "bizType",
+               f.role_type AS "roleType",
+               f.role_name AS "roleName",
+               f.performance_amount AS "amount",
+               f.share_ratio AS "shareRatio",
+               f.contract_no AS "contractNo",
+               f.order_no AS "orderNo",
+               f.property_address AS "propertyAddress"
+        FROM pj_perf_fact f
+        WHERE f.fact_type = 'PERF_EXPECT'
+          <if test="period != null and period != ''">AND f.period = #{period}</if>
+          <if test="employeeId != null">AND f.employee_id = #{employeeId}</if>
+          AND (
+          <choose>
+            <when test="orderNo != null and orderNo != ''">
+              f.order_no = #{orderNo}
+              <if test="contractNo != null and contractNo != ''">AND f.contract_no = #{contractNo}</if>
+            </when>
+            <when test="contractNo != null and contractNo != ''">
+              (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+            </when>
+            <otherwise>1 = 0</otherwise>
+          </choose>
+          )
+        ORDER BY f.id
+        LIMIT 1
+        </script>
+        """)
+    PerformanceFactSummaryDTO selectExpectMirror(@Param("orderNo") String orderNo,
+                                                 @Param("contractNo") String contractNo,
+                                                 @Param("period") String period,
+                                                 @Param("employeeId") Long employeeId);
 }

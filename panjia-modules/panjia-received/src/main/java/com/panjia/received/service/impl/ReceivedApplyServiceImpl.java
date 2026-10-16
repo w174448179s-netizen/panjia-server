@@ -434,6 +434,118 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
+     * 业绩调整联动：合同「有新签、无实收」时，把联动建出的虚拟实收明细归入一张<b>审批通过</b>的实收审批单。
+     * <p>
+     * 场景：新签调整执行后实收侧无 ACTIVE 明细 → 联动按逐人 delta 建虚拟实收明细
+     * （{@code source_type=MANUAL}、{@code received_apply_id} 为空）。这些明细若不入审批单，
+     * 实收审批单列表查不到该笔实收，故此处直建 APPROVED 单（无流程实例）并绑定明细。
+     * <p>幂等：同订单号当月已有活跃审批单（DRAFT/SUBMITTED/APPROVED）时跳过。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int autoCreateApprovedForAdjust(String period, String orderNo, String contractNo,
+                                           Long operatorId, Long adjustId) {
+        if (StringUtils.isBlank(period)
+            || (StringUtils.isBlank(orderNo) && StringUtils.isBlank(contractNo))) {
+            return 0;
+        }
+        // 兜底：联动执行场景一般有登录上下文，事件/定时场景可能没有
+        if (operatorId == null) {
+            operatorId = 1L;
+        }
+        // 该合同当月合同壳（联动建虚拟实收时已建/复用）
+        LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract> cw = new LambdaQueryWrapper<>();
+        cw.eq(com.panjia.received.domain.ReceivedContract::getPeriod, period);
+        if (StringUtils.isNotBlank(orderNo)) {
+            cw.eq(com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo);
+        } else {
+            cw.eq(com.panjia.received.domain.ReceivedContract::getContractNo, contractNo);
+        }
+        List<com.panjia.received.domain.ReceivedContract> contracts = contractMapper.selectList(cw);
+        if (contracts.isEmpty()) {
+            return 0;
+        }
+        Map<Long, com.panjia.received.domain.ReceivedContract> contractById = contracts.stream()
+            .collect(Collectors.toMap(com.panjia.received.domain.ReceivedContract::getId, c -> c, (a, b) -> a));
+        List<Long> contractIds = contracts.stream()
+            .map(com.panjia.received.domain.ReceivedContract::getId).toList();
+        // 未挂单的 ACTIVE 虚拟实收明细
+        List<com.panjia.received.domain.ReceivedDetail> rows = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .in(com.panjia.received.domain.ReceivedDetail::getContractId, contractIds)
+                .eq(com.panjia.received.domain.ReceivedDetail::getPeriod, period)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE")
+                .isNull(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId));
+        if (rows.isEmpty()) {
+            log.info("[实收审批] 业绩调整联动无可挂单实收明细，跳过：adjustId={}, period={}, contractNo={}",
+                adjustId, period, contractNo);
+            return 0;
+        }
+        // 按订单号分组建单（同历史批次口径：0 元行不绑定、不计数；空订单号跳过）
+        Map<String, List<com.panjia.received.domain.ReceivedDetail>> rowsByOrder = new LinkedHashMap<>();
+        Map<String, com.panjia.received.domain.ReceivedContract> contractByOrder = new HashMap<>();
+        for (com.panjia.received.domain.ReceivedDetail d : rows) {
+            com.panjia.received.domain.ReceivedContract c = contractById.get(d.getContractId());
+            if (c == null || StringUtils.isBlank(c.getOrderNo())) {
+                continue;
+            }
+            if (d.getPerformanceAmount() == null
+                || d.getPerformanceAmount().compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+            rowsByOrder.computeIfAbsent(c.getOrderNo(), k -> new ArrayList<>()).add(d);
+            contractByOrder.putIfAbsent(c.getOrderNo(), c);
+        }
+        if (rowsByOrder.isEmpty()) {
+            return 0;
+        }
+        // ===== 批量预加载：活跃审批单 + 应收合计（口径同历史直建） =====
+        List<String> bizKeys = new ArrayList<>(rowsByOrder.keySet());
+        Map<String, ReceivedApply> activeApplies = loadActiveAppliesBatch(period, bizKeys);
+        Map<String, BigDecimal> expectedMap = factMapper.selectExpectSumsByBizKeys(period, bizKeys)
+            .stream()
+            .collect(Collectors.toMap(BatchFactBindRow::getBizKey,
+                r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount(),
+                (a, b) -> a));
+        int created = 0;
+        for (Map.Entry<String, List<com.panjia.received.domain.ReceivedDetail>> entry : rowsByOrder.entrySet()) {
+            String bizKey = entry.getKey();
+            List<com.panjia.received.domain.ReceivedDetail> group = entry.getValue();
+            // 幂等：同订单号当月已有活跃审批单时跳过（避免重复建单）
+            if (activeApplies.containsKey(bizKey)) {
+                log.info("[实收审批] 业绩调整联动跳过，订单当月已有审批单：applyId={}, orderNo={}",
+                    activeApplies.get(bizKey).getId(), bizKey);
+                continue;
+            }
+            BigDecimal realSum = group.stream()
+                .map(r -> r.getPerformanceAmount() == null ? BigDecimal.ZERO : r.getPerformanceAmount())
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (realSum.compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+            Long uniqueDeptId = uniqueDetailDeptId(group, contractByOrder.get(bizKey));
+            BigDecimal expectedAmount = expectedMap.getOrDefault(bizKey, BigDecimal.ZERO);
+            try {
+                ReceivedApply apply = newApplyFromContract(period, contractByOrder.get(bizKey), null, operatorId,
+                    group.size(), realSum, expectedAmount, uniqueDeptId);
+                // 审批终态直接 INSERT：APPROVED + 无流程实例（同历史批次直建语义）
+                apply.setStatus(ReceivedApplyStatus.APPROVED);
+                apply.setApproverId(operatorId);
+                apply.setApproveTime(LocalDateTime.now());
+                insertApply(apply);
+                bindFacts(group.stream().map(com.panjia.received.domain.ReceivedDetail::getId).toList(),
+                    apply.getId());
+                created++;
+                log.info("[实收审批] 业绩调整联动审批单直建：applyNo={}, orderNo={}, received={}, adjustId={}",
+                    apply.getApplyNo(), apply.getOrderNo(), apply.getReceivedAmount(), adjustId);
+            } catch (DuplicateKeyException e) {
+                log.warn("[实收审批] 业绩调整联动直建撞唯一索引，跳过：period={}, orderNo={}", period, bizKey);
+            }
+        }
+        return created;
+    }
+
+    /**
      * 贝壳实收导入分流建单（§2.1.1，2026-09-27 定稿合同维度）：
      * 按「订单当月到账合计（含空经纪人行）vs 该订单跨月全部新签应收合计」自动判定每单
      * 走 APPROVED 直建还是人工审批（比较与建单均为订单/合同维度，不再按经纪人拆分）。
@@ -1636,6 +1748,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         Map<String, Map<String, BigDecimal>> originalByPeriod = new HashMap<>();
         // period → bizKey → 是否「已调整」（链上存在 REVERSED 或 MANUAL-RADJ 新人行；不受金额是否变影响）
         Map<String, Map<String, Boolean>> adjustedByPeriod = new HashMap<>();
+        // period → bizKey → 新签（应收）是否「已调整」（pexp 链存在 REVERSED 或 MANUAL-ADJ/MANUAL-CADJ 新增角色人链）
+        Map<String, Map<String, Boolean>> expectedAdjustedByPeriod = new HashMap<>();
         // period → bizKey → 审批中调整单（targetAmount）
         Map<String, Map<String, Map<String, Object>>> pendingByPeriod = new HashMap<>();
         for (Map.Entry<String, Set<String>> entry : keysByPeriodForAdjust.entrySet()) {
@@ -1661,6 +1775,18 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             originalByPeriod.put(period, origMap);
             adjustedByPeriod.put(period, adjMap);
 
+            // 新签（应收）「已调整」标记：跨期查 pexp 事实链（签约月可能与实收月不一致，故 period 传 null）
+            Map<String, Boolean> expAdjMap = new HashMap<>();
+            for (Map<String, Object> row : factMapper.selectOriginalFactAmountsByKeys(null, "PERF_EXPECT", keys)) {
+                Object bk = row.get("bizKey");
+                Object adjusted = row.get("adjusted");
+                if (bk != null && adjusted != null) {
+                    expAdjMap.put(bk.toString(), Boolean.TRUE.equals(adjusted)
+                        || "true".equalsIgnoreCase(String.valueOf(adjusted)));
+                }
+            }
+            expectedAdjustedByPeriod.put(period, expAdjMap);
+
             List<Map<String, Object>> pendings = receivedAdjustMapper.doSelectPendingByBizKeys(period, keys);
             Map<String, Map<String, Object>> pendMap = new HashMap<>();
             for (Map<String, Object> p : pendings) {
@@ -1681,12 +1807,18 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
                 apply.setBizType(bizType);
                 apply.setEmployeeCount(m.getEmployeeCount());
-                // 新签业绩展示实时值（含已生效调整），与详情/每人明细口径一致；与快照不一致时标「已调整」
+                // 新签业绩展示实时值（含已生效调整），与详情/每人明细口径一致；
+                // 「已调整」以新签事实链存在性为准（含 AMOUNT 类总额不变的重分配），
+                // 兼容快照与实时不一致的旧口径，避免总额不变时漏标
                 if (m.getExpectedAmount() != null) {
                     // 快照即「调整前」值，先留存再覆盖为实时值（口径同 getDetail），供前端展示「原值 → 调整后值」
                     apply.setOriginalExpectedAmount(apply.getExpectedAmount());
-                    apply.setExpectedAdjusted(apply.getExpectedAmount() != null
-                        && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
+                    boolean expectedAdjusted = matchChainAdjusted(
+                            expectedAdjustedByPeriod.get(apply.getPeriod()),
+                            apply.getContractNo(), apply.getOrderNo())
+                        || (apply.getExpectedAmount() != null
+                            && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
+                    apply.setExpectedAdjusted(expectedAdjusted);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
                 // 实收业绩展示实时值（pj_received_detail ACTIVE 合计，含已生效实收调整）；

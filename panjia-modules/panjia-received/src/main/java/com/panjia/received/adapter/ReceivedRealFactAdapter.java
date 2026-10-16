@@ -287,14 +287,24 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
                     .eq(ReceivedContract::getPeriod, period)
                     .last("LIMIT 1"));
         }
+        // 新签事实镜像：合同无实收时建的虚拟实收 = 新签的全字段镜像，仅金额=delta 不同，
+        // 故壳级/明细级字段统一回源该新签事实（调用方入参只带得到员工/角色/金额）
+        PerformanceFactSummaryDTO mirror = realMapper.selectExpectMirror(orderNo, contractNo, period, employeeId);
         if (contract == null) {
             // 合同无实收壳：手工建一条 MANUAL 壳（后续真实实收到账自动合并到同一个 contract_id 聚合）
             contract = new ReceivedContract();
-            contract.setOrderNo(orderNo);
-            contract.setContractNo(contractNo);
-            contract.setBizType(bizType);
+            contract.setOrderNo(orderNo != null ? orderNo : (mirror == null ? null : mirror.getOrderNo()));
+            contract.setContractNo(contractNo != null ? contractNo : (mirror == null ? null : mirror.getContractNo()));
+            // biz_type 回源新签事实的真实业务类型（调用方以 factType 占位、非业务类型）；取不到退回入参
+            String realBizType = mirror == null ? null : mirror.getBizType();
+            contract.setBizType(realBizType != null && !realBizType.isBlank() ? realBizType : bizType);
             contract.setPeriod(period);
             contract.setSourceType("MANUAL");
+            // business_date NOT NULL：镜像新签签约/成交日期，缺失时才兜底当期月末
+            contract.setBusinessDate(mirror != null && mirror.getBusinessDate() != null
+                ? mirror.getBusinessDate() : periodEndFallback(period));
+            contract.setDeptId(mirror == null ? null : mirror.getDeptId());
+            contract.setPropertyAddress(mirror == null ? null : mirror.getPropertyAddress());
             contract.setPeriodTotalReceived(BigDecimal.ZERO);
             contract.setItemCount(0);
             contractMapper.insert(contract);
@@ -307,11 +317,17 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         ReceivedDetail n = new ReceivedDetail();
         n.setContractId(contractId);
         n.setEmployeeId(employeeId);
-        n.setDeptId(deptId != null ? deptId : contract.getDeptId());
-        n.setEmployeeExternalCode(employeeCode);
-        n.setRoleType(roleType);
-        n.setRoleName(roleType);
-        n.setShareRatio(shareRatio != null ? shareRatio : BigDecimal.ONE);
+        // 字段回退链：调用方入参 → 新签事实镜像 → 壳/默认，实现「新签全字段镜像」
+        Long effDeptId = deptId != null ? deptId
+            : (mirror != null && mirror.getDeptId() != null ? mirror.getDeptId() : contract.getDeptId());
+        String effRoleType = roleType != null ? roleType : (mirror == null ? null : mirror.getRoleType());
+        n.setDeptId(effDeptId);
+        n.setEmployeeExternalCode(employeeCode != null ? employeeCode
+            : (mirror == null ? null : mirror.getEmployeeCode()));
+        n.setRoleType(effRoleType);
+        n.setRoleName(mirror != null && mirror.getRoleName() != null ? mirror.getRoleName() : effRoleType);
+        n.setShareRatio(shareRatio != null ? shareRatio
+            : (mirror != null && mirror.getShareRatio() != null ? mirror.getShareRatio() : BigDecimal.ONE));
         n.setPerformanceAmount(MoneyUtil.round2(amount == null ? BigDecimal.ZERO : amount));
         n.setFeeItem(null); // 合同壳无 feeItem 模板，空值即可
         n.setPeriod(period);
@@ -329,7 +345,7 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         String on = orderNo == null ? "" : orderNo;
         String cn = contractNo == null ? "" : contractNo;
         n.setSourceKey(on + "|" + cn + "|MANUAL-RADJ-" + adjustId + "-" + employeeId
-            + "|" + (roleType == null ? "" : roleType));
+            + "|" + (effRoleType == null ? "" : effRoleType));
         n.setSourceBatchId(null);
         n.setNormalizedRecordId(null);
         n.setReceivedApplyId(null); // 手工虚拟实收不归属任何审批单
@@ -341,6 +357,16 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         log.info("[实收-无壳建行] adjustId={}, employeeId={}, amount={}, contractId={}",
             adjustId, employeeId, n.getPerformanceAmount(), contractId);
         return n.getId();
+    }
+
+    /**
+     * 新签事实缺 business_date 时的兜底：当期月末 23:59:59，再不行取当前时间（该列 NOT NULL）。
+     */
+    private java.time.LocalDateTime periodEndFallback(String period) {
+        if (period != null && period.matches("\\d{4}-\\d{2}")) {
+            return java.time.YearMonth.parse(period).atEndOfMonth().atTime(23, 59, 59);
+        }
+        return java.time.LocalDateTime.now();
     }
 
     @Override

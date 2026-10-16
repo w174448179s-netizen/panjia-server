@@ -94,4 +94,23 @@ public interface ReceivedApplyPort {
      * @return true=已自动通过；false=未通过（启动人工或保持 DRAFT）
      */
     boolean resolveDraftAfterNewSign(String period, String contractNo, String orderNo, Long operatorId);
+
+    /**
+     * 业绩调整联动：合同「有新签、无实收」时，把联动建出的虚拟实收明细归入一张
+     * <b>审批通过</b>的实收审批单（APPROVED，无流程实例，来源=业绩调整）。
+     * <p>
+     * 新签调整执行后，实收侧无 ACTIVE 明细 → 联动按逐人 delta 建虚拟实收明细
+     * （source_type=MANUAL、received_apply_id 为空）。这些明细必须挂到一张审批单上，
+     * 否则实收审批单列表查不到该笔实收；本方法即“直建 APPROVED 单 + 绑定明细”。
+     * <p>幂等：同订单号当月已有活跃审批单（DRAFT/SUBMITTED/APPROVED）时跳过。
+     *
+     * @param period     实收归属期间 YYYY-MM
+     * @param orderNo    订单号（可空，空时按合同号匹配）
+     * @param contractNo 合同号
+     * @param operatorId 操作人 ID（业绩调整执行人，兜底 1L）
+     * @param adjustId   业绩调整单 ID（日志留痕；明细侧 adjust_id 已记录来源）
+     * @return 新建审批单数量
+     */
+    int autoCreateApprovedForAdjust(String period, String orderNo, String contractNo,
+                                    Long operatorId, Long adjustId);
 }

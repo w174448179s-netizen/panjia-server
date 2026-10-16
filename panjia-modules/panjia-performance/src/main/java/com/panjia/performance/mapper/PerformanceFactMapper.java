@@ -1138,9 +1138,21 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                AND x.fact_type = #{factType}
                                <if test="period != null and period != ''">AND x.period = #{period}</if>
             ORDER BY sk.source_key, x.id ASC
+        ),
+        rev AS (
+            SELECT DISTINCT sk2.source_key
+            FROM sk sk2
+            JOIN pj_perf_fact y ON y.source_key = sk2.source_key
+                               AND y.fact_type = #{factType}
+                               AND y.fact_status = 'REVERSED'
         )
         SELECT sk.key AS "bizKey",
-               COALESCE(SUM(orig.amt), 0) AS "originalAmount"
+               COALESCE(SUM(orig.amt), 0) AS "originalAmount",
+               -- 链上存在 REVERSED（supersede 冲销）或为调整新增角色人链（MANUAL-ADJ/MANUAL-CADJ）即「已调整」；
+               -- AMOUNT 类调整总额不变时原值=现值，仅靠金额比较会漏标，故以链存在性为准
+               BOOL_OR(sk.source_key LIKE '%MANUAL-ADJ%'
+                       OR sk.source_key LIKE '%MANUAL-CADJ%'
+                       OR sk.source_key IN (SELECT source_key FROM rev)) AS "adjusted"
         FROM sk
         LEFT JOIN orig ON orig.source_key = sk.source_key
         GROUP BY sk.key

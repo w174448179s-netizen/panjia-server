@@ -33,6 +33,7 @@ import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionGatePort;
 import com.panjia.contracts.port.ConversionFactorPort;
+import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.contracts.port.ReceivedRealFactPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -135,6 +136,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 端口实现缺失时跳过联动，保证本模块上下文可独立启动。
      */
     private final ObjectProvider<ReceivedRealFactPort> receivedRealFactPortProvider;
+
+    /**
+     * 实收审批单端口（合同「有新签、无实收」联动时直建一张审批通过的实收审批单）。
+     * 实现 bean 在 panjia-received，ObjectProvider 惰性取用，缺失时跳过建单。
+     */
+    private final ObjectProvider<ReceivedApplyPort> receivedApplyPortProvider;
 
     @Override
     public PageResult<PerformanceAdjust> listAdjusts(PerformanceAdjustBo query, PageQuery pageQuery) {
@@ -1149,6 +1156,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     /** 实收事实端口（端口实现缺失时返回 null，实收联动跳过）。 */
     private ReceivedRealFactPort receivedRealPort() {
         return receivedRealFactPortProvider.getIfAvailable();
+    }
+
+    /** 实收审批单端口（惰性取用，实现缺失返回 null）。 */
+    private ReceivedApplyPort receivedApplyPort() {
+        return receivedApplyPortProvider.getIfAvailable();
     }
 
     /**
@@ -2186,22 +2198,20 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 新签调整实收联动（2026-10-16 简化为「同额联动」）。
+     * 新签调整实收联动（2026-10-16「按角色行同额联动」；修正「扣减一条角色行、实收却被扣减到多条角色行」）。
      * <p>
-     * 客户要求简化：取消比例联动，三种调整类型（业绩调整 AMOUNT / 业绩扣减 DEDUCT /
-     * 业绩增加 INCREASE）一律<b>逐经纪人同额联动</b>——某经纪人新签变动 delta，
-     * 其名下实收明细合计同额变动 delta（新签调增多少实收就增多少，调减多少实收就减多少），
-     * 不再按「调整金额×实收÷新签」折算比例。
+     * 联动粒度 = 新签<b>事实行（角色行）</b>：某经纪人某个角色的新签变动 delta，
+     * 只落到其实收明细中<b>同员工 + 同角色</b>的行上（同额），
+     * 不再按「经纪人」把变动额分摊到其名下全部实收行（原实现按人聚合导致跨角色行扣减）。
      * <ul>
-     *   <li>既有员工有实收行：把 delta 按各行金额占比分摊后逐行 supersede（
-     *       {@link MoneyUtil#allocateByAmount}，尾差补最大行）；</li>
-     *   <li>该人无实收行（尚未到账）且 delta ≠ 0：自动建一条实收行，金额 = delta（正负均建）；</li>
-     *   <li>新增角色人：按 {@link AddMemberPayload#effectiveMembers()} 逐人新建实收行，
-     *       金额 = 该新人新签金额（同额）；</li>
-     *   <li>合同整体无 ACTIVE 实收明细：<b>自动建壳建明细</b>（2026-10-16 扩展）——
-     *       逐人按 delta 建虚拟实收明细（正负均建），后续真实实收到账直接合并对齐；</li>
+     *   <li>命中（员工+角色）实收行：按命中行金额占比分摊 delta 后逐行 supersede
+     *       （{@link MoneyUtil#allocateByAmount}，尾差补最大行）；</li>
+     *   <li>未命中同行、但该员工实收侧仍有其它行（角色口径不一致）：退化为按该员工实收行等比分摊（兜底，不新建行）；</li>
+     *   <li>该员工实收侧完全无行（尚未到账）：按新签角色行镜像建实收行，金额 = delta（正负均建）；</li>
+     *   <li>新增角色人：按（员工+角色）新建实收行，金额 = 该新人新签金额（同额）；</li>
+     *   <li>合同整体无 ACTIVE 实收明细：自动建壳建明细，并在末尾直建一张审批通过的实收审批单；</li>
      *   <li>允许实收金额为负（{@code pj_received_detail.performance_amount} 无负值约束）：
-     *       扣减额超过该人实收时不做截断、不阻断，严格同额扣减。</li>
+     *       扣减额超过该角色行实收时不做截断、不阻断，严格同额扣减。</li>
      * </ul>
      * 端口缺失时跳过。
      */
@@ -2214,37 +2224,58 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         String period = adjust.getPeriod();
         String orderNo = adjust.getOrderNo();
         String contractNo = adjust.getContractNo();
-        String bizType = payload != null && payload.getAllocations() != null && !payload.getAllocations().isEmpty()
-            ? adjust.getFactType() : null; // bizType 用于 createDetailFromContract 的合同壳
 
-        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(
-            null, orderNo, contractNo);
+        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
         boolean hasAnyReceived = received != null && !received.isEmpty();
-        // 按经纪人聚合实收明细行
-        Map<Long, List<PerformanceFactSummaryDTO>> detailsByEmp = new HashMap<>();
-        if (received != null) {
-            for (PerformanceFactSummaryDTO r : received) {
-                if (r.getEmployeeId() != null && r.getFactId() != null) {
-                    detailsByEmp.computeIfAbsent(r.getEmployeeId(), k -> new ArrayList<>()).add(r);
-                }
-            }
-        }
+        // 按（员工 + 角色）归组实收行：角色 trim 归一，空角色统一为空串，保证键稳定
+        Map<Long, Map<String, List<PerformanceFactSummaryDTO>>> receivedByEmpRole = new HashMap<>();
         // 模板明细：有实收时用于 addMemberDetail 复制基础字段；无实收时用 createDetailFromContract
         Long templateDetailId = null;
-        if (received != null && !received.isEmpty()) {
-            templateDetailId = received.get(0).getFactId();
-        }
-
-        // 按经纪人聚合新签变动额（allocations 为事实行粒度，一人可能多行）
-        Map<Long, BigDecimal> deltaByEmp = new HashMap<>();
-        if (payload != null && payload.getAllocations() != null) {
-            for (AddMemberPayload.Alloc alloc : payload.getAllocations()) {
-                if (alloc.getEmployeeId() == null) {
+        if (received != null) {
+            for (PerformanceFactSummaryDTO r : received) {
+                if (r.getEmployeeId() == null || r.getFactId() == null) {
                     continue;
                 }
-                deltaByEmp.merge(alloc.getEmployeeId(),
-                    alloc.getDelta() == null ? BigDecimal.ZERO : alloc.getDelta(), BigDecimal::add);
+                receivedByEmpRole
+                    .computeIfAbsent(r.getEmployeeId(), k -> new HashMap<>())
+                    .computeIfAbsent(normalizeRole(r.getRoleType()), k -> new ArrayList<>())
+                    .add(r);
+                if (templateDetailId == null) {
+                    templateDetailId = r.getFactId();
+                }
             }
+        }
+
+        // 新签事实行（角色行）变动额：allocations 为事实行粒度（含 factId），逐行按（员工+角色）归组
+        List<AddMemberPayload.Alloc> allocs = payload == null || payload.getAllocations() == null
+            ? List.of() : payload.getAllocations();
+        Map<Long, PerformanceFactSummaryDTO> allocFactById = new HashMap<>();
+        Set<Long> allocFactIds = allocs.stream()
+            .map(AddMemberPayload.Alloc::getFactId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (!allocFactIds.isEmpty()) {
+            for (PerformanceFactSummaryDTO f : factMapper.selectFactSummariesByIds(allocFactIds)) {
+                if (f != null && f.getFactId() != null) {
+                    allocFactById.put(f.getFactId(), f);
+                }
+            }
+        }
+        // 建壳兜底业务类型：同合同同业务类型，取任一新签事实的 bizType（取不到由适配器回源新签镜像）
+        String bizType = allocFactById.values().stream()
+            .map(PerformanceFactSummaryDTO::getBizType)
+            .filter(StringUtils::isNotBlank)
+            .findFirst().orElse(null);
+        Map<Long, Map<String, BigDecimal>> deltaByEmpRole = new HashMap<>();
+        for (AddMemberPayload.Alloc alloc : allocs) {
+            if (alloc.getEmployeeId() == null) {
+                continue;
+            }
+            PerformanceFactSummaryDTO f = alloc.getFactId() == null ? null : allocFactById.get(alloc.getFactId());
+            String role = normalizeRole(f == null ? null : f.getRoleType());
+            deltaByEmpRole
+                .computeIfAbsent(alloc.getEmployeeId(), k -> new HashMap<>())
+                .merge(role, alloc.getDelta() == null ? BigDecimal.ZERO : alloc.getDelta(), BigDecimal::add);
         }
         // 新增角色人清单（同额新增实收行；其 delta 不在 allocations 中，单独处理）
         List<AddMemberPayload.NewMember> members = payload == null ? List.of() : payload.effectiveMembers();
@@ -2258,54 +2289,49 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 adjust.getId(), contractNo);
         }
 
-        // 1. 有实收明细的员工：同额联动（含 INCREASE——新签增加多少实收就增多少）
-        //    无实收明细的员工跳过（在步骤 2 处理）
-        for (Map.Entry<Long, List<PerformanceFactSummaryDTO>> entry : detailsByEmp.entrySet()) {
-            Long employeeId = entry.getKey();
-            BigDecimal delta = MoneyUtil.round2(deltaByEmp.getOrDefault(employeeId, BigDecimal.ZERO));
-            if (MoneyUtil.isZero(delta) || memberEmpIds.contains(employeeId)) {
-                continue;
-            }
-            List<PerformanceFactSummaryDTO> empDetails = entry.getValue();
-            List<BigDecimal> amounts = empDetails.stream()
-                .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
-                .toList();
-            BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
-            for (int i = 0; i < empDetails.size(); i++) {
-                if (MoneyUtil.isZero(parts[i])) {
+        // 1. 逐新签角色行：按（员工+角色）同额联动实收（新增角色人除外，在步骤 3 处理）
+        for (Map.Entry<Long, Map<String, BigDecimal>> empEntry : deltaByEmpRole.entrySet()) {
+            Long employeeId = empEntry.getKey();
+            Map<String, List<PerformanceFactSummaryDTO>> empReceived = receivedByEmpRole.get(employeeId);
+            for (Map.Entry<String, BigDecimal> roleEntry : empEntry.getValue().entrySet()) {
+                BigDecimal delta = MoneyUtil.round2(roleEntry.getValue());
+                if (MoneyUtil.isZero(delta) || memberEmpIds.contains(employeeId)) {
                     continue;
                 }
-                PerformanceFactSummaryDTO detail = empDetails.get(i);
-                // 允许为负：严格同额，扣减超实收不截断
-                BigDecimal newAmount = MoneyUtil.round2(amounts.get(i).add(parts[i]));
-                port.adjustDetailAmount(detail.getFactId(), newAmount, operatorId, adjust.getId());
+                String role = roleEntry.getKey();
+                List<PerformanceFactSummaryDTO> matched = empReceived == null ? null : empReceived.get(role);
+                if (matched != null && !matched.isEmpty()) {
+                    // 命中同（员工+角色）实收行：同额联动（含 INCREASE——新签增多少实收就增多少）
+                    adjustReceivedRows(port, matched, delta, adjust.getId(), operatorId);
+                    log.info("[调整单-实收联动] adjustId={}, employeeId={}, role={}, 新签同额={}, 实收命中 {} 行同额联动",
+                        adjust.getId(), employeeId, role, delta, matched.size());
+                    continue;
+                }
+                if (empReceived != null && !empReceived.isEmpty()) {
+                    // 角色口径不一致：退化为按该员工实收行等比分摊（兜底，不新建行，避免重复行）
+                    List<PerformanceFactSummaryDTO> all = empReceived.values().stream()
+                        .flatMap(List::stream).toList();
+                    adjustReceivedRows(port, all, delta, adjust.getId(), operatorId);
+                    log.warn("[调整单-实收联动] adjustId={}, employeeId={}, 新签角色={} 在实收侧无同行，"
+                        + "退化为按该员工 {} 条实收行等比分摊", adjust.getId(), employeeId, role, all.size());
+                    continue;
+                }
+                // 该员工实收侧完全无行（尚未到账）：按新签角色行镜像建实收行（同额，正负均建）
+                String roleArg = StringUtils.isBlank(role) ? null : role;
+                Long createdId;
+                if (templateDetailId != null) {
+                    createdId = port.addMemberDetail(templateDetailId, employeeId, null, null,
+                        roleArg, delta, null, operatorId, adjust.getId());
+                } else {
+                    createdId = port.createDetailFromContract(orderNo, contractNo, period, bizType,
+                        employeeId, null, null, roleArg, delta, null, operatorId, adjust.getId());
+                }
+                log.info("[调整单-实收联动] 员工 {} 角色 {} 实收侧无明细，按新签同额 {} 自动建实收行："
+                    + "adjustId={}, newDetailId={}", employeeId, role, delta, adjust.getId(), createdId);
             }
-            log.info("[调整单-实收联动] adjustId={}, employeeId={}, 新签同额={}, 实收已同额联动",
-                adjust.getId(), employeeId, delta);
         }
 
-        // 2. 无实收明细的员工：按 delta 自动建实收行（正负均建，保证逐人对齐：
-        //    合同有实收则复用其模板建行；整合同无实收则自动建壳建行）
-        for (Map.Entry<Long, BigDecimal> entry : deltaByEmp.entrySet()) {
-            Long employeeId = entry.getKey();
-            BigDecimal delta = MoneyUtil.round2(entry.getValue());
-            if (MoneyUtil.isZero(delta) || memberEmpIds.contains(employeeId)
-                || detailsByEmp.containsKey(employeeId)) {
-                continue;
-            }
-            if (templateDetailId != null) {
-                port.addMemberDetail(templateDetailId, employeeId, null, null, null, delta, null,
-                    operatorId, adjust.getId());
-            } else {
-                // 合同整体无实收：用无模板方法自动建壳建明细（首行建壳，后续行复用同一壳）
-                port.createDetailFromContract(orderNo, contractNo, period, bizType,
-                    employeeId, null, null, null, delta, null, operatorId, adjust.getId());
-            }
-            log.info("[调整单-实收联动] 员工 {} 实收侧无明细，按新签同额 {} 自动建实收行：adjustId={}",
-                employeeId, delta, adjust.getId());
-        }
-
-        // 3. 新增角色人：实收同额新增角色人（金额 = 该新人新签金额）
+        // 3. 新增角色人：按（员工+角色）同额新增实收行（金额 = 该新人新签金额）
         for (AddMemberPayload.NewMember m : members) {
             if (m.getEmployeeId() == null) {
                 continue;
@@ -2314,20 +2340,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (MoneyUtil.isZero(amt)) {
                 continue;
             }
-            List<PerformanceFactSummaryDTO> exist = detailsByEmp.get(m.getEmployeeId());
+            String role = normalizeRole(m.getRoleType());
+            Map<String, List<PerformanceFactSummaryDTO>> empReceived = receivedByEmpRole.get(m.getEmployeeId());
+            List<PerformanceFactSummaryDTO> exist = empReceived == null ? null : empReceived.get(role);
             if (exist != null && !exist.isEmpty()) {
-                // 该人实收侧已有明细（异常场景）：同额加在其既有行上
-                List<BigDecimal> amounts = exist.stream()
-                    .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
-                    .toList();
-                BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, amt);
-                for (int i = 0; i < exist.size(); i++) {
-                    if (MoneyUtil.isZero(parts[i])) {
-                        continue;
-                    }
-                    BigDecimal newAmount = MoneyUtil.round2(amounts.get(i).add(parts[i]));
-                    port.adjustDetailAmount(exist.get(i).getFactId(), newAmount, operatorId, adjust.getId());
-                }
+                // 该人实收侧已有同角色明细（异常场景）：同额加在其既有行上
+                adjustReceivedRows(port, exist, amt, adjust.getId(), operatorId);
             } else if (templateDetailId != null) {
                 port.addMemberDetail(templateDetailId, m.getEmployeeId(), m.getEmployeeCode(), m.getDeptId(),
                     m.getRoleType(), amt, m.getNewShareRatio(), operatorId, adjust.getId());
@@ -2337,8 +2355,51 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     m.getEmployeeId(), m.getEmployeeCode(), m.getDeptId(), m.getRoleType(),
                     amt, m.getNewShareRatio(), operatorId, adjust.getId());
             }
-            log.info("[调整单-实收联动] 新增角色人同额新增实收：adjustId={}, employeeId={}, amount={}",
-                adjust.getId(), m.getEmployeeId(), amt);
+            log.info("[调整单-实收联动] 新增角色人同额新增实收：adjustId={}, employeeId={}, role={}, amount={}",
+                adjust.getId(), m.getEmployeeId(), role, amt);
+        }
+
+        // 4. 合同整体无实收：联动建出的虚拟实收明细须归入一张「审批通过」的实收审批单，
+        //    否则实收审批单列表（按审批单维度展示）查不到这笔实收
+        if (!hasAnyReceived) {
+            ReceivedApplyPort applyPort = receivedApplyPort();
+            if (applyPort != null) {
+                int newApplies = applyPort.autoCreateApprovedForAdjust(period, orderNo, contractNo,
+                    operatorId, adjust.getId());
+                if (newApplies > 0) {
+                    log.info("[调整单-实收联动] 无实收合同已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
+                        adjust.getId(), contractNo, newApplies);
+                }
+            } else {
+                log.warn("[调整单-实收联动] 实收审批单端口缺失，跳过直建审批单：adjustId={}", adjust.getId());
+            }
+        }
+    }
+
+    /** 角色口径归一：null → 空串；去除首尾空白，保证（员工+角色）匹配键稳定。 */
+    private String normalizeRole(String roleType) {
+        return roleType == null ? "" : roleType.trim();
+    }
+
+    /**
+     * 对给定实收明细行按金额占比分摊 delta 后逐行 supersede（{@link MoneyUtil#allocateByAmount}，尾差补最大行）。
+     * <p>金额允许为负：严格同额，扣减超实收不截断。
+     */
+    private void adjustReceivedRows(ReceivedRealFactPort port, List<PerformanceFactSummaryDTO> rows,
+                                    BigDecimal delta, Long adjustId, Long operatorId) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        List<BigDecimal> amounts = rows.stream()
+            .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
+            .toList();
+        BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
+        for (int i = 0; i < rows.size(); i++) {
+            if (MoneyUtil.isZero(parts[i])) {
+                continue;
+            }
+            BigDecimal newAmount = MoneyUtil.round2(amounts.get(i).add(parts[i]));
+            port.adjustDetailAmount(rows.get(i).getFactId(), newAmount, operatorId, adjustId);
         }
     }
 
