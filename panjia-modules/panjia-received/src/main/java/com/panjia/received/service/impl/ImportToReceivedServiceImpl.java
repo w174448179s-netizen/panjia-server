@@ -161,14 +161,23 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
      * <p>
      * 粒度：订单 + 合同 + 员工 + 费项 + 角色 + 期间（同月同人同角色的多笔到账聚合为一行
      * 当月实收）。与新签事实 source_key「订单|合同|员工|费项|角色-期间」口径对齐。
+     * <p>
+     * 特例：roleType 为空的行（贝壳未给到角色人，已在导入域按客源成交人回填系统号+姓名），
+     * 同一合同可能有多条，需追加 normalizedRecordId 保证幂等键唯一，否则后续行被跳过丢数据。
      */
     private String buildDetailSourceKey(NormalizedRecordDTO r, String period) {
-        return (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
+        String roleType = r.getRoleType() != null ? r.getRoleType() : "";
+        String base = (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
             + (r.getContractNo() != null ? r.getContractNo() : "") + "|"
             + (r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
             + (r.getFeeItem() != null ? r.getFeeItem() : "") + "|"
-            + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
+            + roleType + "|"
             + period;
+        // roleType 为空的回填行：同合同多条会撞幂等键，追加归一化记录 ID 区分
+        if (roleType.isEmpty() && r.getId() != null) {
+            return base + "|" + r.getId();
+        }
+        return base;
     }
 
     private ReceivedContract buildContract(NormalizedRecordDTO r, String period, String sourceType, Long batchId, EmployeeMainDataDTO emp) {

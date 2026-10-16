@@ -651,8 +651,17 @@ public class ImportEngine {
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
+        // 贝壳实收：空角色行按客源成交人回填角色人（系统号+姓名）。
+        // 理房通到账明细中部分到账行只有合同维度金额、无具体角色人，
+        // 业务上要求统一挂靠到客源成交人名下。预扫描全批行，按合同/订单
+        // 归集客源成交人信息，供循环内回填空角色行使用。
+        Map<String, String[]> sourcePersonByContract = null;
+        if (sourceType == ImportSourceType.KE_RECEIVED) {
+            sourcePersonByContract = buildReceivedSourcePersonMap(rawRows);
+        }
+
         // 批量匹配员工（未匹配 → issue，不写归一化记录；该行不进 fact 表）
-        Map<String, Long> codeToId = matchEmployees(rawRows);
+        Map<String, Long> codeToId = matchEmployees(rawRows, sourcePersonByContract);
 
         // sourceKey 生成器
         SourceKeyGenerator keyGen = findSourceKeyGenerator(sourceType);
@@ -694,6 +703,24 @@ public class ImportEngine {
 
         for (RawData raw : rawRows) {
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
+            // 贝壳实收：角色人为空的行，按同一合同客源成交人回填系统号+姓名。
+            // 修改 jsonMap 不影响 rawJson 只读归档（rawJson 保留原始空值），
+            // 仅影响归一化字段读取，使空角色行挂靠到客源成交人名下。
+            if (sourcePersonByContract != null) {
+                String curCode = extractExternalCode(jsonMap);
+                if (curCode == null || curCode.isEmpty()) {
+                    String contractNo = str(jsonMap, "contractNo");
+                    String orderNo = str(jsonMap, "orderNo");
+                    String key = (contractNo != null && !contractNo.isBlank()) ? contractNo : orderNo;
+                    String[] sp = key == null ? null : sourcePersonByContract.get(key);
+                    if (sp != null && sp[0] != null) {
+                        jsonMap.put("roleSysNo", sp[0]);
+                        if (sp[1] != null) {
+                            jsonMap.put("roleName", sp[1]);
+                        }
+                    }
+                }
+            }
             String externalCode = extractExternalCode(jsonMap);
 
             // 贝壳实收导入特例：角色人系统号可为空（贝壳未给到人的到账行），
@@ -929,12 +956,27 @@ public class ImportEngine {
             .eq(col, batchId);
     }
 
-    private Map<String, Long> matchEmployees(List<? extends RawData> rawRows) {
-        List<String> codes = rawRows.stream()
-            .map(this::extractExternalCode)
-            .filter(c -> c != null && !c.isEmpty())
-            .distinct()
-            .toList();
+    private Map<String, Long> matchEmployees(List<? extends RawData> rawRows,
+                                              Map<String, String[]> sourcePersonByContract) {
+        List<String> codes = new ArrayList<>();
+        for (RawData raw : rawRows) {
+            Map<String, Object> json = parseRawJson(raw.getRawJson());
+            String code = extractExternalCode(json);
+            if (code != null && !code.isEmpty()) {
+                codes.add(code);
+            } else if (sourcePersonByContract != null) {
+                // 空角色行：回填后用客源成交人系统号参与员工匹配，
+                // 确保回填行能解析出 employeeId，下游实收明细不再是合同维度空员工
+                String contractNo = str(json, "contractNo");
+                String orderNo = str(json, "orderNo");
+                String key = (contractNo != null && !contractNo.isBlank()) ? contractNo : orderNo;
+                String[] sp = key == null ? null : sourcePersonByContract.get(key);
+                if (sp != null && sp[0] != null) {
+                    codes.add(sp[0]);
+                }
+            }
+        }
+        codes = codes.stream().distinct().toList();
         if (codes.isEmpty()) {
             return Map.of();
         }
@@ -943,6 +985,40 @@ public class ImportEngine {
 
     private String extractExternalCode(RawData raw) {
         return extractExternalCode(parseRawJson(raw.getRawJson()));
+    }
+
+    /**
+     * 贝壳实收：按合同/订单归集「客源成交人」的角色人信息（系统号+姓名）。
+     * <p>
+     * 理房通到账明细中，部分到账行只有合同维度金额、没有具体角色人，
+     * 业务上要求统一挂靠到客源成交人名下。本方法预扫描全批行，
+     * 为每个合同/订单找到客源成交人的系统号与姓名，供循环内回填空角色行。
+     *
+     * @param rawRows 批次内全部实收原始行
+     * @return key=合同号（回退订单号），value=[roleSysNo, roleName]；
+     *         无客源成交人的合同不在 map 中
+     */
+    private Map<String, String[]> buildReceivedSourcePersonMap(List<? extends RawData> rawRows) {
+        Map<String, String[]> map = new java.util.HashMap<>();
+        for (RawData raw : rawRows) {
+            Map<String, Object> json = parseRawJson(raw.getRawJson());
+            if (!"客源成交人".equals(str(json, "roleType"))) {
+                continue;
+            }
+            String sysNo = str(json, "roleSysNo");
+            if (sysNo == null || sysNo.isBlank()) {
+                continue;
+            }
+            String contractNo = str(json, "contractNo");
+            String orderNo = str(json, "orderNo");
+            String key = (contractNo != null && !contractNo.isBlank()) ? contractNo : orderNo;
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            // 同合同可能多条客源成交人行（理论上唯一），取首次出现的
+            map.putIfAbsent(key, new String[]{sysNo, str(json, "roleName")});
+        }
+        return map;
     }
 
     private String extractExternalCode(Map<String, Object> jsonMap) {
