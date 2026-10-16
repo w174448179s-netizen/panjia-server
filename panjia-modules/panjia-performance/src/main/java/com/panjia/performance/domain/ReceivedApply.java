@@ -127,6 +127,14 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private BigDecimal adjustPendingAmount;
 
+    /**
+     * 转人工审批的原因（非入库字段；列表/详情实时计算，仅 SUBMITTED 审批中单据有值）。
+     * <p>如「新签与实收人数不一致（新签 3 人/实收 2 人），需人工核对人员」、「实收金额小于新签金额」，
+     * 让申请人与审批人一眼知道为什么卡在审批中。</p>
+     */
+    @TableField(exist = false)
+    private String manualReviewReason;
+
     /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
     private ReceivedApplyStatus status;
 

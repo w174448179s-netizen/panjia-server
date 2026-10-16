@@ -1052,6 +1052,31 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
+     * 计算「转人工审批」原因（仅 SUBMITTED 审批中单据返回非空）。
+     * <p>与自动通过判定点同一口径：先查新签-实收人数一致性（不一致优先提示），再查实收&lt;新签。
+     * 列表/详情调用，让申请人与审批人知道为什么卡在审批中。</p>
+     *
+     * @param apply     审批单（需含 period/orderNo/contractNo/receivedAmount/expectedAmount）
+     * @param realEmps  实收侧去重员工集合（调用方批量查好后传入，避免循环内重复查询）
+     */
+    private String manualReviewReasonOf(ReceivedApply apply, Set<Long> realEmps) {
+        if (apply == null || apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
+            return null;
+        }
+        Set<Long> expectEmps = expectEmpIdsByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
+        if (!expectEmps.isEmpty() && !expectEmps.equals(realEmps)) {
+            return String.format("新签与实收人数不一致（新签 %d 人/实收 %d 人），需人工核对人员",
+                expectEmps.size(), realEmps.size());
+        }
+        BigDecimal realSum = nvlAmount(apply.getReceivedAmount());
+        BigDecimal expectSum = apply.getExpectedAmount() == null ? BigDecimal.ZERO : apply.getExpectedAmount();
+        if (expectSum.signum() > 0 && realSum.compareTo(expectSum) < 0) {
+            return "实收金额小于新签金额，需人工核对";
+        }
+        return null;
+    }
+
+    /**
      * 新签-实收匹配键（2026-10-11 双侧闸门定稿）：<b>合同号+订单号双键同时满足精确归集</b>；
      * 双键未命中时，仅当该合同在<b>本批实收订单、新签 ACTIVE 事实、实收合同表全局</b>三处
      * 订单维度都唯一才退化按合同号归集（兼容贝壳新签 orderNo 误填成合同号的脏数据）；
@@ -1567,6 +1592,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
         List<ReceivedApply> records = page.getRecords();
         fillContractMetrics(records);
+        fillManualReviewReason(records);
 
         // 汇总与列表行口径：与列表完全同条件（不含排序）一次聚合，随 summary 返回；
         // 未按员工筛选时为单据级（合同/订单）合计，按员工筛选时改为该员工自己的明细合计与应收份额
@@ -1743,6 +1769,41 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 直接按订单号聚合（订单号为唯一业务锚点）。
      * 期间/合同号/订单号全缺失的行保持 null，前端显示占位符。
      */
+    /**
+     * 列表页批量填充「转人工审批原因」（仅 SUBMITTED 审批中行）。
+     * <p>实收侧人员一次批量查询（入口批量取数，避免行内循环查库）；
+     * 新签侧人员按单据 bizKey 逐单取（仅审批中行，受分页大小约束）。</p>
+     */
+    private void fillManualReviewReason(List<ReceivedApply> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        List<ReceivedApply> submitted = records.stream()
+            .filter(a -> a.getStatus() == ReceivedApplyStatus.SUBMITTED)
+            .toList();
+        if (submitted.isEmpty()) {
+            return;
+        }
+        List<Long> applyIds = submitted.stream().map(ReceivedApply::getId).filter(java.util.Objects::nonNull).toList();
+        // 实收侧人员：一条 SQL 批量取本页所有审批中单的 ACTIVE 明细，再按单分组
+        Map<Long, Set<Long>> realEmpsByApply = new HashMap<>();
+        if (!applyIds.isEmpty()) {
+            for (com.panjia.received.domain.ReceivedDetail d : detailMapper.selectList(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                    .in(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId, applyIds)
+                    .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"))) {
+                if (d.getReceivedApplyId() != null && d.getEmployeeId() != null) {
+                    realEmpsByApply.computeIfAbsent(d.getReceivedApplyId(), k -> new LinkedHashSet<>())
+                        .add(d.getEmployeeId());
+                }
+            }
+        }
+        for (ReceivedApply apply : submitted) {
+            apply.setManualReviewReason(manualReviewReasonOf(apply,
+                realEmpsByApply.getOrDefault(apply.getId(), Set.of())));
+        }
+    }
+
     private void fillContractMetrics(List<ReceivedApply> records) {
         if (records == null || records.isEmpty()) {
             return;
@@ -2072,6 +2133,12 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         apply.setExpectedConvertedAmount(expectConvertedSum);
         // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）
         apply.setOriginalExpectedConvertedAmount(expectOriginalConvertedSum);
+        // 转人工审批原因（仅审批中）：人数不一致 / 实收不足，让审批人一眼知道卡点
+        Set<Long> realEmps = facts.stream()
+            .map(ReceivedFactDetailVo::getEmployeeId)
+            .filter(java.util.Objects::nonNull)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        apply.setManualReviewReason(manualReviewReasonOf(apply, realEmps));
         return new ReceivedApplyDetail(apply, facts);
     }
 
