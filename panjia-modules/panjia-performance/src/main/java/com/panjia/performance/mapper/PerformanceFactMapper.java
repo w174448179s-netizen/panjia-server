@@ -890,7 +890,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         ),
         active_expect AS (
             SELECT pe.employee_external_code AS emp_code, pe.role_type,
-                   SUM(pe.performance_amount) AS exp_amt
+                   -- 理房通空角色回填行 fee_item=贷款服务费，匹配新签贷款服务费；
+                   -- 有角色人原始行 fee_item 空，匹配新签非贷款服务费（居间代理费等）。
+                   SUM(CASE WHEN pe.fee_item = '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS loan_fee_amt,
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt
             FROM pj_perf_fact pe
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
@@ -912,7 +915,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             SELECT DISTINCT ON (a.source_key)
                    a.employee_external_code AS emp_code, a.role_type,
                    a.order_no AS order_no, a.contract_no AS contract_no,
-                   a.source_key, b.performance_amount AS orig_amt
+                   a.source_key, a.fee_item AS fee_item,
+                   b.performance_amount AS orig_amt
             FROM pj_perf_fact a
             JOIN pj_perf_fact b ON b.source_key = a.source_key
                AND b.fact_type = 'PERF_EXPECT' AND b.fact_status = 'REVERSED'
@@ -933,7 +937,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             ORDER BY a.source_key, b.id ASC
         ),
         original_expect AS (
-            SELECT emp_code, role_type, order_no, contract_no, SUM(orig_amt) AS orig_amt
+            SELECT emp_code, role_type, order_no, contract_no,
+                   SUM(CASE WHEN fee_item = '贷款服务费' THEN orig_amt ELSE 0 END) AS loan_orig_amt,
+                   SUM(CASE WHEN fee_item IS DISTINCT FROM '贷款服务费' THEN orig_amt ELSE 0 END) AS other_orig_amt
             FROM reversed_chain
             GROUP BY 1, 2, 3, 4
         )
@@ -956,9 +962,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                rd.role_type AS "roleType",
                rd.role_name AS "roleName",
                rd.share_ratio AS "shareRatio",
-               ae.exp_amt AS "expectedAmount",
-               COALESCE(oe.orig_amt, ae.exp_amt) AS "originalExpectedAmount",
-               (oe.orig_amt IS NOT NULL) AS "expectedAdjusted",
+               CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_fee_amt ELSE ae.other_fee_amt END AS "expectedAmount",
+               COALESCE(
+                   CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END,
+                   CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_fee_amt ELSE ae.other_fee_amt END
+               ) AS "originalExpectedAmount",
+               (CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END IS NOT NULL) AS "expectedAdjusted",
                rd.performance_amount AS "amount",
                -- 实收原值沿 rd 的 sourceKey 链取最早 REVERSED 金额（与新签 originalExpectedAmount 同口径）；
                -- 实收调整「增加角色人」新人行（MANUAL-RADJ 虚拟锚点）无前序，调整前按 0 展示（0 → X）

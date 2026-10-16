@@ -2105,8 +2105,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         BigDecimal factor = conversionFactorPort.factorOf(factorMap, bizType);
         BigDecimal recvSum = BigDecimal.ZERO;
         BigDecimal originalRecvSum = BigDecimal.ZERO;
-        BigDecimal expectConvertedSum = BigDecimal.ZERO;
-        BigDecimal expectOriginalConvertedSum = BigDecimal.ZERO;
         for (ReceivedFactDetailVo f : facts) {
             // 应收折算（实收折算已取消）
             f.setExpectedConvertedAmount(conversionFactorPort.convert(f.getExpectedAmount(), factor));
@@ -2118,8 +2116,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             // 实收行级原值（rd 链最早 REVERSED 金额，无链=当前值；MANUAL-RADJ 新人行=0）求和=合同原值合计
             originalRecvSum = originalRecvSum.add(f.getOriginalAmount() != null ? f.getOriginalAmount()
                 : (f.getAmount() != null ? f.getAmount() : BigDecimal.ZERO));
-            if (f.getExpectedConvertedAmount() != null) expectConvertedSum = expectConvertedSum.add(f.getExpectedConvertedAmount());
-            if (f.getOriginalConvertedAmount() != null) expectOriginalConvertedSum = expectOriginalConvertedSum.add(f.getOriginalConvertedAmount());
         }
         // 实收合计取实收明细实时合计（rd ACTIVE，含已生效实收调整）；
         // 调整前原值=每人行链原值求和（多次调整取最初，与每人明细「原值 → 调整后值」同口径），
@@ -2130,9 +2126,12 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (receivedAdjusted) {
             apply.setOriginalReceivedAmount(originalRecvSum);
         }
-        apply.setExpectedConvertedAmount(expectConvertedSum);
-        // 合计口径与明细列一致：调整前应收折算合计（供详情「应收合计」展示「原值 → 调整后值」）
-        apply.setOriginalExpectedConvertedAmount(expectOriginalConvertedSum);
+        // 应收折算后合计与「应收合计」同口径：合同新签总额 × 因子，
+        // 不采用「每人明细 expectedConvertedAmount 求和」——同人同角色多行时分摊后虽等价，
+        // 但直接以合同总额乘因子更直观，且避免分摊误差传导到合计。
+        apply.setExpectedConvertedAmount(conversionFactorPort.convert(apply.getExpectedAmount(), factor));
+        apply.setOriginalExpectedConvertedAmount(apply.getOriginalExpectedAmount() == null ? null
+            : conversionFactorPort.convert(apply.getOriginalExpectedAmount(), factor));
         // 转人工审批原因（仅审批中）：人数不一致 / 实收不足，让审批人一眼知道卡点
         Set<Long> realEmps = facts.stream()
             .map(ReceivedFactDetailVo::getEmployeeId)

@@ -159,22 +159,21 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
      * 房源维护人/钥匙人/推广等 6 个角色），若键里不含角色，同员工的多行 source_key 完全
      * 相同，{@code uk_received_detail_anchor} 幂等检查会把除首行外的角色全部吞掉。
      * <p>
-     * 粒度：订单 + 合同 + 员工 + 费项 + 角色 + 期间（同月同人同角色的多笔到账聚合为一行
-     * 当月实收）。与新签事实 source_key「订单|合同|员工|费项|角色-期间」口径对齐。
+     * 粒度：订单 + 合同 + 员工 + 费项 + 角色 + 期间。
      * <p>
-     * 特例：roleType 为空的行（贝壳未给到角色人，已在导入域按客源成交人回填系统号+姓名），
-     * 同一合同可能有多条，需追加 normalizedRecordId 保证幂等键唯一，否则后续行被跳过丢数据。
+     * 追加归一化记录 ID：同一合同同人同角色可能有多笔到账（贝壳理房通明细按到账笔数
+     * 拆行，含空角色回填客源成交人的行），若仅按业务键去重会把后续到账行跳过丢金额；
+     * 重导时旧批次被 supersede（旧明细置 SUPERSEDED），故以归一化记录 ID 保证行级唯一。
      */
     private String buildDetailSourceKey(NormalizedRecordDTO r, String period) {
-        String roleType = r.getRoleType() != null ? r.getRoleType() : "";
         String base = (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
             + (r.getContractNo() != null ? r.getContractNo() : "") + "|"
             + (r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
             + (r.getFeeItem() != null ? r.getFeeItem() : "") + "|"
-            + roleType + "|"
+            + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
             + period;
-        // roleType 为空的回填行：同合同多条会撞幂等键，追加归一化记录 ID 区分
-        if (roleType.isEmpty() && r.getId() != null) {
+        // 同一业务键可能有多笔到账，追加归一化记录 ID 保证行级幂等唯一
+        if (r.getId() != null) {
             return base + "|" + r.getId();
         }
         return base;

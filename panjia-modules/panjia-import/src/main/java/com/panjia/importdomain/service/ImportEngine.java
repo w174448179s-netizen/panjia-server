@@ -651,10 +651,12 @@ public class ImportEngine {
         // 读 RawData
         List<? extends RawData> rawRows = selectRawData(sourceType, batchId);
 
-        // 贝壳实收：空角色行按客源成交人回填角色人（系统号+姓名）。
+        // 贝壳实收：空角色行按客源成交人回填角色人（系统号+姓名+角色类型）。
         // 理房通到账明细中部分到账行只有合同维度金额、无具体角色人，
-        // 业务上要求统一挂靠到客源成交人名下。预扫描全批行，按合同/订单
-        // 归集客源成交人信息，供循环内回填空角色行使用。
+        // 业务上要求统一挂靠到客源成交人名下。回填 roleType 是为了：
+        // 1) 前端「所属角色」列显示角色类型而非姓名；
+        // 2) 实收详情按「同合同+同员工+同角色」匹配新签事实时能命中。
+        // 预扫描全批行，按合同/订单归集客源成交人信息，供循环内回填空角色行使用。
         Map<String, String[]> sourcePersonByContract = null;
         if (sourceType == ImportSourceType.KE_RECEIVED) {
             sourcePersonByContract = buildReceivedSourcePersonMap(rawRows);
@@ -703,9 +705,11 @@ public class ImportEngine {
 
         for (RawData raw : rawRows) {
             Map<String, Object> jsonMap = parseRawJson(raw.getRawJson());
-            // 贝壳实收：角色人为空的行，按同一合同客源成交人回填系统号+姓名。
+            // 贝壳实收：角色人为空的行，按同一合同客源成交人回填系统号+姓名+角色类型。
             // 修改 jsonMap 不影响 rawJson 只读归档（rawJson 保留原始空值），
-            // 仅影响归一化字段读取，使空角色行挂靠到客源成交人名下。
+            // 仅影响归一化字段读取，使空角色行挂靠到客源成交人名下并能匹配新签。
+            // 业务规则：理房通到账明细中无角色人的到账行对应新签「贷款服务费」费用项，
+            // 打上 feeItem=贷款服务费，供实收详情按费用项唯一匹配新签（避免同人同角色多行重复匹配）。
             if (sourcePersonByContract != null) {
                 String curCode = extractExternalCode(jsonMap);
                 if (curCode == null || curCode.isEmpty()) {
@@ -718,6 +722,8 @@ public class ImportEngine {
                         if (sp[1] != null) {
                             jsonMap.put("roleName", sp[1]);
                         }
+                        jsonMap.put("roleType", "客源成交人");
+                        jsonMap.put("feeItem", "贷款服务费");
                     }
                 }
             }
