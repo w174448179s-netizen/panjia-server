@@ -46,7 +46,8 @@ public interface ReceivedRealFactMapper {
             rc.contract_no AS "contractNo",
             rc.order_no AS "orderNo",
             rc.property_address AS "propertyAddress",
-            rd.share_ratio AS "shareRatio"
+            rd.share_ratio AS "shareRatio",
+            rd.fee_item AS "feeItem"
         """;
 
     String SUMMARY_FROM = """

@@ -738,7 +738,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                f.contract_no AS "contractNo",
                f.order_no AS "orderNo",
                f.property_address AS "propertyAddress",
-               f.share_ratio AS "shareRatio"
+               f.share_ratio AS "shareRatio",
+               f.fee_item AS "feeItem"
         FROM pj_perf_fact f
         LEFT JOIN pj_perf_received_apply ra ON ra.id = f.received_apply_id
         WHERE f.id IN
@@ -938,8 +939,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         ),
         original_expect AS (
             SELECT emp_code, role_type, order_no, contract_no,
-                   SUM(CASE WHEN fee_item = '贷款服务费' THEN orig_amt ELSE 0 END) AS loan_orig_amt,
-                   SUM(CASE WHEN fee_item IS DISTINCT FROM '贷款服务费' THEN orig_amt ELSE 0 END) AS other_orig_amt
+                   -- 不用 ELSE 0：该（工号+角色）组无此费用项的冲正链时必须为 NULL，
+                   -- 外层 COALESCE 才会回退到当前值、expectedAdjusted 才为 false；
+                   -- 若给 0，未调整的费用项会显示「0 → 当前值」的幻影调整箭头
+                   SUM(CASE WHEN fee_item = '贷款服务费' THEN orig_amt END) AS loan_orig_amt,
+                   SUM(CASE WHEN fee_item IS DISTINCT FROM '贷款服务费' THEN orig_amt END) AS other_orig_amt
             FROM reversed_chain
             GROUP BY 1, 2, 3, 4
         )

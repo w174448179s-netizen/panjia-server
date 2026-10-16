@@ -2227,7 +2227,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
         boolean hasAnyReceived = received != null && !received.isEmpty();
-        // 按（员工 + 角色）归组实收行：角色 trim 归一，空角色统一为空串，保证键稳定
+        // 按（员工 + 角色 + 费用项键）归组实收行：角色 trim 归一，空角色统一为空串；
+        // 费用项键二分化（贷款服务费 / 非贷款服务费）——理房通空角色回填行=贷款服务费，
+        // 只承接新签贷款服务费的变动，居间代理费等变动不得摊到该行（反之亦然）
         Map<Long, Map<String, List<PerformanceFactSummaryDTO>>> receivedByEmpRole = new HashMap<>();
         // 模板明细：有实收时用于 addMemberDetail 复制基础字段；无实收时用 createDetailFromContract
         Long templateDetailId = null;
@@ -2238,7 +2240,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 }
                 receivedByEmpRole
                     .computeIfAbsent(r.getEmployeeId(), k -> new HashMap<>())
-                    .computeIfAbsent(normalizeRole(r.getRoleType()), k -> new ArrayList<>())
+                    .computeIfAbsent(normalizeRole(r.getRoleType()) + feeKeyOf(r.getFeeItem()), k -> new ArrayList<>())
                     .add(r);
                 if (templateDetailId == null) {
                     templateDetailId = r.getFactId();
@@ -2266,13 +2268,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .map(PerformanceFactSummaryDTO::getBizType)
             .filter(StringUtils::isNotBlank)
             .findFirst().orElse(null);
+        // 新签事实行（角色行）变动额：allocations 为事实行粒度（含 factId），
+        // 逐行按（员工+角色+费用项键）归组——费用项键与实收侧同口径二分
         Map<Long, Map<String, BigDecimal>> deltaByEmpRole = new HashMap<>();
         for (AddMemberPayload.Alloc alloc : allocs) {
             if (alloc.getEmployeeId() == null) {
                 continue;
             }
             PerformanceFactSummaryDTO f = alloc.getFactId() == null ? null : allocFactById.get(alloc.getFactId());
-            String role = normalizeRole(f == null ? null : f.getRoleType());
+            String role = normalizeRole(f == null ? null : f.getRoleType())
+                + feeKeyOf(f == null ? null : f.getFeeItem());
             deltaByEmpRole
                 .computeIfAbsent(alloc.getEmployeeId(), k -> new HashMap<>())
                 .merge(role, alloc.getDelta() == null ? BigDecimal.ZERO : alloc.getDelta(), BigDecimal::add);
@@ -2397,6 +2402,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     /** 角色口径归一：null → 空串；去除首尾空白，保证（员工+角色）匹配键稳定。 */
     private String normalizeRole(String roleType) {
         return roleType == null ? "" : roleType.trim();
+    }
+
+    /**
+     * 费用项联动键（实收联动两侧同口径二分）：
+     * 「贷款服务费」独立成键（理房通空角色回填行 ↔ 新签贷款服务费事实），
+     * 其余费用项（含空）统一归空串键。与实收详情 SQL 的 IS DISTINCT FROM '贷款服务费' 同口径。
+     */
+    private String feeKeyOf(String feeItem) {
+        return "贷款服务费".equals(feeItem) ? "|贷款服务费" : "";
     }
 
     /**

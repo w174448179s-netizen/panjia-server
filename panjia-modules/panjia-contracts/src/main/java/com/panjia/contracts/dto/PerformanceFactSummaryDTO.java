@@ -90,4 +90,11 @@ public class PerformanceFactSummaryDTO implements Serializable {
 
     /** 分摊比例（仅展示用，不参与计算） */
     private BigDecimal shareRatio;
+
+    /**
+     * 费用项。新签侧=事实行费用项（居间代理费/贷款服务费等）；
+     * 实收侧=理房通空角色回填行标记「贷款服务费」，其余到账行为空。
+     * 实收联动按「贷款服务费 / 非贷款服务费」二分匹配，避免跨费用项错摊。
+     */
+    private String feeItem;
 }
