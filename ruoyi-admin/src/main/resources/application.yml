@@ -78,6 +78,12 @@ panjia:
     dir: ${PANJIA_BACKUP_DIR:./backup}
     # 备份保留份数（超出自动清理最旧的）
     keep: 30
+    # 定时备份保留天数（双保险兜底）
+    keep-days: 30
+    # 定时备份调度（默认关闭，需显式开启；cron 表达式 0 0 0 * * ? = 每天 00:00）
+    schedule:
+      enabled: false
+      cron: 0 0 0 * * ?
   # 导入工具层（公共导入文件归档）
   import-util:
     # 归档存储类型：minio（推荐，生产/dev 一致）/ local（兜底，本地磁盘）
