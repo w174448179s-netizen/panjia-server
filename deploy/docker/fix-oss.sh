@@ -12,7 +12,16 @@ set -u
 cd "$(dirname "$0")" || exit 1
 
 [ -f .env ] || { echo "[X] 当前目录没有 .env——必须先 cd 到部署目录"; exit 1; }
-source .env
+# 逐行解析而非 source：兼容老版本无引号含空格值（如 JAVA_OPTS=-Xms.. -Xmx..）
+while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in ''|'#'*) continue;; esac
+    _k="${_line%%=*}"
+    case "$_k" in *[!A-Za-z0-9_]*) continue;; esac
+    _v="${_line#*=}"
+    if [ "${_v:0:1}" = '"' ] && [ "${_v: -1}" = '"' ]; then _v="${_v:1:${#_v}-2}"; fi
+    if [ "${_v:0:1}" = "'" ] && [ "${_v: -1}" = "'" ]; then _v="${_v:1:${#_v}-2}"; fi
+    printf -v "$_k" '%s' "$_v"
+done < .env
 DC="docker compose"; docker compose version >/dev/null 2>&1 || DC="docker-compose"
 
 cid() { $DC ps -q "$1" 2>/dev/null | head -1; }
@@ -60,15 +69,27 @@ if [ -n "$MINIO_C" ]; then
   fi
 fi
 
-echo "== 4/7 回填 sys_oss_config（浏览器回显域名 = 本机IP:WEB端口/oss） =="
-IP=$(curl -s --max-time 5 ifconfig.me | tr -d '[:space:]'); [ -n "$IP" ] || IP=$(hostname -I | awk '{print $1}')
-PORT=$(docker port "$WEB_C" 80/tcp 2>/dev/null | head -1 | sed 's/.*://'); PORT="${PORT:-80}"
-DOMAIN="$IP:$PORT/oss"; [ "$PORT" = "80" ] && DOMAIN="$IP/oss"
-PG "update sys_oss_config set endpoint='$ENDPOINT', access_key='$MU', secret_key='$MP', domain_url='$DOMAIN', update_time=now() where config_key='minio'"
+echo "== 4/7 回填 sys_oss_config（浏览器回显域名） =="
+# HTTPS 模式：.env 含 DOMAIN（deploy.sh 写入），图片直链必须用 https://域名/oss，
+# 否则 HTTPS 页面里的图片被浏览器按混合内容拦截；纯 HTTP 模式沿用 公网IP[:端口]/oss
+SITE_DOMAIN="${DOMAIN:-}"
+if [ -n "$SITE_DOMAIN" ]; then
+    SCHEME="https"
+    OSS_HOST="$SITE_DOMAIN"
+    PORT=443
+else
+    SCHEME="http"
+    IP=$(curl -s --max-time 5 ifconfig.me | tr -d '[:space:]'); [ -n "$IP" ] || IP=$(hostname -I | awk '{print $1}')
+    PORT=$(docker port "$WEB_C" 80/tcp 2>/dev/null | head -1 | sed 's/.*://'); PORT="${PORT:-80}"
+    if [ "$PORT" = "80" ]; then OSS_HOST="$IP"; else OSS_HOST="$IP:$PORT"; fi
+fi
+OSS_DOMAIN="$OSS_HOST/oss"
+echo "  domain_url=$SCHEME://$OSS_DOMAIN"
+PG "update sys_oss_config set endpoint='$ENDPOINT', access_key='$MU', secret_key='$MP', domain_url='$SCHEME://$OSS_DOMAIN', update_time=now() where config_key='minio'"
 PG "select config_key, endpoint, domain_url, bucket_name, access_key from sys_oss_config where config_key='minio'"
 
 echo "== 5/7 重建存量图片 URL（坏域名存量数据一次性修复） =="
-PG "update sys_oss set url='http://$DOMAIN/$BUCKET/'||file_name where service='minio'"
+PG "update sys_oss set url='$SCHEME://$OSS_DOMAIN/$BUCKET/'||file_name where service='minio'"
 
 echo "== 6/7 修补 nginx /oss/ 代理（整块替换为标准块，幂等可重复执行） =="
 NGINX_CONF=$(docker inspect "$WEB_C" --format '{{range .Mounts}}{{if eq .Destination "/etc/nginx/nginx.conf"}}{{.Source}}{{end}}{{end}}')
@@ -124,19 +145,30 @@ else
 fi
 
 echo "== 7/7 重启后端、清缓存、自检 =="
+# HTTPS 模式用 --resolve 把域名指到回环：SNI/Host 与证书 CN 一致、直接打本机 443，
+# 不依赖公网 DNS 回环；纯 HTTP 模式走 127.0.0.1:80
+if [ -n "$SITE_DOMAIN" ]; then
+  CURL_BASE=(curl -s -o /dev/null --resolve "$SITE_DOMAIN:443:127.0.0.1")
+  PROBE_URL="https://$SITE_DOMAIN/prod-api/"
+  OSS_URL="https://$SITE_DOMAIN/oss/minio/health/live"
+else
+  CURL_BASE=(curl -s -o /dev/null)
+  PROBE_URL="http://127.0.0.1:$PORT/prod-api/"
+  OSS_URL="http://127.0.0.1:$PORT/oss/minio/health/live"
+fi
 $DC restart server
 for i in $(seq 1 60); do
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/prod-api/" 2>/dev/null)
+  CODE=$("${CURL_BASE[@]}" -w '%{http_code}' --max-time 3 "$PROBE_URL" 2>/dev/null)
   [ "$CODE" != "000" ] && [ "$CODE" != "502" ] && break
   sleep 5
 done
 echo "后端就绪（HTTP ${CODE}）"
 docker exec "$REDIS_C" sh -c 'redis-cli -a "$REDIS_PASSWORD" DEL sys_oss' >/dev/null 2>&1
 echo -n "图片通道自检 /oss/minio/health/live: "
-OSSCHK=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' --max-time 8 "http://127.0.0.1:$PORT/oss/minio/health/live")
+OSSCHK=$("${CURL_BASE[@]}" -w '%{http_code} %{content_type}' --max-time 8 "$OSS_URL")
 echo "$OSSCHK"
 case "$OSSCHK" in
-  "200 text/html"*) echo "[X] /oss/ 落到了前端 SPA fallback——nginx.conf 里没有 /oss/ location，人工检查第 6 步";;
-  200*)             echo "[OK] 全链路就绪。domain_url=http://$DOMAIN  页面重新登录后上传/回显验证即可。";;
+  "200 text/html"*) echo "[X] /oss/ 落到了前端 SPA fallback——nginx 配置里没有 /oss/ location，人工检查第 6 步";;
+  200*)             echo "[OK] 全链路就绪。domain_url=$SCHEME://$OSS_DOMAIN  页面重新登录后上传/回显验证即可。";;
   *)                echo "[X] /oss/ 通道异常（${OSSCHK}）——docker compose logs web 查看 nginx 错误";;
 esac

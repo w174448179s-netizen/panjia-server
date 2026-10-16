@@ -18,7 +18,8 @@
 | `.env.example` | 环境变量模板（服务器上首次自动生成 `.env`，含随机强密码） | ✅ |
 | `panjia-server-latest.tar` | 后端镜像（273MB，`docker load` 导入，不走 Docker Hub） | ✅ |
 | `web/dist/` | 前端静态文件（nginx 容器挂载） | ✅ |
-| `nginx/nginx.conf` | nginx 配置（静态文件 + `/prod-api/` 反代后端） | ✅ |
+| `nginx/nginx.conf` | nginx 纯 HTTP 配置（静态文件 + `/prod-api/` 反代后端；无域名客户/测试环境用） | ✅ |
+| `nginx/nginx-https.conf` | nginx HTTPS 模板（`__DOMAIN__` 占位符；带 `DOMAIN` 部署时由脚本生成 `nginx-https.enabled.conf`） | ✅ |
 | `start.sh` `stop.sh` `restart.sh` `logs.sh` | 服务器端运维脚本 | ✅ |
 | `data/` `logs/` | 运行时数据（PG/Redis 数据、应用日志），**部署时自动排除不上传** | 运行生成 |
 
@@ -28,7 +29,7 @@
 
 - [ ] 客户服务器：Ubuntu 22.04 / 24.04（其他发行版脚本会自动适配 apt）
 - [ ] 裸机先初始化：`bash ../ubuntu/setup-server.sh`（装 Docker + 防火墙 + 加速源，一次性，幂等）
-- [ ] 腾讯云/阿里云**安全组**放行：`22`(SSH)、`80`(HTTP)；其余端口全部不需要（后端/数据库只走容器内网或回环）
+- [ ] 腾讯云/阿里云**安全组**放行：`22`(SSH)、`80`(HTTP)、`443`(HTTPS，用域名时)；其余端口全部不需要（后端/数据库只走容器内网或回环）
 - [ ] 本地已配免密：`ssh-copy-id ubuntu@<客户服务器IP>`
 - [ ] 本地产物已就绪：`panjia-server-latest.tar` + `web/dist/` 存在（没有就先跑 `bash build.sh`）
 - [ ] **已从授权管理后台生成该客户的授权码**（首次部署必填，写入服务器 `.env` 的 `PANJIA_AUTH_CODE`，激活后 token 落盘、此值可清空）
@@ -41,6 +42,22 @@ cd panjia-server/deploy/docker
 # 一键全新部署（自动构建前后端 + 上传 + 初始化 + 首启自动激活 License）
 PANJIA_AUTH_CODE=PJ-XXXX-XXXX-XXXX bash deploy.sh <客户服务器IP> [ssh用户]   # 用户默认 ubuntu
 ```
+
+### 域名 HTTPS（推荐，证书全自动申请/续签）
+
+域名已 ICP 备案、A 记录（`@` 和 `www`，如有）已指向服务器后，部署时多带一个 `DOMAIN` 即可，其余流程完全相同：
+
+```bash
+# 自动：DNS 校验 → certbot 申请 Let's Encrypt 证书（www 已解析会一并签）
+#       → 启用 HTTPS（80 自动跳转 443）→ 配每日 3:00 自动续签 cron → OSS 图片域名改 https
+DOMAIN=panjia.online PANJIA_AUTH_CODE=PJ-XXXX-XXXX-XXXX bash deploy.sh <客户服务器IP>
+```
+
+- 证书有效期 90 天，续签由 `/etc/cron.d/panjia-certbot` 自动完成，**无需人工换证书**
+- 域名也可写进本地 `server.env`：`DOMAIN=panjia.online`（该文件不进 git），之后直接 `bash deploy.sh <IP>`
+- 纯 HTTP 老站切域名：带 `DOMAIN` 重跑一次 `deploy.sh <IP> --skip-upload`（需先重新打包过含新脚本的产物）即可，数据不动；切完在服务器 `sudo bash fix-oss.sh` 把存量图片链接改成 https
+- 回退纯 HTTP：删除服务器 `.env` 里 `DOMAIN/NGINX_CONF/WEB_HTTPS_BIND` 三行后 `sudo ./restart.sh`
+- 前置条件：80 端口必须公网可达（ACME 验证用），安全组放行 80 + 443
 
 > ⚠️ 授权码绑定机器指纹：服务器**重装系统/换机器**后原码可能失效，回授权管理后台重新生成即可（token 已落盘的日常重启不受影响）。
 
@@ -81,7 +98,8 @@ sudo cat ~/panjia/.env     # 数据库/Redis 密码都在这（root 600 权限�
 
 | 端口 | 用途 | 发布范围 |
 |------|------|---------|
-| **80** | 前端页面 + API 入口（nginx，容器内反代后端） | ✅ 唯一对公网发布，云防火墙放行 |
+| **80** | 前端/API 入口 + HTTP→HTTPS 跳转 + ACME 续签验证（域名模式） | ✅ 对公网发布，云防火墙放行 |
+| **443** | HTTPS 前端/API 入口（仅 `.env` 设 `WEB_HTTPS_BIND=443` 的域名模式；测试环境只绑回环 1443） | ✅ 域名模式对公网，云防火墙放行 |
 | 8080 | 后端服务 | 仅容器内网（expose，不发布宿主机），**无法绕过 nginx 直连** |
 | 5432 | PostgreSQL | 仅绑宿主机 127.0.0.1 |
 | 6379 | Redis | 仅绑宿主机 127.0.0.1 |
@@ -215,6 +233,9 @@ bash deploy.sh <IP>
 | 后端反复重启，日志见 `未检测到有效 token` | 首次部署没配授权码：`.env` 里写 `PANJIA_AUTH_CODE=<授权码>` 后 `sudo ./restart.sh`；激活成功后 token 落盘 `data/panjia-license/` |
 | 拉镜像超时 `registry-1.docker.io` | `deploy.sh` 会自动写加速源并重启 docker；手动检查：`docker info \| grep -A5 Mirrors` |
 | 前端 502 | 后端没起来：`./logs.sh server` 看启动日志（首次 Flyway 建表约 1-2 分钟） |
+| 域名模式部署时证书申请失败 | 检查：① `dig <域名>` 是否解析到本机 ② 是否已 ICP 备案、80 是否公网可达 ③ 安全组放行 80；修正后重跑 `deploy.sh`（已申请到的证书会自动跳过） |
+| HTTPS 页面图片不显示/控制台报混合内容 | OSS 域名仍是旧的 http://IP：服务器上 `sudo bash fix-oss.sh`（自动按 .env 的 DOMAIN 改成 https 并修存量链接） |
+| 手动检查证书续签 | `sudo certbot renew --dry-run`；生产 cron 在 `/etc/cron.d/panjia-certbot`（每天 3:00），续签后自动 reload nginx |
 | 端口被占用 | `ss -tlnp \| grep ':80'`，改 `.env` 里 `WEB_PORT` 后 `./restart.sh`（8080/5432 等只绑回环，不会与外部冲突） |
 | 服务器重启后自动恢复 | compose 已配 `restart: always`，无需人工干预 |
 | 磁盘满 | docker 日志已限 100m×5；清旧镜像：`docker image prune -a` |

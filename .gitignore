@@ -71,6 +71,7 @@ deploy/docker/data/
 deploy/docker/logs/
 deploy/docker/web/dist/
 deploy/docker/*.tar
+deploy/docker/panjia.online_nginx
 ######################################################################
 # Windows 安装器构建产物（源码提交，构建结果不提交）
 deploy/windows/panjia-setup.exe
