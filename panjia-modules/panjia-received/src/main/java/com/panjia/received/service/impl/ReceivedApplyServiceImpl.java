@@ -2146,6 +2146,15 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return approvalPort.instanceId(BizType.REAL_CONFIRM, id);
     }
 
+    @Override
+    public boolean claim(Long id) {
+        ReceivedApply apply = applyMapper.selectById(id);
+        if (apply == null) {
+            throw new ServiceException("实收审批单不存在：" + id);
+        }
+        return approvalPort.claim(BizType.REAL_CONFIRM, id);
+    }
+
     // ==================== 内部方法 ====================
 
     /**

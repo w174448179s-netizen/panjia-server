@@ -73,6 +73,19 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(Map.of("instanceId", receivedApplyService.getInstanceId(id)));
     }
 
+    /**
+     * 认领当前节点待办（拥有节点所需角色但不在授权快照时，如事后补赋财务角色的总监）。
+     * <p>认领成功后前端重新拉取本人待办即可打开审批弹窗。
+     */
+    @SaCheckPermission("perf:received:approve")
+    @Log(title = "实收业绩审批任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return receivedApplyService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该单据当前无待办，或您不具备当前节点所需角色", false);
+    }
+
     /** 驳回后重新提交 */
     @SaCheckPermission("perf:received:submit")
     @Log(title = "实收业绩审批重新提交", businessType = BusinessType.UPDATE)

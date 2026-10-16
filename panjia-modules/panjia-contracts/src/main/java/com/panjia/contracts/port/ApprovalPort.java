@@ -52,6 +52,17 @@ public interface ApprovalPort {
     boolean isMyTask(String bizType, Long bizId);
 
     /**
+     * 在途任务认领：当前登录用户拥有当前待办节点所需角色（或本人即节点办理人），
+     * 但不在 flow_user 授权快照时（如任务创建后才补赋角色），将自己追加为待办审批人。
+     * <p>引擎在任务创建时把节点 handler 解析成当时的用户快照，事后赋角色不回填，
+     * 认领以当前用户角色为口径补齐授权，认领后 completeTask 引擎鉴权放行。
+     * <p>已在授权快照中幂等返回 true；超管直接放行。
+     *
+     * @return true=可办理（已授权或认领成功）；false=无运行中待办或角色不匹配
+     */
+    boolean claim(String bizType, Long bizId);
+
+    /**
      * 批量查询当前登录用户可办理的当前待办任务（批量审批同步阶段预检用）。
      * <p>
      * 以 3 条 SQL（流程实例 IN + 当前任务 IN + flow_user 授权 IN）完成 N 个单据的

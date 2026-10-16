@@ -131,6 +131,14 @@ public interface IReceivedApplyService {
     /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
     Long getInstanceId(Long id);
 
+    /**
+     * 认领当前节点待办：当前用户拥有节点所需角色但不在 flow_user 授权快照时
+     * （如任务创建后才补赋财务角色的总监），将自己追加为待办审批人。
+     *
+     * @return true=可办理（已授权或认领成功）；false=无运行中待办或角色不匹配
+     */
+    boolean claim(Long id);
+
     /** 实收审批单明细视图 */
     record ReceivedApplyDetail(ReceivedApply apply,
                                List<com.panjia.performance.domain.vo.ReceivedFactDetailVo> facts) {

@@ -9,11 +9,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.system.api.domain.RoleDTO;
+import org.dromara.system.api.model.LoginUser;
 import org.dromara.workflow.api.WorkflowService;
 import org.dromara.workflow.api.domain.CompleteTaskDTO;
 import org.dromara.workflow.api.domain.FlowInstanceBizExtDTO;
 import org.dromara.workflow.api.domain.StartProcessDTO;
 import org.dromara.workflow.api.domain.StartProcessReturnDTO;
+import org.dromara.workflow.common.enums.TaskAssigneeType;
 import org.dromara.workflow.domain.bo.BackProcessBo;
 import org.dromara.workflow.mapper.FlwInstanceMapper;
 import org.dromara.workflow.mapper.FlwUserMapper;
@@ -37,6 +40,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -223,6 +227,101 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
             .eq(FlowUser::getProcessedBy, userId);
         Long count = flwUserMapper.selectCount(qw);
         return count != null && count > 0;
+    }
+
+    @Override
+    public boolean claim(String bizType, Long bizId) {
+        // ① 定位运行中实例与当前待办任务（nodeType=1 办理节点）
+        FlowInstance instance = flwInstanceService.selectInstByBusinessId(String.valueOf(bizId));
+        if (instance == null) {
+            return false;
+        }
+        List<FlowTask> tasks = flwTaskService.selectByInstId(instance.getId());
+        FlowTask task = tasks.stream()
+            .filter(t -> Integer.valueOf(1).equals(t.getNodeType()))
+            .findFirst()
+            .orElse(null);
+        if (task == null) {
+            return false;
+        }
+        String userId = LoginHelper.getUserIdStr();
+        // ② 已在授权快照 → 幂等成功（正常审批路径）
+        Long exist = flwUserMapper.selectCount(Wrappers.lambdaQuery(FlowUser.class)
+            .eq(FlowUser::getAssociated, task.getId())
+            .eq(FlowUser::getProcessedBy, userId));
+        if (exist != null && exist > 0) {
+            return true;
+        }
+        // ③ 超管直接放行；否则按节点 permission_flag 校验当前用户角色/用户命中
+        if (!LoginHelper.isSuperAdmin() && !matchNodeHandler(task, userId)) {
+            log.warn("[审批适配器] 认领被拒（角色不匹配）：bizType={}, bizId={}, taskId={}, nodeCode={}, userId={}",
+                bizType, bizId, task.getId(), task.getNodeCode(), userId);
+            return false;
+        }
+        // ④ 追加待办审批人授权（type=1），认领后 completeTask 引擎鉴权放行
+        flwUserMapper.insert(new FlowUser()
+            .setType(TaskAssigneeType.APPROVER.getCode())
+            .setProcessedBy(userId)
+            .setAssociated(task.getId()));
+        log.info("[审批适配器] 在途任务认领：bizType={}, bizId={}, taskId={}, nodeCode={}, userId={}",
+            bizType, bizId, task.getId(), task.getNodeCode(), userId);
+        return true;
+    }
+
+    /**
+     * 按当前任务的节点 permission_flag 校验用户是否具备办理身份。
+     * <p>解析口径与工作流模块一致：逗号分隔多标识，支持 {@code role:角色ID} /
+     * {@code user:用户ID} / 裸用户ID；dept/post/SpEL（如 ${initiator}）不参与认领判定。
+     */
+    private boolean matchNodeHandler(FlowTask task, String userId) {
+        FlowNode node = flowNodeMapper.selectOne(Wrappers.lambdaQuery(FlowNode.class)
+            .eq(FlowNode::getDefinitionId, task.getDefinitionId())
+            .eq(FlowNode::getNodeCode, task.getNodeCode()));
+        if (node == null || StringUtils.isBlank(node.getPermissionFlag())) {
+            return false;
+        }
+        Set<Long> roleIds = currentRoleIds();
+        for (String token : node.getPermissionFlag().split(StringUtils.SEPARATOR)) {
+            String t = token.trim();
+            if (t.startsWith("role:")) {
+                Long roleId = parseLong(t.substring(5));
+                if (roleId != null && roleIds.contains(roleId)) {
+                    return true;
+                }
+            } else if (t.startsWith("user:")) {
+                if (userId.equals(t.substring(5).trim())) {
+                    return true;
+                }
+            } else if (userId.equals(t)) {
+                // 无前缀标识按用户ID处理（与引擎解析口径一致）
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 当前登录用户的角色 ID 集合。
+     * <p>LoginUser.roles 由 Sa-Token 登录上下文实时装载，事后补赋角色重新登录即刻生效。
+     */
+    private Set<Long> currentRoleIds() {
+        LoginUser loginUser = LoginHelper.getLoginUser();
+        if (loginUser == null || loginUser.getRoles() == null) {
+            return Set.of();
+        }
+        return loginUser.getRoles().stream()
+            .map(RoleDTO::getRoleId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+    }
+
+    /** 数字解析（非法返回 null）。 */
+    private Long parseLong(String text) {
+        try {
+            return StringUtils.isBlank(text) ? null : Long.valueOf(text.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     @Override
