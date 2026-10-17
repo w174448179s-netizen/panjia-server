@@ -25,16 +25,21 @@ set -euo pipefail
 # ---- 参数解析：test/prod 为目标环境，--rebuild 强制重建，其余按旧约定当 IP/用户 ----
 DEPLOY_ENV=prod
 FORCE_BUILD=0
-ARGS=()
+ARG_IP=""
+ARG_USER=""
 for a in "$@"; do
     case "$a" in
         test|prod)  DEPLOY_ENV="$a" ;;
         --rebuild)  FORCE_BUILD=1 ;;
-        *)          ARGS+=("$a") ;;
+        *)
+            if [ -z "$ARG_IP" ]; then
+                ARG_IP="$a"
+            elif [ -z "$ARG_USER" ]; then
+                ARG_USER="$a"
+            fi
+            ;;
     esac
 done
-ARG_IP="${ARGS[0]:-}"
-ARG_USER="${ARGS[1]:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/server.env" ]; then . "$SCRIPT_DIR/server.env"; fi
