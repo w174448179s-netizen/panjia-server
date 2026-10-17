@@ -186,12 +186,15 @@ public class RateAdjustServiceImpl implements IRateAdjustService {
             qw.eq(RateAdjust::getStatus, status);
         }
         if (StringUtils.isNotBlank(period)) {
-            // 命中生效区间：start_month ≤ period ≤ end_month（end 为 null 视为长期有效）
-            qw.eq(RateAdjust::getStartMonth, period.trim()).or(w2 -> {
-                w2.lt(RateAdjust::getStartMonth, period.trim());
-                w2.and(w3 -> w3.isNull(RateAdjust::getEndMonth)
-                    .or().ge(RateAdjust::getEndMonth, period.trim()));
-            });
+            // 命中生效区间：start_month ≤ period ≤ end_month（end 为 null 视为长期有效）；
+            // 区间条件必须嵌套 and 包裹，避免 OR 旁路外层的员工/类型过滤（SQL 中 AND 优先级高于 OR）
+            qw.and(w1 -> w1
+                .eq(RateAdjust::getStartMonth, period.trim())
+                .or(w2 -> {
+                    w2.lt(RateAdjust::getStartMonth, period.trim());
+                    w2.and(w3 -> w3.isNull(RateAdjust::getEndMonth)
+                        .or().ge(RateAdjust::getEndMonth, period.trim()));
+                }));
             qw.eq(RateAdjust::getStatus, RateAdjust.STATUS_APPROVED);
         }
         qw.orderByDesc(RateAdjust::getCreateTime);
