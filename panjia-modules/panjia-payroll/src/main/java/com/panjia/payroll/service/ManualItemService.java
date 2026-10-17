@@ -54,12 +54,12 @@ public class ManualItemService {
         return item.getId();
     }
 
-    /** 查询某月生效的手工项（startMonth ≤ 月 ≤ endMonth），按创建时间倒序 */
+    /** 查询某月生效的手工项（startMonth ≤ 月 ≤ endMonth，截止月可空=长期），按创建时间倒序 */
     public List<ManualItem> listByPeriod(String period) {
         return mapper.selectList(
             new LambdaQueryWrapper<ManualItem>()
                 .le(ManualItem::getStartMonth, period)
-                .ge(ManualItem::getEndMonth, period)
+                .and(w -> w.isNull(ManualItem::getEndMonth).or().ge(ManualItem::getEndMonth, period))
                 .orderByDesc(ManualItem::getCreateTime));
     }
 
@@ -76,29 +76,38 @@ public class ManualItemService {
         mapper.deleteById(id);
     }
 
-    /** 校验生效区间字段（同提成点调整 startMonth/endMonth 口径） */
+    /** 校验生效区间字段（同提成点调整 startMonth/endMonth 口径；截止月可空=长期生效） */
     private void assertRangeValid(ManualItem item) {
-        if (StringUtils.isBlank(item.getStartMonth()) || StringUtils.isBlank(item.getEndMonth())) {
-            throw new ServiceException("生效起始月和截止月不能为空");
+        if (StringUtils.isBlank(item.getStartMonth())) {
+            throw new ServiceException("生效起始月不能为空");
         }
-        if (item.getStartMonth().compareTo(item.getEndMonth()) > 0) {
+        if (StringUtils.isNotBlank(item.getEndMonth())
+            && item.getStartMonth().compareTo(item.getEndMonth()) > 0) {
             throw new ServiceException("生效起始月不能晚于截止月");
         }
-        // 跨度保护：区间最长 36 个月，防止误录超长区间导致逐月校验/多月重复生效
-        long months = java.time.YearMonth.parse(item.getStartMonth())
-            .until(java.time.YearMonth.parse(item.getEndMonth()), java.time.temporal.ChronoUnit.MONTHS) + 1;
-        if (months > 36) {
-            throw new ServiceException("生效区间最长 36 个月，请拆分录入");
+        // 跨度保护：有截止月时限长 36 个月，防止误录超长区间导致逐月校验/多月重复生效
+        if (StringUtils.isNotBlank(item.getEndMonth())) {
+            long months = java.time.YearMonth.parse(item.getStartMonth())
+                .until(java.time.YearMonth.parse(item.getEndMonth()), java.time.temporal.ChronoUnit.MONTHS) + 1;
+            if (months > 36) {
+                throw new ServiceException("生效区间最长 36 个月，如需长期生效请截止月留空");
+            }
         }
     }
 
     /**
      * 校验生效区间覆盖的每个期间均允许新增/删除（任一月冻结即拒绝，请拆分区间避开冻结月）。
      * 双重冻结信号与原单月口径一致：批次冻结状态 + 期间封账。
+     * 截止月为空（长期生效）时校验到当前月为止——未来月份批次尚不存在，无需校验。
      */
     private void assertRangeEditable(String startMonth, String endMonth) {
         java.time.YearMonth cur = java.time.YearMonth.parse(startMonth);
-        java.time.YearMonth end = java.time.YearMonth.parse(endMonth);
+        java.time.YearMonth end = StringUtils.isBlank(endMonth)
+            ? java.time.YearMonth.now()
+            : java.time.YearMonth.parse(endMonth);
+        if (cur.isAfter(end)) {
+            return; // 纯未来区间，当前无批次可校验
+        }
         while (!cur.isAfter(end)) {
             String month = cur.toString();
             PayrollBatch frozenBatch = batchMapper.selectOne(
@@ -128,12 +137,12 @@ public class ManualItemService {
         };
     }
 
-    /** 取某月生效的已审批手工项，按员工分组（算薪用；startMonth ≤ 月 ≤ endMonth） */
+    /** 取某月生效的已审批手工项，按员工分组（算薪用；startMonth ≤ 月 ≤ endMonth，截止月可空=长期） */
     public Map<Long, List<ManualItem>> loadApprovedForPeriod(String period) {
         List<ManualItem> items = mapper.selectList(
             new LambdaQueryWrapper<ManualItem>()
                 .le(ManualItem::getStartMonth, period)
-                .ge(ManualItem::getEndMonth, period)
+                .and(w -> w.isNull(ManualItem::getEndMonth).or().ge(ManualItem::getEndMonth, period))
                 .eq(ManualItem::getStatus, "APPROVED"));
         return items.stream().collect(Collectors.groupingBy(ManualItem::getEmployeeId));
     }

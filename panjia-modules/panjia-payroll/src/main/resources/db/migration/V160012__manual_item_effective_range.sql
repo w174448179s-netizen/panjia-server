@@ -10,7 +10,7 @@ ALTER TABLE pj_payroll_manual_item
     ADD COLUMN IF NOT EXISTS end_month   varchar(7);
 
 COMMENT ON COLUMN pj_payroll_manual_item.start_month IS '生效起始月 YYYY-MM（含）';
-COMMENT ON COLUMN pj_payroll_manual_item.end_month   IS '生效截止月 YYYY-MM（含）';
+COMMENT ON COLUMN pj_payroll_manual_item.end_month   IS '生效截止月 YYYY-MM（含），可空=长期生效';
 
 UPDATE pj_payroll_manual_item
 SET start_month = period,

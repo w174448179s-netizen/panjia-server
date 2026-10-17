@@ -27,7 +27,7 @@ public class ManualItem implements Serializable {
     /** 生效起始月 YYYY-MM（含）；算薪取 startMonth ≤ 算薪月 ≤ endMonth 的审批通过项 */
     private String startMonth;
 
-    /** 生效截止月 YYYY-MM（含）；同提成点调整口径 */
+    /** 生效截止月 YYYY-MM（含）；可空=长期生效（每月计入直至记录删除） */
     private String endMonth;
 
     private Long employeeId;
