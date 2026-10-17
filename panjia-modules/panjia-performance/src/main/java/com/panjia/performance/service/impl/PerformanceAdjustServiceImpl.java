@@ -359,6 +359,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 拷贝基础字段
         org.springframework.beans.BeanUtils.copyProperties(adjust, dto);
 
+        // 门店/组别名称回填（与列表口径一致，详情接口历史遗漏）
+        if (adjust.getDeptId() != null) {
+            adjustMapper.deptNames(java.util.List.of(adjust.getDeptId())).stream().findFirst()
+                .ifPresent(row -> dto.setDeptName(String.valueOf(row.get("deptName"))));
+        }
+
         boolean isContractScope = SCOPE_CONTRACT.equals(adjust.getAdjustScope());
         String contractNo = adjust.getContractNo();
         Long factId = adjust.getFactId();
@@ -433,6 +439,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 // 合同级：优先按 payload 预演快照逐行精确回填（指定值模式，2026-09-28 可编辑表格）；
                 // 无快照时按金额占比分摊 delta（与执行逻辑共用同一分摊方法）
                 Map<Long, BigDecimal> deltaByFact = contractAdjustDeltaByFact(adjust);
+                if (alreadyExecuted && deltaByFact != null) {
+                    // 执行后旧事实行 REVERSED、同 source_key 生成新 ACTIVE 行（新 factId），
+                    // payload 快照记的是旧 factId，需按稳定业务键（员工+角色+source_key）重映，
+                    // 否则每行 delta 全部 miss 为 0，表现为「合同金额变了、明细没变」
+                    deltaByFact = remapExecutedDeltaByFact(deltaByFact, details);
+                }
                 if (deltaByFact != null) {
                     for (AdjustFactDetailVo d : details) {
                         BigDecimal rowDelta = d.getFactId() != null
@@ -479,9 +491,24 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 }
                 }
             } else {
+                // 明细级：执行后 adjust.factId 指向 REVERSED 旧行，先按业务键解析当前 ACTIVE 后继行，
+                // 否则目标行匹配不上，表现为明细 delta 全部为 0
+                Long targetFactId = factId;
+                if (alreadyExecuted && factId != null) {
+                    PerformanceFact oldTargetFact = factMapper.selectById(factId);
+                    if (oldTargetFact != null) {
+                        String oldKey = factBizKey(oldTargetFact.getEmployeeId(),
+                            oldTargetFact.getRoleType(), oldTargetFact.getSourceKey());
+                        targetFactId = details.stream()
+                            .filter(d -> oldKey.equals(factBizKey(d.getEmployeeId(), d.getRoleType(), d.getSourceKey())))
+                            .map(AdjustFactDetailVo::getFactId)
+                            .findFirst()
+                            .orElse(factId);
+                    }
+                }
                 // 明细级：只标记目标行
                 for (AdjustFactDetailVo d : details) {
-                    if (d.getFactId() != null && d.getFactId().equals(factId)) {
+                    if (d.getFactId() != null && d.getFactId().equals(targetFactId)) {
                         d.setDeltaAmount(delta);
                         if (alreadyExecuted) {
                             BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
@@ -1413,6 +1440,45 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
         return deltaByFact.isEmpty() ? null : deltaByFact;
+    }
+
+    /**
+     * 已执行合同级调整的行 delta 重映。
+     * <p>
+     * payload 快照（allocations/detailTargets）记录的是执行前的 factId；执行时 supersede
+     * 将旧行置 REVERSED 并生成同 source_key 的新 ACTIVE 行（新 factId）。详情明细查询只返回
+     * ACTIVE 行，直接按 factId 匹配会全部 miss。这里按稳定业务键
+     * （员工 + 角色 + source_key，source_key 内含费用项）把旧 factId 的 delta 映射到新行。
+     *
+     * @param deltaByOldFact key=执行前旧 factId，value=该行调整额
+     * @param currentDetails 详情查询返回的当前 ACTIVE 明细
+     * @return key=当前 ACTIVE factId 的 delta 映射；无法重映时返回原映射（行 delta 保持 0）
+     */
+    private Map<Long, BigDecimal> remapExecutedDeltaByFact(Map<Long, BigDecimal> deltaByOldFact,
+                                                           List<AdjustFactDetailVo> currentDetails) {
+        List<PerformanceFact> oldFacts = factMapper.selectBatchIds(deltaByOldFact.keySet());
+        if (oldFacts == null || oldFacts.isEmpty()) {
+            return deltaByOldFact;
+        }
+        Map<String, Long> bizKeyToOldFactId = new HashMap<>();
+        for (PerformanceFact old : oldFacts) {
+            bizKeyToOldFactId.put(
+                factBizKey(old.getEmployeeId(), old.getRoleType(), old.getSourceKey()), old.getId());
+        }
+        Map<Long, BigDecimal> remapped = new HashMap<>();
+        for (AdjustFactDetailVo d : currentDetails) {
+            Long oldFactId = bizKeyToOldFactId.get(factBizKey(d.getEmployeeId(), d.getRoleType(), d.getSourceKey()));
+            if (oldFactId != null) {
+                remapped.put(d.getFactId(), deltaByOldFact.getOrDefault(oldFactId, BigDecimal.ZERO));
+            }
+        }
+        return remapped.isEmpty() ? deltaByOldFact : remapped;
+    }
+
+    /** 明细业务键：员工 + 角色 + source_key（source_key 内含合同/费用项，足以区分同人多费项行） */
+    private String factBizKey(Long employeeId, String roleType, String sourceKey) {
+        return String.valueOf(employeeId) + '|' + StringUtils.trimToEmpty(roleType)
+            + '|' + StringUtils.trimToEmpty(sourceKey);
     }
 
     /**
