@@ -11,6 +11,7 @@ import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.PerformanceSource;
+import com.panjia.performance.domain.ReceivedAdjust;
 import com.panjia.performance.domain.bo.AdjustDetailTargetBo;
 import com.panjia.performance.domain.bo.AdjustDeductionBo;
 import com.panjia.performance.domain.bo.AddMemberItemBo;
@@ -22,6 +23,7 @@ import com.panjia.performance.domain.vo.AdjustFactDetailVo;
 import com.panjia.performance.domain.bo.PerformanceAdjustBo;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.mapper.ReceivedAdjustMapper;
 import com.panjia.performance.service.FactConversionResolver;
 import com.panjia.performance.service.IPerformanceAdjustService;
 import com.panjia.performance.service.IPeriodCloseService;
@@ -112,6 +114,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     private final PerformanceAdjustMapper adjustMapper;
     private final PerformanceFactMapper factMapper;
+    /** 实收调整单 mapper：新签联动实收时登记镜像单（实收调整菜单可见、可追溯） */
+    private final ReceivedAdjustMapper receivedAdjustMapper;
     /** 双键未命中退化合同号匹配的安全闸门（同合同多订单禁退化、订单误填唯一订单才退化） */
     private final com.panjia.performance.service.BizKeyMatchGuard bizKeyMatchGuard;
     private final ReverseService reverseService;
@@ -2227,6 +2231,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
         boolean hasAnyReceived = received != null && !received.isEmpty();
+        // 联动前实收合计（镜像单 originalAmount）；联动累计变动额/是否动过行（镜像单 targetAmount 与是否登记判定）
+        BigDecimal originalReceivedTotal = BigDecimal.ZERO;
+        BigDecimal appliedDelta = BigDecimal.ZERO;
+        boolean linkedTouched = false;
         // 按（员工 + 角色 + 费用项键）归组实收行：角色 trim 归一，空角色统一为空串；
         // 费用项键二分化（贷款服务费 / 非贷款服务费）——理房通空角色回填行=贷款服务费，
         // 只承接新签贷款服务费的变动，居间代理费等变动不得摊到该行（反之亦然）
@@ -2235,6 +2243,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         Long templateDetailId = null;
         if (received != null) {
             for (PerformanceFactSummaryDTO r : received) {
+                if (r.getAmount() != null) {
+                    originalReceivedTotal = originalReceivedTotal.add(r.getAmount());
+                }
                 if (r.getEmployeeId() == null || r.getFactId() == null) {
                     continue;
                 }
@@ -2314,6 +2325,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                         continue;
                     }
                     adjustReceivedRows(port, matched, delta, adjust.getId(), operatorId);
+                    appliedDelta = appliedDelta.add(delta);
+                    linkedTouched = true;
                     log.info("[调整单-实收联动] adjustId={}, employeeId={}, role={}, 新签同额={}, 实收命中 {} 行同额联动",
                         adjust.getId(), employeeId, role, delta, matched.size());
                     continue;
@@ -2326,6 +2339,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     List<PerformanceFactSummaryDTO> all = empReceived.values().stream()
                         .flatMap(List::stream).toList();
                     adjustReceivedRows(port, all, delta, adjust.getId(), operatorId);
+                    appliedDelta = appliedDelta.add(delta);
+                    linkedTouched = true;
                     log.warn("[调整单-实收联动] adjustId={}, employeeId={}, 新签角色={} 在实收侧无同行，"
                         + "退化为按该员工 {} 条实收行等比分摊", adjust.getId(), employeeId, role, all.size());
                     continue;
@@ -2351,6 +2366,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 }
                 log.info("[调整单-实收联动] 员工 {} 角色 {} 实收侧无明细，按新签同额 {} 自动建实收行："
                     + "adjustId={}, newDetailId={}", employeeId, role, delta, adjust.getId(), createdId);
+                appliedDelta = appliedDelta.add(delta);
+                linkedTouched = true;
             }
         }
 
@@ -2378,6 +2395,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     m.getEmployeeId(), m.getEmployeeCode(), m.getDeptId(), m.getRoleType(),
                     amt, m.getNewShareRatio(), operatorId, adjust.getId());
             }
+            appliedDelta = appliedDelta.add(amt);
+            linkedTouched = true;
             log.info("[调整单-实收联动] 新增角色人同额新增实收：adjustId={}, employeeId={}, role={}, amount={}",
                 adjust.getId(), m.getEmployeeId(), role, amt);
         }
@@ -2396,6 +2415,54 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             } else {
                 log.warn("[调整单-实收联动] 实收审批单端口缺失，跳过直建审批单：adjustId={}", adjust.getId());
             }
+        }
+
+        // 5. 登记实收调整镜像单（2026-10-17）：联动只动了 pj_received_detail 冲销链、没有实收调整单记录，
+        //    导致「实收调整」菜单查不到、无法追溯。凡是动过实收行（supersede/新建）就补一张
+        //    EXECUTED 镜像单（无审批流，与结佣调整登记新签镜像同款），原因里回链新签调整单号。
+        if (linkedTouched) {
+            recordLinkedReceivedAdjustMirror(adjust, bizType, originalReceivedTotal, appliedDelta, operatorId);
+        }
+    }
+
+    /**
+     * 新签联动实收的镜像单登记：写入 pj_perf_received_adjust（status=EXECUTED），
+     * 让「实收调整」菜单可见可追溯；金额口径 = 联动前实收合计 → 联动后实收合计。
+     */
+    private void recordLinkedReceivedAdjustMirror(PerformanceAdjust adjust, String bizType,
+                                                  BigDecimal originalTotal, BigDecimal appliedDelta, Long operatorId) {
+        try {
+            ReceivedAdjust mirror = new ReceivedAdjust();
+            mirror.setAdjustNo(generateAdjustNo());
+            mirror.setPeriod(adjust.getPeriod());
+            mirror.setEmployeeId(adjust.getEmployeeId());
+            mirror.setDeptId(adjust.getDeptId());
+            mirror.setContractNo(adjust.getContractNo());
+            mirror.setOrderNo(adjust.getOrderNo());
+            mirror.setBizType(bizType);
+            // 镜像类型：扣减/增加沿用新签类型；其余（AMOUNT 重分配/历史加人等）按 AMOUNT 语义
+            AdjustType type = adjust.getAdjustType();
+            mirror.setAdjustType(type == AdjustType.DEDUCT || type == AdjustType.INCREASE
+                ? type.getCode() : AdjustType.AMOUNT.getCode());
+            mirror.setOriginalAmount(MoneyUtil.round2(originalTotal));
+            mirror.setTargetAmount(MoneyUtil.round2(originalTotal.add(appliedDelta)));
+            String reason = "新签调整联动（新签调整单 " + adjust.getAdjustNo() + "）";
+            if (StringUtils.isNotBlank(adjust.getReason())) {
+                reason = reason + "：" + adjust.getReason();
+            }
+            mirror.setReason(reason);
+            mirror.setStatus(AdjustStatus.EXECUTED);
+            mirror.setApplicantId(adjust.getApplicantId() != null ? adjust.getApplicantId() : operatorId);
+            mirror.setApproverId(operatorId);
+            mirror.setApproveTime(LocalDateTime.now());
+            mirror.setOperatorId(operatorId);
+            mirror.setExecuteTime(LocalDateTime.now());
+            receivedAdjustMapper.insert(mirror);
+            log.info("[调整单-实收联动] 已登记实收调整镜像单：adjustId={}, mirrorNo={}, {} → {}",
+                adjust.getId(), mirror.getAdjustNo(), mirror.getOriginalAmount(), mirror.getTargetAmount());
+        } catch (Exception e) {
+            // 镜像登记失败不阻断主流程（实收行已联动成功），仅告警由人工补录
+            log.error("[调整单-实收联动] 实收调整镜像单登记失败（不影响联动结果）：adjustId={}", adjust.getId(), e);
         }
     }
 

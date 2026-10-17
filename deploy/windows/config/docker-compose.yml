@@ -4,6 +4,7 @@ services:
     container_name: panjia-postgres
     restart: unless-stopped
     environment:
+      TZ: Asia/Shanghai
       POSTGRES_USER: ${POSTGRES_USER:?err}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
       POSTGRES_DB: ${POSTGRES_DB:-panjia}
@@ -24,6 +25,7 @@ services:
     restart: unless-stopped
     command: redis-server --requirepass ${REDIS_PASSWORD:?err} --appendonly yes
     environment:
+      TZ: Asia/Shanghai
       # 供 healthcheck 在容器内 shell 展开使用
       REDIS_PASSWORD: ${REDIS_PASSWORD:?err}
     volumes:
@@ -47,6 +49,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      TZ: Asia/Shanghai
       SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-panjia}?useUnicode=true&characterEncoding=utf8&useSSL=false&autoReconnect=true&reWriteBatchedInserts=true
       SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_USERNAME: ${POSTGRES_USER:?err}
@@ -59,7 +62,7 @@ services:
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?err}
       SPRING_DATA_REDIS_DATABASE: 0
       REDISSON_SINGLESERVERCONFIG_PASSWORD: ${REDIS_PASSWORD:?err}
-      JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC}
+      JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC -Duser.timezone=Asia/Shanghai}
       PANJIA_LICENSE_SERVER_URL: ${PANJIA_LICENSE_SERVER_URL:-https://panjia.icu}
       PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
       PANJIA_LICENSE_DATA_DIR: /data/panjia-license

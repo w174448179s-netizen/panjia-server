@@ -9,23 +9,32 @@
 # 不会动：前端页面、postgres/redis/minio 数据容器、服务器 .env（密码/license 不变）
 #
 # 用法（Mac 本地执行，服务器信息读本目录 server.env）：
-#   bash update-backend.sh test                     # 先发测试
-#   bash update-backend.sh                          # 验证通过后发生产（= prod）
+#   bash update-backend.sh test                     # 先发测试（构建镜像 + 记录指纹）
+#   bash update-backend.sh                          # 验证通过后发生产（= prod；默认跳过构建，复用 test 的镜像）
+#   bash update-backend.sh prod --rebuild           # 强制重新构建后再发生产（紧急直发用）
 #   bash update-backend.sh prod <服务器IP> [SSH用户] # 临时指定其它服务器
 #   bash update-backend.sh <服务器IP> [SSH用户]      # 兼容旧用法（= prod）
+#
+# 防呆：prod 跳过构建时会校验镜像构建指纹（git HEAD + 工作区脏文件）与当前代码一致，
+#       不一致说明 test 之后代码又改了，拒绝直接发生产，需重新 test 验证。
 #
 # 前提：服务器已经跑过 deploy.sh 一次；发测试前需先跑过 setup-test-env.sh
 # ============================================================================
 set -euo pipefail
 
-# ---- 参数解析：第一个参数为 test/prod 时视为目标环境，否则按旧约定当服务器 IP ----
+# ---- 参数解析：test/prod 为目标环境，--rebuild 强制重建，其余按旧约定当 IP/用户 ----
 DEPLOY_ENV=prod
-if [ "${1:-}" = "test" ] || [ "${1:-}" = "prod" ]; then
-    DEPLOY_ENV="$1"
-    shift
-fi
-ARG_IP="${1:-}"
-ARG_USER="${2:-}"
+FORCE_BUILD=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        test|prod)  DEPLOY_ENV="$a" ;;
+        --rebuild)  FORCE_BUILD=1 ;;
+        *)          ARGS+=("$a") ;;
+    esac
+done
+ARG_IP="${ARGS[0]:-}"
+ARG_USER="${ARGS[1]:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/server.env" ]; then . "$SCRIPT_DIR/server.env"; fi
@@ -34,6 +43,20 @@ SERVER_USER="${ARG_USER:-${SERVER_USER:-ubuntu}}"
 REMOTE_DIR="${INSTALL_DIR:-/home/$SERVER_USER/panjia}"
 SSH_TARGET="${SERVER_USER}@${SERVER_IP}"
 IMAGE_TAR="$SCRIPT_DIR/panjia-server-latest.tar"
+META_FILE="$IMAGE_TAR.meta"
+
+# 构建指纹 = git HEAD + 工作区脏文件 md5（防"test 后又改代码直接发生产"）
+git_fingerprint() {
+    local repo="$1"
+    if git -C "$repo" rev-parse HEAD >/dev/null 2>&1; then
+        local head dirty
+        head="$(git -C "$repo" rev-parse HEAD)"
+        dirty="$(git -C "$repo" status --porcelain | md5 -q 2>/dev/null || git -C "$repo" status --porcelain | md5sum | cut -d' ' -f1)"
+        echo "${head}|${dirty}"
+    else
+        echo "no-git"
+    fi
+}
 
 # ---- 目标环境：目录 / 端口 / 展示名 ----
 TEST_DEPLOY_DIR="$(dirname "$REMOTE_DIR")/panjia-test"
@@ -71,11 +94,26 @@ else
     info "目标：生产环境 ${TARGET_DIR}（${TARGET_URL}）"
 fi
 
-# ---- 1. 本地构建 ----
-info ">>> 步骤 1/4：本地构建后端镜像"
-bash "$SCRIPT_DIR/build.sh" --backend
-[ -f "$IMAGE_TAR" ] || fail "镜像 tar 未生成：$IMAGE_TAR"
-ok " 镜像就绪：$(du -sh "$IMAGE_TAR" | cut -f1)"
+# ---- 1. 本地构建（prod 默认复用 test 构建产物，一次构建两环境通用）----
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+if [ "$DEPLOY_ENV" = "prod" ] && [ "$FORCE_BUILD" = "0" ]; then
+    [ -f "$IMAGE_TAR" ] || fail "未找到已构建镜像 $IMAGE_TAR（先 bash update-backend.sh test，或加 --rebuild 强制重建）"
+    [ -f "$META_FILE" ] || fail "未找到构建指纹 $META_FILE（该镜像非本流程构建，请先 bash update-backend.sh test 验证）"
+    . "$META_FILE"
+    CUR_FP="$(git_fingerprint "$REPO_ROOT")"
+    [ "${BUILD_FP:-}" = "$CUR_FP" ] \
+        || fail "镜像指纹与当前代码不一致（镜像构建于 ${BUILD_TIME:-未知}）——test 之后代码有变动，请重新 test 验证；紧急直发加 --rebuild"
+    info ">>> 步骤 1/4：跳过构建，复用测试验证过的镜像（构建于 ${BUILD_TIME}）"
+    ok " 镜像：$(du -sh "$IMAGE_TAR" | cut -f1)，指纹一致"
+else
+    info ">>> 步骤 1/4：本地构建后端镜像"
+    bash "$SCRIPT_DIR/build.sh" --backend
+    [ -f "$IMAGE_TAR" ] || fail "镜像 tar 未生成：$IMAGE_TAR"
+    {   echo "BUILD_FP=\"$(git_fingerprint "$REPO_ROOT")\""
+        echo "BUILD_TIME=\"$(date '+%Y-%m-%d %H:%M:%S')\""
+    } > "$META_FILE"
+    ok " 镜像就绪：$(du -sh "$IMAGE_TAR" | cut -f1)（指纹已记录，发生产时免重建）"
+fi
 
 # ---- 2. 上传 ----
 info ">>> 步骤 2/4：上传镜像 tar"

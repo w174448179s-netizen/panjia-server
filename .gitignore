@@ -94,3 +94,5 @@ backup/
 *.dump
 
 
+deploy/docker/panjia-server-latest.tar.meta
+deploy/docker/web/.dist-meta

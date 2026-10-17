@@ -4,11 +4,15 @@ services:
     container_name: panjia-postgres
     restart: always
     environment:
+      TZ: Asia/Shanghai
       POSTGRES_USER: ${POSTGRES_USER:?err}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?err}
       POSTGRES_DB: ${POSTGRES_DB:-panjia}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+      # 容器系统时区对齐宿主机（Asia/Shanghai），保证 now() / timestamp 默认值为中国时区
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     # 只绑宿主机回环：容器间走内网，外部仅能通过 SSH 隧道访问，不对公网暴露
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
@@ -25,10 +29,12 @@ services:
     restart: always
     command: redis-server --requirepass ${REDIS_PASSWORD:?err} --appendonly yes
     environment:
+      TZ: Asia/Shanghai
       # 供 healthcheck 在容器内 shell 展开使用
       REDIS_PASSWORD: ${REDIS_PASSWORD:?err}
     volumes:
       - ./data/redis:/data
+      - /etc/localtime:/etc/localtime:ro
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -76,6 +82,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      TZ: Asia/Shanghai
       SPRING_PROFILES_ACTIVE: prod
       # stringtype=unspecified：允许 MyBatis 以 String 绑定 JSONB 列（panjia 导入域 raw_json/column_json 等），与 application-dev.yml 保持一致
       SPRING_DATASOURCE_DYNAMIC_DATASOURCE_MASTER_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-panjia}?useUnicode=true&characterEncoding=utf8&useSSL=false&autoReconnect=true&reWriteBatchedInserts=true&stringtype=unspecified
@@ -110,7 +117,7 @@ services:
       PANJIA_BACKUP_USER: ${POSTGRES_USER:?err}
       PANJIA_BACKUP_PASS: ${POSTGRES_PASSWORD:?err}
       PANJIA_BACKUP_DIR: /ruoyi/server/backup
-      JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC}
+      JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC -Duser.timezone=Asia/Shanghai}
     volumes:
       - ./logs:/ruoyi/server/logs
       - ./data/panjia-license:/data/panjia-license
@@ -118,6 +125,9 @@ services:
       - ./data/backup:/ruoyi/server/backup
       # License 机器指纹主因子：只读挂载宿主机 machine-id
       - /etc/machine-id:/etc/machine-id:ro
+      # 容器系统时区对齐宿主机（Asia/Shanghai），配合 TZ 环境变量
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     # 只在容器内网暴露，不发布到宿主机：nginx 通过容器名 server:8080 反代，
     # 禁止绕过 nginx 从公网直连后端 API
     expose:
