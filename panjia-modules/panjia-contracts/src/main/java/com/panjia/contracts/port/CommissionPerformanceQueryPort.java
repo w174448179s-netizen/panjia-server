@@ -329,4 +329,17 @@ public interface CommissionPerformanceQueryPort {
      * @return bizKey → 该员工应收合计；无事实的键不在结果中
      */
     Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriodForEmployee(Collection<String> bizKeys, Long employeeId);
+
+    /**
+     * 解析实收事实对应的<b>新签导入月</b>（薪酬域结佣提成规则期间用，2026-10-17 改）。
+     * <p>
+     * 口径：历史导入/历史单的结佣明细绑定实收明细（PERF_REAL），其 period 是结佣导入月
+     * 而非新签月；本方法按「订单号+员工 → 合同号+员工（订单号未命中时退化）」匹配
+     * ACTIVE 新签事实（PERF_EXPECT），取<b>最早归属月（MIN period）</b>作为该笔结佣的
+     * 新签导入月（同合同跨月补差/分期的多期新签行，新签月以最初导入月为准）。
+     *
+     * @param realFacts 实收事实摘要集合（需含 factId/orderNo/contractNo/employeeId）
+     * @return realFactId → 新签导入月（YYYY-MM）；未匹配到新签事实的 realFactId 不在结果中
+     */
+    Map<Long, String> findNewSignPeriodsByRealFacts(Collection<PerformanceFactSummaryDTO> realFacts);
 }

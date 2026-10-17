@@ -61,13 +61,21 @@ public class SalaryCalculationEngine {
         public Map<Long, BigDecimal> deptDiffTotal;
         /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
-        /** factId → 业绩归属月（结佣明细对应的业绩事实 period，用于按导入月锁定规则） */
+        /** factId → 新签导入月（结佣提成规则期间：绑新签事实取其 period；实收明细按业务键匹配新签事实） */
         public Map<Long, String> factPeriodMap = Map.of();
+        /** 新签导入月 → 员工ID → 该月历史职级（结佣提成按新签月职级算提点；未命中回退算薪月职级） */
+        public Map<String, Map<Long, String>> periodLevelMap = Map.of();
+        /** 新签导入月 → 员工ID → 该月历史绩效事实（结佣按新签月积分派生等级；该月无数据按 0 分处理） */
+        public Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = Map.of();
+        /** 新签导入月 → 师傅员工ID → 当月生效徒弟数（招聘加点按新签月师徒切片；未命中回退算薪月） */
+        public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
+        /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（结佣调整按新签月口径；该月无调整=不叠加） */
+        public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
         /**
          * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。
          * <p>
-         * 结佣提成统一按签约月（businessDate 所在月）取规则快照（2026-09-28 取消
-         * settlement-rate-biz-types 按结算月分流）。本 Map 由 PayrollBatchService 在算薪前
+         * 结佣提成统一按<b>新签导入月</b>（对应新签业绩事实的归属月，非签约日所在月、
+         * 非结佣导入月）取规则快照（2026-10-17 改）。本 Map 由 PayrollBatchService 在算薪前
          * 扫描结佣明细预先构建，engine 按期间精确命中；key 缺失时回退到主 snapshot。
          */
         public Map<String, RuleService.ParsedSnapshot> periodSnapshots = Map.of();
@@ -95,8 +103,6 @@ public class SalaryCalculationEngine {
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格徒弟数（招聘奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
-        /** employeeId -> 徒弟结佣合计（店长/总监招聘奖励用） */
-        public Map<Long, BigDecimal> apprenticeCommission;
         /** employeeId -> 总监管辖门店 deptId 列表（含自身及子孙，总监多门店按门店分别跳点算提成） */
         public Map<Long, List<Long>> directorStoreDepts;
         /** deptId -> 部门展示名（总监门店提成明细 deptName 用） */
@@ -109,6 +115,20 @@ public class SalaryCalculationEngine {
     public List<PayrollDetail> calculate(CalcInput input) {
         List<PayrollDetail> details = new ArrayList<>();
         RuleService.ParsedSnapshot snap = input.snapshot;
+
+        // 招聘奖励数据源预算（AMOUNT_RATIO，店长/总监）：师傅 → 徒弟结佣业绩合计（主快照折算系数）。
+        // applyConversion 为纯函数，可主循环前预算；师徒归属按算薪月快照 mentorId（师傅号生效区间当前值）
+        Map<Long, BigDecimal> apprenticePerfByMentor = new HashMap<>();
+        for (EmployeeSnapshot t : input.employees) {
+            if (t.getMentorId() == null) {
+                continue;
+            }
+            List<CommissionItemDTO> tItems = input.lockedByEmp == null ? null : input.lockedByEmp.get(t.getEmployeeId());
+            if (tItems == null || tItems.isEmpty()) {
+                continue;
+            }
+            apprenticePerfByMentor.merge(t.getMentorId(), applyConversion(tItems, snap), BigDecimal::add);
+        }
 
         for (EmployeeSnapshot emp : input.employees) {
             PayrollDetail d = new PayrollDetail();
@@ -141,16 +161,8 @@ public class SalaryCalculationEngine {
 
             // 招聘加点（经纪人模式 RATE_ADD）
             int apprenticeCnt = input.qualifiedApprenticeCount.getOrDefault(emp.getEmployeeId(), 0);
-            BigDecimal mentorAdd = BigDecimal.ZERO;
             JsonNode rc = rank.path("ruleContent");
-            if ("RATE_ADD".equals(rc.path("mentorBonusMode").asText())) {
-                BigDecimal addRate = bd(rc.path("mentorBonusRateAdd").asText("0.02"));
-                mentorAdd = addRate.multiply(BigDecimal.valueOf(apprenticeCnt));
-                BigDecimal cap = bd(rc.path("mentorBonusRateCap").asText("0.10"));
-                if (mentorAdd.compareTo(cap) > 0) {
-                    mentorAdd = cap;
-                }
-            }
+            BigDecimal mentorAdd = calcMentorAdd(rc, apprenticeCnt);
 
             BigDecimal finalRate = baseRate.add(perfDeduct).add(mentorAdd);
             // EMPLOYEE 级提点覆盖（一级一价，覆盖 baseRate + perfDeduct + mentorAdd 全部）
@@ -163,15 +175,17 @@ public class SalaryCalculationEngine {
             List<RateAdjustItem> adjustItems = new ArrayList<>(
                 input.manualAdjustItems == null
                     ? List.of() : input.manualAdjustItems.getOrDefault(emp.getEmployeeId(), List.of()));
+            // 未参保自动扣点单列（结佣逐期间重算时保持算薪月参保状态复用）
+            RateAdjustItem noSocialAuto = null;
             if (!Boolean.TRUE.equals(emp.getIsPartTime()) && !Boolean.TRUE.equals(emp.getSocialInsured())) {
                 BigDecimal noSocialDeduct = bd(snap.policy().path("noSocialDeduct").asText("0"));
                 if (noSocialDeduct.signum() != 0) {
-                    RateAdjustItem auto = new RateAdjustItem();
-                    auto.setType("NO_SOCIAL");
-                    auto.setRate(noSocialDeduct);
-                    auto.setReason("未买社保，按规则自动扣点");
-                    auto.setSource("AUTO");
-                    adjustItems.add(auto);
+                    noSocialAuto = new RateAdjustItem();
+                    noSocialAuto.setType("NO_SOCIAL");
+                    noSocialAuto.setRate(noSocialDeduct);
+                    noSocialAuto.setReason("未买社保，按规则自动扣点");
+                    noSocialAuto.setSource("AUTO");
+                    adjustItems.add(noSocialAuto);
                 }
             }
             BigDecimal manualAdjust = BigDecimal.ZERO;
@@ -192,9 +206,9 @@ public class SalaryCalculationEngine {
             d.setTotalDeduct(MoneyUtil.round6(perfDeduct.add(manualAdjust)));
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
-            // 结佣提成：统一按签约月（businessDate 所在月）取规则（2026-09-28 取消
-            // settlement-rate-biz-types 按结算月分流，全部业务类型同口径）
-            // 不同签约月规则（职级提点/绩效扣点）可能不同，需逐期间分别折算+算提成后汇总。
+            // 结佣提成：统一按新签导入月（对应新签业绩事实的归属月）取规则（2026-10-17 改，
+            // 取代 2026-09-28 的签约月口径与 2026-10-12 的业绩归属月口径）
+            // 不同新签导入月规则（职级提点/绩效扣点）可能不同，需逐期间分别折算+算提成后汇总。
             BigDecimal commissionPerf;
             BigDecimal commissionIncome;
             BigDecimal finalRateForCommission = finalRate; // 经纪人/总监默认用 baseRate 口径
@@ -226,9 +240,45 @@ public class SalaryCalculationEngine {
                     List<CommissionItemDTO> periodItems = entry.getValue();
                     RuleService.ParsedSnapshot periodSnap = input.periodSnapshots.getOrDefault(rulePeriod, snap);
 
-                    // 用该期间快照重新计算 finalRate（职级规则/绩效扣点可能不同）
-                    BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, level, emp,
-                        scoreFacts, adjustItems, rc, mentorAdd, role);
+                    // 职级按新签导入月取历史切片（升职员工的新签月职级 ≠ 算薪月职级；未命中回退算薪月职级）
+                    String periodLevel = input.periodLevelMap
+                        .getOrDefault(rulePeriod, Map.of())
+                        .getOrDefault(emp.getEmployeeId(), level);
+                    JsonNode periodRank = periodSnap.rank(periodLevel);
+
+                    // 招聘加点：徒弟数按新签月师徒切片（师傅号生效日期≤该月），未命中回退算薪月；
+                    // 费率/上限取该期间快照
+                    int periodApprenticeCnt = input.periodApprenticeMap
+                        .getOrDefault(rulePeriod, Map.of())
+                        .getOrDefault(emp.getEmployeeId(), apprenticeCnt);
+                    BigDecimal periodMentorAdd = calcMentorAdd(periodRank.path("ruleContent"), periodApprenticeCnt);
+
+                    // 绩效等级按新签月积分事实派生；阈值/费率取该期间快照。
+                    // 切片已构建该月但无绩效事实 → 0 分（→C 扣点）；整体未构建（回退场景）→ 用算薪月积分
+                    ScoreFactsDTO periodScore;
+                    if (input.periodScoreMap.containsKey(rulePeriod)) {
+                        periodScore = input.periodScoreMap.get(rulePeriod).get(emp.getEmployeeId());
+                        if (periodScore == null) {
+                            periodScore = new ScoreFactsDTO();
+                            periodScore.setTotalPoints(BigDecimal.ZERO);
+                            periodScore.setAttendDays(1); // 出勤 1 天使 0/1=0 分走等级派生（否则 0 出勤会兜底 A）
+                        }
+                    } else {
+                        periodScore = scoreFacts;
+                    }
+
+                    // 人工调整按新签导入月当时生效的调整单（该月无调整=不叠加，即 0）；
+                    // 未参保自动扣点保持算薪月参保状态（当月合规事实）
+                    List<RateAdjustItem> periodAdjustItems = new ArrayList<>(
+                        input.periodAdjustMap.getOrDefault(rulePeriod, Map.of())
+                            .getOrDefault(emp.getEmployeeId(), List.of()));
+                    if (noSocialAuto != null) {
+                        periodAdjustItems.add(noSocialAuto);
+                    }
+
+                    // 用该期间快照重新计算 finalRate（职级提点/绩效扣点/招聘加点均按新签月口径）
+                    BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, periodLevel, emp,
+                        periodScore, periodAdjustItems, periodRank.path("ruleContent"), periodMentorAdd, role);
 
                     // 用该期间快照折算业绩
                     BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
@@ -250,12 +300,13 @@ public class SalaryCalculationEngine {
             d.setNewSignRate(role == EmployeeRole.MANAGER
                 ? bd(rank.path("personalRate").asText("0.70")) : baseRate);
 
-            // 招聘奖励（店长/总监 = 徒弟结佣 × 2%）
+            // 招聘奖励（AMOUNT_RATIO，店长/总监）＝徒弟当月结佣业绩合计（折算后）× 配置比例
             BigDecimal mentorBonus = BigDecimal.ZERO;
             if (role == EmployeeRole.MANAGER || role == EmployeeRole.DIRECTOR) {
                 if ("AMOUNT_RATIO".equals(rc.path("mentorBonusMode").asText())) {
+                    BigDecimal apprenticeTotal = apprenticePerfByMentor.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
                     BigDecimal ratio = bd(rc.path("mentorBonusAmountRatio").asText("0.02"));
-                    mentorBonus = MoneyUtil.round2(input.apprenticeCommission.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO).multiply(ratio));
+                    mentorBonus = MoneyUtil.round2(apprenticeTotal.multiply(ratio));
                 }
             }
             d.setMentorBonus(mentorBonus);
@@ -716,6 +767,20 @@ public class SalaryCalculationEngine {
     }
 
     /**
+     * 招聘加点（经纪人模式 RATE_ADD）：费率 × 达标徒弟数，封顶 mentorBonusRateCap。
+     * 主循环与结佣逐期间重算共用（费率/上限取对应期间职级规则的 ruleContent）。
+     */
+    private BigDecimal calcMentorAdd(JsonNode ruleContent, int apprenticeCnt) {
+        if (!"RATE_ADD".equals(ruleContent.path("mentorBonusMode").asText())) {
+            return BigDecimal.ZERO;
+        }
+        BigDecimal addRate = bd(ruleContent.path("mentorBonusRateAdd").asText("0.02"));
+        BigDecimal mentorAdd = addRate.multiply(BigDecimal.valueOf(apprenticeCnt));
+        BigDecimal cap = bd(ruleContent.path("mentorBonusRateCap").asText("0.10"));
+        return mentorAdd.compareTo(cap) > 0 ? cap : mentorAdd;
+    }
+
+    /**
      * 派生绩效等级（事实 → 等级）。
      * <p>
      * 平均积分 = totalPoints / attendDays（HALF_UP 保留 4 位）；
@@ -761,11 +826,13 @@ public class SalaryCalculationEngine {
     /**
      * 解析结佣明细对应的规则期间。
      * <p>
-     * 口径：按<b>业绩归属月（period，即导入月/结算月）</b>取规则快照。
-     * 业绩事实 period 为 NOT NULL，必然存在；factId 未命中映射时返回空串（回退主快照）。
+     * 口径：按<b>新签导入月</b>（该笔结佣对应新签业绩事实的归属月）取规则快照（2026-10-17 改）。
+     * 映射由 PayrollBatchService 预先构建：绑新签事实（PERF_EXPECT）取其 period；
+     * 绑实收明细（PERF_REAL）按业务键+员工匹配新签事实取最早归属月，未匹配时兜底结佣导入月。
+     * factId 未命中映射时返回空串（回退主快照）。
      *
      * @param item 结佣明细
-     * @param factPeriodMap factId → 业绩归属月（由 PayrollBatchService 预先从业绩事实加载）
+     * @param factPeriodMap factId → 新签导入月（由 PayrollBatchService 预先构建）
      * @return 规则期间（YYYY-MM）
      */
     private String resolveCommissionRulePeriod(CommissionItemDTO item, Map<Long, String> factPeriodMap) {
@@ -780,7 +847,7 @@ public class SalaryCalculationEngine {
      * <p>
      * 与 calculate 主循环中对主快照算 finalRate 逻辑完全一致，但：
      * <ul>
-     *   <li>入参传入指定的 ParsedSnapshot（可能是签约月/结算月的规则快照）；</li>
+     *   <li>入参传入指定的 ParsedSnapshot（新签导入月对应的规则快照）；</li>
      *   <li>店长角色用 personalRate 口径，其他角色用 baseRate 口径；</li>
      *   <li>用于按规则期间分组计算结佣提成时逐期间调用。</li>
      * </ul>

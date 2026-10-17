@@ -351,7 +351,8 @@ public class RuoYiDeptAdapter implements DeptPort {
 
     @Override
     public Map<Long, String> findStoreDepts() {
-        // 门店 = 顶级根（parent_id=0）的直接子部门
+        // 业务组（门店A组/B组等）= 门店（顶级根直接子部门）的子部门；
+        // 薪酬配置（社保扣减标准/门店月度配置）与算薪取数统一按组级 deptId
         List<SysDept> roots = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
             .select(SysDept::getDeptId)
             .eq(SysDept::getParentId, 0L));
@@ -360,12 +361,20 @@ public class RuoYiDeptAdapter implements DeptPort {
         }
         List<Long> rootIds = roots.stream().map(SysDept::getDeptId).toList();
         List<SysDept> stores = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .select(SysDept::getDeptId)
             .in(SysDept::getParentId, rootIds)
+            .eq(SysDept::getStatus, UserStatus.OK.getCode()));
+        if (stores.isEmpty()) {
+            return Map.of();
+        }
+        List<Long> storeIds = stores.stream().map(SysDept::getDeptId).toList();
+        List<SysDept> groups = sysDeptMapper.selectList(new LambdaQueryWrapper<SysDept>()
+            .in(SysDept::getParentId, storeIds)
             .eq(SysDept::getStatus, UserStatus.OK.getCode())
             .orderByAsc(SysDept::getOrderNum));
         Map<Long, String> result = new LinkedHashMap<>();
-        for (SysDept s : stores) {
-            result.put(s.getDeptId(), s.getDeptName());
+        for (SysDept g : groups) {
+            result.put(g.getDeptId(), g.getDeptName());
         }
         return result;
     }

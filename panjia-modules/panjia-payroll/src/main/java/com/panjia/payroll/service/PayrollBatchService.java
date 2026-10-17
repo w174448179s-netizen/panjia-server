@@ -4,6 +4,7 @@ import com.panjia.contracts.dto.AttendanceApprovalStatusDTO;
 import com.panjia.contracts.dto.CommissionItemDTO;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
+import com.panjia.contracts.dto.ScoreFactsDTO;
 import com.panjia.contracts.event.PayrollLockedEvent;
 import com.panjia.contracts.port.CommissionQueryPort;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -276,9 +277,12 @@ public class PayrollBatchService {
         input.period = period;
         input.snapshot = ruleService.parseSnapshot(ruleSnap.getSnapshotContent());
 
-        // ====== 多期间规则快照构建（结佣提成统一按业绩归属月取规则，2026-10-12 改） ======
-        // 扫描结佣明细，收集需要的规则期间集合（与 engine.resolveCommissionRulePeriod 口径一致）
-        // 先批量加载业绩事实 period（factId → 业绩归属月）
+        // ====== 多期间规则快照构建（结佣提成统一按新签导入月取规则，2026-10-17 改） ======
+        // 新签导入月 = 该笔结佣对应新签业绩事实的归属月（非签约日所在月、非结佣导入月）。
+        // 先批量加载结佣明细绑定的事实（factId → 事实摘要）：
+        //   · 绑新签事实（PERF_EXPECT，正常审批流/新签调整）→ period 即新签导入月；
+        //   · 绑实收明细（PERF_REAL，历史导入/历史单）→ 按订单号+员工（退化合同号+员工）
+        //     匹配 ACTIVE 新签事实，取最早归属月；未匹配到新签事实时兜底结佣导入月。
         Set<Long> factIds = lockedItems.stream()
             .map(CommissionItemDTO::getPerformanceFactId)
             .filter(Objects::nonNull)
@@ -286,8 +290,19 @@ public class PayrollBatchService {
         Map<Long, String> factPeriodMap = new HashMap<>();
         if (!factIds.isEmpty()) {
             List<PerformanceFactSummaryDTO> facts = commissionPerformanceQueryPort.findActiveByFacts(factIds);
+            List<PerformanceFactSummaryDTO> realFacts = new ArrayList<>();
             for (PerformanceFactSummaryDTO f : facts) {
-                factPeriodMap.put(f.getFactId(), f.getPeriod());
+                if ("PERF_REAL".equals(f.getFactType())) {
+                    realFacts.add(f);
+                } else {
+                    factPeriodMap.put(f.getFactId(), f.getPeriod());
+                }
+            }
+            if (!realFacts.isEmpty()) {
+                factPeriodMap.putAll(commissionPerformanceQueryPort.findNewSignPeriodsByRealFacts(realFacts));
+                for (PerformanceFactSummaryDTO f : realFacts) {
+                    factPeriodMap.putIfAbsent(f.getFactId(), f.getPeriod());
+                }
             }
         }
         input.factPeriodMap = factPeriodMap;
@@ -316,6 +331,49 @@ public class PayrollBatchService {
         }
         input.periodSnapshots = periodSnapshots;
         // ====== 多期间规则快照构建 end ======
+
+        // ====== 多期间历史切片（结佣提成按新签导入月取职级/绩效/师徒，2026-10-17 改） ======
+        // 员工升职后算薪月职级 ≠ 新签月职级，需按新签导入月取当时的 LEVEL 事实切片；
+        // 主期间（算薪月）的职级/师徒即员工快照当前值，无需重复查询。
+        Set<Long> commissionEmpIds = lockedItems.stream()
+            .map(CommissionItemDTO::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        Map<String, Map<Long, String>> periodLevelMap = new HashMap<>();
+        Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = new HashMap<>();
+        Map<String, Map<Long, Integer>> periodApprenticeMap = new HashMap<>();
+        Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = new HashMap<>();
+        for (String rp : requiredPeriods) {
+            if (rp.equals(period) || commissionEmpIds.isEmpty()) {
+                continue;
+            }
+            try {
+                LocalDate refDate = YearMonth.parse(rp).atDay(1);
+                // 一次切片同时取历史职级（LEVEL 事实）与历史师徒关系（MENTOR 事实，按生效区间）
+                Map<Long, String> levelByEmp = new HashMap<>();
+                Map<Long, Integer> apprenticeByMentor = new HashMap<>();
+                peopleQueryPort.getEmployeeSnapshots(commissionEmpIds, refDate)
+                    .forEach((empId, es) -> {
+                        levelByEmp.put(empId, es.getLevelCode());
+                        if (es.getMentorId() != null) {
+                            apprenticeByMentor.merge(es.getMentorId(), 1, Integer::sum);
+                        }
+                    });
+                periodLevelMap.put(rp, levelByEmp);
+                periodApprenticeMap.put(rp, apprenticeByMentor);
+                // 历史绩效积分（该月无事实的员工结佣时按 0 分处理）
+                periodScoreMap.put(rp, scoreQueryPort.scoreFacts(rp));
+                // 该月当时生效的人工调整单（结佣调整按新签月口径；APPROVED 且 start_month ≤ rp ≤ end_month）
+                periodAdjustMap.put(rp, rateAdjustService.loadEffectiveForPeriod(rp));
+            } catch (Exception e) {
+                log.warn("[薪酬] 构建历史切片失败：period={}，该期间结佣提成回退算薪月口径", rp, e);
+            }
+        }
+        input.periodLevelMap = periodLevelMap;
+        input.periodScoreMap = periodScoreMap;
+        input.periodApprenticeMap = periodApprenticeMap;
+        input.periodAdjustMap = periodAdjustMap;
+        // ====== 多期间历史切片 end ======
 
         // 结佣按员工分组
         input.lockedByEmp = lockedItems.stream()
@@ -481,17 +539,23 @@ public class PayrollBatchService {
             }
         }
 
-        // 个税累计月数：暂统一默认 1；EmployeeSnapshot.hireDate 已提供（用于入职当月底薪折算），
-        // 个税累计月数口径待税务规则专项迭代时再启用，避免影响在职员工个税
+        // 个税累计月数：仅 tax.mode=ENGINE（系统内试算）时参与累计预扣；
+        // 当前个税统一走外部导入（EXTERNAL 为默认模式），该值不参与实际计算，保留备用
         input.monthsEmployed = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
         }
 
-        // 招聘奖励：需要师徒关系（EmployeeSnapshot.mentorId）+ 结佣数据联合查询
-        // 暂置默认值，后续迭代实现（需跨 people + commission 域联合查询）
-        input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
+        // 招聘加点徒弟数：按算薪月师徒关系（EmployeeSnapshot.mentorId）统计在册徒弟数；
+        // 历史月切片见 periodApprenticeMap（新签导入月的 MENTOR 事实）
+        Map<Long, Integer> apprenticeByMentor = new HashMap<>();
+        for (EmployeeSnapshot e : employees) {
+            if (e.getMentorId() != null) {
+                apprenticeByMentor.merge(e.getMentorId(), 1, Integer::sum);
+            }
+        }
+        input.qualifiedApprenticeCount = apprenticeByMentor;
+        // 招聘奖励（AMOUNT_RATIO）的徒弟结佣业绩合计由引擎在算薪时基于师徒关系+结佣明细预算
 
         return input;
     }

@@ -77,7 +77,7 @@ public class RuleController {
         return R.ok();
     }
 
-    /** 门店列表（顶级根的直接子部门），门店社保标准/月度配置页枚举门店用。 */
+    /** 业务组列表（门店的子部门），门店社保标准/月度配置页枚举用；配置与算薪取数统一按组级 deptId。 */
     @SaCheckPermission(value = {"payroll:rule:list", "payroll:batch:list"}, mode = SaMode.OR)
     @GetMapping("/stores")
     public R<List<StoreDeptVo>> storeList() {

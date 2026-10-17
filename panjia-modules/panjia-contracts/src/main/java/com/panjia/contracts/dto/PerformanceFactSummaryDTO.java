@@ -19,10 +19,10 @@ public class PerformanceFactSummaryDTO implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    /** 事实 ID（pj_perf_fact.id） */
+    /** 事实 ID（PERF_EXPECT=pj_perf_fact.id；PERF_REAL=pj_received_detail.id 实收明细，历史导入/历史单绑定场景） */
     private Long factId;
 
-    /** 事实口径（FactType code：PERF_REAL / PERF_EXPECT） */
+    /** 事实口径（FactType code：PERF_REAL-实收明细（实收域 rd 表，拆表后不再落 pj_perf_fact）/ PERF_EXPECT-新签事实） */
     private String factType;
 
     /** 事实状态（FactStatus code：ACTIVE / REVERSED） */

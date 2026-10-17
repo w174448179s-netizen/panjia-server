@@ -45,7 +45,8 @@ public class ManualItemService {
         if (item.getItemType() == null) {
             throw new ServiceException("请选择录入类型");
         }
-        assertPeriodEditable(item.getPeriod());
+        assertRangeValid(item);
+        assertRangeEditable(item.getStartMonth(), item.getEndMonth());
         item.setStatus("APPROVED"); // V1 直接生效，后续可走审批
         item.setApplyBy(operatorId);
         item.setApproveBy(operatorId);
@@ -53,10 +54,12 @@ public class ManualItemService {
         return item.getId();
     }
 
+    /** 查询某月生效的手工项（startMonth ≤ 月 ≤ endMonth），按创建时间倒序 */
     public List<ManualItem> listByPeriod(String period) {
         return mapper.selectList(
             new LambdaQueryWrapper<ManualItem>()
-                .eq(ManualItem::getPeriod, period)
+                .le(ManualItem::getStartMonth, period)
+                .ge(ManualItem::getEndMonth, period)
                 .orderByDesc(ManualItem::getCreateTime));
     }
 
@@ -69,39 +72,48 @@ public class ManualItemService {
         if (item == null) {
             throw new ServiceException("记录不存在或已被删除");
         }
-        assertPeriodEditable(item.getPeriod());
+        assertRangeEditable(item.getStartMonth(), item.getEndMonth());
         mapper.deleteById(id);
     }
 
+    /** 校验生效区间字段（同提成点调整 startMonth/endMonth 口径） */
+    private void assertRangeValid(ManualItem item) {
+        if (StringUtils.isBlank(item.getStartMonth()) || StringUtils.isBlank(item.getEndMonth())) {
+            throw new ServiceException("生效起始月和截止月不能为空");
+        }
+        if (item.getStartMonth().compareTo(item.getEndMonth()) > 0) {
+            throw new ServiceException("生效起始月不能晚于截止月");
+        }
+        // 跨度保护：区间最长 36 个月，防止误录超长区间导致逐月校验/多月重复生效
+        long months = java.time.YearMonth.parse(item.getStartMonth())
+            .until(java.time.YearMonth.parse(item.getEndMonth()), java.time.temporal.ChronoUnit.MONTHS) + 1;
+        if (months > 36) {
+            throw new ServiceException("生效区间最长 36 个月，请拆分录入");
+        }
+    }
+
     /**
-     * 校验期间是否允许新增/删除手工项（奖金/其他收入/其他支出）。
-     * <p>双重冻结信号，任一命中即拒绝：
-     * <ol>
-     *   <li>该期间工资批次处于审批中及以后状态（提交审批即定稿）；</li>
-     *   <li>该业绩期间已封账（兜底，防止批次记录缺失等异常数据绕过）。</li>
-     * </ol>
-     *
-     * @param period 归属期间 YYYY-MM
+     * 校验生效区间覆盖的每个期间均允许新增/删除（任一月冻结即拒绝，请拆分区间避开冻结月）。
+     * 双重冻结信号与原单月口径一致：批次冻结状态 + 期间封账。
      */
-    private void assertPeriodEditable(String period) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("归属期间不能为空");
-        }
-
-        // 1. 批次状态：任一 dept_scope 的批次冻结即冻结（uk_batch_period_scope 每范围一条）
-        PayrollBatch frozenBatch = batchMapper.selectOne(
-            new LambdaQueryWrapper<PayrollBatch>()
-                .eq(PayrollBatch::getPeriod, period)
-                .in(PayrollBatch::getStatus, FROZEN_BATCH_STATUS)
-                .last("LIMIT 1"));
-        if (frozenBatch != null) {
-            throw new ServiceException(frozenMessage(frozenBatch.getStatus()));
-        }
-
-        // 2. 期间封账兜底（总监锁定自动封账；解封后本信号解除）
-        if (periodCloseQueryPort.isClosed(period)) {
-            throw new ServiceException(
-                "该业绩期间已封账，奖金与收支不允许新增或删除；如需纠错请先在「结佣明细」页解封该期间");
+    private void assertRangeEditable(String startMonth, String endMonth) {
+        java.time.YearMonth cur = java.time.YearMonth.parse(startMonth);
+        java.time.YearMonth end = java.time.YearMonth.parse(endMonth);
+        while (!cur.isAfter(end)) {
+            String month = cur.toString();
+            PayrollBatch frozenBatch = batchMapper.selectOne(
+                new LambdaQueryWrapper<PayrollBatch>()
+                    .eq(PayrollBatch::getPeriod, month)
+                    .in(PayrollBatch::getStatus, FROZEN_BATCH_STATUS)
+                    .last("LIMIT 1"));
+            if (frozenBatch != null) {
+                throw new ServiceException("生效区间包含 " + month + "，" + frozenMessage(frozenBatch.getStatus()));
+            }
+            if (periodCloseQueryPort.isClosed(month)) {
+                throw new ServiceException("生效区间包含已封账期间 " + month
+                    + "，奖金与收支不允许新增或删除；如需纠错请先在「结佣明细」页解封该期间，或拆分区间避开该月");
+            }
+            cur = cur.plusMonths(1);
         }
     }
 
@@ -116,11 +128,12 @@ public class ManualItemService {
         };
     }
 
-    /** 取某期间已审批的手工项，按员工分组（算薪用） */
+    /** 取某月生效的已审批手工项，按员工分组（算薪用；startMonth ≤ 月 ≤ endMonth） */
     public Map<Long, List<ManualItem>> loadApprovedForPeriod(String period) {
         List<ManualItem> items = mapper.selectList(
             new LambdaQueryWrapper<ManualItem>()
-                .eq(ManualItem::getPeriod, period)
+                .le(ManualItem::getStartMonth, period)
+                .ge(ManualItem::getEndMonth, period)
                 .eq(ManualItem::getStatus, "APPROVED"));
         return items.stream().collect(Collectors.groupingBy(ManualItem::getEmployeeId));
     }

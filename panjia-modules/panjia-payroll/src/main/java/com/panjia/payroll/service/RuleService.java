@@ -146,7 +146,55 @@ public class RuleService {
      */
     public ParsedSnapshot buildSnapshotForDate(LocalDate refDate) {
         ObjectNode root = buildSnapshotRoot(refDate);
+        validateRuleCompleteness(root);
         return new ParsedSnapshot(root);
+    }
+
+    /**
+     * 规则配置完整性校验：敏感配置缺失时记录警告（算薪仍按引擎默认值执行，避免静默错账无人知）。
+     * personalRate 仅店长/总监提成使用；招聘奖励费率/上限/比例按配置的模式校验；
+     * 绩效等级阈值取 policy.points；系统算税（ENGINE）时必须有税率表。
+     */
+    private void validateRuleCompleteness(JsonNode root) {
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        JsonNode ranks = root.path("rank");
+        if (ranks.isObject()) {
+            ranks.properties().forEach(e -> {
+                String level = e.getKey();
+                JsonNode rank = e.getValue();
+                if (!rank.hasNonNull("personalRate")) {
+                    missing.add("职级[" + level + "] personalRate（店长/总监个人提点）未配置，将按引擎默认 0.70 计算");
+                }
+                JsonNode rc = rank.path("ruleContent");
+                String mode = rc.path("mentorBonusMode").asText("");
+                if ("RATE_ADD".equals(mode)) {
+                    if (!rc.hasNonNull("mentorBonusRateAdd")) {
+                        missing.add("职级[" + level + "] mentorBonusRateAdd 未配置，将按默认 0.02");
+                    }
+                    if (!rc.hasNonNull("mentorBonusRateCap")) {
+                        missing.add("职级[" + level + "] mentorBonusRateCap 未配置，将按默认 0.10");
+                    }
+                } else if ("AMOUNT_RATIO".equals(mode)) {
+                    if (!rc.hasNonNull("mentorBonusAmountRatio")) {
+                        missing.add("职级[" + level + "] mentorBonusAmountRatio 未配置，将按默认 0.02");
+                    }
+                }
+            });
+        }
+        JsonNode points = root.path("policy").path("points");
+        if (!points.hasNonNull("gradeA")) {
+            missing.add("policy.points.gradeA（绩效A阈值）未配置，将按默认 8");
+        }
+        if (!points.hasNonNull("gradeB")) {
+            missing.add("policy.points.gradeB（绩效B阈值）未配置，将按默认 6");
+        }
+        if ("ENGINE".equalsIgnoreCase(root.path("policy").path("tax").path("mode").asText("EXTERNAL"))
+            && root.path("policy").path("tax").path("brackets").size() == 0) {
+            missing.add("policy.tax.brackets 税率表未配置（tax.mode=ENGINE 系统算税必须有税率表）");
+        }
+        if (!missing.isEmpty()) {
+            log.warn("[薪酬] 规则快照配置不完整，算薪将使用引擎默认值：{}", String.join("；", missing));
+        }
     }
 
     /**

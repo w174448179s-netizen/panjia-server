@@ -246,6 +246,64 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Map<Long, String> findNewSignPeriodsByRealFacts(java.util.Collection<PerformanceFactSummaryDTO> realFacts) {
+        if (realFacts == null || realFacts.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        // 收集业务键（订单号/合同号），跨期间查 ACTIVE 新签事实（新签可能早于实收多个归属月）
+        Set<String> bizKeys = new HashSet<>();
+        for (PerformanceFactSummaryDTO f : realFacts) {
+            if (StringUtils.isNotBlank(f.getOrderNo())) {
+                bizKeys.add(f.getOrderNo());
+            }
+            if (StringUtils.isNotBlank(f.getContractNo())) {
+                bizKeys.add(f.getContractNo());
+            }
+        }
+        if (bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
+                .or().in(PerformanceFact::getContractNo, bizKeys))
+            .select(PerformanceFact::getOrderNo, PerformanceFact::getContractNo,
+                PerformanceFact::getEmployeeId, PerformanceFact::getPeriod);
+        // (orderNo|contractNo, employeeId) → 最早归属月（新签月以最初导入月为准，跨月补差取 MIN）
+        Map<String, String> minPeriodByKeyEmp = new HashMap<>();
+        for (PerformanceFact f : factMapper.selectList(wrapper)) {
+            if (f.getEmployeeId() == null || StringUtils.isBlank(f.getPeriod())) {
+                continue;
+            }
+            if (StringUtils.isNotBlank(f.getOrderNo())) {
+                minPeriodByKeyEmp.merge("O|" + f.getOrderNo() + "|" + f.getEmployeeId(), f.getPeriod(),
+                    (a, b) -> a.compareTo(b) <= 0 ? a : b);
+            }
+            if (StringUtils.isNotBlank(f.getContractNo())) {
+                minPeriodByKeyEmp.merge("C|" + f.getContractNo() + "|" + f.getEmployeeId(), f.getPeriod(),
+                    (a, b) -> a.compareTo(b) <= 0 ? a : b);
+            }
+        }
+        Map<Long, String> result = new HashMap<>();
+        for (PerformanceFactSummaryDTO r : realFacts) {
+            if (r.getFactId() == null || r.getEmployeeId() == null) {
+                continue;
+            }
+            // 订单号优先精确匹配（同合同多订单防串），空/未命中退化合同号
+            String hit = StringUtils.isNotBlank(r.getOrderNo())
+                ? minPeriodByKeyEmp.get("O|" + r.getOrderNo() + "|" + r.getEmployeeId()) : null;
+            if (hit == null && StringUtils.isNotBlank(r.getContractNo())) {
+                hit = minPeriodByKeyEmp.get("C|" + r.getContractNo() + "|" + r.getEmployeeId());
+            }
+            if (hit != null) {
+                result.put(r.getFactId(), hit);
+            }
+        }
+        return result;
+    }
+
+    @Override
     public Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriod(java.util.Collection<String> bizKeys) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyMap();

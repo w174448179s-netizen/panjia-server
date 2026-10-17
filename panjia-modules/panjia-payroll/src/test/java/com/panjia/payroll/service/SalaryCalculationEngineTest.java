@@ -114,7 +114,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
         input.scoreFacts = Map.of(e.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         List<PayrollDetail> details = engine.calculate(input);
         assertEquals(1, details.size());
@@ -152,7 +151,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 店长 finalRate = personalRate 0.70（非 baseRate 0.30）
@@ -186,7 +184,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 团队 = (20000 - 店长本人新签折算 1000×0.96=960) × 10% = 1904, 个人新签折算后递延 = 672
@@ -219,7 +216,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // finalRate = personalRate 0.70（非 baseRate 0.30）
@@ -250,7 +246,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
         input.scoreFacts = Map.of(e.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 结佣折算后：100000 × 0.9024 = 90240（落地业绩）
@@ -279,7 +274,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         assertEquals(0, new BigDecimal("6000.00").compareTo(d.getBaseSalary()));
@@ -310,7 +304,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(e.getEmployeeId(), 1);
         input.scoreFacts = Map.of(e.getEmployeeId(), factsB());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         List<PayrollDetail> details = engine.calculate(input);
         PayrollDetail d = details.get(0);
@@ -341,7 +334,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 团队提成 = (90000 - 1000) × 10% = 8900
@@ -374,7 +366,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 门店提成 = (120000 - 1000) × 7% = 8330
@@ -418,7 +409,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 门店1: (120000-1000) × 7% = 8330
@@ -462,7 +452,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // buildSnapshot policy 无 fullAttendance → 兜底 500
@@ -495,7 +484,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(a2.getEmployeeId(), 1, a0.getEmployeeId(), 1);
         input.scoreFacts = Map.of(a2.getEmployeeId(), factsA(), a0.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         // A2（无底薪）：迟到 3 次 + 旷工 2 天 + 事假 1 天 + 两类病假各 1 天 + 导入金额 10
         AttendanceMetricsDTO m2 = new AttendanceMetricsDTO();
@@ -542,7 +530,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(a2.getEmployeeId(), 1);
         input.scoreFacts = Map.of(a2.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         AttendanceMetricsDTO m = new AttendanceMetricsDTO();
         m.setLateCount(0);
@@ -585,7 +572,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mid.getEmployeeId(), 1, first.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mid.getEmployeeId(), factsA(), first.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         List<PayrollDetail> details = engine.calculate(input);
         PayrollDetail dMid = details.stream().filter(x -> x.getEmployeeId().equals(mid.getEmployeeId())).findFirst().orElseThrow();
@@ -622,7 +608,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1);
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 团队提成 = (90000 - 1000 - 500) × 10% = 8850
@@ -657,7 +642,6 @@ class SalaryCalculationEngineTest {
         input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = new HashMap<>();
-        input.apprenticeCommission = new HashMap<>();
 
         PayrollDetail d = engine.calculate(input).get(0);
         // 门店提成 = (120000 - 1000 - 20000) × 6% = 5940

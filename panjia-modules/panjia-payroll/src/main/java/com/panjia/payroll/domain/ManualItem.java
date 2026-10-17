@@ -24,7 +24,12 @@ public class ManualItem implements Serializable {
     @TableId(type = IdType.ASSIGN_ID)
     private Long id;
 
-    private String period;
+    /** 生效起始月 YYYY-MM（含）；算薪取 startMonth ≤ 算薪月 ≤ endMonth 的审批通过项 */
+    private String startMonth;
+
+    /** 生效截止月 YYYY-MM（含）；同提成点调整口径 */
+    private String endMonth;
+
     private Long employeeId;
     private ManualItemType itemType;
     private String subType;
