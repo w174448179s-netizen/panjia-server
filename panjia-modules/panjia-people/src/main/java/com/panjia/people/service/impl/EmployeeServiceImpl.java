@@ -63,11 +63,13 @@ public class EmployeeServiceImpl implements EmployeeService {
     private static final String CHANGE_FIELD_DEPT = "DEPT";
     /** 变更字段：岗位与角色 */
     private static final String CHANGE_FIELD_POSTS = "POSTS";
+    /** 变更字段：生效日调整（值不变，仅平移事实生效日） */
+    private static final String CHANGE_FIELD_EFFECTIVE = "EFFECTIVE";
     /** 布尔事实真值 */
     private static final String BOOL_TRUE = "true";
     /** 布尔事实假值 */
     private static final String BOOL_FALSE = "false";
-    /** 无师傅时 MENTOR 事实存储值 */
+    /** 无伯乐时 MENTOR 事实存储值 */
     private static final String NO_MENTOR = "";
     /**
      * 门店虚拟角色人识别方式（2026-09-28 改）：
@@ -159,7 +161,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         if (exists != null && exists > 0) {
             throw new ServiceException("工号 {} 已存在", dto.getEmployeeCode());
         }
-        // 导入侧预解析后可直传 mentorId 绕过库内查询（师傅在本批次但尚未入库的场景）；
+        // 导入侧预解析后可直传 mentorId 绕过库内查询（伯乐在本批次但尚未入库的场景）；
         // 员工管理界面路径不传 mentorId，回退到 mentorCode 走库内解析
         Long mentorId = dto.getMentorId() != null
             ? dto.getMentorId()
@@ -186,7 +188,8 @@ public class EmployeeServiceImpl implements EmployeeService {
         employeeMapper.updateById(emp);
 
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
-        LocalDate effect = emp.getHireDate();
+        // 事实生效粒度 = 月（算薪按月）：生效日统一收敛到当月 1 日，月末切片取数与月粒度等价
+        LocalDate effect = monthStart(emp.getHireDate());
         // 8 类算薪事实初始记录（change_field=ALL，生效日=入职日）
         initFact(emp.getEmployeeId(), FactType.LEVEL, dto.getLevelCode(), effect);
         initFact(emp.getEmployeeId(), FactType.STATUS, emp.getStatus().getCode(), effect);
@@ -218,7 +221,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             throw new ServiceException("员工不存在，employeeId={}", employeeId);
         }
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
-        LocalDate effect = dto.getEffectiveDate() != null ? dto.getEffectiveDate() : LocalDate.now();
+        LocalDate effect = monthStart(dto.getEffectiveDate() != null ? dto.getEffectiveDate() : LocalDate.now());
 
         // ① 基本信息直改
         if (StringUtils.isNotBlank(dto.getEmployeeName())) {
@@ -243,7 +246,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             emp.setLeaveDate(dto.getLeaveDate());
         }
 
-        // ② 师傅（mentorCode 非 null 即参与比对；空白=解除师傅关系）
+        // ② 伯乐（mentorCode 非 null 即参与比对；空白=解除伯乐关系）
         if (dto.getMentorCode() != null) {
             Long newMentorId = resolveMentorIdByCode(dto.getMentorCode());
             if (!Objects.equals(newMentorId, emp.getMentorEmployeeId())) {
@@ -322,6 +325,61 @@ public class EmployeeServiceImpl implements EmployeeService {
 
         employeeMapper.updateById(emp);
         refreshRecord(emp);
+    }
+
+    /**
+     * 调整算薪事实生效日期（值不变，仅平移生效日）。
+     * <p>
+     * 逐项处理所选变更项：平移当前开放事实的起点，并把前一段闭合点对齐到新日期
+     * （保持"前段终点=开放段起点"的链条不变式），写"生效日调整"日志留痕。
+     * 已是指定日期的项自动跳过；全部跳过视为无操作报错，避免用户以为调成功了。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int adjustFactDates(Long employeeId, List<String> factTypes, LocalDate newDate, Long operatorId) {
+        Employee emp = employeeMapper.selectById(employeeId);
+        if (emp == null) {
+            throw new ServiceException("员工不存在，employeeId={}", employeeId);
+        }
+        if (newDate == null) {
+            throw new ServiceException("新生效日期不能为空");
+        }
+        // 生效粒度 = 月：统一收敛到当月 1 日
+        final LocalDate target = monthStart(newDate);
+        boolean all = factTypes == null || factTypes.isEmpty()
+            || factTypes.stream().anyMatch(t -> "ALL".equalsIgnoreCase(t));
+        List<FactType> types = all
+            ? List.of(FactType.values())
+            : factTypes.stream().map(FactType::fromCode).filter(Objects::nonNull).distinct().toList();
+        if (types.isEmpty()) {
+            throw new ServiceException("未指定有效的变更项");
+        }
+        Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
+        int changed = 0;
+        for (FactType type : types) {
+            SalaryFact open = salaryFactMapper.selectOpenFact(employeeId, type);
+            if (open == null || open.getEffectiveDate().equals(target)) {
+                continue;
+            }
+            LocalDate oldDate = open.getEffectiveDate();
+            salaryFactMapper.shiftPrevExpire(employeeId, type, oldDate, target, open.getFactId());
+            salaryFactMapper.updateEffectiveDate(open.getFactId(), target);
+            writeLog(employeeId, CHANGE_FIELD_EFFECTIVE,
+                type.getDesc() + "：原生效月 " + oldDate.toString().substring(0, 7),
+                "调整为 " + target.toString().substring(0, 7), target, operator);
+            changed++;
+        }
+        if (changed == 0) {
+            throw new ServiceException("所选变更项的生效月均已是 {}，无需调整", target.toString().substring(0, 7));
+        }
+        return changed;
+    }
+
+    /**
+     * 算薪事实生效粒度 = 月：生效日统一收敛到当月 1 日（月末切片取数与月粒度天然等价）。
+     */
+    private static LocalDate monthStart(LocalDate date) {
+        return (date != null ? date : LocalDate.now()).withDayOfMonth(1);
     }
 
     // ==================== 算薪快照（PeopleQueryPort） ====================
@@ -512,7 +570,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             snap.setCommercialFee(parseDecimalFact(factValues.get(FactType.COMMERCIAL_FEE.getCode())));
             snap.setHousingFund(parseDecimalFact(factValues.get(FactType.HOUSING_FUND.getCode())));
             snap.setDormitoryFee(parseDecimalFact(factValues.get(FactType.DORMITORY_FEE.getCode())));
-            // 师徒
+            // 伯乐
             snap.setMentorId(parseMentorFact(factValues.get(FactType.MENTOR.getCode())));
         }
         snap.setSnapshotDate(point);
@@ -550,7 +608,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         return val != null ? val.toPlainString() : null;
     }
 
-    /** MENTOR 事实值解析：空串/空白/非数字 → null（无师傅） */
+    /** MENTOR 事实值解析：空串/空白/非数字 → null（无伯乐） */
     private Long parseMentorFact(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -778,8 +836,8 @@ public class EmployeeServiceImpl implements EmployeeService {
                             LocalDate effect, Long operatorId) {
         String oldValue = salaryFactMapper.selectValueAt(employeeId, type, effect);
         salaryFactMapper.closeActiveAt(employeeId, type, effect);
-        // 回填生效日早于既有后续事实时（如入职初始化的无师傅占位），删除被新区间
-        // 完全覆盖的开放事实，避免"生效日最新者优先"取数遮蔽新值（2026-10-18 招聘奖励事故）
+        // 回填生效日早于既有后续事实时（如入职初始化的无伯乐占位），删除被新区间
+        // 完全覆盖的开放事实，避免"生效日最新者优先"取数遮蔽新值（2026-10-18 伯乐奖励事故）
         salaryFactMapper.deleteOpenAfter(employeeId, type, effect);
 
         SalaryFact fact = new SalaryFact();
@@ -861,7 +919,7 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     /**
-     * 师傅工号 → 师傅员工 ID；空白返回 null；不存在抛异常。
+     * 伯乐工号 → 伯乐员工 ID；空白返回 null；不存在抛异常。
      */
     private Long resolveMentorIdByCode(String mentorCode) {
         if (StringUtils.isBlank(mentorCode)) {
@@ -871,7 +929,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             .eq(Employee::getEmployeeCode, mentorCode.trim())
             .last("LIMIT 1"));
         if (mentor == null) {
-            throw new ServiceException("师傅工号 {} 不存在", mentorCode);
+            throw new ServiceException("伯乐工号 {} 不存在", mentorCode);
         }
         return mentor.getEmployeeId();
     }
@@ -886,7 +944,7 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     /**
-     * 批量填充视图：算薪当前态、部门全路径、岗位名集合、师傅信息。
+     * 批量填充视图：算薪当前态、部门全路径、岗位名集合、伯乐信息。
      */
     private void enrich(List<EmployeeVO> vos) {
         if (vos.isEmpty()) {
@@ -928,7 +986,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         vos.forEach(vo -> vo.setPostNames(
             vo.getUserId() != null ? postNames.getOrDefault(vo.getUserId(), List.of()) : List.of()));
 
-        // 师傅姓名/工号
+        // 伯乐姓名/工号
         Set<Long> mentorIds = vos.stream().map(EmployeeVO::getMentorEmployeeId).filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, Employee> mentors = new LinkedHashMap<>();
         if (!mentorIds.isEmpty()) {
@@ -955,6 +1013,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             case CHANGE_FIELD_ALL -> "入职初始化";
             case CHANGE_FIELD_DEPT -> "归属部门";
             case CHANGE_FIELD_POSTS -> "岗位/角色";
+            case CHANGE_FIELD_EFFECTIVE -> "生效日调整";
             default -> changeField;
         };
     }
@@ -964,7 +1023,7 @@ public class EmployeeServiceImpl implements EmployeeService {
      */
     private String displayMentor(String value) {
         if (StringUtils.isBlank(value)) {
-            return "无师傅";
+            return "无伯乐";
         }
         Employee mentor = employeeMapper.selectById(Long.valueOf(value));
         return mentor == null ? value : mentor.getEmployeeName() + "（" + mentor.getEmployeeCode() + "）";

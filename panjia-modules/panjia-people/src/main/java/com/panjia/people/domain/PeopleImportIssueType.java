@@ -25,8 +25,8 @@ public enum PeopleImportIssueType {
     /** 职级不在枚举白名单 */
     LEVEL_INVALID("职级非法", true),
 
-    /** 师傅工号不存在（库内与本批次均无此工号） */
-    MENTOR_NOT_FOUND("师傅不存在", true);
+    /** 伯乐工号不存在（库内与本批次均无此工号） */
+    MENTOR_NOT_FOUND("伯乐不存在", true);
 
     /** 类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

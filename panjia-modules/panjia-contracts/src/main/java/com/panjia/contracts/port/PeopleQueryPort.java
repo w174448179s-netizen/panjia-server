@@ -15,7 +15,7 @@ import java.util.Map;
  * <p>
  * 返回 Map 的 key 为 {@link com.panjia.contracts.constant.PeopleFactFields}
  * 定义的 8 类 fact_type，value 一律为字符串：
- * 布尔类事实为 {@code "true"}/{@code "false"}，MENTOR 为师傅员工 ID 字符串，
+ * 布尔类事实为 {@code "true"}/{@code "false"}，MENTOR 为伯乐员工 ID 字符串，
  * 查无记录时对应 key 的 value 为 {@code null}。
  */
 public interface PeopleQueryPort {

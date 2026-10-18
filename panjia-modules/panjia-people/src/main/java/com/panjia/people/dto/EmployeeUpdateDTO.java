@@ -73,7 +73,7 @@ public class EmployeeUpdateDTO {
     /** 是否兼职 */
     private Boolean parttime;
 
-    /** 师傅工号（空串表示解除师傅关系） */
+    /** 伯乐工号（空串表示解除伯乐关系） */
     private String mentorCode;
 
     /** 备注 */

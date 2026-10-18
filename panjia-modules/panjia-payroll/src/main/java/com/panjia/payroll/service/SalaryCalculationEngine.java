@@ -67,7 +67,7 @@ public class SalaryCalculationEngine {
         public Map<String, Map<Long, String>> periodLevelMap = Map.of();
         /** 新签导入月 → 员工ID → 该月历史绩效事实（结佣按新签月积分派生等级；该月无数据按 0 分处理） */
         public Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = Map.of();
-        /** 新签导入月 → 师傅员工ID → 当月生效徒弟数（招聘加点按新签月师徒切片；未命中回退算薪月） */
+        /** 新签导入月 → 伯乐员工ID → 当月生效千里马数（招聘加点按新签月伯乐切片；未命中回退算薪月） */
         public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
         /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（结佣调整按新签月口径；该月无调整=不叠加） */
         public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
@@ -101,7 +101,7 @@ public class SalaryCalculationEngine {
         public Map<Long, ScoreFactsDTO> scoreFacts;
         /** employeeId -> 提成点人工调整命中项（rate_adjust APPROVED 且区间命中，溯源写入 rate_adjust_json） */
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
-        /** employeeId -> 合格徒弟数（招聘奖励加点用） */
+        /** employeeId -> 合格千里马数（伯乐奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
         /** employeeId -> 总监管辖门店 deptId 列表（含自身及子孙，总监多门店按门店分别跳点算提成） */
         public Map<Long, List<Long>> directorStoreDepts;
@@ -116,8 +116,8 @@ public class SalaryCalculationEngine {
         List<PayrollDetail> details = new ArrayList<>();
         RuleService.ParsedSnapshot snap = input.snapshot;
 
-        // 招聘奖励数据源预算（AMOUNT_RATIO，店长/总监）：师傅 → 徒弟结佣业绩合计（主快照折算系数）。
-        // applyConversion 为纯函数，可主循环前预算；师徒归属按算薪月快照 mentorId（师傅号生效区间当前值）
+        // 伯乐奖励数据源预算（AMOUNT_RATIO，店长/总监）：伯乐 → 千里马结佣业绩合计（主快照折算系数）。
+        // applyConversion 为纯函数，可主循环前预算；伯乐归属按算薪月快照 mentorId（伯乐号生效区间当前值）
         Map<Long, BigDecimal> apprenticePerfByMentor = new HashMap<>();
         for (EmployeeSnapshot t : input.employees) {
             if (t.getMentorId() == null) {
@@ -248,7 +248,7 @@ public class SalaryCalculationEngine {
                         .getOrDefault(emp.getEmployeeId(), level);
                     JsonNode periodRank = periodSnap.rank(periodLevel);
 
-                    // 招聘加点：徒弟数按新签月师徒切片（师傅号生效日期≤该月），未命中回退算薪月；
+                    // 招聘加点：千里马数按新签月伯乐切片（伯乐号生效日期≤该月），未命中回退算薪月；
                     // 费率/上限取该期间快照
                     int periodApprenticeCnt = input.periodApprenticeMap
                         .getOrDefault(rulePeriod, Map.of())
@@ -321,7 +321,7 @@ public class SalaryCalculationEngine {
             d.setNewSignRate(role == EmployeeRole.MANAGER
                 ? bd(rank.path("personalRate").asText("0.70")) : baseRate);
 
-            // 招聘奖励（AMOUNT_RATIO，店长/总监）＝徒弟当月结佣业绩合计（折算后）× 配置比例
+            // 伯乐奖励（AMOUNT_RATIO，店长/总监）＝千里马当月结佣业绩合计（折算后）× 配置比例
             BigDecimal mentorBonus = BigDecimal.ZERO;
             if (role == EmployeeRole.MANAGER || role == EmployeeRole.DIRECTOR) {
                 if ("AMOUNT_RATIO".equals(rc.path("mentorBonusMode").asText())) {
@@ -586,7 +586,7 @@ public class SalaryCalculationEngine {
             d.setBonus(MoneyUtil.round2(bonus));
             d.setOtherIncome(MoneyUtil.round2(otherIncome));
 
-            // 应发 = 结佣提成 + 保底补足 + 团队 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖
+            // 应发 = 结佣提成 + 保底补足 + 团队 + 门店 + 底薪 + 伯乐奖励 + 奖金 + 其他收入 + 全勤奖
             // 注：店长个人新签递延不计入当月应发；经纪人保底场景个人新签提成不单独计入应发
             //（与结佣提成同源同一笔业绩钱，单独计入即重复计薪），仅作为保底比较基准落明细列
             BigDecimal fullAttendance = d.getFullAttendance() == null
@@ -882,7 +882,7 @@ public class SalaryCalculationEngine {
     }
 
     /**
-     * 招聘加点（经纪人模式 RATE_ADD）：费率 × 达标徒弟数，封顶 mentorBonusRateCap。
+     * 招聘加点（经纪人模式 RATE_ADD）：费率 × 达标千里马数，封顶 mentorBonusRateCap。
      * 主循环与结佣逐期间重算共用（费率/上限取对应期间职级规则的 ruleContent）。
      */
     private BigDecimal calcMentorAdd(JsonNode ruleContent, int apprenticeCnt) {

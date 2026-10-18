@@ -12,6 +12,7 @@ import com.panjia.people.dto.VirtualEmployeeInitResultVO;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -55,6 +56,20 @@ public interface EmployeeService extends PeopleQueryPort {
      * @param operatorId 操作人 ID
      */
     void updateEmployee(Long employeeId, EmployeeUpdateDTO dto, Long operatorId);
+
+    /**
+     * 调整算薪事实生效日期（值不变，仅平移生效日；用于更正录入时选错生效日的场景）。
+     * <p>
+     * 按变更项精确调整：传单个/多个 factType 码（如 MENTOR/LEVEL/SOCIAL），
+     * 或传 ["ALL"] 调整全部事实项。已是指定日期的项自动跳过。
+     *
+     * @param employeeId 员工 ID
+     * @param factTypes  变更项码列表（FactType code；["ALL"]=全部项）
+     * @param newDate    新生效日期
+     * @param operatorId 操作人 ID
+     * @return 实际调整的项数
+     */
+    int adjustFactDates(Long employeeId, List<String> factTypes, LocalDate newDate, Long operatorId);
 
     /**
      * 员工变更记录时间线（按生效日倒序）。

@@ -45,7 +45,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 员工管理（V6.0：主数据 + 算薪事实 + 岗位角色同步 + 员工导入）。
@@ -117,6 +119,21 @@ public class EmployeeController extends BaseController {
     public R<Void> edit(@PathVariable Long employeeId, @Validated @RequestBody EmployeeUpdateDTO dto) {
         employeeService.updateEmployee(employeeId, dto, LoginHelper.getUserId());
         return R.ok();
+    }
+
+    /**
+     * 调整算薪事实生效日期（值不变，仅平移生效日）：用于更正录入时选错生效日的场景。
+     * 请求体：{ factTypes: ["MENTOR"] 或 ["ALL"]（全部项），newDate: "2026-04-01" }
+     * 权限沿用员工编辑权限（同一操作环节）。
+     */
+    @SaCheckPermission("people:employee:edit")
+    @Log(title = "员工管理", businessType = BusinessType.UPDATE)
+    @PostMapping("/{employeeId}/adjust-fact-date")
+    public R<Integer> adjustFactDate(@PathVariable Long employeeId, @RequestBody Map<String, Object> body) {
+        @SuppressWarnings("unchecked")
+        List<String> factTypes = (List<String>) body.getOrDefault("factTypes", List.of());
+        LocalDate newDate = LocalDate.parse(String.valueOf(body.get("newDate")));
+        return R.ok(employeeService.adjustFactDates(employeeId, factTypes, newDate, LoginHelper.getUserId()));
     }
 
     /**

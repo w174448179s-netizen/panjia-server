@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * 算薪事实类型枚举（V5.2 冻结 8 类）。
  * <p>
  * 绑定到人身上的只有开关/标签/关系：职级、状态、社保、公积金、商业保险、
- * 宿舍、兼职、师傅。社保基数/比例、公积金金额等客户级规则归 payroll 域规则 JSON。
+ * 宿舍、兼职、伯乐。社保基数/比例、公积金金额等客户级规则归 payroll 域规则 JSON。
  * <p>
  * 存储约定：DB 字段 fact_type VARCHAR(16) 存 code（code 固定取枚举名）。
  */
@@ -45,8 +45,8 @@ public enum FactType {
     /** 是否兼职 */
     PARTTIME("兼职"),
 
-    /** 师傅员工 ID */
-    MENTOR("师傅");
+    /** 伯乐员工 ID */
+    MENTOR("伯乐");
 
     /** 事实类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

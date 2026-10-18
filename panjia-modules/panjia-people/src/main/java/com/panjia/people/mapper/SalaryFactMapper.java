@@ -134,7 +134,7 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
     /**
      * 删除被新区间完全覆盖的后续事实：生效日晚于新变更生效日且仍开放的事实。
      * <p>回填场景（变更生效日早于既有事实生效日）下，这类事实按"生效日最新者优先"
-     * 会遮蔽新值（如入职初始化的无师傅占位事实遮住回填的师傅），直接删除；
+     * 会遮蔽新值（如入职初始化的无伯乐占位事实遮住回填的伯乐），直接删除；
      * 生效日 &le; 新生效日的开放事实由 {@link #closeActiveAt} 闭合，两者互斥不重复处理。
      *
      * @param employeeId 员工 ID
@@ -165,4 +165,33 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
     int closeActiveAt(@Param("employeeId") Long employeeId,
                       @Param("factType") FactType factType,
                       @Param("effect") LocalDate effect);
+
+    /**
+     * 查当前开放事实（expire_date IS NULL），用于"值不变仅调生效日期"的平移修正。
+     * 干净时间线下每个 (employee, factType) 至多一条开放事实；防御性取生效日最新一条。
+     */
+    @Select("SELECT * FROM pj_people_salary_fact " +
+        "WHERE employee_id = #{employeeId} AND fact_type = #{factType} " +
+        "AND expire_date IS NULL " +
+        "ORDER BY effective_date DESC, create_time DESC LIMIT 1")
+    SalaryFact selectOpenFact(@Param("employeeId") Long employeeId,
+                              @Param("factType") FactType factType);
+
+    /**
+     * 生效日平移时对齐前一段闭合点：expire_date = 旧生效日 → 新生效日（链条不变式：前段终点=开放段起点）。
+     */
+    @Update("UPDATE pj_people_salary_fact SET expire_date = #{newEffect} " +
+        "WHERE employee_id = #{employeeId} AND fact_type = #{factType} " +
+        "AND expire_date = #{oldEffect} AND id <> #{excludeId}")
+    int shiftPrevExpire(@Param("employeeId") Long employeeId,
+                        @Param("factType") FactType factType,
+                        @Param("oldEffect") LocalDate oldEffect,
+                        @Param("newEffect") LocalDate newEffect,
+                        @Param("excludeId") Long excludeId);
+
+    /**
+     * 平移开放事实的生效日。
+     */
+    @Update("UPDATE pj_people_salary_fact SET effective_date = #{newEffect} WHERE id = #{id}")
+    int updateEffectiveDate(@Param("id") Long id, @Param("newEffect") LocalDate newEffect);
 }

@@ -66,13 +66,13 @@ public class EmployeeVO {
     /** 是否兼职 */
     private Boolean isPartTime;
 
-    /** 师傅员工 ID */
+    /** 伯乐员工 ID */
     private Long mentorEmployeeId;
 
-    /** 师傅姓名 */
+    /** 伯乐姓名 */
     private String mentorName;
 
-    /** 师傅工号 */
+    /** 伯乐工号 */
     private String mentorCode;
 
     /** 电话 */

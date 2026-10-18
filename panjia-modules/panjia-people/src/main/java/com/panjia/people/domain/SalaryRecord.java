@@ -63,7 +63,7 @@ public class SalaryRecord implements Serializable {
     /** 是否兼职 */
     private Boolean isPartTime;
 
-    /** 师傅员工 ID */
+    /** 伯乐员工 ID */
     private Long mentorEmployeeId;
 
     /** 最近刷新时间 */

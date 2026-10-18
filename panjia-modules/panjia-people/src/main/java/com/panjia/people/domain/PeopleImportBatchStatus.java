@@ -14,7 +14,7 @@ public enum PeopleImportBatchStatus {
     /** 解析中（工具层解析 + 落 raw） */
     PARSING("解析中"),
 
-    /** 业务校验中（工号唯一/部门路径/师傅/职级） */
+    /** 业务校验中（工号唯一/部门路径/伯乐/职级） */
     VALIDATING("校验中"),
 
     /** 单一大原子事务落地中 */

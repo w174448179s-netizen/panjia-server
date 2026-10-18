@@ -34,7 +34,7 @@ public final class PeopleFactFields {
     /** 是否兼职（true/false） */
     public static final String PARTTIME = "PARTTIME";
 
-    /** 师傅员工 ID（NULL/空串=无师傅） */
+    /** 伯乐员工 ID（NULL/空串=无伯乐） */
     public static final String MENTOR = "MENTOR";
 
     /**

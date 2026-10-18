@@ -58,7 +58,7 @@ public class Employee implements Serializable {
     /** 状态：ACTIVE/PARTTIME/LEFT/PENDING */
     private EmployeeStatus status;
 
-    /** 师傅员工 ID（null=无师傅） */
+    /** 伯乐员工 ID（null=无伯乐） */
     private Long mentorEmployeeId;
 
     /** 备注 */

@@ -152,7 +152,7 @@ public class RuleService {
 
     /**
      * 规则配置完整性校验：敏感配置缺失时记录警告（算薪仍按引擎默认值执行，避免静默错账无人知）。
-     * personalRate 仅店长/总监提成使用；招聘奖励费率/上限/比例按配置的模式校验；
+     * personalRate 仅店长/总监提成使用；伯乐奖励费率/上限/比例按配置的模式校验；
      * 绩效等级阈值取 policy.points；系统算税（ENGINE）时必须有税率表。
      */
     private void validateRuleCompleteness(JsonNode root) {

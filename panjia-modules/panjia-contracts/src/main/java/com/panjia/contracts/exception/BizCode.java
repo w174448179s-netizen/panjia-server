@@ -28,13 +28,13 @@ public final class BizCode {
     /** 指定时点无有效职级（不降级，避免算薪口径错误） */
     public static final int NO_VALID_LEVEL = 2003;
 
-    /** 不能自推荐（师徒关系 mentor_id = apprentice_id） */
+    /** 不能自推荐（伯乐关系 mentor_id = apprentice_id） */
     public static final int MENTOR_SELF_REFERENCE = 2004;
 
-    /** 该员工已有有效师傅（同一徒弟只能有一个有效师傅） */
+    /** 该员工已有有效伯乐（同一千里马只能有一个有效伯乐） */
     public static final int MENTOR_ALREADY_EXISTS = 2005;
 
-    /** 师傅推荐人数已达上限（5 人） */
+    /** 伯乐推荐人数已达上限（5 人） */
     public static final int MENTOR_LIMIT_REACHED = 2006;
 
     private BizCode() {

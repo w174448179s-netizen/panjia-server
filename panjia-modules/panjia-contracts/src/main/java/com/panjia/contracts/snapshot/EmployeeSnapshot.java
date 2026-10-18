@@ -21,7 +21,7 @@ import java.time.LocalDateTime;
  *   <li>普通 POJO（{@link Serializable}），<b>禁止 Java record</b>（ADR-019）；</li>
  *   <li>只读 DTO，<b>禁止回写 people 域</b>；需要冻结留痕时由消费域物化到自己的快照表
  *       （payroll → {@code pj_payroll_employee_snapshot}，commission 同理，§3.4）；</li>
- *   <li>只含<b>业务事实</b>：身份 / 职级 / 参保开关 / 师徒关系；
+ *   <li>只含<b>业务事实</b>：身份 / 职级 / 参保开关 / 伯乐关系；
  *       <b>不含任何算薪规则参数</b>（社保基数与比例、公积金金额、提点、兼职豁免规则等
  *       一律归 payroll 规则侧，见 §10.9）。</li>
  * </ul>
@@ -105,9 +105,9 @@ public class EmployeeSnapshot implements Serializable {
      */
     private String socialTag;
 
-    // ==================== 师徒（MENTOR 事实） ====================
+    // ==================== 伯乐（MENTOR 事实） ====================
 
-    /** 师傅 employeeId（MENTOR 时点事实；无师傅为 null） */
+    /** 伯乐 employeeId（MENTOR 时点事实；无伯乐为 null） */
     private Long mentorId;
 
     // ==================== 快照元数据 ====================

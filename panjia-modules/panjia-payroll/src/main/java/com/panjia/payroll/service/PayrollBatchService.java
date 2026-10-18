@@ -342,9 +342,9 @@ public class PayrollBatchService {
         input.periodSnapshots = periodSnapshots;
         // ====== 多期间规则快照构建 end ======
 
-        // ====== 多期间历史切片（结佣提成按新签导入月取职级/绩效/师徒，2026-10-17 改） ======
+        // ====== 多期间历史切片（结佣提成按新签导入月取职级/绩效/伯乐，2026-10-17 改） ======
         // 员工升职后算薪月职级 ≠ 新签月职级，需按新签导入月取当时的 LEVEL 事实切片；
-        // 主期间（算薪月）的职级/师徒即员工快照当前值，无需重复查询。
+        // 主期间（算薪月）的职级/伯乐即员工快照当前值，无需重复查询。
         Set<Long> commissionEmpIds = lockedItems.stream()
             .map(CommissionItemDTO::getEmployeeId)
             .filter(Objects::nonNull)
@@ -364,7 +364,7 @@ public class PayrollBatchService {
             }
             try {
                 LocalDate refDate = YearMonth.parse(rp).atDay(1);
-                // 一次切片同时取历史职级（LEVEL 事实）与历史师徒关系（MENTOR 事实，按生效区间）
+                // 一次切片同时取历史职级（LEVEL 事实）与历史伯乐关系（MENTOR 事实，按生效区间）
                 Map<Long, String> levelByEmp = new HashMap<>();
                 Map<Long, Integer> apprenticeByMentor = new HashMap<>();
                 peopleQueryPort.getEmployeeSnapshots(commissionEmpIds, refDate)
@@ -570,7 +570,7 @@ public class PayrollBatchService {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
         }
 
-        // 招聘加点徒弟数：按算薪月师徒关系（EmployeeSnapshot.mentorId）统计在册徒弟数；
+        // 招聘加点千里马数：按算薪月伯乐关系（EmployeeSnapshot.mentorId）统计在册千里马数；
         // 历史月切片见 periodApprenticeMap（新签导入月的 MENTOR 事实）
         Map<Long, Integer> apprenticeByMentor = new HashMap<>();
         for (EmployeeSnapshot e : employees) {
@@ -579,7 +579,7 @@ public class PayrollBatchService {
             }
         }
         input.qualifiedApprenticeCount = apprenticeByMentor;
-        // 招聘奖励（AMOUNT_RATIO）的徒弟结佣业绩合计由引擎在算薪时基于师徒关系+结佣明细预算
+        // 伯乐奖励（AMOUNT_RATIO）的千里马结佣业绩合计由引擎在算薪时基于伯乐关系+结佣明细预算
 
         return input;
     }

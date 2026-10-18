@@ -17,7 +17,7 @@ import java.time.LocalDateTime;
  * 取数条件 {@code effective_date <= :point AND (expire_date IS NULL OR :point < expire_date)}，
  * 按 effective_date 倒序取第一条。
  * <p>
- * value 一律存字符串：布尔类为 "true"/"false"，MENTOR 存师傅员工 ID，
+ * value 一律存字符串：布尔类为 "true"/"false"，MENTOR 存伯乐员工 ID，
  * LEVEL 存职级编码，STATUS 存状态码。
  */
 @Data

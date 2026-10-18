@@ -81,15 +81,15 @@ public class EmployeeCreateDTO {
     /** 是否兼职 */
     private Boolean parttime;
 
-    /** 师傅工号（服务端按工号解析为师傅员工 ID） */
+    /** 伯乐工号（服务端按工号解析为伯乐员工 ID） */
     private String mentorCode;
 
     /**
-     * 师傅员工 ID（导入侧预解析后直传，绕过 resolveMentorIdByCode 的库内查询）。
+     * 伯乐员工 ID（导入侧预解析后直传，绕过 resolveMentorIdByCode 的库内查询）。
      * <p>
-     * 用于员工导入场景：阶段 B 落地循环里师傅可能尚未入库（师傅行排在徒弟后），
+     * 用于员工导入场景：阶段 B 落地循环里伯乐可能尚未入库（伯乐行排在千里马后），
      * 此时由导入侧维护「本批次已创建工号 → 员工 ID」缓存预解析后直传，
-     * 避免 createEmployee 内部再次查库抛「师傅工号不存在」。
+     * 避免 createEmployee 内部再次查库抛「伯乐工号不存在」。
      * <br>非 null 时优先于 mentorCode；null 时回退到 mentorCode 走库内解析（员工管理界面路径）。
      */
     private Long mentorId;
