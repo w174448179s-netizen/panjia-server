@@ -185,8 +185,9 @@ public class SalaryFactSyncAdapter implements PeopleSalaryFactSyncPort {
         if (target.equals(current)) {
             return false;
         }
-        // 与员工域 changeFact 同口径：闭合生效日时点旧区间 → 插入新事实 → 写变更日志
+        // 与员工域 changeFact 同口径：闭合生效日时点旧区间 → 清理被覆盖的后续开放事实 → 插入新事实 → 写变更日志
         salaryFactMapper.closeActiveAt(employeeId, FactType.LEVEL, effectiveDate);
+        salaryFactMapper.deleteOpenAfter(employeeId, FactType.LEVEL, effectiveDate);
 
         SalaryFact fact = new SalaryFact();
         fact.setEmployeeId(employeeId);

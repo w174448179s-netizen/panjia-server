@@ -778,6 +778,9 @@ public class EmployeeServiceImpl implements EmployeeService {
                             LocalDate effect, Long operatorId) {
         String oldValue = salaryFactMapper.selectValueAt(employeeId, type, effect);
         salaryFactMapper.closeActiveAt(employeeId, type, effect);
+        // 回填生效日早于既有后续事实时（如入职初始化的无师傅占位），删除被新区间
+        // 完全覆盖的开放事实，避免"生效日最新者优先"取数遮蔽新值（2026-10-18 招聘奖励事故）
+        salaryFactMapper.deleteOpenAfter(employeeId, type, effect);
 
         SalaryFact fact = new SalaryFact();
         fact.setEmployeeId(employeeId);

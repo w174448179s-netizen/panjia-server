@@ -2,6 +2,7 @@ package com.panjia.people.mapper;
 
 import com.panjia.people.domain.FactType;
 import com.panjia.people.domain.SalaryFact;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -129,6 +130,25 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
         """)
     List<Long> selectActiveEmployeeIdsByFactType(@Param("factType") FactType factType,
                                                  @Param("point") LocalDate point);
+
+    /**
+     * 删除被新区间完全覆盖的后续事实：生效日晚于新变更生效日且仍开放的事实。
+     * <p>回填场景（变更生效日早于既有事实生效日）下，这类事实按"生效日最新者优先"
+     * 会遮蔽新值（如入职初始化的无师傅占位事实遮住回填的师傅），直接删除；
+     * 生效日 &le; 新生效日的开放事实由 {@link #closeActiveAt} 闭合，两者互斥不重复处理。
+     *
+     * @param employeeId 员工 ID
+     * @param factType   事实类型
+     * @param effect     新变更生效日
+     * @return 删除行数
+     */
+    @Delete("DELETE FROM pj_people_salary_fact " +
+        "WHERE employee_id = #{employeeId} AND fact_type = #{factType} " +
+        "AND effective_date > #{effect} " +
+        "AND (expire_date IS NULL OR #{effect} < expire_date)")
+    int deleteOpenAfter(@Param("employeeId") Long employeeId,
+                        @Param("factType") FactType factType,
+                        @Param("effect") LocalDate effect);
 
     /**
      * 闭合旧区间：将覆盖指定生效日的开放事实记录 expire_date 置为 effect 日。
