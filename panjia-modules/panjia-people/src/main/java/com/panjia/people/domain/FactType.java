@@ -46,7 +46,10 @@ public enum FactType {
     PARTTIME("兼职"),
 
     /** 伯乐员工 ID */
-    MENTOR("伯乐");
+    MENTOR("伯乐"),
+
+    /** 新签业绩不计入所属组别店长的团队业绩（true=排除；只影响店长团队提成与其社保人数，不影响总监跳点/本人提成/伯乐奖励） */
+    EXCLUDE_TEAM("不计入店长团队");
 
     /** 事实类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

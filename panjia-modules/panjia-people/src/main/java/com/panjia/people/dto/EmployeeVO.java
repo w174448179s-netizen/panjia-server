@@ -66,6 +66,9 @@ public class EmployeeVO {
     /** 是否兼职 */
     private Boolean isPartTime;
 
+    /** 新签业绩不计入所属组别店长的团队业绩 */
+    private Boolean excludeTeam;
+
     /** 伯乐员工 ID */
     private Long mentorEmployeeId;
 

@@ -400,12 +400,19 @@ public class PayrollBatchService {
             .filter(it -> it.getEmployeeId() != null)
             .collect(Collectors.groupingBy(CommissionItemDTO::getEmployeeId));
 
-        // 新签按事实行原始 deptId 分组（折算后）；门店级 roll-up 在下方统一做
+        // 新签按事实行原始 deptId 分组（折算后）；门店级 roll-up 在下方统一做。
+        // 「不计入店长团队」（EXCLUDE_TEAM 事实，2026-10-19 拆分口径）：开关开启的员工，其新签
+        // 不计入所属组别店长的团队业绩，但**计入总监管辖组的原始口径**（总监跳点不受影响）。
+        // rawAll = 原始（含被排除，总监用）；rawDeptNewSign = 店长口径（排除后）
+        Map<Long, BigDecimal> rawDeptNewSignAll = new HashMap<>();
         Map<Long, BigDecimal> rawDeptNewSign = new HashMap<>();
         for (CommissionItemDTO it : newsignItems) {
             if (it.getDeptId() == null || it.getAmount() == null) continue;
             BigDecimal factor = input.snapshot.conversionFactor(it.getBizType());
             BigDecimal converted = it.getAmount().multiply(factor);
+            rawDeptNewSignAll.merge(it.getDeptId(), converted, BigDecimal::add);
+            EmployeeSnapshot owner = it.getEmployeeId() == null ? null : empMap.get(it.getEmployeeId());
+            if (owner != null && Boolean.TRUE.equals(owner.getExcludeTeam())) continue;
             rawDeptNewSign.merge(it.getDeptId(), converted, BigDecimal::add);
         }
 
@@ -430,12 +437,22 @@ public class PayrollBatchService {
         Map<Long, BigDecimal> deptStandardMap = new HashMap<>();
         Map<Long, Integer> deptInsuredCountMap = new HashMap<>();
 
-        // 组级计缴参保人数：按员工所在组别直接统计
+        // 组级计缴参保人数：按员工所在组别直接统计。
+        // 「不计入店长团队」联动（2026-10-19）：被排除人员只从**店长口径**人数剔除；
+        // 总监用原始人数口径（headcountAll），社保扣款两套分开
         Map<Long, Integer> headcountByDept = new HashMap<>();
+        Map<Long, Integer> headcountAll = new HashMap<>();
         for (EmployeeSnapshot es : employees) {
-            if (es.getDeptId() != null && SalaryCalculationEngine.isInsuredHeadcount(es, input.snapshot)) {
-                headcountByDept.merge(es.getDeptId(), 1, Integer::sum);
-            }
+            if (es.getDeptId() == null) continue;
+            if (!SalaryCalculationEngine.isInsuredHeadcount(es, input.snapshot)) continue;
+            headcountAll.merge(es.getDeptId(), 1, Integer::sum);
+            if (Boolean.TRUE.equals(es.getExcludeTeam())) continue;
+            headcountByDept.merge(es.getDeptId(), 1, Integer::sum);
+        }
+        Map<Long, BigDecimal> deptSocialRaw = new HashMap<>();
+        for (Map.Entry<Long, Integer> entry : headcountAll.entrySet()) {
+            deptSocialRaw.put(entry.getKey(),
+                input.snapshot.deptSocialStandard(entry.getKey()).multiply(BigDecimal.valueOf(entry.getValue())));
         }
         for (Map.Entry<Long, Integer> entry : headcountByDept.entrySet()) {
             Long deptId = entry.getKey();
@@ -448,6 +465,9 @@ public class PayrollBatchService {
 
         input.deptNewSignTotal = deptNewSign;
         input.deptEmployerSocialTotal = deptSocial;
+        // 原始口径（总监管辖组跳点用，「不计入店长团队」不生效）
+        input.deptNewSignTotalRaw = rawDeptNewSignAll;
+        input.deptEmployerSocialTotalRaw = deptSocialRaw;
         input.deptSocialStandard = deptStandardMap;
         input.deptInsuredCount = deptInsuredCountMap;
         input.deptDiffTotal = deptDiffConfig;

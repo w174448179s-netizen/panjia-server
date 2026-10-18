@@ -202,6 +202,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         initFact(emp.getEmployeeId(), FactType.HOUSING_FUND, decimalVal(dto.getHousingFund()), effect);
         initFact(emp.getEmployeeId(), FactType.DORMITORY_FEE, decimalVal(dto.getDormitoryFee()), effect);
         initFact(emp.getEmployeeId(), FactType.PARTTIME, boolVal(dto.getParttime()), effect);
+        initFact(emp.getEmployeeId(), FactType.EXCLUDE_TEAM, boolVal(dto.getExcludeTeam()), effect);
         initFact(emp.getEmployeeId(), FactType.MENTOR,
             mentorId != null ? String.valueOf(mentorId) : NO_MENTOR, effect);
 
@@ -292,6 +293,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         changeDecimalFact(employeeId, FactType.HOUSING_FUND, dto.getHousingFund(), effect, operator);
         changeDecimalFact(employeeId, FactType.DORMITORY_FEE, dto.getDormitoryFee(), effect, operator);
         changeBoolFact(employeeId, FactType.PARTTIME, dto.getParttime(), effect, operator);
+        changeBoolFact(employeeId, FactType.EXCLUDE_TEAM, dto.getExcludeTeam(), effect, operator);
 
         // ⑥ 归属部门变更 → 同步 sys_user.dept_id
         if (dto.getDeptId() != null && !dto.getDeptId().equals(emp.getDeptId())) {
@@ -572,6 +574,8 @@ public class EmployeeServiceImpl implements EmployeeService {
             snap.setDormitoryFee(parseDecimalFact(factValues.get(FactType.DORMITORY_FEE.getCode())));
             // 伯乐
             snap.setMentorId(parseMentorFact(factValues.get(FactType.MENTOR.getCode())));
+            // 团队业绩排除开关
+            snap.setExcludeTeam(parseBoolFact(factValues.get(FactType.EXCLUDE_TEAM.getCode())));
         }
         snap.setSnapshotDate(point);
         snap.setSnapshottedAt(java.time.LocalDateTime.now());
@@ -979,6 +983,14 @@ public class EmployeeServiceImpl implements EmployeeService {
         Set<Long> deptIds = vos.stream().map(EmployeeVO::getDeptId).filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, String> deptNames = deptPort.findDeptFullNames(deptIds);
         vos.forEach(vo -> vo.setDeptName(deptNames.get(vo.getDeptId())));
+
+        // 团队业绩排除开关（事实表当前态；低频配置，批量查 fact 不走物化表）
+        Map<Long, String> excludeTeamFacts = new LinkedHashMap<>();
+        for (SalaryFact fact : salaryFactMapper.selectValuesAt(employeeIds, FactType.EXCLUDE_TEAM, LocalDate.now())) {
+            excludeTeamFacts.put(fact.getEmployeeId(), fact.getValue());
+        }
+        vos.forEach(vo -> vo.setExcludeTeam(
+            Boolean.parseBoolean(excludeTeamFacts.get(vo.getEmployeeId()))));
 
         // 岗位名集合
         List<Long> userIds = vos.stream().map(EmployeeVO::getUserId).filter(Objects::nonNull).toList();

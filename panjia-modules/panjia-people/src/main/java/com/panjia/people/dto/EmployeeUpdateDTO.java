@@ -73,6 +73,9 @@ public class EmployeeUpdateDTO {
     /** 是否兼职 */
     private Boolean parttime;
 
+    /** 新签业绩不计入所属组别店长的团队业绩（null=不修改） */
+    private Boolean excludeTeam;
+
     /** 伯乐工号（空串表示解除伯乐关系） */
     private String mentorCode;
 

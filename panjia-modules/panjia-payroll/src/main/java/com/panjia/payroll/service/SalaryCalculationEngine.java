@@ -59,6 +59,13 @@ public class SalaryCalculationEngine {
         public Map<Long, Integer> deptInsuredCount;
         /** deptId -> 门店当月新签与结佣差额（门店月度配置，未配置=0，计薪基数直接扣减项） */
         public Map<Long, BigDecimal> deptDiffTotal;
+
+        // ===== 原始口径（不做「不计入店长团队」排除，2026-10-19 拆分：总监管辖组跳点用原始数，
+        // 店长团队提成用上方排除后口径；店长/总监同组数字允许不同，开关语义=只影响店长） =====
+        /** deptId -> 组新签合计（原始，含被排除员工） */
+        public Map<Long, BigDecimal> deptNewSignTotalRaw;
+        /** deptId -> 社保业绩扣款（原始人数口径） */
+        public Map<Long, BigDecimal> deptEmployerSocialTotalRaw;
         /** 算薪期间的规则快照（主快照） */
         public RuleService.ParsedSnapshot snapshot;
         /** factId → 新签导入月（结佣提成规则期间：绑新签事实取其 period；实收明细按业务键匹配新签事实） */
@@ -415,6 +422,12 @@ public class SalaryCalculationEngine {
                 // 总监多组：遍历管辖组别，各组独立按合计跳点算提成，汇总 storeIncome。
                 // 对齐天街工资表总监 sheet（每组一行：新签/社保/合计/跳点/提成金额，
                 // 提成金额汇总到第一行发工资）。
+                // 口径（2026-10-19）：「不计入店长团队」开关只影响店长团队提成，
+                // 总监管辖组跳点用原始口径（含被排除员工），同组数字与店长侧允许不同
+                Map<Long, BigDecimal> dirNewSign = input.deptNewSignTotalRaw != null
+                    ? input.deptNewSignTotalRaw : input.deptNewSignTotal;
+                Map<Long, BigDecimal> dirSocialMap = input.deptEmployerSocialTotalRaw != null
+                    ? input.deptEmployerSocialTotalRaw : input.deptEmployerSocialTotal;
                 List<Long> managedDepts;
                 if (input.directorStoreDepts != null && input.directorStoreDepts.containsKey(emp.getEmployeeId())) {
                     managedDepts = input.directorStoreDepts.get(emp.getEmployeeId());
@@ -429,9 +442,9 @@ public class SalaryCalculationEngine {
                 BigDecimal sumIncome = BigDecimal.ZERO;
                 List<DirectorStoreItem> storeItems = new ArrayList<>();
                 for (Long deptId : managedDepts) {
-                    BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(deptId, BigDecimal.ZERO);
-                    BigDecimal deptSocial = input.deptEmployerSocialTotal == null
-                        ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(deptId, BigDecimal.ZERO);
+                    BigDecimal deptTotal = dirNewSign.getOrDefault(deptId, BigDecimal.ZERO);
+                    BigDecimal deptSocial = dirSocialMap == null
+                        ? BigDecimal.ZERO : dirSocialMap.getOrDefault(deptId, BigDecimal.ZERO);
                     BigDecimal deptDiff = input.deptDiffTotal == null
                         ? BigDecimal.ZERO : input.deptDiffTotal.getOrDefault(deptId, BigDecimal.ZERO);
                     if (deptTotal.signum() == 0 && deptSocial.signum() == 0 && deptDiff.signum() == 0) continue;

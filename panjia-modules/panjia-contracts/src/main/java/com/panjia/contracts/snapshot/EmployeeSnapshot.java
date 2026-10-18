@@ -110,6 +110,9 @@ public class EmployeeSnapshot implements Serializable {
     /** 伯乐 employeeId（MENTOR 时点事实；无伯乐为 null） */
     private Long mentorId;
 
+    /** 新签业绩不计入所属组别店长的团队业绩（EXCLUDE_TEAM 时点事实；只影响店长团队提成与其社保人数，总监跳点用原始口径不受影响） */
+    private Boolean excludeTeam;
+
     // ==================== 快照元数据 ====================
 
     /** 业务时点（取数所在月，约定为该月月末日） */

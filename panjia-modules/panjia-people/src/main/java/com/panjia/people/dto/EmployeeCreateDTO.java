@@ -81,6 +81,9 @@ public class EmployeeCreateDTO {
     /** 是否兼职 */
     private Boolean parttime;
 
+    /** 新签业绩不计入所属组别店长的团队业绩（null=false） */
+    private Boolean excludeTeam;
+
     /** 伯乐工号（服务端按工号解析为伯乐员工 ID） */
     private String mentorCode;
 
