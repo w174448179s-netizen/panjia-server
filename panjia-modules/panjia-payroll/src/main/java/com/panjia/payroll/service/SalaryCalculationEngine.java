@@ -375,6 +375,25 @@ public class SalaryCalculationEngine {
                     guaranteeFill = BigDecimal.ZERO;
                 }
                 d.setGuaranteeFill(guaranteeFill);
+                // 保底补足计算过程：保底线 vs 团队+个人新签（含构成），未触发也落地供前端展示
+                if (minSalary.compareTo(BigDecimal.ZERO) > 0) {
+                    List<Map<String, Object>> gpSteps = new ArrayList<>();
+                    Map<String, Object> gpTeam = new java.util.LinkedHashMap<>();
+                    gpTeam.put("label", "团队提成");
+                    gpTeam.put("value", teamIncome);
+                    gpSteps.add(gpTeam);
+                    Map<String, Object> gpNewsign = new java.util.LinkedHashMap<>();
+                    gpNewsign.put("label", "个人新签(递延)");
+                    gpNewsign.put("value", personalNewsign);
+                    gpSteps.add(gpNewsign);
+                    Map<String, Object> gp = new java.util.LinkedHashMap<>();
+                    gp.put("minSalary", minSalary);
+                    gp.put("compareLabel", "团队提成+个人新签");
+                    gp.put("compareValue", sumTp);
+                    gp.put("steps", gpSteps);
+                    gp.put("fill", guaranteeFill);
+                    d.setGuaranteeCalcProcess(writeGuaranteeJson(gp));
+                }
 
                 // 落地：店长 sheet 展示字段（组新签/社保标准/参保人数/社保业绩扣款/差额/团队提成比例/保底）
                 BigDecimal deptStandard = input.deptSocialStandard == null
@@ -450,13 +469,78 @@ public class SalaryCalculationEngine {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
                 baseSalary = bd(rank.path("baseSalary").asText("0"));
 
-                // 经纪人保底规则：当月工资 = MAX(保底工资, 个人新签提成)
+                // 经纪人保底规则：业绩部分 = 结佣提成 + 保底补足，其中
+                // 保底补足 = MAX(保底工资, 个人新签提成) - 个人新签提成
                 // 仅当职级配置了保底工资（minSalary > 0）时生效；未配置则经纪人新签业绩不参与薪酬核算
-                // 个人新签提成 = 个人新签计薪业绩（折算后）× 当月最终提成比例（finalRate，与结佣提成同口径）
+                // 个人新签提成与结佣提成完全同口径（2026-10-18 改）：按新签导入月分期间，
+                // 各期间用该月规则快照（职级提点/绩效扣点/调整单）重算 finalRate 后折算+算提成——
+                // 同一笔业绩无论按新签口径还是结佣口径，费率一致，保底比较才有意义。
+                // 注意：个人新签提成与结佣提成同源（同一笔业绩钱），不单独计入应发，仅作保底比较基准
                 BigDecimal minSalary = bd(rank.path("minSalary").asText("0"));
+                // 个人新签分笔计算过程（期间→业绩/费率/金额），与结佣提成过程同构
+                List<Map<String, Object>> nsSteps = new ArrayList<>();
                 if (minSalary.compareTo(BigDecimal.ZERO) > 0) {
-                    BigDecimal personalNewsignPerf = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
-                    personalNewsign = MoneyUtil.round2(personalNewsignPerf.multiply(finalRate));
+                    List<CommissionItemDTO> nsItems = input.newsignByEmp.get(emp.getEmployeeId());
+                    if (nsItems != null && !nsItems.isEmpty()) {
+                        // 按新签导入月分组（与结佣提成共用 resolveCommissionRulePeriod / factPeriodMap）
+                        Map<String, List<CommissionItemDTO>> nsByRulePeriod = new HashMap<>();
+                        for (CommissionItemDTO it : nsItems) {
+                            String rulePeriod = resolveCommissionRulePeriod(it, input.factPeriodMap);
+                            nsByRulePeriod.computeIfAbsent(rulePeriod, k -> new ArrayList<>()).add(it);
+                        }
+                        // 逐期间分别用对应规则快照算提成
+                        for (Map.Entry<String, List<CommissionItemDTO>> entry : nsByRulePeriod.entrySet()) {
+                            String rulePeriod = entry.getKey();
+                            List<CommissionItemDTO> periodItems = entry.getValue();
+                            RuleService.ParsedSnapshot periodSnap = input.periodSnapshots.getOrDefault(rulePeriod, snap);
+
+                            // 职级按新签导入月取历史切片（未命中回退算薪月职级）
+                            String periodLevel = input.periodLevelMap
+                                .getOrDefault(rulePeriod, Map.of())
+                                .getOrDefault(emp.getEmployeeId(), level);
+                            JsonNode periodRank = periodSnap.rank(periodLevel);
+
+                            // 绩效等级按新签月积分事实派生（切片已构建该月但无事实 → 0 分走 C 扣点；
+                            // 整体未构建（回退场景）→ 用算薪月积分），与结佣提成同口径
+                            ScoreFactsDTO periodScore;
+                            if (input.periodScoreMap.containsKey(rulePeriod)) {
+                                periodScore = input.periodScoreMap.get(rulePeriod).get(emp.getEmployeeId());
+                                if (periodScore == null) {
+                                    periodScore = new ScoreFactsDTO();
+                                    periodScore.setTotalPoints(BigDecimal.ZERO);
+                                    periodScore.setAttendDays(1); // 出勤 1 天使 0/1=0 分走等级派生
+                                }
+                            } else {
+                                periodScore = scoreFacts;
+                            }
+
+                            // 人工调整按新签导入月当时生效的调整单（该月无调整=不叠加）；
+                            // 未参保自动扣点保持算薪月参保状态
+                            List<RateAdjustItem> periodAdjustItems = new ArrayList<>(
+                                input.periodAdjustMap.getOrDefault(rulePeriod, Map.of())
+                                    .getOrDefault(emp.getEmployeeId(), List.of()));
+                            if (noSocialAuto != null) {
+                                periodAdjustItems.add(noSocialAuto);
+                            }
+
+                            // 经纪人无招聘加点（mentorAdd=0），其余口径与结佣提成一致
+                            BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, periodLevel, emp,
+                                periodScore, periodAdjustItems, periodRank.path("ruleContent"), BigDecimal.ZERO, role);
+
+                            // 用该期间快照折算业绩
+                            BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
+                            BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
+                            personalNewsign = personalNewsign.add(periodIncome);
+                            // 收集分笔过程：month=新签导入月
+                            Map<String, Object> nsStep = new java.util.LinkedHashMap<>();
+                            nsStep.put("month", rulePeriod);
+                            nsStep.put("perf", periodPerf);
+                            nsStep.put("rate", periodFinalRate);
+                            nsStep.put("income", periodIncome);
+                            nsSteps.add(nsStep);
+                        }
+                        personalNewsign = MoneyUtil.round2(personalNewsign);
+                    }
                     // 保底补足 = MAX(保底工资, 个人新签提成) - 个人新签提成
                     guaranteeFill = MoneyUtil.round2(minSalary.max(personalNewsign).subtract(personalNewsign));
                     if (guaranteeFill.compareTo(BigDecimal.ZERO) < 0) {
@@ -465,6 +549,14 @@ public class SalaryCalculationEngine {
                     d.setPersonalNewsignIncome(personalNewsign);
                     d.setGuaranteeFill(guaranteeFill);
                     d.setMinSalary(minSalary);
+                    // 保底补足计算过程：保底线 vs 个人新签提成（含分笔回溯），未触发也落地供前端展示
+                    Map<String, Object> gp = new java.util.LinkedHashMap<>();
+                    gp.put("minSalary", minSalary);
+                    gp.put("compareLabel", "个人新签提成");
+                    gp.put("compareValue", personalNewsign);
+                    gp.put("newsignSteps", nsSteps);
+                    gp.put("fill", guaranteeFill);
+                    d.setGuaranteeCalcProcess(writeGuaranteeJson(gp));
                 }
             }
             d.setBaseSalary(MoneyUtil.round2(baseSalary));
@@ -494,12 +586,12 @@ public class SalaryCalculationEngine {
             d.setBonus(MoneyUtil.round2(bonus));
             d.setOtherIncome(MoneyUtil.round2(otherIncome));
 
-            // 应发 = 提成 + 团队 + 个人新签（仅经纪人保底场景）+ 保底 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖
-            // 注：店长个人新签递延不计入当月应发；经纪人仅当职级配置保底时才将个人新签提成计入
+            // 应发 = 结佣提成 + 保底补足 + 团队 + 门店 + 底薪 + 招聘奖励 + 奖金 + 其他收入 + 全勤奖
+            // 注：店长个人新签递延不计入当月应发；经纪人保底场景个人新签提成不单独计入应发
+            //（与结佣提成同源同一笔业绩钱，单独计入即重复计薪），仅作为保底比较基准落明细列
             BigDecimal fullAttendance = d.getFullAttendance() == null
                 ? BigDecimal.ZERO : d.getFullAttendance();
-            BigDecimal agentNewsign = (role == EmployeeRole.AGENT) ? personalNewsign : BigDecimal.ZERO;
-            BigDecimal gross = commissionIncome.add(teamIncome).add(agentNewsign).add(guaranteeFill)
+            BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
                 .add(storeIncome).add(payableBaseSalary).add(mentorBonus).add(bonus).add(otherIncome)
                 .add(fullAttendance);
             // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
@@ -507,14 +599,6 @@ public class SalaryCalculationEngine {
                 BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
                 // 保底场景 gross = commissionIncome + teamIncome + guaranteeFill，应等于 minSalary + commissionIncome
                 BigDecimal expectedFloor = minSal.add(commissionIncome);
-                if (gross.compareTo(expectedFloor) < 0) {
-                    gross = expectedFloor;
-                }
-            }
-            // 经纪人保底触发时，兜底 gross 至少等于「保底工资 + 结佣提成 + 当月应付底薪」
-            if (role == EmployeeRole.AGENT && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
-                BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
-                BigDecimal expectedFloor = minSal.add(commissionIncome).add(payableBaseSalary);
                 if (gross.compareTo(expectedFloor) < 0) {
                     gross = expectedFloor;
                 }
@@ -714,6 +798,16 @@ public class SalaryCalculationEngine {
             return ADJUST_JSON.writeValueAsString(items);
         } catch (Exception e) {
             log.warn("总监门店提成明细JSON序列化失败", e);
+            return null;
+        }
+    }
+
+    /** 保底补足计算过程 → 溯源 JSON（guarantee_calc_process 列） */
+    private String writeGuaranteeJson(Object process) {
+        try {
+            return ADJUST_JSON.writeValueAsString(process);
+        } catch (Exception e) {
+            log.warn("保底补足计算过程JSON序列化失败", e);
             return null;
         }
     }

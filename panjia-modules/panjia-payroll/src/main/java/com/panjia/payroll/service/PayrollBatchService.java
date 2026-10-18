@@ -287,6 +287,12 @@ public class PayrollBatchService {
             .map(CommissionItemDTO::getPerformanceFactId)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
+        // 新签明细同样按新签导入月回溯（2026-10-18 改，经纪人新签提成与结佣提成同口径）：
+        // 新签事实映射与结佣共用一套 factPeriodMap
+        newsignItems.stream()
+            .map(CommissionItemDTO::getPerformanceFactId)
+            .filter(Objects::nonNull)
+            .forEach(factIds::add);
         Map<Long, String> factPeriodMap = new HashMap<>();
         if (!factIds.isEmpty()) {
             List<PerformanceFactSummaryDTO> facts = commissionPerformanceQueryPort.findActiveByFacts(factIds);
@@ -308,11 +314,14 @@ public class PayrollBatchService {
         input.factPeriodMap = factPeriodMap;
 
         Set<String> requiredPeriods = new HashSet<>();
-        for (CommissionItemDTO it : lockedItems) {
-            if (it.getPerformanceFactId() != null) {
-                String factPeriod = factPeriodMap.get(it.getPerformanceFactId());
-                if (factPeriod != null) {
-                    requiredPeriods.add(factPeriod);
+        // 结佣与新签明细均按新签导入月归集规则期间（2026-10-18 改）
+        for (List<CommissionItemDTO> items : List.of(lockedItems, newsignItems)) {
+            for (CommissionItemDTO it : items) {
+                if (it.getPerformanceFactId() != null) {
+                    String factPeriod = factPeriodMap.get(it.getPerformanceFactId());
+                    if (factPeriod != null) {
+                        requiredPeriods.add(factPeriod);
+                    }
                 }
             }
         }
@@ -339,6 +348,11 @@ public class PayrollBatchService {
             .map(CommissionItemDTO::getEmployeeId)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
+        // 新签提成同样按新签导入月取历史切片（2026-10-18 改）：切片员工范围含新签明细涉及员工
+        newsignItems.stream()
+            .map(CommissionItemDTO::getEmployeeId)
+            .filter(Objects::nonNull)
+            .forEach(commissionEmpIds::add);
         Map<String, Map<Long, String>> periodLevelMap = new HashMap<>();
         Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = new HashMap<>();
         Map<String, Map<Long, Integer>> periodApprenticeMap = new HashMap<>();

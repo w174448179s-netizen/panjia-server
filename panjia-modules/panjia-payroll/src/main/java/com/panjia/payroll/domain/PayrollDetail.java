@@ -68,6 +68,12 @@ public class PayrollDetail implements Serializable {
      * 仅当存在跨月回溯（新签导入月 ≠ 算薪月）时落地；全部当月结佣则为 null（展示保持原样）。
      */
     private String commissionCalcProcess;
+    /**
+     * 保底补足计算过程 JSON：{minSalary:保底线, compareLabel:比较基准名, compareValue:基准值,
+     * steps?:[{label,value}] 基准构成, newsignSteps?:[{month,perf,rate,income}] 经纪人个人新签分笔回溯, fill:补足结果}。
+     * 仅保底职级（minSalary &gt; 0）落地；未触发（fill=0）也落地，供前端展示"有没有触发、怎么算的"。
+     */
+    private String guaranteeCalcProcess;
 
     // 业绩溯源（导出展示用，落地避免前端反推误差）
     /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */
