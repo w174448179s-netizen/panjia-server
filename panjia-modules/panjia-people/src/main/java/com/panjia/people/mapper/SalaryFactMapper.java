@@ -182,7 +182,7 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
      */
     @Update("UPDATE pj_people_salary_fact SET expire_date = #{newEffect} " +
         "WHERE employee_id = #{employeeId} AND fact_type = #{factType} " +
-        "AND expire_date = #{oldEffect} AND id <> #{excludeId}")
+        "AND expire_date = #{oldEffect} AND fact_id <> #{excludeId}")
     int shiftPrevExpire(@Param("employeeId") Long employeeId,
                         @Param("factType") FactType factType,
                         @Param("oldEffect") LocalDate oldEffect,
@@ -192,6 +192,6 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
     /**
      * 平移开放事实的生效日。
      */
-    @Update("UPDATE pj_people_salary_fact SET effective_date = #{newEffect} WHERE id = #{id}")
+    @Update("UPDATE pj_people_salary_fact SET effective_date = #{newEffect} WHERE fact_id = #{id}")
     int updateEffectiveDate(@Param("id") Long id, @Param("newEffect") LocalDate newEffect);
 }
