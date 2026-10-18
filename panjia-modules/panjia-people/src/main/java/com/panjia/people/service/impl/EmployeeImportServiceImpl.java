@@ -423,6 +423,9 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         }
     }
 
+    /** 经纪人岗位名（= 角色名，PostRolePort 同名精确匹配） */
+    private static final String AGENT_POST_NAME = "经纪人";
+
     /**
      * 解析行 → 新增员工 DTO（映射规则与旧 EmployeeImportSink 一致）。
      *
@@ -435,12 +438,14 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         String deptFull = assembleDeptPath(row, deptCols);
         Long deptId = deptIdCache.computeIfAbsent(deptFull, deptPort::ensureDept);
 
+        String level = str(row, "level");
         EmployeeCreateDTO dto = new EmployeeCreateDTO();
         dto.setDeptId(deptId);
         dto.setEmployeeCode(str(row, "employee_code"));
         dto.setEmployeeName(str(row, "employee_name"));
-        dto.setPostNames(splitPosts(str(row, "post_names")));
-        dto.setLevelCode(str(row, "level"));
+        // 职级含"经纪人"（如租赁经纪人/买卖经纪人）→ 补充"经纪人"岗位，确保经纪人角色绑定
+        dto.setPostNames(ensureAgentPost(level, splitPosts(str(row, "post_names"))));
+        dto.setLevelCode(level);
         dto.setPhone(str(row, "phone"));
         dto.setIdCard(str(row, "id_card"));
         dto.setReportDate(date(row, "report_date"));
@@ -477,15 +482,20 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         String deptFull = assembleDeptPath(row, deptCols);
         Long deptId = deptIdCache.computeIfAbsent(deptFull, deptPort::ensureDept);
 
+        String level = str(row, "level");
         EmployeeUpdateDTO dto = new EmployeeUpdateDTO();
         dto.setDeptId(deptId);
         dto.setEmployeeName(blankToNull(str(row, "employee_name")));
-        // 岗位列空白不参与 diff（保留现有岗位/角色，避免整批误清）
-        if (StringUtils.isNotBlank(str(row, "post_names"))) {
-            dto.setPostNames(splitPosts(str(row, "post_names")));
+        // 岗位列空白不参与 diff（保留现有岗位/角色，避免整批误清）；
+        // 但若职级含"经纪人"（如租赁经纪人/买卖经纪人），需补充"经纪人"岗位确保角色绑定
+        String postNamesRaw = str(row, "post_names");
+        if (StringUtils.isNotBlank(postNamesRaw)) {
+            dto.setPostNames(ensureAgentPost(level, splitPosts(postNamesRaw)));
+        } else if (level != null && level.contains(AGENT_POST_NAME)) {
+            dto.setPostNames(List.of(AGENT_POST_NAME));
         }
         // updateEmployee 内部跳过空白职级
-        dto.setLevelCode(str(row, "level"));
+        dto.setLevelCode(level);
         dto.setPhone(blankToNull(str(row, "phone")));
         dto.setIdCard(blankToNull(str(row, "id_card")));
         dto.setReportDate(date(row, "report_date"));
@@ -633,6 +643,30 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
             .filter(s -> !s.isEmpty())
             .distinct()
             .toList();
+    }
+
+    /**
+     * 职级含"经纪人"时补充"经纪人"岗位，确保经纪人角色（sys_role）被绑定。
+     * <p>
+     * 背景：原"经纪人"职级拆分为"租赁经纪人"/"买卖经纪人"等，岗位名不再与角色名精确匹配，
+     * 而 PostRolePort.resolveRole 按同名精确匹配查找角色，导致经纪人角色漏绑。
+     * 这里按"包含"语义兜底：凡职级含"经纪人"者，强制补充"经纪人"岗位，
+     * 由 rebuildPostsAndRoles 1:1 推导绑定经纪人角色。
+     *
+     * @param level     职级（如 "租赁经纪人"）
+     * @param postNames 原始岗位集合
+     * @return 补充经纪人岗位后的集合；职级不含"经纪人"时原样返回
+     */
+    private List<String> ensureAgentPost(String level, List<String> postNames) {
+        if (StringUtils.isBlank(level) || !level.contains(AGENT_POST_NAME)) {
+            return postNames;
+        }
+        if (postNames != null && postNames.contains(AGENT_POST_NAME)) {
+            return postNames;
+        }
+        List<String> result = postNames == null ? new ArrayList<>() : new ArrayList<>(postNames);
+        result.add(AGENT_POST_NAME);
+        return result;
     }
 
     private String str(ParsedRow row, String field) {
