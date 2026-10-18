@@ -234,6 +234,8 @@ public class SalaryCalculationEngine {
                 }
                 commissionPerf = BigDecimal.ZERO;
                 commissionIncome = BigDecimal.ZERO;
+                // 分笔计算过程（期间→业绩/提点/金额），存在跨月回溯时落地到明细供展示
+                List<Map<String, Object>> calcProcess = new ArrayList<>();
                 // 逐期间分别用对应规则快照算提成
                 for (Map.Entry<String, List<CommissionItemDTO>> entry : byRulePeriod.entrySet()) {
                     String rulePeriod = entry.getKey();
@@ -285,6 +287,25 @@ public class SalaryCalculationEngine {
                     BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
                     commissionPerf = commissionPerf.add(periodPerf);
                     commissionIncome = commissionIncome.add(periodIncome);
+                    // 收集分笔过程：month=新签导入月（无回溯时=算薪月）
+                    Map<String, Object> step = new java.util.LinkedHashMap<>();
+                    step.put("month", rulePeriod);
+                    step.put("perf", periodPerf);
+                    step.put("rate", periodFinalRate);
+                    step.put("income", periodIncome);
+                    calcProcess.add(step);
+                }
+                // 仅当存在跨月回溯（新签导入月 ≠ 算薪月）时落地计算过程；全部当月结佣保持原样
+                // 注意：此处用 input.period（d.period 由批次服务在引擎返回后才赋值，引擎内为 null）
+                boolean hasBacktrack = calcProcess.stream()
+                    .anyMatch(p -> !input.period.equals(p.get("month")));
+                if (hasBacktrack) {
+                    try {
+                        d.setCommissionCalcProcess(
+                            new tools.jackson.databind.ObjectMapper().writeValueAsString(calcProcess));
+                    } catch (Exception ignore) {
+                        // 序列化失败不影响算薪结果
+                    }
                 }
             } else {
                 commissionPerf = BigDecimal.ZERO;

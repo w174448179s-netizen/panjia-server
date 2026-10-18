@@ -65,6 +65,12 @@
             <artifactId>ruoyi-common-log</artifactId>
         </dependency>
 
+        <!-- excel 导入导出 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-excel</artifactId>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>

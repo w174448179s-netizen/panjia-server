@@ -63,6 +63,11 @@ public class PayrollDetail implements Serializable {
     private BigDecimal employerSocial;
     /** 个税来源：ENGINE=内部引擎试算，EXTERNAL=外部个税系统（扣缴端）导入回补 */
     private String taxSource;
+    /**
+     * 结佣提成计算过程 JSON（数组）：[{month:"新签导入月",perf:折算业绩,rate:提点,income:提成金额},...]。
+     * 仅当存在跨月回溯（新签导入月 ≠ 算薪月）时落地；全部当月结佣则为 null（展示保持原样）。
+     */
+    private String commissionCalcProcess;
 
     // 业绩溯源（导出展示用，落地避免前端反推误差）
     /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */

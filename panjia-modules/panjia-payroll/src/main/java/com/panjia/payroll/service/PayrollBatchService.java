@@ -437,8 +437,9 @@ public class PayrollBatchService {
         input.deptInsuredCount = deptInsuredCountMap;
         input.deptDiffTotal = deptDiffConfig;
 
-        // 总监管辖组 deptId 列表（总监挂顶级根，取其直接子部门 = 组级，
-        // 组级汇总已在上方统一完成，多组按组分别跳点算提成）
+        // 总监管辖组 deptId 列表。部门层级为：总监根部门 → 门店 → 业务组，
+        // 而新签/社保/差额等组级汇总均以「业务组 deptId」为 key，
+        // 因此管辖列表需下钻到组级（直接子部门是门店，须再取一层子部门）。
         Map<Long, List<Long>> directorStoreDepts = new HashMap<>();
         Set<Long> directorDeptIds = new HashSet<>();
         List<EmployeeSnapshot> directors = new ArrayList<>();
@@ -452,10 +453,18 @@ public class PayrollBatchService {
             }
         }
         if (!directorDeptIds.isEmpty()) {
-            Map<Long, List<Long>> deptDirectChildren = peopleQueryPort.findDirectChildren(directorDeptIds);
+            Map<Long, List<Long>> storeLevel = peopleQueryPort.findDirectChildren(directorDeptIds);
+            Set<Long> storeIds = storeLevel.values().stream()
+                .flatMap(List::stream).collect(Collectors.toSet());
+            Map<Long, List<Long>> groupLevel = storeIds.isEmpty()
+                ? Map.of() : peopleQueryPort.findDirectChildren(storeIds);
             for (EmployeeSnapshot dir : directors) {
-                directorStoreDepts.put(dir.getEmployeeId(),
-                    deptDirectChildren.getOrDefault(dir.getDeptId(), List.of()));
+                List<Long> stores = storeLevel.getOrDefault(dir.getDeptId(), List.of());
+                List<Long> groups = stores.stream()
+                    .flatMap(sid -> groupLevel.getOrDefault(sid, List.<Long>of()).stream())
+                    .collect(Collectors.toList());
+                // 兜底：管辖根下无组级结构（如业绩直挂门店）时回退门店列表，避免管辖为空全为 0
+                directorStoreDepts.put(dir.getEmployeeId(), groups.isEmpty() ? stores : groups);
             }
         }
         input.directorStoreDepts = directorStoreDepts;
