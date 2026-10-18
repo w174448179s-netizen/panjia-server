@@ -44,6 +44,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -929,7 +930,9 @@ public class PayrollBatchService {
         if (batchIds.isEmpty()) {
             return List.of();
         }
+        // 只列出对员工可见的批次：已发送工资条 或 已锁定/已发放（历史批次天然可见，兼容发送功能上线前数据）
         return batchMapper.selectBatchIds(batchIds).stream()
+            .filter(PayrollBatch::visibleToEmployee)
             .sorted(Comparator.comparing(PayrollBatch::getPeriod).reversed())
             .collect(Collectors.toList());
     }
@@ -950,11 +953,63 @@ public class PayrollBatchService {
         if (batch == null) {
             throw new ServiceException("工资批次不存在");
         }
+        // 未发送且未锁定的批次对员工不可见（防止员工猜测 batchId 越权查看未发布工资）
+        if (!batch.visibleToEmployee()) {
+            throw new ServiceException("该批次工资尚未发送，请等待人事发送工资条");
+        }
         MyPayrollDetailVo vo = new MyPayrollDetailVo();
         vo.setBatch(batch);
         vo.setDetail(detail);
         vo.setEmployee(me);
         return vo;
+    }
+
+    /**
+     * 发送工资条：员工端工资查询立即可见（留痕发送人与时间）。
+     * <p>
+     * 算薪完成（CALCULATED/REVIEWING/APPROVED）且未锁定才可发送；可重复发送刷新留痕。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PayrollBatch send(Long batchId, Long operatorId, String operatorName) {
+        PayrollBatch b = getOrThrow(batchId);
+        b.assertCanSend();
+        b.setSendTime(LocalDateTime.now());
+        b.setSendBy(operatorName != null ? operatorName : String.valueOf(operatorId));
+        batchMapper.updateById(b);
+        return b;
+    }
+
+    /**
+     * 员工核对工资：纯留痕标记（写明细行 ack_time），不影响工资审批流。
+     * <p>
+     * 前置：批次已对员工可见；批次锁定（LOCKED/PAID）后不允许再核对。幂等：已核对直接返回。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public PayrollDetail ackMyDetail(Long userId, Long batchId) {
+        EmployeeMainDataDTO me = employeeMainDataQueryPort.getByUserId(userId);
+        if (me == null || me.getEmployeeId() == null) {
+            throw new ServiceException("当前账号未关联员工档案");
+        }
+        PayrollDetail detail = detailMapper.selectByBatchAndEmployee(batchId, me.getEmployeeId());
+        if (detail == null) {
+            throw new ServiceException("未找到您在该批次的工资明细");
+        }
+        PayrollBatch batch = batchMapper.selectById(batchId);
+        if (batch == null) {
+            throw new ServiceException("工资批次不存在");
+        }
+        if (!batch.visibleToEmployee()) {
+            throw new ServiceException("该批次工资尚未发送，无法核对");
+        }
+        if (batch.getStatus() != null && batch.getStatus().isLocked()) {
+            throw new ServiceException("该批次工资已锁定，无需核对");
+        }
+        if (detail.getAckTime() != null) {
+            return detail;
+        }
+        detail.setAckTime(LocalDateTime.now());
+        detailMapper.updateById(detail);
+        return detail;
     }
 
     // ==================== 结佣追溯（工资构成 → 每笔结佣明细） ====================

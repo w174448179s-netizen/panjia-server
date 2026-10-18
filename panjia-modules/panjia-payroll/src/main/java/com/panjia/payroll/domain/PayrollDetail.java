@@ -75,6 +75,9 @@ public class PayrollDetail implements Serializable {
      */
     private String guaranteeCalcProcess;
 
+    /** 员工核对时间（纯留痕标记，员工在工资查询页点"核对"写入；批次锁定后不可核对，null=未核对） */
+    private LocalDateTime ackTime;
+
     // 业绩溯源（导出展示用，落地避免前端反推误差）
     /** 当月新签业绩（折算后金额；店长=个人新签业绩，经纪人/总监无则 0） */
     private BigDecimal newSignPerformance;

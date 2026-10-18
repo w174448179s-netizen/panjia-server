@@ -77,6 +77,16 @@ public class PayrollController {
         return R.ok(batchService.pay(id, LoginHelper.getUserId()));
     }
 
+    /**
+     * 发送工资条：算薪完成且未锁定时可发；发送后员工端「工资查询」立即可见（留痕发送人/时间）。
+     * 权限沿用发放权限（同一操作环节）。
+     */
+    @SaCheckPermission("payroll:batch:release")
+    @PostMapping("/{id}/send")
+    public R<PayrollBatch> send(@PathVariable Long id) {
+        return R.ok(batchService.send(id, LoginHelper.getUserId(), LoginHelper.getUsername()));
+    }
+
     /** 批次列表 */
     @SaCheckPermission("payroll:batch:list")
     @GetMapping
@@ -119,6 +129,16 @@ public class PayrollController {
     @GetMapping("/my/detail")
     public R<MyPayrollDetailVo> myDetail(@RequestParam Long batchId) {
         return R.ok(batchService.getMyDetail(LoginHelper.getUserId(), batchId));
+    }
+
+    /**
+     * 员工核对工资：纯留痕标记（不影响工资审批流）；批次锁定后不可核对，已核对幂等返回。
+     * 员工身份由后端按登录态解析。
+     */
+    @SaCheckPermission("payroll:my:query")
+    @PostMapping("/my/detail/ack")
+    public R<PayrollDetail> ackMyDetail(@RequestParam Long batchId) {
+        return R.ok(batchService.ackMyDetail(LoginHelper.getUserId(), batchId));
     }
 
     /** 我的结佣追溯（本人工资构成中每笔结佣明细，员工身份后端解析） */

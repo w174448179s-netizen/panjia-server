@@ -53,6 +53,11 @@ public class PayrollBatch implements Serializable {
     private Long lockedBy;
     private Long operatorId;
 
+    /** 工资条发送时间（员工端工资查询可见的前提之一；锁定/发放批次天然可见） */
+    private LocalDateTime sendTime;
+    /** 工资条发送操作人（留痕） */
+    private String sendBy;
+
     @Version
     private Integer version;
 
@@ -79,6 +84,18 @@ public class PayrollBatch implements Serializable {
         if (status == null || !status.canPay()) {
             throw new ServiceException("当前状态「" + statusName() + "」不允许标记发放");
         }
+    }
+
+    /** 断言可发送工资条：算薪完成且未锁定（已锁定/已发放不提供发送动作） */
+    public void assertCanSend() {
+        if (status == null || !status.canSend()) {
+            throw new ServiceException("当前状态「" + statusName() + "」不允许发送工资条");
+        }
+    }
+
+    /** 员工端是否可见（已发送 或 已锁定/已发放——历史批次天然可见） */
+    public boolean visibleToEmployee() {
+        return sendTime != null || (status != null && status.isLocked());
     }
 
     /**

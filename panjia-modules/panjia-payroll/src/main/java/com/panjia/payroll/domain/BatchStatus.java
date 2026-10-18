@@ -59,6 +59,15 @@ public enum BatchStatus {
     }
 
     /**
+     * 是否允许发送工资条：算薪完成（有明细）且未锁定。
+     * CALCULATED（已计算）/ REVIEWING（待审核）/ APPROVED（已确认）可发；
+     * DRAFT/FAILED 无有效明细不可发；LOCKED/PAID 天然对员工可见，无需发送。
+     */
+    public boolean canSend() {
+        return this == CALCULATED || this == REVIEWING || this == APPROVED;
+    }
+
+    /**
      * 是否允许解锁（反结账联动）。
      * <p>
      * 仅 LOCKED 可解锁回 CALCULATED；PAID（已发放）为资金终态，禁止反结账解锁。
