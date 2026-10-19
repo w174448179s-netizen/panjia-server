@@ -211,6 +211,10 @@ public class SalaryCalculationEngine {
             d.setManualAdjust(MoneyUtil.round6(manualAdjust));
             // 所有扣点合计：前端"绩效提成扣点"列统一展示此值（等级 + 未参保自动 + 人工调整）
             d.setTotalDeduct(MoneyUtil.round6(perfDeduct.add(manualAdjust)));
+            // 伯乐加点仅 RATE_ADD 模式落库（前端「伯乐奖励」列据此自适应：mentorAdd 非空=加点比例，空=显示 mentorBonus 金额）
+            if ("RATE_ADD".equals(rc.path("mentorBonusMode").asText())) {
+                d.setMentorAdd(MoneyUtil.round6(mentorAdd));
+            }
             d.setRateAdjustJson(adjustItems.isEmpty() ? null : writeAdjustJson(adjustItems));
 
             // 结佣提成：统一按新签导入月（对应新签业绩事实的归属月）取规则（2026-10-17 改，
