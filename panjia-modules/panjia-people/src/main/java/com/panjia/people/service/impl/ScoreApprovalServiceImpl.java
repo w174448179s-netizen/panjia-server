@@ -289,6 +289,19 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             .collect(Collectors.toSet());
     }
 
+    @Override
+    public Set<String> approvedPeriods(Collection<String> periods) {
+        if (periods == null || periods.isEmpty()) {
+            return Set.of();
+        }
+        return approvalMapper.selectList(new LambdaQueryWrapper<ScoreApproval>()
+                .in(ScoreApproval::getPeriod, periods)
+                .eq(ScoreApproval::getStatus, ScoreApproval.STATUS_APPROVED))
+            .stream()
+            .map(ScoreApproval::getPeriod)
+            .collect(Collectors.toSet());
+    }
+
     // ==================== 内部方法 ====================
 
     /**

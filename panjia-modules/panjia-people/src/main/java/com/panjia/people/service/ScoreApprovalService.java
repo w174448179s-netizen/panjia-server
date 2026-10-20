@@ -68,4 +68,14 @@ public interface ScoreApprovalService extends PeopleScoreApprovalQueryPort {
      * @return 其中处于 SUBMITTED/APPROVED 状态的期间
      */
     Set<String> lockedPeriods(Collection<String> periods);
+
+    /**
+     * 批量查询已审批通过（APPROVED）的期间集合。
+     * <p>
+     * 用途：综合查询 → 积分查询：仅展示审批通过后的期间，未审批/已驳回/驳回未重提的期间不对外可见。
+     *
+     * @param periods 归属期间集合（yyyy-MM）
+     * @return 其中处于 APPROVED 状态的期间
+     */
+    Set<String> approvedPeriods(Collection<String> periods);
 }
