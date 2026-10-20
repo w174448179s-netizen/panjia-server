@@ -73,6 +73,9 @@ public class Employee implements Serializable {
     /** 伯乐员工 ID（null=无伯乐） */
     private Long mentorEmployeeId;
 
+    /** 工资查询密码（BCrypt hash，空=未设置） */
+    private String salaryQueryPassword;
+
     /** 备注 */
     private String remark;
 

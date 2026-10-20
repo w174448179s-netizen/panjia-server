@@ -66,4 +66,12 @@ public interface EmployeeMainDataQueryPort {
      * @return 员工主数据列表（含部门全路径名），按工号升序
      */
     List<EmployeeMainDataDTO> searchOptions(String keyword, Collection<Long> deptIds, int limit);
+
+    /**
+     * 取指定员工的工资查询密码 hash。
+     *
+     * @param employeeId 员工 ID
+     * @return BCrypt hash；null=未设置密码
+     */
+    String getSalaryQueryPasswordHash(Long employeeId);
 }

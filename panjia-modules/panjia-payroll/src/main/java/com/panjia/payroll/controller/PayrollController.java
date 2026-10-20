@@ -2,24 +2,28 @@ package com.panjia.payroll.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.contracts.dto.CommissionItemDTO;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.port.EmployeeCredentialPort;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.payroll.domain.PayrollBatch;
 import com.panjia.payroll.domain.PayrollDetail;
 import com.panjia.payroll.domain.RuleSnapshot;
 import com.panjia.payroll.domain.vo.MyPayrollDetailVo;
 import com.panjia.payroll.service.PayrollBatchService;
-import com.panjia.payroll.domain.PayrollBatch;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,6 +40,8 @@ import java.util.Map;
 public class PayrollController {
 
     private final PayrollBatchService batchService;
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
+    private final EmployeeCredentialPort employeeCredentialPort;
 
     /** 创建批次 */
     @SaCheckPermission("payroll:batch:add")
@@ -181,5 +187,81 @@ public class PayrollController {
     @GetMapping("/all-newsign")
     public R<List<CommissionItemDTO>> allNewSign(@RequestParam String period) {
         return R.ok(batchService.listAllNewSignForExport(period));
+    }
+
+    // ==================== 工资查询密码门（综合查询 → 工资查询） ====================
+
+    /**
+     * 查询当前登录员工是否已设置工资查询密码（前端决定首次进入时是否弹出设置框）。
+     */
+    @SaCheckPermission("payroll:my:query")
+    @GetMapping("/my/password-status")
+    public R<Map<String, Boolean>> passwordStatus() {
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        Map<String, Boolean> result = new HashMap<>(2);
+        boolean has = emp != null && employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId()) != null;
+        result.put("hasPassword", has);
+        return R.ok(result);
+    }
+
+    /**
+     * 验证工资查询密码。
+     * <p>
+     * 请求体：{ "password": "xxx" }；后端按登录态解析员工身份，不接受 employeeId 参数。
+     *
+     * @return 成功：R.ok()；失败：R.fail("密码错误")
+     */
+    @SaCheckPermission("payroll:my:query")
+    @PostMapping("/my/verify-password")
+    public R<Void> verifyPassword(@RequestBody Map<String, String> body) {
+        String password = body.get("password");
+        if (password == null || password.isBlank()) {
+            return R.fail("密码不能为空");
+        }
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        if (emp == null) {
+            return R.fail("员工身份不存在");
+        }
+        String hash = employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId());
+        if (hash == null) {
+            return R.fail("尚未设置工资查询密码，请先设置");
+        }
+        boolean ok = cn.hutool.crypto.digest.BCrypt.checkpw(password, hash);
+        if (!ok) {
+            return R.fail("密码错误");
+        }
+        return R.ok();
+    }
+
+    /**
+     * 设置/更新工资查询密码。
+     * <p>
+     * 请求体：{ "password": "xxx", "oldPassword": "xxx(修改时必填，首次设置可省略)" }
+     * 后端按登录态解析员工身份，不接受 employeeId 参数。
+     */
+    @SaCheckPermission("payroll:my:query")
+    @PutMapping("/my/password")
+    public R<Void> setPassword(@RequestBody Map<String, String> body) {
+        String password = body.get("password");
+        if (password == null || password.length() < 4) {
+            return R.fail("密码长度至少 4 位");
+        }
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        if (emp == null) {
+            return R.fail("员工身份不存在");
+        }
+        // 如果已有密码，校验 oldPassword
+        String hash = employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId());
+        if (hash != null) {
+            String oldPassword = body.get("oldPassword");
+            if (oldPassword == null || !cn.hutool.crypto.digest.BCrypt.checkpw(oldPassword, hash)) {
+                return R.fail("原密码错误");
+            }
+        }
+        employeeCredentialPort.setSalaryQueryPassword(emp.getEmployeeId(), password);
+        return R.ok();
     }
 }

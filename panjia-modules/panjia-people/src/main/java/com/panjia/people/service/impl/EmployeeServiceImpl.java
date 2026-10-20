@@ -1173,4 +1173,19 @@ public class EmployeeServiceImpl implements EmployeeService {
     private Boolean parseBool(String value) {
         return BOOL_TRUE.equals(value);
     }
+
+    // ==================== EmployeeCredentialPort ====================
+
+    @Override
+    public void setSalaryQueryPassword(Long employeeId, String rawPassword) {
+        if (employeeId == null || rawPassword == null || rawPassword.isBlank()) {
+            return;
+        }
+        String hash = cn.hutool.crypto.digest.BCrypt.hashpw(rawPassword,
+            cn.hutool.crypto.digest.BCrypt.gensalt());
+        Employee emp = new Employee();
+        emp.setEmployeeId(employeeId);
+        emp.setSalaryQueryPassword(hash);
+        employeeMapper.updateById(emp);
+    }
 }

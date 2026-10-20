@@ -1,11 +1,17 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import com.panjia.contracts.dto.EmployeeMainDataDTO;
+import com.panjia.contracts.port.EmployeeCredentialPort;
+import com.panjia.contracts.port.EmployeeMainDataQueryPort;
+import com.panjia.people.domain.Employee;
 import com.panjia.people.dto.ContractCreateDTO;
 import com.panjia.people.dto.ContractExpiringVO;
 import com.panjia.people.dto.ContractQuery;
 import com.panjia.people.dto.ContractUpdateDTO;
 import com.panjia.people.dto.ContractVO;
+import com.panjia.people.mapper.EmployeeMapper;
+import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.ContractService;
 import com.panjia.people.service.ContractTemplateService;
 import lombok.RequiredArgsConstructor;
@@ -27,7 +33,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 员工合同管理（劳动合同/兼职合同/其他）。
@@ -44,6 +52,10 @@ public class ContractController extends BaseController {
 
     private final ContractService contractService;
     private final ContractTemplateService contractTemplateService;
+    private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
+    private final EmployeeCredentialPort employeeCredentialPort;
+    private final EmployeeMapper employeeMapper;
+    private final DeptPort deptPort;
 
     /**
      * 分页查询合同列表。
@@ -146,6 +158,117 @@ public class ContractController extends BaseController {
     @DeleteMapping("/template/{contractType}")
     public R<Void> deleteTemplate(@PathVariable String contractType) {
         contractTemplateService.deleteTemplate(contractType);
+        return R.ok();
+    }
+
+    // ==================== 本人合同查询 + 密码门（综合查询 → 合同查询） ====================
+
+    /**
+     * 我的合同列表（按登录态解析员工身份，仅返回本人的全部合同记录）。
+     */
+    @SaCheckPermission("people:contract:my")
+    @GetMapping("/my/list")
+    public R<List<ContractVO>> myList() {
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        if (emp == null) {
+            return R.ok(List.of());
+        }
+        return R.ok(contractService.listMyContracts(emp.getEmployeeId()));
+    }
+
+    /**
+     * 当前登录员工的基本信息（身份证/工资卡等），供合同打印用。
+     */
+    @SaCheckPermission("people:contract:my")
+    @GetMapping("/my/employee")
+    public R<Map<String, Object>> myEmployee() {
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO empRef = employeeMainDataQueryPort.getByUserId(userId);
+        if (empRef == null) {
+            return R.fail("员工身份不存在");
+        }
+        Employee emp = employeeMapper.selectById(empRef.getEmployeeId());
+        if (emp == null) {
+            return R.fail("员工档案不存在");
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("employeeId", emp.getEmployeeId());
+        result.put("employeeCode", emp.getEmployeeCode());
+        result.put("employeeName", emp.getEmployeeName());
+        result.put("gender", emp.getGender());
+        result.put("genderLabel", emp.getGender() == null ? null : ("MALE".equals(emp.getGender()) ? "男" : "女"));
+        result.put("phone", emp.getPhone());
+        result.put("idCard", emp.getIdCard());
+        result.put("bankName", emp.getBankName());
+        result.put("bankBranch", emp.getBankBranch());
+        result.put("bankCardNo", emp.getBankCardNo());
+        // 合同打印需要甲方名 = 员工所属门店（用 deptPort 查完整路径名）
+        Map<Long, String> deptNames = emp.getDeptId() != null
+            ? deptPort.findDeptFullNames(List.of(emp.getDeptId())) : Map.of();
+        result.put("deptName", deptNames.get(emp.getDeptId()));
+        return R.ok(result);
+    }
+
+    /** 查询当前登录员工是否已设置合同查询密码（与工资查询共用同一密码）。 */
+    @SaCheckPermission("people:contract:my")
+    @GetMapping("/my/password-status")
+    public R<Map<String, Boolean>> myPasswordStatus() {
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        Map<String, Boolean> result = new HashMap<>(2);
+        boolean has = emp != null && employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId()) != null;
+        result.put("hasPassword", has);
+        return R.ok(result);
+    }
+
+    /** 验证合同查询密码（与工资查询共用同一密码）。 */
+    @SaCheckPermission("people:contract:my")
+    @PostMapping("/my/verify-password")
+    public R<Void> verifyMyPassword(@RequestBody Map<String, String> body) {
+        String password = body.get("password");
+        if (password == null || password.isBlank()) {
+            return R.fail("密码不能为空");
+        }
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        if (emp == null) {
+            return R.fail("员工身份不存在");
+        }
+        String hash = employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId());
+        if (hash == null) {
+            return R.fail("尚未设置查询密码，请先设置");
+        }
+        boolean ok = cn.hutool.crypto.digest.BCrypt.checkpw(password, hash);
+        if (!ok) {
+            return R.fail("密码错误");
+        }
+        return R.ok();
+    }
+
+    /**
+     * 设置/更新合同查询密码（与工资查询共用同一密码；修改时需校验 oldPassword）。
+     */
+    @SaCheckPermission("people:contract:my")
+    @PutMapping("/my/password")
+    public R<Void> setMyPassword(@RequestBody Map<String, String> body) {
+        String password = body.get("password");
+        if (password == null || password.length() < 4) {
+            return R.fail("密码长度至少 4 位");
+        }
+        Long userId = LoginHelper.getUserId();
+        EmployeeMainDataDTO emp = employeeMainDataQueryPort.getByUserId(userId);
+        if (emp == null) {
+            return R.fail("员工身份不存在");
+        }
+        String hash = employeeMainDataQueryPort.getSalaryQueryPasswordHash(emp.getEmployeeId());
+        if (hash != null) {
+            String oldPassword = body.get("oldPassword");
+            if (oldPassword == null || !cn.hutool.crypto.digest.BCrypt.checkpw(oldPassword, hash)) {
+                return R.fail("原密码错误");
+            }
+        }
+        employeeCredentialPort.setSalaryQueryPassword(emp.getEmployeeId(), password);
         return R.ok();
     }
 }

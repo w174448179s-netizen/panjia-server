@@ -157,6 +157,14 @@ public class EmployeeMainDataAdapter implements EmployeeMainDataQueryPort {
         return result;
     }
 
+    @Override
+    public String getSalaryQueryPasswordHash(Long employeeId) {
+        if (employeeId == null) {
+            return null;
+        }
+        return employeeMapper.selectSalaryQueryPasswordHash(employeeId);
+    }
+
     private EmployeeMainDataDTO toDTO(Employee emp) {
         EmployeeMainDataDTO dto = new EmployeeMainDataDTO();
         dto.setEmployeeId(emp.getEmployeeId());

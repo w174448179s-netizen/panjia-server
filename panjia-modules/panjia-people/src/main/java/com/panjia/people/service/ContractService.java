@@ -57,4 +57,14 @@ public interface ContractService {
      * @return 到期名单（已到期在前，其余按到期日升序）
      */
     List<ContractExpiringVO> listExpiring();
+
+    /**
+     * 取指定员工的全部合同列表（综合查询 → 合同查询；员工身份由 Controller 按登录态解析传入）。
+     * <p>
+     * 按 start_date 倒序、create_time 倒序排列（续签新版合同在前）。
+     *
+     * @param employeeId 员工 ID（已由 Controller 校验归属登录用户）
+     * @return 合同列表（含 enrich 后的员工/门店/扫描件 URL）
+     */
+    List<ContractVO> listMyContracts(Long employeeId);
 }

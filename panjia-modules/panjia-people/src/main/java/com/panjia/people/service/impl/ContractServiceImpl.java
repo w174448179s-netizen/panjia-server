@@ -247,6 +247,25 @@ public class ContractServiceImpl implements ContractService {
         return false;
     }
 
+    // ==================== 本人合同查询 ====================
+
+    @Override
+    public List<ContractVO> listMyContracts(Long employeeId) {
+        if (employeeId == null) {
+            return List.of();
+        }
+        List<Contract> list = contractMapper.selectList(new LambdaQueryWrapper<Contract>()
+            .eq(Contract::getEmployeeId, employeeId)
+            .orderByDesc(Contract::getStartDate)
+            .orderByDesc(Contract::getCreateTime));
+        if (list.isEmpty()) {
+            return List.of();
+        }
+        List<ContractVO> vos = list.stream().map(this::toVO).toList();
+        enrich(vos);
+        return vos;
+    }
+
     // ==================== 内部方法 ====================
 
     private ContractVO toVO(Contract contract) {

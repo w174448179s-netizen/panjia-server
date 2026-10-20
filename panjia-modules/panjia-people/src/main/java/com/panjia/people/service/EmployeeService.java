@@ -1,5 +1,6 @@
 package com.panjia.people.service;
 
+import com.panjia.contracts.port.EmployeeCredentialPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.people.dto.ChangeLogVO;
 import com.panjia.people.dto.EmployeeCreateDTO;
@@ -20,7 +21,7 @@ import java.util.List;
  * <p>
  * 同时实现 {@link PeopleQueryPort} 供 payroll 等下游域按月份取算薪快照。
  */
-public interface EmployeeService extends PeopleQueryPort {
+public interface EmployeeService extends PeopleQueryPort, EmployeeCredentialPort {
 
     /**
      * 分页查询员工列表（筛选：工号/姓名/部门树/岗位/状态）。
