@@ -69,6 +69,9 @@ public class EmployeeVO {
     /** 新签业绩不计入所属组别店长的团队业绩 */
     private Boolean excludeTeam;
 
+    /** 绩效方案编码（空/null=未指派，算薪按默认方案积分绩效） */
+    private String perfSchemeCode;
+
     /** 伯乐员工 ID */
     private Long mentorEmployeeId;
 
@@ -83,6 +86,18 @@ public class EmployeeVO {
 
     /** 身份证号（详情展示，列表不返回） */
     private String idCard;
+
+    /** 性别（字典 panjia_employee_gender：MALE/FEMALE） */
+    private String gender;
+
+    /** 工资卡开户银行 */
+    private String bankName;
+
+    /** 工资卡开户支行 */
+    private String bankBranch;
+
+    /** 工资卡卡号（本人） */
+    private String bankCardNo;
 
     /** 报道时间 */
     private LocalDate reportDate;

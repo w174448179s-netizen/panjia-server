@@ -26,7 +26,10 @@ public enum EmployeeStatus {
     LEFT("离职"),
 
     /** 待入职 */
-    PENDING("待入职");
+    PENDING("待入职"),
+
+    /** 虚拟员工（店组虚拟角色人，工号=店组编码；不算薪、默认不展示） */
+    VIRTUAL("虚拟");
 
     /** 状态码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

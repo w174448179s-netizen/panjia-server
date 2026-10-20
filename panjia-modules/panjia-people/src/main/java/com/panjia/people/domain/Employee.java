@@ -46,6 +46,18 @@ public class Employee implements Serializable {
     /** 身份证号（AES 加密存储） */
     private String idCard;
 
+    /** 性别（字典 panjia_employee_gender：MALE/FEMALE） */
+    private String gender;
+
+    /** 工资卡开户银行 */
+    private String bankName;
+
+    /** 工资卡开户支行 */
+    private String bankBranch;
+
+    /** 工资卡卡号（本人） */
+    private String bankCardNo;
+
     /** 报道时间 */
     private LocalDate reportDate;
 

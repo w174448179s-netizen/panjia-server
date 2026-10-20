@@ -49,7 +49,10 @@ public enum FactType {
     MENTOR("伯乐"),
 
     /** 新签业绩不计入所属组别店长的团队业绩（true=排除；只影响店长团队提成与其社保人数，不影响总监跳点/本人提成/伯乐奖励） */
-    EXCLUDE_TEAM("不计入店长团队");
+    EXCLUDE_TEAM("不计入店长团队"),
+
+    /** 绩效方案编码（值为 pj_payroll_perf_scheme.code；空=未指派，算薪按默认方案积分绩效） */
+    PERF_SCHEME("绩效方案");
 
     /** 事实类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;

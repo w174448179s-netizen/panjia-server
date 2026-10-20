@@ -32,6 +32,15 @@ public interface EmployeeService extends PeopleQueryPort {
     PageResult<EmployeeVO> pageList(EmployeeQuery query, PageQuery pageQuery);
 
     /**
+     * 导出用全量查询（不分页）：按筛选条件返回匹配员工，供 Excel 导出。
+     * <p>复用 {@link #pageList} 的筛选与排序口径，仅去掉分页上限。
+     *
+     * @param query 筛选条件
+     * @return 员工视图列表
+     */
+    List<EmployeeVO> listForExport(EmployeeQuery query);
+
+    /**
      * 员工详情（基本信息 + 算薪当前态 + 岗位）。
      *
      * @param employeeId 员工 ID

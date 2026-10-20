@@ -6,10 +6,12 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 import com.panjia.payroll.domain.ConversionRule;
 import com.panjia.payroll.domain.PolicyRule;
+import com.panjia.payroll.domain.PerfScheme;
 import com.panjia.payroll.domain.RankRule;
 import com.panjia.payroll.domain.RuleSnapshot;
 import com.panjia.payroll.mapper.ConversionRuleMapper;
 import com.panjia.payroll.mapper.PolicyRuleMapper;
+import com.panjia.payroll.mapper.PerfSchemeMapper;
 import com.panjia.payroll.mapper.RankRuleMapper;
 import com.panjia.payroll.mapper.RuleSnapshotMapper;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +40,7 @@ public class RuleService {
     private final PolicyRuleMapper policyRuleMapper;
     private final ConversionRuleMapper conversionRuleMapper;
     private final RuleSnapshotMapper ruleSnapshotMapper;
+    private final PerfSchemeMapper perfSchemeMapper;
     private final ObjectMapper objectMapper;
 
     // ==================== 规则 CRUD ====================
@@ -181,12 +184,13 @@ public class RuleService {
                 }
             });
         }
-        JsonNode points = root.path("policy").path("points");
-        if (!points.hasNonNull("gradeA")) {
-            missing.add("policy.points.gradeA（绩效A阈值）未配置，将按默认 8");
-        }
-        if (!points.hasNonNull("gradeB")) {
-            missing.add("policy.points.gradeB（绩效B阈值）未配置，将按默认 6");
+        // 积分等级阈值已迁至绩效方案（perfScheme 节点）：默认积分方案缺失时按引擎兜底 8/6 计算
+        JsonNode defaultScheme = root.path("perfScheme").path(root.path("defaultPerfScheme").asText(""));
+        if (defaultScheme.isMissingNode()) {
+            missing.add("默认绩效方案（积分绩效）未配置，员工未指派方案时将按引擎默认阈值 8/6 计算");
+        } else if ("GRADE_RATE".equals(defaultScheme.path("schemeType").asText())
+            && !defaultScheme.path("ruleContent").hasNonNull("gradeA")) {
+            missing.add("默认积分方案 gradeA（绩效A阈值）未配置，将按默认 8");
         }
         if ("ENGINE".equalsIgnoreCase(root.path("policy").path("tax").path("mode").asText("EXTERNAL"))
             && root.path("policy").path("tax").path("brackets").size() == 0) {
@@ -318,6 +322,35 @@ public class RuleService {
             convNode.put(c.getBizType(), c.getFactor().toString());
         }
 
+        // perfScheme: code -> {name, schemeType, applicableRole, isDefault, ruleContent}
+        // 仅装载算薪日已生效方案（effective_from <= refDate）；员工未指派（PERF_SCHEME 事实空）
+        // 按 defaultPerfScheme（is_default 的积分绩效）计算，保证历史批次重算口径不变
+        List<PerfScheme> schemes = perfSchemeMapper.selectList(null);
+        ObjectNode schemeNode = root.putObject("perfScheme");
+        String defaultSchemeCode = null;
+        for (PerfScheme s : schemes) {
+            if (s.getEffectiveFrom() != null && s.getEffectiveFrom().isAfter(refDate)) {
+                continue;
+            }
+            ObjectNode sn = schemeNode.putObject(s.getCode());
+            sn.put("name", s.getName());
+            sn.put("schemeType", s.getSchemeType());
+            sn.put("applicableRole", s.getApplicableRole());
+            sn.put("isDefault", Boolean.TRUE.equals(s.getIsDefault()));
+            try {
+                sn.set("ruleContent",
+                    objectMapper.readTree(s.getRuleContent() == null ? "{}" : s.getRuleContent()));
+            } catch (Exception e) {
+                sn.putObject("ruleContent");
+            }
+            if (defaultSchemeCode == null && Boolean.TRUE.equals(s.getIsDefault())) {
+                defaultSchemeCode = s.getCode();
+            }
+        }
+        if (defaultSchemeCode != null) {
+            root.put("defaultPerfScheme", defaultSchemeCode);
+        }
+
         return root;
     }
 
@@ -391,6 +424,93 @@ public class RuleService {
 
         public JsonNode tax() {
             return policy().path("tax");
+        }
+
+        // ==================== 绩效方案 ====================
+
+        /** 默认绩效方案编码（员工未指派 PERF_SCHEME 事实时使用；快照无默认时返回 null） */
+        public String defaultPerfSchemeCode() {
+            JsonNode n = root.path("defaultPerfScheme");
+            return n.isMissingNode() || n.isNull() ? null : n.asText();
+        }
+
+        /** 按编码取方案节点（含 name/schemeType/applicableRole/isDefault/ruleContent） */
+        public JsonNode perfScheme(String code) {
+            return root.path("perfScheme").path(code);
+        }
+
+        /**
+         * 解析员工生效方案节点：员工指派编码命中 → 该方案；
+         * 未指派/编码无效 → 默认方案；默认也缺失 → missing node（引擎兜底积分口径）。
+         */
+        public JsonNode resolvePerfScheme(String empSchemeCode) {
+            if (empSchemeCode != null && !empSchemeCode.isBlank()) {
+                JsonNode hit = perfScheme(empSchemeCode);
+                if (!hit.isMissingNode()) {
+                    return hit;
+                }
+            }
+            String def = defaultPerfSchemeCode();
+            return def == null ? objectMapperNull() : perfScheme(def);
+        }
+
+        private JsonNode objectMapperNull() {
+            return tools.jackson.databind.node.JsonNodeFactory.instance.missingNode();
+        }
+    }
+
+    // ==================== 绩效方案 CRUD ====================
+
+    public List<PerfScheme> listPerfSchemes() {
+        return perfSchemeMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PerfScheme>()
+                .orderByAsc(PerfScheme::getCode));
+    }
+
+    /**
+     * 保存方案（code 存在则更新，否则新增）。
+     * 校验：code/name/schemeType 必填、类型合法、默认方案唯一（新默认会清掉旧默认）。
+     */
+    public void savePerfScheme(PerfScheme scheme) {
+        if (scheme.getCode() == null || scheme.getCode().isBlank()) {
+            throw new IllegalArgumentException("方案编码不能为空");
+        }
+        if (scheme.getName() == null || scheme.getName().isBlank()) {
+            throw new IllegalArgumentException("方案名称不能为空");
+        }
+        String type = scheme.getSchemeType();
+        if (type == null || java.util.Set.of("NONE", "GRADE_RATE", "RATE_TIER", "AMOUNT_TIER", "GRADE_AMOUNT")
+            .contains(type) == false) {
+            throw new IllegalArgumentException("非法方案类型：" + type);
+        }
+        String role = scheme.getApplicableRole();
+        scheme.setApplicableRole(role == null || role.isBlank() ? "ALL" : role);
+
+        PerfScheme existing = perfSchemeMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PerfScheme>()
+                .eq(PerfScheme::getCode, scheme.getCode().trim())
+                .last("LIMIT 1"));
+        scheme.setCode(scheme.getCode().trim());
+        if (Boolean.TRUE.equals(scheme.getIsDefault())) {
+            // 默认方案唯一：清掉其他默认标记
+            List<PerfScheme> defaults = perfSchemeMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<PerfScheme>()
+                    .eq(PerfScheme::getIsDefault, true));
+            for (PerfScheme d : defaults) {
+                if (existing == null || !d.getId().equals(existing.getId())) {
+                    d.setIsDefault(false);
+                    perfSchemeMapper.updateById(d);
+                }
+            }
+        }
+        if (existing != null) {
+            scheme.setId(existing.getId());
+            perfSchemeMapper.updateById(scheme);
+        } else {
+            if (scheme.getEffectiveFrom() == null) {
+                scheme.setEffectiveFrom(LocalDate.now());
+            }
+            perfSchemeMapper.insert(scheme);
         }
     }
 }

@@ -44,6 +44,18 @@ public class EmployeeCreateDTO {
     /** 身份证号（平台加密器启用后 AES 存储） */
     private String idCard;
 
+    /** 性别（字典 panjia_employee_gender：MALE/FEMALE） */
+    private String gender;
+
+    /** 工资卡开户银行 */
+    private String bankName;
+
+    /** 工资卡开户支行 */
+    private String bankBranch;
+
+    /** 工资卡卡号（本人） */
+    private String bankCardNo;
+
     /** 报道时间 */
     private LocalDate reportDate;
 
@@ -53,6 +65,9 @@ public class EmployeeCreateDTO {
 
     /** 状态（ACTIVE/PARTTIME/LEFT/PENDING，默认 ACTIVE） */
     private String status;
+
+    /** 离职时间（status=LEFT 时填写） */
+    private LocalDate leaveDate;
 
     /** 是否缴社保 */
     private Boolean socialInsured;

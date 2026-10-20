@@ -6,6 +6,7 @@ import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.payroll.controller.dto.StoreDeptVo;
 import com.panjia.payroll.domain.ConversionRule;
 import com.panjia.payroll.domain.DeptMonthlyConfig;
+import com.panjia.payroll.domain.PerfScheme;
 import com.panjia.payroll.domain.PolicyRule;
 import com.panjia.payroll.domain.RankRule;
 import com.panjia.payroll.domain.RuleSnapshot;
@@ -74,6 +75,21 @@ public class RuleController {
     @PostMapping("/conversion")
     public R<Void> saveConversion(@RequestBody ConversionRule rule) {
         ruleService.saveConversionRule(rule);
+        return R.ok();
+    }
+
+    /** 绩效方案列表（方案配置页维护；员工域指派经 PerfSchemeQueryPort 读取） */
+    @SaCheckPermission("payroll:rule:list")
+    @GetMapping("/perf-scheme")
+    public R<List<PerfScheme>> perfSchemeList() {
+        return R.ok(ruleService.listPerfSchemes());
+    }
+
+    /** 保存绩效方案（code 存在则更新；默认方案唯一） */
+    @SaCheckPermission("payroll:rule:list")
+    @PostMapping("/perf-scheme")
+    public R<Void> savePerfScheme(@RequestBody PerfScheme scheme) {
+        ruleService.savePerfScheme(scheme);
         return R.ok();
     }
 

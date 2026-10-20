@@ -74,6 +74,11 @@ public class PayrollDetail implements Serializable {
      * 仅保底职级（minSalary &gt; 0）落地；未触发（fill=0）也落地，供前端展示"有没有触发、怎么算的"。
      */
     private String guaranteeCalcProcess;
+    /**
+     * 绩效方案计算过程 JSON：{schemeCode,schemeName,schemeType,grade?,tierMin?,tierMax?,perf?,deduct?,fee?}。
+     * 按员工指派方案落库（未指派=默认方案）；未触发扣减也落地，供前端展示口径与推导链。
+     */
+    private String perfCalcProcess;
 
     /** 员工核对时间（纯留痕标记，员工在工资查询页点"核对"写入；批次锁定后不可核对，null=未核对） */
     private LocalDateTime ackTime;
@@ -113,6 +118,10 @@ public class PayrollDetail implements Serializable {
     private String perfGrade;
     /** 绩效提成扣点（积分等级 A/B/C 对应扣点，A=0/B=-2%/C=-4%，负=扣点） */
     private BigDecimal perfDeduct;
+    /** 绩效方案金额扣款（业绩阶梯B版/店长积分绩效：未达标扣固定金额，正数=扣款，进应发扣减） */
+    private BigDecimal perfDeductFee;
+    /** 绩效方案编码（该批次冻结的方案，空=默认积分绩效） */
+    private String perfSchemeCode;
     /** 提成点调整合计（未参保自动扣点+审批通过人工项，负=扣点） */
     private BigDecimal manualAdjust;
     /** 所有扣点合计（等级扣点 + 未参保自动扣点 + 人工调整，负=扣点，前端"绩效提成扣点"列统一取此值） */

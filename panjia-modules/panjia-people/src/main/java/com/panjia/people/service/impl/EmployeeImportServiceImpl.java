@@ -448,8 +448,14 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setLevelCode(level);
         dto.setPhone(str(row, "phone"));
         dto.setIdCard(str(row, "id_card"));
+        dto.setGender(normalizeGender(str(row, "gender")));
+        dto.setBankName(str(row, "bank_name"));
+        dto.setBankBranch(str(row, "bank_branch"));
+        dto.setBankCardNo(str(row, "bank_card_no"));
         dto.setReportDate(date(row, "report_date"));
         dto.setHireDate(date(row, "hire_date"));
+        dto.setStatus(resolveCreateStatus(row));
+        dto.setLeaveDate(date(row, "leave_date"));
         dto.setSocialInsured(bool(row, "social"));
         dto.setHousingInsured(bool(row, "housing"));
         dto.setCommercialInsured(bool(row, "commercial"));
@@ -462,11 +468,21 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setCommercialFee(decimal(row, "commercial_fee"));
         dto.setHousingFund(decimal(row, "housing_fund"));
         dto.setDormitoryFee(decimal(row, "dormitory_fee"));
-        // 兼职员工初始状态 = PARTTIME，其余 ACTIVE
-        dto.setStatus(Boolean.TRUE.equals(bool(row, "parttime"))
-            ? EmployeeStatus.PARTTIME.getCode()
-            : EmployeeStatus.ACTIVE.getCode());
         return dto;
+    }
+
+    /**
+     * 新增导入时的状态解析：优先取「状态」列（支持中文与字典码）；
+     * 状态列留空时按「兼职」列推断（是→PARTTIME，否→ACTIVE），保持旧模板兼容。
+     */
+    private String resolveCreateStatus(ParsedRow row) {
+        String s = normalizeStatus(str(row, "status"));
+        if (s != null) {
+            return s;
+        }
+        return Boolean.TRUE.equals(bool(row, "parttime"))
+            ? EmployeeStatus.PARTTIME.getCode()
+            : EmployeeStatus.ACTIVE.getCode();
     }
 
     /**
@@ -475,7 +491,7 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
      * 覆盖语义：文件提供的值覆盖旧值，空白单元格保留原值不修改（岗位列除外，防止误清登录岗位）；
      * 算薪数据列（职级/社保/公积金/商保/宿舍/兼职）经 changeFact 切换时间线，
      * 生效日 = 导入日（旧事实结束日期、新事实生效日均置为导入日）；
-     * 状态（含离职）不随导入变更，由员工管理界面维护。
+     * 状态列填值则切换（含离职：状态=离职时禁用账户、离职时间取列值或导入日），留空=不修改原状态。
      */
     private EmployeeUpdateDTO toUpdateDTO(ParsedRow row, List<ColumnDef> deptCols,
                                           Map<String, Long> deptIdCache, LocalDate effectDate) {
@@ -498,8 +514,15 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setLevelCode(level);
         dto.setPhone(blankToNull(str(row, "phone")));
         dto.setIdCard(blankToNull(str(row, "id_card")));
+        dto.setGender(normalizeGender(str(row, "gender")));
+        dto.setBankName(blankToNull(str(row, "bank_name")));
+        dto.setBankBranch(blankToNull(str(row, "bank_branch")));
+        dto.setBankCardNo(blankToNull(str(row, "bank_card_no")));
         dto.setReportDate(date(row, "report_date"));
         dto.setHireDate(date(row, "hire_date"));
+        // 状态列留空=不修改原状态；填值则切换（含离职）
+        dto.setStatus(blankToNull(normalizeStatus(str(row, "status"))));
+        dto.setLeaveDate(date(row, "leave_date"));
         dto.setSocialInsured(bool(row, "social"));
         dto.setHousingInsured(bool(row, "housing"));
         dto.setCommercialInsured(bool(row, "commercial"));
@@ -518,6 +541,52 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
     /** 空白字符串 → null（覆盖更新时空白=保留原值） */
     private String blankToNull(String s) {
         return StringUtils.isBlank(s) ? null : s;
+    }
+
+    /**
+     * 性别导入值归一化：兼容中文（男/女）与字典值（MALE/FEMALE），不区分大小写。
+     * 未识别返回 null（不阻断导入，性别留空）。
+     */
+    private String normalizeGender(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = raw.trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        if ("男".equals(s) || "MALE".equalsIgnoreCase(s)) {
+            return "MALE";
+        }
+        if ("女".equals(s) || "FEMALE".equalsIgnoreCase(s)) {
+            return "FEMALE";
+        }
+        return null;
+    }
+
+    /**
+     * 状态导入值归一化：兼容中文（在职/兼职/离职/待入职）与字典码（ACTIVE/PARTTIME/LEFT/PENDING），
+     * 不区分大小写；未识别返回 null。
+     */
+    private String normalizeStatus(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String s = raw.trim();
+        if (s.isEmpty()) {
+            return null;
+        }
+        return switch (s) {
+            case "在职", "ACTIVE" -> EmployeeStatus.ACTIVE.getCode();
+            case "兼职", "PARTTIME" -> EmployeeStatus.PARTTIME.getCode();
+            case "离职", "LEFT" -> EmployeeStatus.LEFT.getCode();
+            case "待入职", "PENDING" -> EmployeeStatus.PENDING.getCode();
+            default -> {
+                // 兜底：尝试按字典码解析
+                EmployeeStatus parsed = EmployeeStatus.fromCode(s);
+                yield parsed != null ? parsed.getCode() : null;
+            }
+        };
     }
 
     // ==================== 辅助方法 ====================

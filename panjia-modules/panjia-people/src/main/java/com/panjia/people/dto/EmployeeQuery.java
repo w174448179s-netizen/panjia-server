@@ -2,6 +2,7 @@ package com.panjia.people.dto;
 
 import lombok.Data;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
@@ -24,4 +25,19 @@ public class EmployeeQuery {
 
     /** 状态集合（ACTIVE/PARTTIME/LEFT/PENDING），支持多选；为空表示不限制 */
     private List<String> status;
+
+    /** 性别（MALE/FEMALE，精确；为空表示不限制） */
+    private String gender;
+
+    /** 入职时间范围-起（含，按 hire_date） */
+    private LocalDate hireDateBegin;
+
+    /** 入职时间范围-止（含，按 hire_date） */
+    private LocalDate hireDateEnd;
+
+    /** 排序字段（createTime=默认录入时间倒序；hireDate=入职时间） */
+    private String sortField;
+
+    /** 排序方向（asc/desc；默认 desc） */
+    private String sortOrder;
 }

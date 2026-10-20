@@ -85,18 +85,41 @@ public class EmployeeServiceImpl implements EmployeeService {
     private final ChangeLogMapper changeLogMapper;
     private final AccountPort accountPort;
     private final DeptPort deptPort;
+    private final com.panjia.contracts.port.PerfSchemeQueryPort perfSchemeQueryPort;
 
     // ==================== 查询 ====================
 
     @Override
     public PageResult<EmployeeVO> pageList(EmployeeQuery query, PageQuery pageQuery) {
+        LambdaQueryWrapper<Employee> wrapper = buildListWrapper(query);
+        Page<Employee> page = employeeMapper.selectPage(pageQuery.build(), wrapper);
+        List<EmployeeVO> vos = page.getRecords().stream().map(this::toVO).toList();
+        enrich(vos);
+        return PageResult.build(vos, page.getTotal());
+    }
+
+    @Override
+    public List<EmployeeVO> listForExport(EmployeeQuery query) {
+        LambdaQueryWrapper<Employee> wrapper = buildListWrapper(query);
+        List<Employee> emps = employeeMapper.selectList(wrapper);
+        List<EmployeeVO> vos = emps.stream().map(this::toVO).toList();
+        enrich(vos);
+        return vos;
+    }
+
+    /**
+     * 列表/导出共用的筛选 + 排序条件构造。
+     */
+    private LambdaQueryWrapper<Employee> buildListWrapper(EmployeeQuery query) {
         List<EmployeeStatus> statuses = EmployeeStatus.fromCodes(query.getStatus());
         LambdaQueryWrapper<Employee> wrapper = new LambdaQueryWrapper<Employee>()
             .like(StringUtils.isNotBlank(query.getEmployeeCode()), Employee::getEmployeeCode, query.getEmployeeCode())
             .like(StringUtils.isNotBlank(query.getEmployeeName()), Employee::getEmployeeName, query.getEmployeeName())
             .in(!statuses.isEmpty(), Employee::getStatus, statuses)
-            .orderByDesc(Employee::getCreateTime)
-            .orderByDesc(Employee::getEmployeeId);
+            .eq(StringUtils.isNotBlank(query.getGender()), Employee::getGender, query.getGender())
+            .ge(query.getHireDateBegin() != null, Employee::getHireDate, query.getHireDateBegin())
+            .le(query.getHireDateEnd() != null, Employee::getHireDate, query.getHireDateEnd());
+        applySort(wrapper, query.getSortField(), query.getSortOrder());
 
         if (query.getDeptId() != null) {
             List<Long> deptIds = deptPort.findDeptAndChildIds(query.getDeptId());
@@ -105,15 +128,29 @@ public class EmployeeServiceImpl implements EmployeeService {
         if (StringUtils.isNotBlank(query.getPostName())) {
             List<Long> userIds = accountPort.findUserIdsByPostName(query.getPostName());
             if (userIds.isEmpty()) {
-                return PageResult.build(List.of(), 0L);
+                // 无匹配岗位 → 无结果（用不可能条件短路）
+                wrapper.eq(Employee::getEmployeeId, -1L);
+                return wrapper;
             }
             wrapper.in(Employee::getUserId, userIds);
         }
+        return wrapper;
+    }
 
-        Page<Employee> page = employeeMapper.selectPage(pageQuery.build(), wrapper);
-        List<EmployeeVO> vos = page.getRecords().stream().map(this::toVO).toList();
-        enrich(vos);
-        return PageResult.build(vos, page.getTotal());
+    /**
+     * 列表排序：hireDate=按入职时间（asc/desc，平局按工号）；默认=录入时间倒序。
+     */
+    private void applySort(LambdaQueryWrapper<Employee> wrapper, String sortField, String sortOrder) {
+        boolean asc = "asc".equalsIgnoreCase(sortOrder);
+        if ("hireDate".equalsIgnoreCase(sortField)) {
+            if (asc) {
+                wrapper.orderByAsc(Employee::getHireDate).orderByAsc(Employee::getEmployeeCode);
+            } else {
+                wrapper.orderByDesc(Employee::getHireDate).orderByDesc(Employee::getEmployeeCode);
+            }
+            return;
+        }
+        wrapper.orderByDesc(Employee::getCreateTime).orderByDesc(Employee::getEmployeeId);
     }
 
     @Override
@@ -173,10 +210,18 @@ public class EmployeeServiceImpl implements EmployeeService {
         emp.setDeptId(dto.getDeptId());
         emp.setPhone(dto.getPhone());
         emp.setIdCard(dto.getIdCard());
+        emp.setGender(dto.getGender());
+        emp.setBankName(dto.getBankName());
+        emp.setBankBranch(dto.getBankBranch());
+        emp.setBankCardNo(dto.getBankCardNo());
         emp.setReportDate(dto.getReportDate());
         emp.setHireDate(dto.getHireDate());
         EmployeeStatus status = EmployeeStatus.fromCode(dto.getStatus());
         emp.setStatus(status != null ? status : EmployeeStatus.ACTIVE);
+        // 离职员工：记录离职时间（未填则取入职日）并禁用登录账户
+        if (emp.getStatus() == EmployeeStatus.LEFT) {
+            emp.setLeaveDate(dto.getLeaveDate() != null ? dto.getLeaveDate() : emp.getHireDate());
+        }
         emp.setMentorEmployeeId(mentorId);
         emp.setRemark(dto.getRemark());
         employeeMapper.insert(emp);
@@ -185,6 +230,9 @@ public class EmployeeServiceImpl implements EmployeeService {
         Long userId = accountPort.createUser(
             emp.getEmployeeCode(), emp.getEmployeeName(), emp.getDeptId(), dto.getPostNames());
         emp.setUserId(userId);
+        if (emp.getStatus() == EmployeeStatus.LEFT) {
+            accountPort.disableUser(userId);
+        }
         employeeMapper.updateById(emp);
 
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
@@ -222,7 +270,9 @@ public class EmployeeServiceImpl implements EmployeeService {
             throw new ServiceException("员工不存在，employeeId={}", employeeId);
         }
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
-        LocalDate effect = monthStart(dto.getEffectiveDate() != null ? dto.getEffectiveDate() : LocalDate.now());
+        // 算薪事实（职级/社保/公积金/商保/宿舍/兼职/排除团队/各项费用/绩效方案）及状态、伯乐
+        // 走时间线，必须显式传入 effectiveDate 才会处理；未传则仅修改基本信息，不触碰算薪事实。
+        LocalDate effect = dto.getEffectiveDate() != null ? monthStart(dto.getEffectiveDate()) : null;
 
         // ① 基本信息直改
         if (StringUtils.isNotBlank(dto.getEmployeeName())) {
@@ -233,6 +283,18 @@ public class EmployeeServiceImpl implements EmployeeService {
         }
         if (dto.getIdCard() != null) {
             emp.setIdCard(dto.getIdCard());
+        }
+        if (dto.getGender() != null) {
+            emp.setGender(dto.getGender());
+        }
+        if (dto.getBankName() != null) {
+            emp.setBankName(dto.getBankName());
+        }
+        if (dto.getBankBranch() != null) {
+            emp.setBankBranch(dto.getBankBranch());
+        }
+        if (dto.getBankCardNo() != null) {
+            emp.setBankCardNo(dto.getBankCardNo());
         }
         if (dto.getReportDate() != null) {
             emp.setReportDate(dto.getReportDate());
@@ -247,55 +309,71 @@ public class EmployeeServiceImpl implements EmployeeService {
             emp.setLeaveDate(dto.getLeaveDate());
         }
 
-        // ② 伯乐（mentorCode 非 null 即参与比对；空白=解除伯乐关系）
-        if (dto.getMentorCode() != null) {
-            Long newMentorId = resolveMentorIdByCode(dto.getMentorCode());
-            if (!Objects.equals(newMentorId, emp.getMentorEmployeeId())) {
-                changeFact(employeeId, FactType.MENTOR,
-                    newMentorId != null ? String.valueOf(newMentorId) : NO_MENTOR, effect, operator);
-                emp.setMentorEmployeeId(newMentorId);
+        // ②~⑤ 走时间线的事实变更（伯乐/状态/职级/算薪开关与金额/绩效方案）
+        // 仅当显式传入 effectiveDate 时才处理；仅改基本信息时不触碰，避免无意义的变更记录。
+        if (effect != null) {
+            // ② 伯乐（mentorCode 非 null 即参与比对；空白=解除伯乐关系）
+            if (dto.getMentorCode() != null) {
+                Long newMentorId = resolveMentorIdByCode(dto.getMentorCode());
+                if (!Objects.equals(newMentorId, emp.getMentorEmployeeId())) {
+                    changeFact(employeeId, FactType.MENTOR,
+                        newMentorId != null ? String.valueOf(newMentorId) : NO_MENTOR, effect, operator);
+                    emp.setMentorEmployeeId(newMentorId);
+                }
             }
-        }
 
-        // ③ 状态（离职 → 禁用账户）
-        if (StringUtils.isNotBlank(dto.getStatus())) {
-            EmployeeStatus newStatus = EmployeeStatus.fromCode(dto.getStatus());
-            if (newStatus == null) {
-                throw new ServiceException("非法员工状态：{}", dto.getStatus());
-            }
-            if (newStatus != emp.getStatus()) {
-                changeFact(employeeId, FactType.STATUS, newStatus.getCode(), effect, operator);
-                emp.setStatus(newStatus);
-                if (newStatus == EmployeeStatus.LEFT) {
-                    emp.setLeaveDate(dto.getLeaveDate() != null ? dto.getLeaveDate() : effect);
-                    if (emp.getUserId() != null) {
-                        accountPort.disableUser(emp.getUserId());
+            // ③ 状态（离职 → 禁用账户）
+            if (StringUtils.isNotBlank(dto.getStatus())) {
+                EmployeeStatus newStatus = EmployeeStatus.fromCode(dto.getStatus());
+                if (newStatus == null) {
+                    throw new ServiceException("非法员工状态：{}", dto.getStatus());
+                }
+                if (newStatus != emp.getStatus()) {
+                    changeFact(employeeId, FactType.STATUS, newStatus.getCode(), effect, operator);
+                    emp.setStatus(newStatus);
+                    if (newStatus == EmployeeStatus.LEFT) {
+                        emp.setLeaveDate(dto.getLeaveDate() != null ? dto.getLeaveDate() : effect);
+                        if (emp.getUserId() != null) {
+                            accountPort.disableUser(emp.getUserId());
+                        }
                     }
+                }
+            }
+
+            // ④ 职级（只走 fact，与登录/权限无关）
+            if (StringUtils.isNotBlank(dto.getLevelCode())) {
+                String current = salaryFactMapper.selectValueAt(employeeId, FactType.LEVEL, effect);
+                if (!dto.getLevelCode().trim().equals(current)) {
+                    changeFact(employeeId, FactType.LEVEL, dto.getLevelCode().trim(), effect, operator);
+                }
+            }
+
+            // ⑤ 算薪开关/金额（只走 fact）
+            changeBoolFact(employeeId, FactType.SOCIAL, dto.getSocialInsured(), effect, operator);
+            changeDecimalFact(employeeId, FactType.SOCIAL_FEE, dto.getSocialFee(), effect, operator);
+            changeBoolFact(employeeId, FactType.HOUSING, dto.getHousingInsured(), effect, operator);
+            changeBoolFact(employeeId, FactType.COMMERCIAL, dto.getCommercialInsured(), effect, operator);
+            changeDecimalFact(employeeId, FactType.COMMERCIAL_FEE, dto.getCommercialFee(), effect, operator);
+            changeBoolFact(employeeId, FactType.DORMITORY, dto.getDormitory(), effect, operator);
+            changeDecimalFact(employeeId, FactType.HOUSING_FUND, dto.getHousingFund(), effect, operator);
+            changeDecimalFact(employeeId, FactType.DORMITORY_FEE, dto.getDormitoryFee(), effect, operator);
+            changeBoolFact(employeeId, FactType.PARTTIME, dto.getParttime(), effect, operator);
+            changeBoolFact(employeeId, FactType.EXCLUDE_TEAM, dto.getExcludeTeam(), effect, operator);
+
+            // ⑤-1 绩效方案指派（null=不修改；空串=清除指派回默认方案）
+            if (dto.getPerfSchemeCode() != null) {
+                String target = dto.getPerfSchemeCode().trim();
+                String current = salaryFactMapper.selectValueAt(employeeId, FactType.PERF_SCHEME, effect);
+                if (!target.equals(current != null ? current : "")) {
+                    if (!target.isEmpty()) {
+                        validatePerfScheme(target, emp);
+                    }
+                    changeFact(employeeId, FactType.PERF_SCHEME, target, effect, operator);
                 }
             }
         }
 
-        // ④ 职级（只走 fact，与登录/权限无关）
-        if (StringUtils.isNotBlank(dto.getLevelCode())) {
-            String current = salaryFactMapper.selectValueAt(employeeId, FactType.LEVEL, effect);
-            if (!dto.getLevelCode().trim().equals(current)) {
-                changeFact(employeeId, FactType.LEVEL, dto.getLevelCode().trim(), effect, operator);
-            }
-        }
-
-        // ⑤ 算薪开关/金额（只走 fact）
-        changeBoolFact(employeeId, FactType.SOCIAL, dto.getSocialInsured(), effect, operator);
-        changeDecimalFact(employeeId, FactType.SOCIAL_FEE, dto.getSocialFee(), effect, operator);
-        changeBoolFact(employeeId, FactType.HOUSING, dto.getHousingInsured(), effect, operator);
-        changeBoolFact(employeeId, FactType.COMMERCIAL, dto.getCommercialInsured(), effect, operator);
-        changeDecimalFact(employeeId, FactType.COMMERCIAL_FEE, dto.getCommercialFee(), effect, operator);
-        changeBoolFact(employeeId, FactType.DORMITORY, dto.getDormitory(), effect, operator);
-        changeDecimalFact(employeeId, FactType.HOUSING_FUND, dto.getHousingFund(), effect, operator);
-        changeDecimalFact(employeeId, FactType.DORMITORY_FEE, dto.getDormitoryFee(), effect, operator);
-        changeBoolFact(employeeId, FactType.PARTTIME, dto.getParttime(), effect, operator);
-        changeBoolFact(employeeId, FactType.EXCLUDE_TEAM, dto.getExcludeTeam(), effect, operator);
-
-        // ⑥ 归属部门变更 → 同步 sys_user.dept_id
+        // ⑥ 归属部门变更 → 同步 sys_user.dept_id（立即生效，日志生效日取当天）
         if (dto.getDeptId() != null && !dto.getDeptId().equals(emp.getDeptId())) {
             String beforeName = deptPort.findDeptFullName(emp.getDeptId());
             if (emp.getUserId() != null) {
@@ -303,10 +381,10 @@ public class EmployeeServiceImpl implements EmployeeService {
             }
             emp.setDeptId(dto.getDeptId());
             String afterName = deptPort.findDeptFullName(dto.getDeptId());
-            writeLog(employeeId, CHANGE_FIELD_DEPT, beforeName, afterName, effect, operator);
+            writeLog(employeeId, CHANGE_FIELD_DEPT, beforeName, afterName, LocalDate.now(), operator);
         }
 
-        // ⑦ 岗位集合变更 → 重建 sys_user_post + 推导重建 sys_user_role（先清后绑）
+        // ⑦ 岗位集合变更 → 重建 sys_user_post + 推导重建 sys_user_role（先清后绑，立即生效）
         if (dto.getPostNames() != null && emp.getUserId() != null) {
             List<String> target = dto.getPostNames().stream()
                 .filter(StringUtils::isNotBlank)
@@ -321,7 +399,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             if (!current.equals(target)) {
                 accountPort.rebuildPostsAndRoles(emp.getUserId(), target);
                 writeLog(employeeId, CHANGE_FIELD_POSTS,
-                    String.join("/", current), String.join("/", target), effect, operator);
+                    String.join("/", current), String.join("/", target), LocalDate.now(), operator);
             }
         }
 
@@ -576,6 +654,9 @@ public class EmployeeServiceImpl implements EmployeeService {
             snap.setMentorId(parseMentorFact(factValues.get(FactType.MENTOR.getCode())));
             // 团队业绩排除开关
             snap.setExcludeTeam(parseBoolFact(factValues.get(FactType.EXCLUDE_TEAM.getCode())));
+            // 绩效方案（空值归一为 null，快照侧语义=未指派走默认方案）
+            String schemeCode = factValues.get(FactType.PERF_SCHEME.getCode());
+            snap.setPerfSchemeCode(StringUtils.isNotBlank(schemeCode) ? schemeCode.trim() : null);
         }
         snap.setSnapshotDate(point);
         snap.setSnapshottedAt(java.time.LocalDateTime.now());
@@ -786,7 +867,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             v.setEmployeeName(nameByDept.getOrDefault(item.getDeptId(), code));
             v.setDeptId(item.getDeptId());
             v.setHireDate(LocalDate.now());
-            v.setStatus(EmployeeStatus.ACTIVE);
+            v.setStatus(EmployeeStatus.VIRTUAL);
             employeeMapper.insert(v);
             result.getCreatedCodes().add(code);
         }
@@ -880,6 +961,28 @@ public class EmployeeServiceImpl implements EmployeeService {
         String current = salaryFactMapper.selectValueAt(employeeId, type, effect);
         if (!target.equals(current != null ? current : "")) {
             changeFact(employeeId, type, target, effect, operatorId);
+        }
+    }
+
+    /**
+     * 绩效方案指派校验：方案存在 + 适用岗位匹配（店长专用方案仅岗位含"店长"的员工可指派；
+     * 岗位与角色严格同名精确匹配，虚拟角色人无岗位不校验放行由算薪侧兜底）。
+     */
+    private void validatePerfScheme(String schemeCode, Employee emp) {
+        com.panjia.contracts.dto.PerfSchemeDTO scheme = perfSchemeQueryPort.listSchemes().stream()
+            .filter(s -> schemeCode.equals(s.getCode()))
+            .findFirst()
+            .orElseThrow(() -> new ServiceException("绩效方案 {} 不存在", schemeCode));
+        if (!"MANAGER".equals(scheme.getApplicableRole())) {
+            return;
+        }
+        if (emp.getUserId() == null) {
+            return;
+        }
+        com.panjia.people.dto.AccountUserInfo info = accountPort.loadUser(emp.getUserId());
+        List<String> posts = info != null && info.getPostNames() != null ? info.getPostNames() : List.of();
+        if (!posts.contains("店长")) {
+            throw new ServiceException("方案[{}]仅可指派给店长岗位员工", scheme.getName());
         }
     }
 
@@ -991,6 +1094,15 @@ public class EmployeeServiceImpl implements EmployeeService {
         }
         vos.forEach(vo -> vo.setExcludeTeam(
             Boolean.parseBoolean(excludeTeamFacts.get(vo.getEmployeeId()))));
+
+        // 绩效方案（事实表当前态，空值回显 null=未指派走默认方案）
+        Map<Long, String> schemeFacts = new LinkedHashMap<>();
+        for (SalaryFact fact : salaryFactMapper.selectValuesAt(employeeIds, FactType.PERF_SCHEME, LocalDate.now())) {
+            if (StringUtils.isNotBlank(fact.getValue())) {
+                schemeFacts.put(fact.getEmployeeId(), fact.getValue().trim());
+            }
+        }
+        vos.forEach(vo -> vo.setPerfSchemeCode(schemeFacts.get(vo.getEmployeeId())));
 
         // 岗位名集合
         List<Long> userIds = vos.stream().map(EmployeeVO::getUserId).filter(Objects::nonNull).toList();

@@ -1,6 +1,7 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaMode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -67,6 +68,17 @@ public class EmployeeController extends BaseController {
     private final PeopleImportTemplateBridge templateBridge;
     private final PostRolePort postRolePort;
     private final DeptPort deptPort;
+    private final com.panjia.contracts.port.PerfSchemeQueryPort perfSchemeQueryPort;
+    private final com.panjia.people.service.EmployeeExcelExporter employeeExcelExporter;
+
+    /**
+     * 绩效方案清单（员工编辑表单指派下拉数据源；方案本体由薪酬域配置维护）。
+     */
+    @SaCheckPermission(value = {"people:employee:list", "payroll:rule:list"}, mode = SaMode.OR)
+    @GetMapping("/perf-schemes")
+    public R<List<com.panjia.contracts.dto.PerfSchemeDTO>> perfSchemes() {
+        return R.ok(perfSchemeQueryPort.listSchemes());
+    }
 
     /**
      * 分页查询员工列表。
@@ -284,6 +296,38 @@ public class EmployeeController extends BaseController {
             out.flush();
         } catch (IOException e) {
             log.warn("员工导入模板下载写入失败", e);
+        }
+    }
+
+    /**
+     * 员工名单导出（Excel）。
+     * <p>
+     * 列与导入模板完全一致，支持「导出 → 编辑 → 导入」闭环：
+     * 性别输出男/女、布尔列输出是/否、部门按大区/门店/组别拆列。
+     * 筛选条件与列表接口相同（工号/姓名/部门/岗位/状态/性别/入职时间范围）。
+     *
+     * @param query    筛选条件
+     * @param response HTTP 响应
+     */
+    @SaCheckPermission("people:employee:list")
+    @GetMapping("/export")
+    public void exportEmployees(EmployeeQuery query, HttpServletResponse response) {
+        com.panjia.importutil.template.model.ImportTemplate template =
+            templateBridge.resolve("EMPLOYEE");
+        List<EmployeeVO> employees = employeeService.listForExport(query);
+        byte[] excel = employeeExcelExporter.export(template.getColumns(), employees);
+        String fileName = URLEncoder.encode("员工名单.xlsx", StandardCharsets.UTF_8);
+        response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        response.setHeader("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
+        response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        response.setHeader("Pragma", "no-cache");
+        response.setHeader("Expires", "0");
+        response.setContentLength(excel.length);
+        try (OutputStream out = response.getOutputStream()) {
+            out.write(excel);
+            out.flush();
+        } catch (IOException e) {
+            log.warn("员工名单导出写入失败", e);
         }
     }
 }

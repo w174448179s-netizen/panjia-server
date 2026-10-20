@@ -157,14 +157,21 @@ public class SalaryCalculationEngine {
             // 基础提点
             BigDecimal baseRate = bd(rank.path("baseRate").asText("0"));
 
-            // 绩效扣点（port 只装 scoreFacts 原始事实：总积分/出勤天数/晚提交次数；
-            // grade 由本引擎按 policy.points（gradeA/gradeB）派生——
-            // 无积分数据默认 A 不扣点）
+            // 当月新签业绩（折算后，所有角色通用）——先算供绩效方案阶梯定档与明细落库复用
+            BigDecimal newSignPerfConverted = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
+
+            // 绩效方案（2026-10 方案化：员工按 PERF_SCHEME 事实指派，未指派=默认方案积分绩效）：
+            // NONE→不考核；GRADE_RATE 积分绩效（等级扣点，历史口径）；RATE_TIER/AMOUNT_TIER 业绩阶梯
+            //（提点进费率链/金额独立扣款）；GRADE_AMOUNT 店长积分等级扣金额。
+            // 旧快照（无 perfScheme 节点）兜底走积分口径，历史批次重算零差异。
             ScoreFactsDTO scoreFacts = input.scoreFacts == null ? null : input.scoreFacts.get(emp.getEmployeeId());
-            String grade = resolveGrade(snap, scoreFacts);
-            d.setPerfGrade(grade);
-            BigDecimal perfDeduct = resolvePerfDeduct(snap, grade);
+            PerfResult perf = resolvePerf(snap, emp, scoreFacts, newSignPerfConverted);
+            d.setPerfGrade(perf.grade);
+            BigDecimal perfDeduct = perf.rate;
             d.setPerfDeduct(MoneyUtil.round6(perfDeduct));
+            d.setPerfDeductFee(perf.fee == null ? null : MoneyUtil.round2(perf.fee));
+            d.setPerfSchemeCode(perf.schemeCode);
+            d.setPerfCalcProcess(writeProcessJson(perf.process));
 
             // 招聘加点（经纪人模式 RATE_ADD）
             int apprenticeCnt = input.qualifiedApprenticeCount.getOrDefault(emp.getEmployeeId(), 0);
@@ -289,12 +296,14 @@ public class SalaryCalculationEngine {
                         periodAdjustItems.add(noSocialAuto);
                     }
 
+                    // 用该期间快照折算业绩（先算：RATE_TIER 方案在该期间阶梯上按此定档）
+                    BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
+
                     // 用该期间快照重新计算 finalRate（职级提点/绩效扣点/招聘加点均按新签月口径）
                     BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, periodLevel, emp,
-                        periodScore, periodAdjustItems, periodRank.path("ruleContent"), periodMentorAdd, role);
+                        periodScore, periodAdjustItems, periodRank.path("ruleContent"), periodMentorAdd, role,
+                        periodPerf);
 
-                    // 用该期间快照折算业绩
-                    BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
                     BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
                     commissionPerf = commissionPerf.add(periodPerf);
                     commissionIncome = commissionIncome.add(periodIncome);
@@ -326,9 +335,8 @@ public class SalaryCalculationEngine {
             d.setCommissionIncome(commissionIncome);
             d.setCommissionPerformance(MoneyUtil.round2(commissionPerf));
 
-            // 落地：当月新签业绩（折算后）+ 新签提成比例（baseRate，所有角色通用）
-            BigDecimal personalNewsignPerfCommon = applyConversion(input.newsignByEmp.get(emp.getEmployeeId()), snap);
-            d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerfCommon));
+            // 落地：当月新签业绩（折算后，主循环上方已算）+ 新签提成比例（baseRate，所有角色通用）
+            d.setNewSignPerformance(MoneyUtil.round2(newSignPerfConverted));
             d.setNewSignRate(role == EmployeeRole.MANAGER
                 ? bd(rank.path("personalRate").asText("0.70")) : baseRate);
 
@@ -359,8 +367,8 @@ public class SalaryCalculationEngine {
                 BigDecimal teamRate = bd(rank.path("teamRate").asText("0.10"));
                 Long groupDeptId = emp.getDeptId();
                 BigDecimal deptTotal = input.deptNewSignTotal.getOrDefault(groupDeptId, BigDecimal.ZERO);
-                // 排除店长本人的新签（personalNewsignPerfCommon 已在上方用同 snap 折算，口径与 deptNewSignTotal 一致）
-                deptTotal = deptTotal.subtract(personalNewsignPerfCommon);
+                // 排除店长本人的新签（newSignPerfConverted 已在上方用同 snap 折算，口径与 deptNewSignTotal 一致）
+                deptTotal = deptTotal.subtract(newSignPerfConverted);
                 BigDecimal deptSocial = input.deptEmployerSocialTotal == null
                     ? BigDecimal.ZERO : input.deptEmployerSocialTotal.getOrDefault(groupDeptId, BigDecimal.ZERO);
                 BigDecimal deptDiff = input.deptDiffTotal == null
@@ -540,12 +548,13 @@ public class SalaryCalculationEngine {
                                 periodAdjustItems.add(noSocialAuto);
                             }
 
-                            // 经纪人无招聘加点（mentorAdd=0），其余口径与结佣提成一致
-                            BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, periodLevel, emp,
-                                periodScore, periodAdjustItems, periodRank.path("ruleContent"), BigDecimal.ZERO, role);
-
-                            // 用该期间快照折算业绩
+                            // 经纪人无招聘加点（mentorAdd=0），其余口径与结佣提成一致；
+                            // 期间业绩先算（RATE_TIER 方案在该期间阶梯上按此定档）
                             BigDecimal periodPerf = applyConversion(periodItems, periodSnap);
+                            BigDecimal periodFinalRate = computeFinalRateForCommission(periodSnap, periodLevel, emp,
+                                periodScore, periodAdjustItems, periodRank.path("ruleContent"), BigDecimal.ZERO, role,
+                                periodPerf);
+
                             BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
                             personalNewsign = personalNewsign.add(periodIncome);
                             // 收集分笔过程：month=新签导入月
@@ -764,10 +773,14 @@ public class SalaryCalculationEngine {
             BigDecimal negativeCarryover = input.negativeBalance.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setNegativeCarryover(MoneyUtil.round2(negativeCarryover));
 
-            // 积分扣款（积分日报晚提交处罚：晚提交次数 × policy.points.penaltyFee 元/次）——
-            // port 只装 scoreFacts 事实，不预扣款，由本引擎按 policy 算。
-            BigDecimal pointsFee = resolvePointsFee(snap, scoreFacts);
+            // 积分扣款（积分日报晚提交处罚：晚提交次数 × 罚款单价）——单价优先取默认积分方案
+            // ruleContent.penaltyFee（resolvePerf 装载），缺失回退 policy.points.penaltyFee。
+            BigDecimal pointsFee = resolvePointsFee(snap, perf.lateFeeUnit, scoreFacts);
             d.setPointsFee(MoneyUtil.round2(pointsFee));
+
+            // 绩效方案金额扣款（业绩阶梯B版/店长积分绩效：未达标扣固定金额，perf.fee 正数=扣款；
+            // perf_deduct_fee 已在主循环绩效方案处落库，此处并入应发扣减，不进保底基数/费率链）
+            BigDecimal perfFee = perf.fee == null ? BigDecimal.ZERO : perf.fee;
 
             // 其他支出
             BigDecimal otherDeduct = input.manualDeduct.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
@@ -776,7 +789,7 @@ public class SalaryCalculationEngine {
             // 支出合计
             BigDecimal deduct = socialFee.add(housingFund).add(attendanceFee)
                 .add(commercialInsurance).add(dormitoryFee).add(negativeCarryover)
-                .add(pointsFee).add(otherDeduct);
+                .add(pointsFee).add(perfFee).add(otherDeduct);
             d.setDeduct(MoneyUtil.round2(deduct));
 
             // 个税（累计预扣；EXTERNAL 模式置 0，待外部个税系统算税后导入回补）
@@ -825,6 +838,16 @@ public class SalaryCalculationEngine {
             return ADJUST_JSON.writeValueAsString(process);
         } catch (Exception e) {
             log.warn("保底补足计算过程JSON序列化失败", e);
+            return null;
+        }
+    }
+
+    /** 绩效方案计算过程 → 溯源 JSON（perf_calc_process 列，未触发扣减也落地供前端展示口径） */
+    private String writeProcessJson(Map<String, Object> process) {
+        try {
+            return ADJUST_JSON.writeValueAsString(process);
+        } catch (Exception e) {
+            log.warn("绩效方案计算过程JSON序列化失败", e);
             return null;
         }
     }
@@ -892,12 +915,6 @@ public class SalaryCalculationEngine {
         return EmployeeRole.AGENT;
     }
 
-    private BigDecimal resolvePerfDeduct(RuleService.ParsedSnapshot snap, String grade) {
-        JsonNode points = snap.policy().path("points");
-        String key = "deduct" + grade;
-        return bd(points.path(key).asText("0"));
-    }
-
     /**
      * 招聘加点（经纪人模式 RATE_ADD）：费率 × 达标千里马数，封顶 mentorBonusRateCap。
      * 主循环与结佣逐期间重算共用（费率/上限取对应期间职级规则的 ruleContent）。
@@ -912,15 +929,156 @@ public class SalaryCalculationEngine {
         return mentorAdd.compareTo(cap) > 0 ? cap : mentorAdd;
     }
 
+    // ==================== 绩效方案（2026-10 方案化） ====================
+
+    /**
+     * 绩效方案计算结果：
+     * rate=提点扣减（负=扣点，进 finalRate 费率链）；fee=金额扣款（正=扣款，落 perf_deduct_fee
+     * 并入应发扣减）；grade 仅积分类方案有；lateFeeUnit=晚提交罚款单价（GRADE_RATE 方案自带）；
+     * process=perf_calc_process 溯源（未触发扣减也落地供前端展示口径）。
+     */
+    private static class PerfResult {
+        String schemeCode;
+        String schemeName;
+        String schemeType;
+        String grade;
+        BigDecimal rate = BigDecimal.ZERO;
+        BigDecimal fee;
+        BigDecimal lateFeeUnit;
+        Map<String, Object> process = new java.util.LinkedHashMap<>();
+    }
+
+    /**
+     * 解析员工绩效方案并计算（主循环口径）。
+     * <p>
+     * 方案来源：员工 PERF_SCHEME 事实（快照 perfSchemeCode）→ 指派方案；
+     * 未指派/编码无效 → 默认方案（积分绩效）；旧快照（无 perfScheme 节点，历史批次重算）
+     * → 兜底走 policy.points 积分口径，行为与方案化前完全一致。
+     * 阶梯定档业绩 perfBase = 算薪月个人新签业绩（折算后）。
+     */
+    private PerfResult resolvePerf(RuleService.ParsedSnapshot snap, EmployeeSnapshot emp,
+                                   ScoreFactsDTO facts, BigDecimal perfBase) {
+        JsonNode scheme = snap.resolvePerfScheme(emp.getPerfSchemeCode());
+        boolean legacy = scheme.isMissingNode();
+        String type = legacy ? "GRADE_RATE" : scheme.path("schemeType").asText("GRADE_RATE");
+        JsonNode rc = legacy ? snap.policy().path("points") : scheme.path("ruleContent");
+
+        PerfResult r = new PerfResult();
+        if (legacy) {
+            r.schemeType = "GRADE_RATE";
+        } else {
+            // 编码取指派值（快照命中时）否则默认方案编码；快照方案节点未冗余 code 字段
+            String assigned = emp.getPerfSchemeCode();
+            r.schemeCode = (assigned != null && !assigned.isBlank()
+                && !snap.perfScheme(assigned).isMissingNode())
+                ? assigned
+                : snap.defaultPerfSchemeCode();
+            r.schemeName = scheme.path("name").asText(null);
+            r.schemeType = type;
+        }
+        r.process.put("schemeCode", r.schemeCode);
+        r.process.put("schemeName", r.schemeName);
+        r.process.put("schemeType", r.schemeType);
+
+        switch (type) {
+            case "NONE" -> {
+                // 无绩效：不考核，无等级无扣减
+            }
+            case "RATE_TIER" -> {
+                // 业绩阶梯扣提点：[min,max) 半开区间定档，rate 负=扣点（进费率链）
+                BigDecimal[] tier = hitTier(rc.path("tiers"), perfBase, "rate");
+                r.rate = tier[2];
+                r.process.put("perf", perfBase == null ? BigDecimal.ZERO : perfBase);
+                r.process.put("tierMin", tier[0]);
+                r.process.put("tierMax", tier[1]);
+                r.process.put("deduct", r.rate);
+            }
+            case "AMOUNT_TIER" -> {
+                // 业绩阶梯扣金额：amount 正=扣款（独立扣款列）
+                BigDecimal[] tier = hitTier(rc.path("tiers"), perfBase, "amount");
+                r.fee = tier[2];
+                r.process.put("perf", perfBase == null ? BigDecimal.ZERO : perfBase);
+                r.process.put("tierMin", tier[0]);
+                r.process.put("tierMax", tier[1]);
+                r.process.put("fee", r.fee);
+            }
+            case "GRADE_AMOUNT" -> {
+                // 积分等级扣金额（店长积分绩效）：A=feeA/B=feeB/C=feeC
+                r.grade = resolveGrade(rc, facts);
+                r.fee = bd(rc.path("fee" + r.grade).asText("0"));
+                r.process.put("grade", r.grade);
+                r.process.put("fee", r.fee);
+            }
+            default -> {
+                // GRADE_RATE 积分绩效（历史口径）：等级派生 + 等级扣点 + 晚提交罚款单价
+                r.grade = resolveGrade(rc, facts);
+                r.rate = perfDeductOf(rc, r.grade);
+                JsonNode pf = rc.path("penaltyFee");
+                r.lateFeeUnit = pf.isMissingNode() || pf.isNull() ? null : bd(pf.asText("5"));
+                r.process.put("grade", r.grade);
+                r.process.put("deduct", r.rate);
+            }
+        }
+        return r;
+    }
+
+    /**
+     * 费率链中的绩效提点扣减（结佣回溯/保底逐期间场景）。
+     * NONE→0；GRADE_RATE（含旧快照兜底）→ 该期间积分派生等级扣点（历史行为不变）；
+     * RATE_TIER→ 该期间业绩 perfBase 在该期间方案阶梯上定档；金额类方案→0（不进费率链）。
+     */
+    private BigDecimal perfRateDeductOf(RuleService.ParsedSnapshot snap, EmployeeSnapshot emp,
+                                        ScoreFactsDTO facts, BigDecimal perfBase) {
+        JsonNode scheme = snap.resolvePerfScheme(emp.getPerfSchemeCode());
+        boolean legacy = scheme.isMissingNode();
+        String type = legacy ? "GRADE_RATE" : scheme.path("schemeType").asText("GRADE_RATE");
+        JsonNode rc = legacy ? snap.policy().path("points") : scheme.path("ruleContent");
+        return switch (type) {
+            case "NONE" -> BigDecimal.ZERO;
+            case "RATE_TIER" -> hitTier(rc.path("tiers"), perfBase, "rate")[2];
+            case "AMOUNT_TIER", "GRADE_AMOUNT" -> BigDecimal.ZERO;
+            default -> perfDeductOf(rc, resolveGrade(rc, facts));
+        };
+    }
+
+    /**
+     * 阶梯命中：[min,max) 半开区间（max=null 表无穷）；业绩低于首档 min 或未配置阶梯时返回 0。
+     *
+     * @return [min, max, value]（未命中 min/max 为 null、value 为 0）
+     */
+    private BigDecimal[] hitTier(JsonNode tiers, BigDecimal perf, String valueKey) {
+        BigDecimal base = perf == null ? BigDecimal.ZERO : perf;
+        if (tiers.isArray()) {
+            for (JsonNode t : tiers) {
+                BigDecimal min = t.path("min").isMissingNode() || t.path("min").isNull()
+                    ? null : bd(t.path("min").asText("0"));
+                BigDecimal max = t.path("max").isMissingNode() || t.path("max").isNull()
+                    ? null : bd(t.path("max").asText("0"));
+                boolean geMin = min == null || base.compareTo(min) >= 0;
+                boolean ltMax = max == null || base.compareTo(max) < 0;
+                if (geMin && ltMax) {
+                    return new BigDecimal[]{min, max, bd(t.path(valueKey).asText("0"))};
+                }
+            }
+        }
+        return new BigDecimal[]{null, null, BigDecimal.ZERO};
+    }
+
+    /** 积分等级扣点（deductA/deductB/deductC，A 默认 0 不扣；历史 policy.points 与方案 ruleContent 同构） */
+    private BigDecimal perfDeductOf(JsonNode thresholds, String grade) {
+        return bd(thresholds.path("deduct" + grade).asText("0"));
+    }
+
     /**
      * 派生绩效等级（事实 → 等级）。
      * <p>
      * 平均积分 = totalPoints / attendDays（HALF_UP 保留 4 位）；
      * 平均分 ≥ gradeA 阈值 → A；≥ gradeB 阈值 → B；否则 C；
-     * 无事实或出勤 0 天 → A（不扣点）。规则缺失/字段缺失时各阈值兜底默认 8/6（与
+     * 无事实或出勤 0 天 → A（不扣点）。阈值来源=绩效方案 ruleContent（GRADE_RATE/GRADE_AMOUNT）
+     * 或旧快照兜底的 policy.points；字段缺失时各阈值兜底默认 8/6（与
      * 员工域 ScoreGradePolicy 一致）。
      */
-    private String resolveGrade(RuleService.ParsedSnapshot snap, ScoreFactsDTO facts) {
+    private String resolveGrade(JsonNode thresholds, ScoreFactsDTO facts) {
         if (facts == null) {
             return "A";
         }
@@ -930,9 +1088,8 @@ public class SalaryCalculationEngine {
             return "A";
         }
         BigDecimal avg = totalPoints.divide(BigDecimal.valueOf(attendDays), 4, RoundingMode.HALF_UP);
-        JsonNode points = snap.policy().path("points");
-        BigDecimal gradeAMin = bd(points.path("gradeA").asText("8"));
-        BigDecimal gradeBMin = bd(points.path("gradeB").asText("6"));
+        BigDecimal gradeAMin = bd(thresholds.path("gradeA").asText("8"));
+        BigDecimal gradeBMin = bd(thresholds.path("gradeB").asText("6"));
         if (avg.compareTo(gradeAMin) >= 0) {
             return "A";
         }
@@ -942,15 +1099,18 @@ public class SalaryCalculationEngine {
     /**
      * 派生积分扣款（事实 → 金额）。
      * <p>
-     * 扣款 = 晚提交次数 × policy.points.penaltyFee（保留 2 位）；
-     * 无事实/字段缺失时为 0；规则缺失时 penaltyFee 兜底默认 5（与员工域
-     * ScoreGradePolicy.lateFeeOf 一致）。
+     * 扣款 = 晚提交次数 × 罚款单价（保留 2 位）；单价优先取默认积分方案 penaltyFee
+     * （resolvePerf 装载），缺失回退 policy.points（兜底默认 5，与员工域
+     * ScoreGradePolicy.lateFeeOf 一致）；无事实/字段缺失时为 0。
      */
-    private BigDecimal resolvePointsFee(RuleService.ParsedSnapshot snap, ScoreFactsDTO facts) {
+    private BigDecimal resolvePointsFee(RuleService.ParsedSnapshot snap, BigDecimal lateFeeUnit,
+                                        ScoreFactsDTO facts) {
         if (facts == null || facts.getLateSubmitCount() == null || facts.getLateSubmitCount() <= 0) {
             return BigDecimal.ZERO;
         }
-        BigDecimal penaltyFee = bd(snap.policy().path("points").path("penaltyFee").asText("5"));
+        BigDecimal penaltyFee = lateFeeUnit != null
+            ? lateFeeUnit
+            : bd(snap.policy().path("points").path("penaltyFee").asText("5"));
         return penaltyFee.multiply(BigDecimal.valueOf(facts.getLateSubmitCount()))
             .setScale(2, RoundingMode.HALF_UP);
     }
@@ -987,7 +1147,8 @@ public class SalaryCalculationEngine {
     private BigDecimal computeFinalRateForCommission(RuleService.ParsedSnapshot snap, String level,
                                                      EmployeeSnapshot emp, ScoreFactsDTO scoreFacts,
                                                      List<RateAdjustItem> adjustItems, JsonNode rc,
-                                                     BigDecimal mentorAdd, EmployeeRole role) {
+                                                     BigDecimal mentorAdd, EmployeeRole role,
+                                                     BigDecimal perfBase) {
         JsonNode rank = snap.rank(level);
 
         // 基础提点：店长用 personalRate（70%），其他角色用 baseRate
@@ -998,9 +1159,9 @@ public class SalaryCalculationEngine {
             baseRate = bd(rank.path("baseRate").asText("0"));
         }
 
-        // 绩效扣点（用该期间快照的积分阈值/扣点规则）
-        String grade = resolveGrade(snap, scoreFacts);
-        BigDecimal perfDeduct = resolvePerfDeduct(snap, grade);
+        // 绩效扣点（用该期间快照的绩效方案：积分类按该期间积分派生；阶梯类按该期间业绩定档；
+        // 金额类不进费率链）
+        BigDecimal perfDeduct = perfRateDeductOf(snap, emp, scoreFacts, perfBase);
 
         BigDecimal finalRate = baseRate.add(perfDeduct).add(mentorAdd);
 

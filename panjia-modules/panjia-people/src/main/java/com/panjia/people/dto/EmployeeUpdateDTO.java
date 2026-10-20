@@ -34,6 +34,18 @@ public class EmployeeUpdateDTO {
     /** 身份证号 */
     private String idCard;
 
+    /** 性别（字典 panjia_employee_gender：MALE/FEMALE；null=不修改） */
+    private String gender;
+
+    /** 工资卡开户银行（null=不修改） */
+    private String bankName;
+
+    /** 工资卡开户支行（null=不修改） */
+    private String bankBranch;
+
+    /** 工资卡卡号（本人；null=不修改） */
+    private String bankCardNo;
+
     /** 报道时间 */
     private LocalDate reportDate;
 
@@ -75,6 +87,9 @@ public class EmployeeUpdateDTO {
 
     /** 新签业绩不计入所属组别店长的团队业绩（null=不修改） */
     private Boolean excludeTeam;
+
+    /** 绩效方案编码（null=不修改；空串=清除指派回默认方案） */
+    private String perfSchemeCode;
 
     /** 伯乐工号（空串表示解除伯乐关系） */
     private String mentorCode;
