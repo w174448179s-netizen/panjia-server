@@ -80,7 +80,26 @@ if [ "${CHECK_ONLY}" -eq 1 ]; then
     exit 0
 fi
 
-# 指纹已一致时直接退出，不做任何 reload / 重启（供每日兜底检查复用）
+reload_nginx() {
+    if ! docker exec panjia-web nginx -t >/dev/null 2>&1; then
+        log "nginx -t 失败，终止（保持原 pin，避免客户端无法握手）"
+        return 1
+    fi
+    if ! docker exec panjia-web nginx -s reload >>"${LOG_FILE}" 2>&1; then
+        log "nginx reload 失败，终止（保持原 pin）"
+        return 1
+    fi
+    sleep 2
+}
+
+# 真实续签（certbot 会传 RENEWED_LINEAGE）后总是 reload nginx，让新证书立即生效。
+# 复用密钥时指纹不变，reload 就够了，不需要改配置、也不需要重启服务。
+if [ -n "${RENEWED_LINEAGE:-}" ]; then
+    reload_nginx || exit 1
+    log "续签后 nginx 已 reload（公钥指纹 ${NEW_FP}）"
+fi
+
+# 指纹已一致时直接退出，不重启任何容器（供每日兜底检查复用）
 needs_update=0
 for dir in /home/ubuntu/panjia /home/ubuntu/panjia-test; do
     env_file="${dir}/.env"
@@ -89,20 +108,12 @@ for dir in /home/ubuntu/panjia /home/ubuntu/panjia-test; do
     [ "${current}" = "${NEW_FP}" ] || needs_update=1
 done
 if [ "${needs_update}" -eq 0 ]; then
-    log "生产/测试指纹均已是最新（${NEW_FP}），无需处理"
+    log "生产/测试指纹均已是最新（${NEW_FP}），无需重启"
     exit 0
 fi
 
-# 必须先让 nginx 提供新证书，再让客户端信任新指纹
-if ! docker exec panjia-web nginx -t >/dev/null 2>&1; then
-    log "nginx -t 失败，终止（保持原 pin，避免客户端无法握手）"
-    exit 1
-fi
-if ! docker exec panjia-web nginx -s reload >>"${LOG_FILE}" 2>&1; then
-    log "nginx reload 失败，终止（保持原 pin）"
-    exit 1
-fi
-sleep 2
+# 兜底补指纹（证书已换但 pin 未跟上）时，同样先确保 nginx 在用新证书
+reload_nginx || exit 1
 
 update_env() {
     local dir="$1"
