@@ -2846,4 +2846,16 @@ public class CommissionApplicationService {
             return null;
         }
     }
+
+    /**
+     * 认领当前节点待办（拥有当前节点角色但不在授权快照时，如事后补赋总监/财务角色）。
+     * <p>认领成功后前端重新拉取本人待办即可打开审批弹窗。
+     */
+    public boolean claim(Long id) {
+        CommissionApplication app = applicationMapper.selectById(id);
+        if (app == null) {
+            throw new ServiceException("结佣申请单不存在：" + id);
+        }
+        return approvalPort.claim(BizType.COMMISSION, id);
+    }
 }

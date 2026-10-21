@@ -1173,4 +1173,11 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
                 adjust.getId(), wfStatus);
         }
     }
+
+    /**
+     * 认领当前节点待办（拥有财务/总监角色但不在授权快照时）。
+     */
+    public boolean claim(Long id) {
+        return approvalPort.claim(BizType.PERF_RECEIVED_ADJUST, id);
+    }
 }

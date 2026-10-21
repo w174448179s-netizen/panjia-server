@@ -537,4 +537,13 @@ public class AttendanceRectifyServiceImpl implements AttendanceRectifyService {
             return null;
         }
     }
+
+    @Override
+    public boolean claim(Long id) {
+        AttendanceRectify rectify = rectifyMapper.selectById(id);
+        if (rectify == null) {
+            throw new ServiceException("考勤修改申请单不存在：" + id);
+        }
+        return approvalPort.claim(BizType.ATTENDANCE_RECTIFY, id);
+    }
 }

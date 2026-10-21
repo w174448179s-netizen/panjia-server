@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.port.EmployeeCredentialPort;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
+import com.panjia.people.domain.ContractParty;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.dto.ContractCreateDTO;
 import com.panjia.people.dto.ContractExpiringVO;
@@ -12,6 +13,7 @@ import com.panjia.people.dto.ContractUpdateDTO;
 import com.panjia.people.dto.ContractVO;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.port.DeptPort;
+import com.panjia.people.service.ContractPartyService;
 import com.panjia.people.service.ContractService;
 import com.panjia.people.service.ContractTemplateService;
 import lombok.RequiredArgsConstructor;
@@ -31,6 +33,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
@@ -52,6 +55,7 @@ public class ContractController extends BaseController {
 
     private final ContractService contractService;
     private final ContractTemplateService contractTemplateService;
+    private final ContractPartyService contractPartyService;
     private final EmployeeMainDataQueryPort employeeMainDataQueryPort;
     private final EmployeeCredentialPort employeeCredentialPort;
     private final EmployeeMapper employeeMapper;
@@ -272,5 +276,83 @@ public class ContractController extends BaseController {
         }
         employeeCredentialPort.setSalaryQueryPassword(emp.getEmployeeId(), password);
         return R.ok();
+    }
+
+    // ==================== 合同甲方（用人单位）配置 ====================
+
+    /** 甲方配置全量列表（管理弹窗用）。 */
+    @SaCheckPermission("people:contract:list")
+    @GetMapping("/party/list")
+    public R<List<Map<String, Object>>> partyList() {
+        return R.ok(contractPartyService.listAll());
+    }
+
+    /** 新增甲方配置。 */
+    @SaCheckPermission("people:contract:add")
+    @Log(title = "合同甲方配置", businessType = BusinessType.INSERT)
+    @PostMapping("/party")
+    public R<Void> addParty(@RequestBody ContractParty party) {
+        party.setPartyId(null);
+        contractPartyService.saveParty(party, LoginHelper.getUserId());
+        return R.ok();
+    }
+
+    /** 修改甲方配置。 */
+    @SaCheckPermission("people:contract:edit")
+    @Log(title = "合同甲方配置", businessType = BusinessType.UPDATE)
+    @PutMapping("/party")
+    public R<Void> editParty(@RequestBody ContractParty party) {
+        if (party.getPartyId() == null) {
+            return R.fail("partyId 不能为空");
+        }
+        contractPartyService.saveParty(party, LoginHelper.getUserId());
+        return R.ok();
+    }
+
+    /** 删除甲方配置（默认甲方不可删）。 */
+    @SaCheckPermission("people:contract:delete")
+    @Log(title = "合同甲方配置", businessType = BusinessType.DELETE)
+    @DeleteMapping("/party/{partyId}")
+    public R<Void> removeParty(@PathVariable Long partyId) {
+        contractPartyService.deleteParty(partyId);
+        return R.ok();
+    }
+
+    /**
+     * 按员工解析甲方三要素（合同打印用）：部门精确 → 门店锚点 → 默认甲方。
+     *
+     * @param employeeId 员工 ID
+     * @return 甲方三要素（companyName/regAddress/legalPerson）
+     */
+    @SaCheckPermission("people:contract:list")
+    @GetMapping("/party/resolve")
+    public R<Map<String, Object>> resolveParty(@RequestParam Long employeeId) {
+        Employee emp = employeeMapper.selectById(employeeId);
+        if (emp == null) {
+            return R.fail("员工不存在");
+        }
+        return R.ok(partyInfoOf(emp.getDeptId()));
+    }
+
+    /** 当前登录员工的甲方三要素（本人合同打印用）。 */
+    @SaCheckPermission("people:contract:my")
+    @GetMapping("/my/party-info")
+    public R<Map<String, Object>> myPartyInfo() {
+        EmployeeMainDataDTO empRef = employeeMainDataQueryPort.getByUserId(LoginHelper.getUserId());
+        if (empRef == null) {
+            return R.fail("员工身份不存在");
+        }
+        Employee emp = employeeMapper.selectById(empRef.getEmployeeId());
+        return R.ok(partyInfoOf(emp != null ? emp.getDeptId() : null));
+    }
+
+    /** 组装甲方三要素返回结构（未配置时三字段为空串，前端打印留空即可）。 */
+    private Map<String, Object> partyInfoOf(Long deptId) {
+        ContractParty party = contractPartyService.resolveByDept(deptId);
+        Map<String, Object> result = new HashMap<>(4);
+        result.put("companyName", party != null && party.getCompanyName() != null ? party.getCompanyName() : "");
+        result.put("regAddress", party != null && party.getRegAddress() != null ? party.getRegAddress() : "");
+        result.put("legalPerson", party != null && party.getLegalPerson() != null ? party.getLegalPerson() : "");
+        return result;
     }
 }

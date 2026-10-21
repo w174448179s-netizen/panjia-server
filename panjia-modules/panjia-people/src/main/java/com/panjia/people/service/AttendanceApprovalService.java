@@ -69,4 +69,7 @@ public interface AttendanceApprovalService extends PeopleAttendanceApprovalQuery
      * @return 其中处于 SUBMITTED/APPROVED 状态的期间
      */
     Set<String> lockedPeriods(Collection<String> periods);
+
+    /** 认领当前节点待办（考勤月度审批总监节点：事后补赋总监角色）。 */
+    boolean claim(Long id);
 }

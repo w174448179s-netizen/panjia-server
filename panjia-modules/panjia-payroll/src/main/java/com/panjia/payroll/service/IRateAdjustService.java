@@ -38,4 +38,9 @@ public interface IRateAdjustService {
 
     /** 工作流回调（RateAdjustWorkflowListener）：finish/back/cancel 状态回写 */
     void handleWorkflowEvent(Long bizId, String status, String handler, String message);
+
+    /**
+     * 认领当前节点待办（算薪比例调整总监节点：事后补赋总监角色）。
+     */
+    boolean claim(Long id);
 }

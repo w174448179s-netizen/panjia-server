@@ -64,4 +64,13 @@ public interface AttendanceRectifyService extends PeopleAttendanceRectifyQueryPo
      * @param message 办理意见
      */
     void handleWorkflowEvent(Long bizId, String status, String handler, String message);
+
+    /**
+     * 认领当前节点待办（拥有人事/总监角色但不在授权快照时，如事后补赋人事角色）。
+     * <p>认领成功后前端重新拉取本人待办即可打开审批弹窗。
+     *
+     * @param id 申请单 ID
+     * @return true=认领成功；false=当前无待办或角色不匹配
+     */
+    boolean claim(Long id);
 }

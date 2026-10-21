@@ -78,4 +78,7 @@ public interface ScoreApprovalService extends PeopleScoreApprovalQueryPort {
      * @return 其中处于 APPROVED 状态的期间
      */
     Set<String> approvedPeriods(Collection<String> periods);
+
+    /** 认领当前节点待办（积分审批总监节点：事后补赋总监角色）。 */
+    boolean claim(Long id);
 }

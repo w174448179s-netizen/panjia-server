@@ -233,4 +233,16 @@ public class CommissionApplyController extends BaseController {
                                     @RequestParam String contractNo) {
         return R.ok(applicationService.hasInFlightApplication(period, contractNo));
     }
+
+    /**
+     * 认领当前节点待办（拥有当前节点角色但不在授权快照时，如事后补赋总监/财务角色）。
+     */
+    @SaCheckPermission("commission:apply:list")
+    @Log(title = "结佣申请任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return applicationService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该申请单当前无待办，或您不具备当前节点所需角色", false);
+    }
 }

@@ -45,6 +45,12 @@ public class ContractVO {
     /** 身份证扫描件访问 URL 集合（与 idCardOssIds 一一对应，预览用） */
     private List<String> idCardUrls;
 
+    /** 合同签署扫描件 ossId 集合（签订后上传留底） */
+    private List<String> contractOssIds;
+
+    /** 合同签署扫描件访问 URL 集合（与 contractOssIds 一一对应，预览用） */
+    private List<String> contractUrls;
+
     /** 备注 */
     private String remark;
 

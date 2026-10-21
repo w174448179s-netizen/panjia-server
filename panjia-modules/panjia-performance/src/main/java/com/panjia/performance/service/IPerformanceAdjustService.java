@@ -136,4 +136,9 @@ public interface IPerformanceAdjustService {
      * @return 修复后的调整单；无需修复时返回原对象
      */
     PerformanceAdjust syncStatusWithWorkflow(PerformanceAdjust adjust);
+
+    /**
+     * 认领当前节点待办（业绩调整总监节点：事后补赋总监角色）。
+     */
+    boolean claim(Long id);
 }

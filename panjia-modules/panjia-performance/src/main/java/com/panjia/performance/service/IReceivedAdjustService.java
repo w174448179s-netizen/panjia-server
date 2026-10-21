@@ -57,4 +57,7 @@ public interface IReceivedAdjustService {
      * 前端预检：该合同该实收期间是否存在审批中的实收调整单。
      */
     boolean hasInFlight(String contractNo, String period);
+
+    /** 认领当前节点待办（实收调整财务/总监节点：事后补赋角色）。 */
+    boolean claim(Long id);
 }

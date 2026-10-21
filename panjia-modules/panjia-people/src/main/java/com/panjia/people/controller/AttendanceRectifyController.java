@@ -88,4 +88,17 @@ public class AttendanceRectifyController extends BaseController {
     public R<AttendanceRectifyVO> getByBizId(@PathVariable Long id) {
         return R.ok(rectifyService.getByBizId(LoginHelper.getUserId(), id));
     }
+
+    /**
+     * 认领当前节点待办（拥有人事/总监角色但不在授权快照时，如事后补赋人事角色）。
+     * <p>认领成功后前端重新拉取本人待办即可打开审批弹窗。
+     */
+    @SaCheckPermission("people:attendance:list")
+    @Log(title = "考勤修改申请任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return rectifyService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该申请单当前无待办，或您不具备当前节点所需角色", false);
+    }
 }

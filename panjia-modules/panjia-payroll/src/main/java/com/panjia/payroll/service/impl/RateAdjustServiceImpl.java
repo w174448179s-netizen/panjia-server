@@ -342,4 +342,11 @@ public class RateAdjustServiceImpl implements IRateAdjustService {
             return null;
         }
     }
+
+    /**
+     * 认领当前节点待办（算薪比例调整总监节点：事后补赋总监角色）。
+     */
+    public boolean claim(Long id) {
+        return approvalPort.claim(BizType.RATE_ADJUST, id);
+    }
 }

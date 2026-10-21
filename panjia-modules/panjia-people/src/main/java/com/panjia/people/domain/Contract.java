@@ -45,6 +45,9 @@ public class Contract implements Serializable {
     /** 身份证扫描件 ossId 串（逗号分隔） */
     private String idCardOssIds;
 
+    /** 合同签署扫描件 ossId 串（逗号分隔），签订后上传留底 */
+    private String contractOssIds;
+
     /** 备注 */
     private String remark;
 

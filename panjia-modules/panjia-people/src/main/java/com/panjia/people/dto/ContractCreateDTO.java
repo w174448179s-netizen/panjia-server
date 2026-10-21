@@ -35,6 +35,9 @@ public class ContractCreateDTO {
     /** 身份证扫描件 ossId 集合 */
     private List<String> idCardOssIds;
 
+    /** 合同签署扫描件 ossId 集合（签订后上传留底） */
+    private List<String> contractOssIds;
+
     /** 备注 */
     private String remark;
 }

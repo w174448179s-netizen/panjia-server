@@ -134,6 +134,7 @@ public class ContractServiceImpl implements ContractService {
         contract.setStartDate(dto.getStartDate());
         contract.setEndDate(dto.getEndDate());
         contract.setIdCardOssIds(joinOssIds(dto.getIdCardOssIds()));
+        contract.setContractOssIds(joinOssIds(dto.getContractOssIds()));
         contract.setRemark(dto.getRemark());
         contractMapper.insert(contract);
         return contract.getContractId();
@@ -164,6 +165,9 @@ public class ContractServiceImpl implements ContractService {
         }
         if (dto.getIdCardOssIds() != null) {
             contract.setIdCardOssIds(joinOssIds(dto.getIdCardOssIds()));
+        }
+        if (dto.getContractOssIds() != null) {
+            contract.setContractOssIds(joinOssIds(dto.getContractOssIds()));
         }
         if (dto.getRemark() != null) {
             contract.setRemark(dto.getRemark());
@@ -279,6 +283,7 @@ public class ContractServiceImpl implements ContractService {
         vo.setRemark(contract.getRemark());
         vo.setCreateTime(contract.getCreateTime());
         vo.setIdCardOssIds(splitOssIds(contract.getIdCardOssIds()));
+        vo.setContractOssIds(splitOssIds(contract.getContractOssIds()));
         return vo;
     }
 
@@ -304,11 +309,13 @@ public class ContractServiceImpl implements ContractService {
         Set<Long> deptIds = vos.stream().map(ContractVO::getDeptId).filter(Objects::nonNull).collect(Collectors.toSet());
         Map<Long, String> deptNames = deptPort.findDeptFullNames(deptIds);
         vos.forEach(vo -> vo.setDeptName(deptNames.get(vo.getDeptId())));
-        // 扫描件 URL（ossId → 直链；元数据已删的 ossId 跳过）
+        // 扫描件 URL（ossId → 直链；元数据已删的 ossId 跳过；身份证 + 合同扫描件一次批量取数）
         List<Long> ossIds = vos.stream()
-            .map(ContractVO::getIdCardOssIds)
-            .filter(Objects::nonNull)
-            .flatMap(List::stream)
+            .flatMap(vo -> {
+                List<String> idIds = vo.getIdCardOssIds() == null ? List.of() : vo.getIdCardOssIds();
+                List<String> ctIds = vo.getContractOssIds() == null ? List.of() : vo.getContractOssIds();
+                return java.util.stream.Stream.concat(idIds.stream(), ctIds.stream());
+            })
             .map(s -> {
                 try {
                     return Long.parseLong(s.trim());
@@ -327,19 +334,25 @@ public class ContractServiceImpl implements ContractService {
             }
         }
         vos.forEach(vo -> {
-            if (vo.getIdCardOssIds() == null) {
-                return;
-            }
-            List<String> urls = new ArrayList<>(vo.getIdCardOssIds().size());
-            for (String id : vo.getIdCardOssIds()) {
-                try {
-                    urls.add(urlById.get(Long.parseLong(id.trim())));
-                } catch (NumberFormatException e) {
-                    urls.add(null);
-                }
-            }
-            vo.setIdCardUrls(urls);
+            vo.setIdCardUrls(urlsOf(vo.getIdCardOssIds(), urlById));
+            vo.setContractUrls(urlsOf(vo.getContractOssIds(), urlById));
         });
+    }
+
+    /** ossId 集合 → URL 集合（一一对应；元数据缺失/非法 ossId 位置为 null；入参 null → null） */
+    private List<String> urlsOf(List<String> ossIds, Map<Long, String> urlById) {
+        if (ossIds == null) {
+            return null;
+        }
+        List<String> urls = new ArrayList<>(ossIds.size());
+        for (String id : ossIds) {
+            try {
+                urls.add(urlById.get(Long.parseLong(id.trim())));
+            } catch (NumberFormatException e) {
+                urls.add(null);
+            }
+        }
+        return urls;
     }
 
     /** ossId 集合 → 逗号分隔串（去空白、去重、保持顺序；空集合 → null） */

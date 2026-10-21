@@ -60,4 +60,16 @@ public class ScoreApprovalController extends BaseController {
         approvalService.submit(body.get("period"), LoginHelper.getUserId());
         return R.ok("已提交总监审批");
     }
+
+    /**
+     * 认领当前节点待办（积分审批总监节点：事后补赋总监角色）。
+     */
+    @SaCheckPermission("people:score:list")
+    @Log(title = "积分审批任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return approvalService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该审批单当前无待办，或您不具备当前节点所需角色", false);
+    }
 }

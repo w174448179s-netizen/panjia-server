@@ -94,4 +94,16 @@ public class CommissionAdjustController extends BaseController {
                                     @RequestParam(required = false) String orderNo) {
         return R.ok(adjustService.hasInFlightAdjust(contractNo, orderNo));
     }
+
+    /**
+     * 认领当前节点待办（拥有当前节点角色但不在授权快照时，如事后补赋财务/总监角色）。
+     */
+    @SaCheckPermission("commission:adjust:list")
+    @Log(title = "结佣调整任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return adjustService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该调整单当前无待办，或您不具备当前节点所需角色", false);
+    }
 }

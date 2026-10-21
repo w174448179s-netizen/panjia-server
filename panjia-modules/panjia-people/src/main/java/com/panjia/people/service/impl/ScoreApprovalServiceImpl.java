@@ -527,4 +527,11 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             return null;
         }
     }
+
+    /**
+     * 认领当前节点待办（积分审批总监节点：事后补赋总监角色）。
+     */
+    public boolean claim(Long id) {
+        return approvalPort.claim(BizType.SCORE_APPROVAL, id);
+    }
 }

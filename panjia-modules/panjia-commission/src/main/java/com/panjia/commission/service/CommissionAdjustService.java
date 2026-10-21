@@ -1366,4 +1366,16 @@ public class CommissionAdjustService {
             throw new ServiceException("明细已被冲销（终态），调整单不可重复执行：itemId=" + item.getId());
         }
     }
+
+    /**
+     * 认领当前节点待办（拥有当前节点角色但不在授权快照时，如事后补赋财务/总监角色）。
+     * <p>认领成功后前端重新拉取本人待办即可打开审批弹窗。
+     */
+    public boolean claim(Long id) {
+        CommissionAdjust adjust = adjustMapper.selectById(id);
+        if (adjust == null) {
+            throw new ServiceException("结佣调整单不存在：" + id);
+        }
+        return approvalPort.claim(BizType.COMMISSION_ADJUST, id);
+    }
 }

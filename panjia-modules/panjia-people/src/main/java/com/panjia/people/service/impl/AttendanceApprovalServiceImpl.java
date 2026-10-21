@@ -461,4 +461,11 @@ public class AttendanceApprovalServiceImpl implements AttendanceApprovalService 
             return null;
         }
     }
+
+    /**
+     * 认领当前节点待办（考勤月度审批总监节点：事后补赋总监角色）。
+     */
+    public boolean claim(Long id) {
+        return approvalPort.claim(BizType.ATTENDANCE_APPROVAL, id);
+    }
 }

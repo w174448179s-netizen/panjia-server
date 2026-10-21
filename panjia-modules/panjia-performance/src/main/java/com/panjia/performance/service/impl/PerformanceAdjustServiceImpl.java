@@ -3110,4 +3110,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         return adjust;
     }
+
+    /**
+     * 认领当前节点待办（拥有总监角色但不在授权快照时，如事后补赋总监角色）。
+     */
+    public boolean claim(Long id) {
+        return approvalPort.claim(BizType.PERF_ADJUST, id);
+    }
 }

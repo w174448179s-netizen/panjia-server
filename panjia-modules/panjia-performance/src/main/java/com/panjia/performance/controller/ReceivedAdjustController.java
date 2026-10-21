@@ -103,4 +103,16 @@ public class ReceivedAdjustController extends BaseController {
                                     @RequestParam String period) {
         return R.ok(receivedAdjustService.hasInFlight(contractNo, period));
     }
+
+    /**
+     * 认领当前节点待办（实收调整财务/总监节点：事后补赋角色）。
+     */
+    @SaCheckPermission("perf:adjust:list")
+    @Log(title = "实收调整任务认领", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/claim")
+    public R<Boolean> claim(@PathVariable Long id) {
+        return receivedAdjustService.claim(id)
+            ? R.ok("认领成功", true)
+            : R.fail("该调整单当前无待办，或您不具备当前节点所需角色", false);
+    }
 }
