@@ -222,23 +222,7 @@ public interface ReceivedRealFactMapper {
         )
             </otherwise>
         </choose>
-        SELECT MAX(s.contract_no) AS "contractNo",
-               MAX(s.order_no) AS "orderNo",
-               MAX(s.biz_type) AS "bizType",
-               MAX(s.property_address) AS "propertyAddress",
-               MAX(s.business_date) AS "businessDate",
-               MIN(s.period) AS "period",
-               COALESCE(SUM(s.amount), 0) AS "amount",
-               COALESCE(MAX(es.amt), 0) AS "expectedAmount",
-               CASE
-                   WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
-                   WHEN bool_or(s.ra_status = 'DRAFT') THEN 'DRAFT'
-                   WHEN COUNT(*) = COUNT(s.ra_id) FILTER (WHERE s.ra_status = 'APPROVED') THEN 'APPROVED'
-                   ELSE NULL
-               END AS "receivedStatus",
-               COUNT(DISTINCT s.emp_key) AS "employeeCount",
-               COUNT(*) AS "detailCount"
-        FROM (
+        , s AS (
             SELECT COALESCE(rc.order_no, rc.contract_no) AS biz_key,
                    rc.contract_no,
                    rc.order_no,
@@ -275,10 +259,39 @@ public interface ReceivedRealFactMapper {
             <if test="employeeId != null">
               AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
             </if>
-        ) s
-        LEFT JOIN expect_sum es ON es.biz_key = s.biz_key
-        GROUP BY s.biz_key
-        ORDER BY MAX(s.business_date) DESC, s.biz_key
+        )
+        , s_with_expect AS (
+            -- PERF_EXPECT 双侧匹配：order_no 优先精确命中，未命中退化 contract_no；
+            -- 修复 order_no 脏数据（PERF_EXPECT.order_no 被误填成 contract_no）导致实收侧
+            -- biz_key（真实订单号）与 PERF_EXPECT 侧 biz_key（contract_no 退化）对不上，
+            -- 新签合计展示为 0 的问题（2026-10-21 修复，差异 2,232.37 元 / 2 笔合同）
+            SELECT s.*,
+                   COALESCE(es1.amt, es2.amt, 0) AS expect_before_agg
+            FROM s
+            LEFT JOIN expect_sum es1
+                   ON s.order_no IS NOT NULL AND es1.biz_key = s.order_no
+            LEFT JOIN expect_sum es2
+                   ON es1.amt IS NULL AND s.contract_no IS NOT NULL AND es2.biz_key = s.contract_no
+        )
+        SELECT MAX(w.contract_no) AS "contractNo",
+               MAX(w.order_no) AS "orderNo",
+               MAX(w.biz_type) AS "bizType",
+               MAX(w.property_address) AS "propertyAddress",
+               MAX(w.business_date) AS "businessDate",
+               MIN(w.period) AS "period",
+               COALESCE(SUM(w.amount), 0) AS "amount",
+               COALESCE(MAX(w.expect_before_agg), 0) AS "expectedAmount",
+               CASE
+                   WHEN bool_or(w.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
+                   WHEN bool_or(w.ra_status = 'DRAFT') THEN 'DRAFT'
+                   WHEN COUNT(*) = COUNT(w.ra_id) FILTER (WHERE w.ra_status = 'APPROVED') THEN 'APPROVED'
+                   ELSE NULL
+               END AS "receivedStatus",
+               COUNT(DISTINCT w.emp_key) AS "employeeCount",
+               COUNT(*) AS "detailCount"
+        FROM s_with_expect w
+        GROUP BY w.biz_key
+        ORDER BY MAX(w.business_date) DESC, w.biz_key
         </script>
         """)
     List<PerformanceContractSummaryDTO> selectContractSummaries(@Param("period") String period,

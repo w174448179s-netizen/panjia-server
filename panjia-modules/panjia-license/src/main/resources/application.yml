@@ -7,7 +7,7 @@ spring:
 panjia:
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
-    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.online}
     # 授权码（首次部署时由管理后台生成，激活后作废）
     auth-code: ${PANJIA_AUTH_CODE:}
     # 产品版本号（激活时上报）
@@ -38,7 +38,7 @@ panjia:
       checksums: panjia-checksums
     # SSL Pinning 双指纹
     ssl-pinning:
-      primary-fingerprint: ${PANJIA_PIN_FP_A:}
+      primary-fingerprint: ${PANJIA_PIN_FP_A:5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce}
       secondary-fingerprint: ${PANJIA_PIN_FP_B:}
     # 日志配置
     log:

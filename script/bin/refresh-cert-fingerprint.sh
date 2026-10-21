@@ -1,7 +1,7 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# 证书指纹刷新工具
-# 用途：获取授权服务器当前 SSL 证书的 SHA-256 指纹（小写无冒号），
+# 公钥(SPKI)指纹刷新工具
+# 用途：获取授权服务器当前 SSL 证书公钥(SPKI)的 SHA-256 指纹（小写无冒号），
 #       对比 LicenseProperties 中已配置的主/备指纹，生成续签操作建议。
 #
 # 使用场景：
@@ -10,7 +10,7 @@
 #   3. 切换主备后清空旧指纹
 #
 # 用法：
-#   ./refresh-cert-fingerprint.sh                      # 默认 panjia.icu
+#   ./refresh-cert-fingerprint.sh                      # 默认 panjia.online
 #   ./refresh-cert-fingerprint.sh license.example.com  # 指定域名
 #   ./refresh-cert-fingerprint.sh license.example.com 8443  # 指定端口
 #
@@ -18,21 +18,21 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-DOMAIN="${1:-panjia.icu}"
+DOMAIN="${1:-panjia.online}"
 PORT="${2:-443}"
 
 # LicenseProperties 文件路径（相对项目根目录定位）
 PROPS_FILE="$(cd "$(dirname "$0")/../.." && pwd)/panjia-modules/panjia-license/src/main/java/com/panjia/license/config/LicenseProperties.java"
 
 echo "======================================================"
-echo " License 证书指纹刷新工具"
+echo " License 公钥(SPKI)指纹刷新工具"
 echo " 目标服务器: ${DOMAIN}:${PORT}"
 echo " 配置文件:   ${PROPS_FILE}"
 echo "======================================================"
 echo ""
 
-# ---------- 1. 取服务器当前证书指纹 ----------
-echo "[1/3] 正在获取服务器证书指纹..."
+# ---------- 1. 取服务器当前公钥(SPKI)指纹 ----------
+echo "[1/3] 正在获取服务器公钥(SPKI)指纹..."
 
 if ! command -v openssl >/dev/null 2>&1; then
     echo "  [错误] 未找到 openssl，请先安装"
@@ -40,10 +40,12 @@ if ! command -v openssl >/dev/null 2>&1; then
 fi
 
 RAW_FP=$(echo | openssl s_client -connect "${DOMAIN}:${PORT}" -servername "${DOMAIN}" 2>/dev/null \
-    | openssl x509 -fingerprint -sha256 -noout 2>/dev/null | cut -d= -f2)
+    | openssl x509 -pubkey -noout 2>/dev/null \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | openssl dgst -sha256 2>/dev/null | awk '{print $NF}')
 
 if [ -z "${RAW_FP}" ]; then
-    echo "  [错误] 无法获取证书指纹，可能原因："
+    echo "  [错误] 无法获取公钥(SPKI)指纹，可能原因："
     echo "         - 域名无法解析 / 端口不通 / 服务器未开启 TLS"
     echo "         - openssl s_client 连接失败"
     exit 1
@@ -52,8 +54,8 @@ fi
 # 转小写、去掉冒号（PinnedTrustManager 期望的格式）
 NEW_FP=$(echo "${RAW_FP}" | tr '[:upper:]' '[:lower:]' | tr -d ':')
 
-echo "  服务器当前证书指纹（原始）：${RAW_FP}"
-echo "  服务器当前证书指纹（配置）：${NEW_FP}"
+echo "  服务器当前公钥(SPKI)指纹（原始）：${RAW_FP}"
+echo "  服务器当前公钥(SPKI)指纹（配置）：${NEW_FP}"
 echo ""
 
 # ---------- 2. 对比 LicenseProperties 已配置的指纹 ----------
@@ -132,6 +134,10 @@ echo ""
 echo "  # 阶段 4：切换主备并清空（确认所有客户端更新后执行）"
 echo "  sed -i '' 's/primaryFingerprint = \"[^\"]*\"/primaryFingerprint = \"${NEW_FP}\"/' \"${PROPS_FILE}\""
 echo "  sed -i '' 's/secondaryFingerprint = \"[^\"]*\"/secondaryFingerprint = \"\"/' \"${PROPS_FILE}\""
+echo ""
+echo "  ⚠ 集成部署（panjia.online /console/）实际生效的是 .env 覆盖值："
+echo "    服务器 .env 的 PANJIA_PIN_FP_A / PANJIA_PIN_FP_B 优先于编译期默认值，"
+echo "    改完 LicenseProperties.java 还要同步服务器 .env，再 docker compose up -d server。"
 echo ""
 echo "======================================================"
 echo " 当前服务器指纹：${NEW_FP}"

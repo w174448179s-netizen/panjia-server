@@ -206,6 +206,10 @@ COMPOSE_PROFILES=embedded-minio
 # PANJIA_IMPORT_MINIO_BUCKET=panjia-archive
 JAVA_OPTS="-Xms2048m -Xmx4096m -XX:+UseG1GC"
 PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
+# License 授权服务器（主站 console）与 SSL Pinning 公钥指纹
+PANJIA_LICENSE_SERVER_URL=https://panjia.online
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
 ENVEOF
     # HTTPS 域名模式：compose 据此挂载 HTTPS 配置 + 对公网发布 443
     if [ -n "$DOMAIN" ]; then
@@ -238,6 +242,23 @@ MNEOF
     if ! grep -q '^PANJIA_AUTH_CODE=' .env; then
         echo "PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}" >> .env
         echo "[服务器] .env 已补充 PANJIA_AUTH_CODE"
+    fi
+    # 老版本升级：License 授权地址迁到主站 console，并补齐 SSL Pinning 公钥指纹
+    if ! grep -q '^PANJIA_LICENSE_SERVER_URL=' .env; then
+        cat >> .env << LICEOF
+
+# ---- License 授权服务器与 SSL Pinning（自动补充）----
+PANJIA_LICENSE_SERVER_URL=https://panjia.online
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
+LICEOF
+        echo "[服务器] .env 已补充 License 授权地址与公钥指纹"
+    elif ! grep -q '^PANJIA_PIN_FP_A=' .env; then
+        cat >> .env << LICEOF
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
+LICEOF
+        echo "[服务器] .env 已补充 SSL Pinning 公钥指纹"
     fi
     # 老版本升级：默认启用内置 MinIO（外置 MinIO 用户自行置空）
     if ! grep -q '^COMPOSE_PROFILES=' .env; then

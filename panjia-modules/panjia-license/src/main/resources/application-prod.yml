@@ -1,7 +1,7 @@
 # 生产环境覆盖配置（由容器环境变量注入）
 panjia:
   license:
-    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.icu}
+    server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.online}
     # 授权码（首次部署注入，激活后作废）
     auth-code: ${PANJIA_AUTH_CODE:}
     product-version: ${panjia.version:1.0.0}
@@ -9,5 +9,5 @@ panjia:
     data-dir: ${PANJIA_LICENSE_DATA_DIR:/data/panjia-license}
     # SSL Pinning 双指纹
     ssl-pinning:
-      primary-fingerprint: ${PANJIA_PIN_FP_A:}
+      primary-fingerprint: ${PANJIA_PIN_FP_A:5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce}
       secondary-fingerprint: ${PANJIA_PIN_FP_B:}

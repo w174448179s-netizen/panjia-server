@@ -7,8 +7,11 @@ import java.security.cert.X509Certificate;
 import java.util.List;
 
 /**
- * 证书指纹匹配 TrustManager。
- * 仅当证书指纹命中主或备指纹时信任，否则 SSL 握手失败。
+ * 公钥指纹（SPKI）匹配 TrustManager。
+ * 仅当证书公钥指纹命中主或备指纹时信任，否则 SSL 握手失败。
+ *
+ * 采用 SPKI（SubjectPublicKeyInfo）哈希而非整张证书 DER 哈希：
+ * 证书续签只要复用密钥，公钥不变，指纹就不会变化，无需重启客户端。
  *
  * 铁律 3：无任何关闭入口。本类不读任何配置，指纹硬编码在调用方。
  */
@@ -37,9 +40,9 @@ class PinnedTrustManager implements X509TrustManager {
         }
         X509Certificate cert = chain[0];
         String fingerprint = calculateFingerprint(cert);
-        log.debug("[PinnedTrustManager] 证书指纹校验: {} -> {}", fingerprint, allowedFingerprints);
+        log.debug("[PinnedTrustManager] 公钥指纹校验: {} -> {}", fingerprint, allowedFingerprints);
         if (!allowedFingerprints.contains(fingerprint)) {
-            throw new RuntimeException("SSL Pinning 失败：证书指纹未命中，拒绝握手。可能是 SSL 中间人代理拦截。");
+            throw new RuntimeException("SSL Pinning 失败：公钥指纹未命中，拒绝握手。可能是 SSL 中间人代理拦截。");
         }
     }
 
@@ -49,13 +52,13 @@ class PinnedTrustManager implements X509TrustManager {
     }
 
     /**
-     * 计算证书 SHA-256 指纹（十六进制）。
-     * 与配置中的主/备指纹比对。
+     * 计算证书公钥（SPKI）的 SHA-256 指纹（十六进制）。
+     * SPKI DER 即公钥编码（X.509 SubjectPublicKeyInfo），与证书有效期/序列号无关。
      */
     private String calculateFingerprint(X509Certificate cert) {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(cert.getEncoded());
+            byte[] hash = md.digest(cert.getPublicKey().getEncoded());
             StringBuilder sb = new StringBuilder();
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));

@@ -108,6 +108,16 @@ services:
       PANJIA_IMPORT_MINIO_BUCKET: ${PANJIA_IMPORT_MINIO_BUCKET:-panjia-archive}
       # License 授权：首次部署配 PANJIA_AUTH_CODE 自动激活，token 落盘 data/panjia-license 后可留空
       PANJIA_AUTH_CODE: ${PANJIA_AUTH_CODE:-}
+      # License 授权服务器地址（激活/心跳/校验），默认指向主站 console，可用 .env 覆盖
+      PANJIA_LICENSE_SERVER_URL: ${PANJIA_LICENSE_SERVER_URL:-https://panjia.online}
+      # SSL Pinning 公钥指纹（SPKI SHA-256）：主=当前证书公钥，备=密钥轮换过渡用（可空）
+      # 证书续签只要复用密钥（certbot reuse_key），公钥不变，无需改这里、也无需重启
+      PANJIA_PIN_FP_A: ${PANJIA_PIN_FP_A:-5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce}
+      PANJIA_PIN_FP_B: ${PANJIA_PIN_FP_B:-}
+      # 兼容旧镜像：旧版 license 模块 YAML 里指纹是硬编码的，PANJIA_PIN_FP_A/B 占位符不生效，
+      # 因此再用标准键名直接绑定 ConfigurationProperties 覆盖；重新构建后两种写法等价
+      PANJIA_LICENSE_SSL_PINNING_PRIMARY_FINGERPRINT: ${PANJIA_PIN_FP_A:-5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce}
+      PANJIA_LICENSE_SSL_PINNING_SECONDARY_FINGERPRINT: ${PANJIA_PIN_FP_B:-}
       # 数据库备份恢复（系统管理 → 备份恢复）：容器内无 docker CLI，走 local 模式
       # 用镜像内置的 pg_dump/pg_restore 经容器内网 TCP 直连 postgres 容器
       PANJIA_BACKUP_MODE: local

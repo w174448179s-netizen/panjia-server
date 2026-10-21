@@ -129,6 +129,10 @@ COMPOSE_PROJECT_NAME=panjia-test
 COMPOSE_PROFILES=embedded-minio
 JAVA_OPTS="-Xms512m -Xmx1024m -XX:+UseG1GC"
 PANJIA_AUTH_CODE=$TEST_AUTH_CODE
+# License 授权服务器（主站 console）与 SSL Pinning 公钥指纹
+PANJIA_LICENSE_SERVER_URL=https://panjia.online
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
 ENVEOF
     chmod 600 "$TEST_DIR/.env"
     echo "[测试] .env 已生成（随机强密码，请记录）："
@@ -141,6 +145,21 @@ else
     if [ -n "$TEST_AUTH_CODE" ] && ! grep -q '^PANJIA_AUTH_CODE=.\+' "$TEST_DIR/.env"; then
         sed -i "s#^PANJIA_AUTH_CODE=.*#PANJIA_AUTH_CODE=$TEST_AUTH_CODE#" "$TEST_DIR/.env"
         echo "[测试] .env 已补写测试授权码"
+    fi
+    # 老版本升级：License 授权地址迁到主站 console，并补齐 SSL Pinning 公钥指纹
+    if ! grep -q '^PANJIA_LICENSE_SERVER_URL=' "$TEST_DIR/.env"; then
+        cat >> "$TEST_DIR/.env" << LICEOF
+PANJIA_LICENSE_SERVER_URL=https://panjia.online
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
+LICEOF
+        echo "[测试] .env 已补充 License 授权地址与公钥指纹"
+    elif ! grep -q '^PANJIA_PIN_FP_A=' "$TEST_DIR/.env"; then
+        cat >> "$TEST_DIR/.env" << LICEOF
+PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
+PANJIA_PIN_FP_B=
+LICEOF
+        echo "[测试] .env 已补充 SSL Pinning 公钥指纹"
     fi
 fi
 

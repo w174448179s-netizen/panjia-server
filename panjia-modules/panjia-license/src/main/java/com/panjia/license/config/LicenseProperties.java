@@ -13,7 +13,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class LicenseProperties {
 
     /** 授权服务器基础地址 */
-    private String serverUrl = "https://panjia.icu";
+    private String serverUrl = "https://panjia.online";
 
     /** 授权码（首次部署时由管理后台生成，激活后作废） */
     private String authCode = "";
@@ -72,9 +72,9 @@ public class LicenseProperties {
 
     @Data
     public static class SslPinning {
-        /** 主指纹（当前生效，panjia.icu 证书 SHA-256 小写无冒号） */
-        private String primaryFingerprint = "98c173cbc20f87ea6667c41a32e0e48365f80e1213e7d9dcc4044a7b2746e6da";
-        /** 备指纹（证书轮换过渡期先信任，留空表示无备指纹；续签时取新证书指纹填入此处，切换后再清空旧主） */
+        /** 主指纹（当前授权服务器证书公钥 SPKI 的 SHA-256，小写无冒号） */
+        private String primaryFingerprint = "5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce";
+        /** 备指纹（密钥轮换过渡期使用；续签复用密钥时无需填写） */
         private String secondaryFingerprint = "";
     }
 
