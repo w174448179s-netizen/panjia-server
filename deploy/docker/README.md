@@ -21,6 +21,7 @@
 | `nginx/nginx.conf` | nginx 纯 HTTP 配置（静态文件 + `/prod-api/` 反代后端；无域名客户/测试环境用） | ✅ |
 | `nginx/nginx-https.conf` | nginx HTTPS 模板（`__DOMAIN__` 占位符；带 `DOMAIN` 部署时由脚本生成 `nginx-https.enabled.conf`） | ✅ |
 | `start.sh` `stop.sh` `restart.sh` `logs.sh` | 服务器端运维脚本 | ✅ |
+| `CERT_MIGRATION.md` | **授权服务器迁移指南**：证书私钥备份、解压恢复、License 公钥指纹校验步骤 | 否（本地用） |
 | `data/` `logs/` | 运行时数据（PG/Redis 数据、应用日志），**部署时自动排除不上传** | 运行生成 |
 
 ## 二、新客户部署（就两条命令）
