@@ -983,6 +983,21 @@ public class CommissionApplicationService {
                 }
             }
         }
+        // 增量结佣（2026-10-21）：排除已被结佣明细绑定的事实。
+        // 同一合同跨月再次发起（如 3 月新签 9 月结佣、10 月退单再发起）时，已结佣的历史
+        // 事实若继续进入候选，会命中占用预检/uk_citem_fact_active 导致整单无法发起；
+        // 此处只结未结佣部分（重建场景本单旧明细已 REVERSED，事实随冲销释放）。
+        if (!expectById.isEmpty()) {
+            List<Long> settledFactIds = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+                    .select(CommissionItem::getPerformanceFactId)
+                    .in(CommissionItem::getPerformanceFactId, expectById.keySet())
+                    .ne(CommissionItem::getStatus, ItemStatus.REVERSED))
+                .stream()
+                .map(CommissionItem::getPerformanceFactId)
+                .filter(Objects::nonNull)
+                .toList();
+            settledFactIds.forEach(expectById::remove);
+        }
         // 结佣金额口径（2026-09-30 定稿）：当月有非零新签用当月，当月为 0/无新签用历史
         // （实收月之前全部月合计）。0 元新签不参与计算、不视为"当月有新签"，仍回退汇总历史
         List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();

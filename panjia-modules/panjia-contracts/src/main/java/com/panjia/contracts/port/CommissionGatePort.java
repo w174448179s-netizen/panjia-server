@@ -1,5 +1,7 @@
 package com.panjia.contracts.port;
 
+import java.util.Collection;
+
 /**
  * 结佣闸门跨域端口（commission 域对外契约，供 performance 域在发起/执行新签调整前校验）。
  * <p>
@@ -27,4 +29,15 @@ public interface CommissionGatePort {
      * @return true=该合同该期间存在 LOCKED 结佣单，禁止新签调整；false=无 LOCKED 单可调整
      */
     boolean isCommissionLocked(String period, String contractNo);
+
+    /**
+     * 判断这批新签事实是否已被<b>已审批锁定</b>的结佣明细绑定。
+     * <p>
+     * 供新签调整发起/执行时校验，事实级口径：只拦「本次将被 supersede 且已结佣」的事实，
+     * 同合同其他月份尚未结佣的新签仍可正常调整（不受该合同历史结佣单影响）。
+     *
+     * @param factIds 待调整（将被 supersede）的新签事实 ID
+     * @return true=其中至少一条已被 LOCKED 结佣单的明细绑定，禁止调整；false=可调整
+     */
+    boolean areFactsLockedByCommission(Collection<Long> factIds);
 }

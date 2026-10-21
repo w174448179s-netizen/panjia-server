@@ -632,11 +632,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
 
-        // 明细级：校验该事实所属合同的结佣是否已审批锁定
+        // 明细级：校验该事实是否已被锁定结佣明细绑定
         if (!SCOPE_CONTRACT.equals(scope) && dto.getFactId() != null) {
             PerformanceFact fact = factMapper.selectById(dto.getFactId());
             if (fact != null && StringUtils.isNotBlank(fact.getContractNo())) {
-                assertCommissionNotLocked(fact.getPeriod(), fact.getContractNo());
+                assertFactsNotLocked(List.of(fact), fact.getContractNo());
             }
         }
 
@@ -706,10 +706,15 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 而事实表 contract_no / order_no 两列本就分开存储
         if (SCOPE_CONTRACT.equals(scope)) {
             normalizeContractBizKeys(dto);
-            // 结佣已审批锁定则禁止发起新签调整（保护已审批结佣数据）
-            String gatePeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
-                ? dto.getOriginalPeriod() : dto.getPeriod();
-            assertCommissionNotLocked(gatePeriod, dto.getContractNo());
+            // 结佣已审批锁定则禁止发起新签调整（保护已审批结佣数据）。
+            // 事实级口径：只拦本次将被 supersede 且已被锁定明细绑定的事实，同合同其他月份
+            // 未结佣的新签仍可调整；业绩冲正不 supersede 老事实，跳过校验。
+            if (adjustType != AdjustType.MANUAL_OFFSET) {
+                String gatePeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+                    ? dto.getOriginalPeriod() : dto.getPeriod();
+                assertFactsNotLocked(loadActiveFactsForAdjust(gatePeriod, dto.getFactType(),
+                    dto.getOrderNo(), dto.getContractNo()), dto.getContractNo());
+            }
         }
 
         // 2.6 在途互斥：同合同存在审批中（SUBMITTED/APPROVED）调整单时拒绝发起。
@@ -1130,8 +1135,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             ? adjust.getOriginalPeriod() : adjust.getPeriod();
         assertPeriodNotClosed(originalPeriod, "原业绩归属月");
         assertPeriodNotClosed(adjust.getPeriod(), "调整生效月");
-        // 结佣已审批锁定则禁止执行新签调整（兜底：防发起后结佣变锁定）
-        assertCommissionNotLocked(originalPeriod, adjust.getContractNo());
+        // 结佣已审批锁定则禁止执行新签调整（兜底：防发起后结佣变锁定）。
+        // 事实级口径：只拦本次将被 supersede 且已被锁定明细绑定的事实。
+        if (adjust.getAdjustType() != AdjustType.MANUAL_OFFSET) {
+            assertFactsNotLocked(loadActiveFactsForAdjust(originalPeriod, adjust.getFactType(),
+                adjust.getOrderNo(), adjust.getContractNo()), adjust.getContractNo());
+        }
 
         // 根据调整范围 + 类型执行不同逻辑
         if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
@@ -1195,18 +1204,26 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 校验指定合同 + 业绩归属月的结佣是否已审批锁定（LOCKED）。
-     * <p>结佣已审批通过并计入工资后，新签事实调整会破坏一致性，必须先作废结佣单再调整。
-     * 端口实现缺失（本模块独立启动）或参数缺失时跳过校验。
+     * 校验待调整（将被 supersede）的新签事实是否已被锁定结佣明细绑定。
+     * <p>事实级口径：只拦已结佣的那几条事实，同合同其他月份未结佣的新签仍可调整。
+     * 端口实现缺失（本模块独立启动）或事实为空时跳过校验。
      */
-    private void assertCommissionNotLocked(String period, String contractNo) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
+    private void assertFactsNotLocked(List<PerformanceFact> facts, String contractNo) {
+        if (facts == null || facts.isEmpty()) {
+            return;
+        }
+        List<Long> factIds = facts.stream()
+            .map(PerformanceFact::getId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        if (factIds.isEmpty()) {
             return;
         }
         CommissionGatePort gate = commissionGate();
-        if (gate != null && gate.isCommissionLocked(period, contractNo)) {
-            throw new ServiceException("合同 " + contractNo + " " + period
-                + " 月结佣已审批通过并锁定，不能发起新签调整；如需调整请先作废结佣单");
+        if (gate != null && gate.areFactsLockedByCommission(factIds)) {
+            throw new ServiceException("合同 " + contractNo
+                + " 的部分新签业绩已结佣并锁定，不能调整；如需调整请先作废对应结佣单");
         }
     }
 
