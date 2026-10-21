@@ -169,6 +169,15 @@ public class ReceivedApply implements Serializable {
     /** 终审时间 */
     private LocalDateTime approveTime;
 
+    /**
+     * 自动发起结佣生成的结佣申请单号（留痕）。
+     * <p>
+     * 仅系统自动审批通过（导入分流/新签触发）且业务类型非「二手买卖」时，
+     * 由结佣域自动发起并回填；人工审批通过不自动发起，保持为空。
+     * 列表/详情据此展示「已自动发起结佣」提示。
+     */
+    private String autoCommissionApplyNo;
+
     /** 乐观锁版本号 */
     @Version
     private Integer version;

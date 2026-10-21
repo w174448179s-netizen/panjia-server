@@ -34,6 +34,12 @@ public class EmployeeUpdateDTO {
     /** 身份证号 */
     private String idCard;
 
+    /** 户口所在地（null=不修改） */
+    private String residence;
+
+    /** 现住地址（null=不修改） */
+    private String currentAddress;
+
     /** 性别（字典 panjia_employee_gender：MALE/FEMALE；null=不修改） */
     private String gender;
 

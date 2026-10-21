@@ -743,7 +743,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     apply.setApproveTime(LocalDateTime.now());
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
-                    emitApprovedEvent(apply, operatorId);
+                    emitApprovedEvent(apply, operatorId, true);
                     log.info("[实收审批] 贝壳实收自动通过直建（实收保留到账金额）：applyNo={}, orderNo={}, received={}",
                         apply.getApplyNo(), orderNo, apply.getReceivedAmount());
                 }
@@ -773,14 +773,28 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /** 发布实收审批通过事件（outbox 原子提交；contractNo 可为空，家装荐客等以 orderNo 为锚点）。 */
-    private void emitApprovedEvent(ReceivedApply apply, Long operatorId) {
+    private void emitApprovedEvent(ReceivedApply apply, Long operatorId, boolean autoApproved) {
         ReceivedApprovedEvent event = new ReceivedApprovedEvent();
         event.setApplyId(apply.getId());
         event.setPeriod(apply.getPeriod());
         event.setOrderNo(apply.getOrderNo());
         event.setContractNo(apply.getContractNo());
+        event.setBizType(apply.getBizType());
         event.setOperatorId(operatorId);
+        // 仅系统自动通过（导入分流/新签触发）才允许结佣域自动发起，人工审批通过不自动发起
+        event.setAutoApproved(autoApproved);
         eventPort.emit(event);
+    }
+
+    @Override
+    public void markAutoCommissionApply(Long applyId, String commissionApplyNo) {
+        if (applyId == null || StringUtils.isBlank(commissionApplyNo)) {
+            return;
+        }
+        // 直接 UPDATE 留痕，不走乐观锁版本号，避免与审批终态写入相互覆盖
+        applyMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ReceivedApply>()
+            .eq(ReceivedApply::getId, applyId)
+            .set(ReceivedApply::getAutoCommissionApplyNo, commissionApplyNo));
     }
 
     private static BigDecimal nvlAmount(BigDecimal v) {
@@ -864,7 +878,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             apply.setApproverId(operatorId);
             apply.setApproveTime(LocalDateTime.now());
             applyMapper.updateById(apply);
-            emitApprovedEvent(apply, operatorId);
+            emitApprovedEvent(apply, operatorId, true);
             log.info("[实收审批] 新签触发自动通过：applyNo={}, orderNo={}, received={}, expect={}",
                 apply.getApplyNo(), apply.getOrderNo(), realSum, expectTotal);
             return true;
@@ -1525,8 +1539,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.setApproverId(handlerId);
                 apply.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(apply);
-                // 人工审批通过：同样发布实收审批通过事件（结佣域按合同自动产生结佣记录）
-                emitApprovedEvent(apply, handlerId);
+                // 人工审批通过：发布事件仅作审批留痕，结佣域不自动发起（由业务人员手工发起）
+                emitApprovedEvent(apply, handlerId, false);
                 log.info("[实收审批工作流] 审批通过：applyId={}, handler={}", applyId, handler);
             }
             case "back" -> {

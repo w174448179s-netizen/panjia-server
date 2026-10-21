@@ -37,6 +37,7 @@ import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.MyTaskBrief;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
+import com.panjia.contracts.port.ReceivedApplyPort;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -125,6 +126,8 @@ public class CommissionApplicationService {
     private final ConfigService configService;
     private final DeptService deptService;
     private final TaskExecutor taskExecutor;
+    /** 实收域端口：实收自动审批通过触发结佣自动发起时，回填实收审批单留痕 */
+    private final ReceivedApplyPort receivedApplyPort;
 
     /**
      * 批量发起上下文：承载在批量入口预加载的数据，贯穿 doBatchApply → apply →
@@ -190,13 +193,53 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, String orderNo, Long operatorId) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
-            throw new ServiceException("结算月与合同号不能为空");
+        return doApplyFromBizKey(period, contractNo, orderNo, operatorId, false);
+    }
+
+    /**
+     * 实收自动审批通过后自动发起并提交结佣（系统触发，2026-10-21 定稿）。
+     * <p>
+     * 仅由实收审批通过事件在「系统自动通过 + 业务类型非二手买卖」时调用：
+     * 结算月 = 实收月（事件 period），建单后直接提交审批；申请人节点以实收操作人身份办理，
+     * 总监节点仍由人工审批（系统触发起人不享受总监自动过节点）。
+     * <p>
+     * 留痕：提交成功后把结佣申请单号回填实收审批单（同一事务），
+     * 实收审批列表/详情据此提示「已自动发起结佣」。
+     *
+     * @param period          实收月 YYYY-MM（即结佣发起月）
+     * @param contractNo      合同号（可空，空则退订单号）
+     * @param orderNo         订单号（业务锚点）
+     * @param receivedApplyId 实收审批单 ID（留痕回填）
+     * @param operatorId      实收审批操作人 ID
+     * @return 已提交的结佣申请单
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionApplication applyAutoOnReceivedApproved(String period, String contractNo, String orderNo,
+                                                             Long receivedApplyId, Long operatorId) {
+        CommissionApplication application = doApplyFromBizKey(period, contractNo, orderNo, operatorId, true);
+        if (receivedApplyId != null) {
+            receivedApplyPort.markAutoCommissionApply(receivedApplyId, application.getApplyNo());
+        }
+        return application;
+    }
+
+    /**
+     * 单发发起/提交实现（人工与系统自动发起共用）。
+     *
+     * @param systemInitiated true = 实收审批通过事件触发的系统自动发起：
+     *                        申请人节点以操作人身份办理、不做总监发起自动过节点；
+     *                        false = 业务人员手工发起
+     */
+    private CommissionApplication doApplyFromBizKey(String period, String contractNo, String orderNo,
+                                                    Long operatorId, boolean systemInitiated) {
+        // 业务键以订单号为准；合同号可空（一手房/家装荐客等无合同号业务）
+        String bizKey = StringUtils.isNotBlank(orderNo) ? orderNo.trim() : StringUtils.trimToNull(contractNo);
+        if (StringUtils.isBlank(period) || bizKey == null) {
+            throw new ServiceException("结算月与合同号/订单号不能为空");
         }
         checkPeriodOpen(period, "发起结佣");
-        // 业务键以订单号为准：ctx 各 Map（申请单/事实/应收）统一按 bizKey 索引，
+        // ctx 各 Map（申请单/事实/应收）统一按 bizKey 索引，
         // 5 参 apply 与 createApplicationWithItems 无需感知输入是合同号还是订单号
-        String bizKey = StringUtils.isNotBlank(orderNo) ? orderNo.trim() : contractNo.trim();
         BatchApplyContext ctx = new BatchApplyContext();
         // 活跃/驳回申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）；
         // 输入为订单号时归组自动命中 order_no 索引
@@ -205,7 +248,7 @@ public class CommissionApplicationService {
         // 有订单号走 (orderNo AND contractNo) 双键精确，只装该订单实收行，绝不串同合同他订单；
         // 无订单号退合同号 OR 口径（多订单时由 createApplicationWithItems 内防串单校验拒绝）
         List<PerformanceFactSummaryDTO> realFacts = StringUtils.isNotBlank(orderNo)
-            ? performanceQueryPort.findActiveByBizKey(null, orderNo.trim(), contractNo.trim(), FACT_TYPE_REAL)
+            ? performanceQueryPort.findActiveByBizKey(null, orderNo.trim(), StringUtils.trimToNull(contractNo), FACT_TYPE_REAL)
             : performanceQueryPort.findActiveByContract(null, contractNo, FACT_TYPE_REAL);
         ctx.factsMap.put(bizKey, realFacts);
         // 应收金额：跨期口径一次查（命中才入 ctx，未命中由 createApplicationWithItems 走宽捞+退化）
@@ -214,7 +257,7 @@ public class CommissionApplicationService {
         if (expect != null) {
             ctx.expectedAmounts.put(bizKey, expect);
         }
-        return apply(period, bizKey, operatorId, false, ctx);
+        return apply(period, bizKey, operatorId, false, ctx, systemInitiated);
     }
 
     /**
@@ -230,6 +273,18 @@ public class CommissionApplicationService {
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId,
                                        boolean skipDeptScope, BatchApplyContext ctx) {
+        return apply(period, contractNo, operatorId, skipDeptScope, ctx, false);
+    }
+
+    /**
+     * 发起结佣并提交审批（系统自动发起标记重载）。
+     *
+     * @param systemInitiated true = 实收审批通过事件自动发起：不做总监发起自动过节点，
+     *                        流程首节点以 operatorId 身份办理
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public CommissionApplication apply(String period, String contractNo, Long operatorId,
+                                       boolean skipDeptScope, BatchApplyContext ctx, boolean systemInitiated) {
         if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
             throw new ServiceException("结算月与合同号不能为空");
         }
@@ -243,12 +298,12 @@ public class CommissionApplicationService {
             ? ctx.rejectedApps.get(contractNo)
             : findRejectedApplication(period, contractNo);
         if (rejected != null) {
-            submit(rejected, operatorId);
+            submit(rejected, operatorId, systemInitiated);
             return rejected;
         }
-        // 实收审批通过后系统自动生成的 DRAFT 草稿单（不自动提交，保留人工审批链）：
-        // 人工单个/批量发起时直接提交该草稿；草稿常由导入归档操作人身份自动建立，
-        // 提交时把申请人改为实际提交人（列表「申请人」、审批中数据隔离均以申请人为准）。
+        // 历史遗留 DRAFT 草稿单（早期实收自动建单不提交）：人工发起时直接提交该草稿；
+        // 草稿常由导入归档操作人身份自动建立，提交时把申请人改为实际提交人
+        // （列表「申请人」、审批中数据隔离均以申请人为准）。
         // SUBMITTED/APPROVED/LOCKED 属重复发起，直接拒绝。
         CommissionApplication active = ctx != null
             ? ctx.activeApps.get(contractNo)
@@ -268,14 +323,14 @@ public class CommissionApplicationService {
                     active.setApplicantId(operatorId);
                     applicationMapper.updateById(active);
                 }
-                submit(active, operatorId);
+                submit(active, operatorId, systemInitiated);
                 return active;
             }
             throw new ServiceException("合同 " + contractNo + " " + period
                 + " 月已存在" + active.getStatus().getDesc() + "申请单（" + active.getApplyNo() + "），请勿重复发起");
         }
         CommissionApplication application = createApplicationWithItems(period, contractNo, operatorId, ctx);
-        submit(application, operatorId);
+        submit(application, operatorId, systemInitiated);
         return application;
     }
 
@@ -1016,6 +1071,17 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void submit(CommissionApplication application, Long operatorId) {
+        submit(application, operatorId, false);
+    }
+
+    /**
+     * 提交审批（实体入参重载 + 系统自动发起标记）。
+     * <p>
+     * 系统自动发起（实收自动审批通过触发）时：流程首节点以 operatorId 身份办理
+     * （后台线程无登录上下文），且不执行「发起人=总监自动过总监节点」逻辑。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void submit(CommissionApplication application, Long operatorId, boolean systemInitiated) {
         if (application == null) {
             throw new ServiceException("结佣申请单不存在");
         }
@@ -1032,7 +1098,8 @@ public class CommissionApplicationService {
             .set(CommissionItem::getStatus, ItemStatus.PENDING));
 
         if (StringUtils.isBlank(application.getProcessInstanceId())) {
-            startWorkflow(application);
+            // 系统自动发起无登录上下文，显式指定办理人，避免流程发起人变量为空
+            startWorkflow(application, systemInitiated ? operatorId : null);
         } else {
             // 驳回后流程停在申请人节点：办理申请人任务重新提交
             Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, application.getId());
@@ -1043,8 +1110,8 @@ public class CommissionApplicationService {
         }
 
         // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
-        // 后续 §3.5 差异对齐与「无差异自动过财务」由 capp_finance 任务创建事件监听器接管
-        if (currentRoles().contains(ROLE_DIRECTOR)) {
+        // 系统自动发起不适用（后台无登录上下文，总监节点保留人工审批）
+        if (!systemInitiated && currentRoles().contains(ROLE_DIRECTOR)) {
             Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
             if (directorTask == null) {
                 throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
@@ -2455,9 +2522,14 @@ public class CommissionApplicationService {
 
     /**
      * 启动 commission_apply 流程并办理申请人首节点。
+     *
+     * @param handlerId 办理人 ID：系统自动发起（无登录上下文）时显式指定，人工发起传 null 走登录态
      */
-    private void startWorkflow(CommissionApplication application) {
+    private void startWorkflow(CommissionApplication application, Long handlerId) {
         ApprovalStartCmd cmd = buildStartCmd(application);
+        if (handlerId != null) {
+            cmd.setHandler(String.valueOf(handlerId));
+        }
         try {
             boolean ok = approvalPort.startAndCompleteFirst(BizType.COMMISSION, application.getId(), cmd);
             if (!ok) {

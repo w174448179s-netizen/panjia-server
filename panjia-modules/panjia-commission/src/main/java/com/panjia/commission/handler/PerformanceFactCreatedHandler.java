@@ -29,12 +29,12 @@ import java.util.stream.Collectors;
  * 双向联动实收自动审批（2026-09-30 定稿）：
  * <ul>
  *   <li>{@code PERF_REAL}（实收导入产生事实）：仅留痕，<b>不建单</b>——实收导入时尚未审批，
- *       结佣须待实收审批通过（APPROVED）后由业务人员手工发起；</li>
+ *       结佣须待实收审批通过（APPROVED）；系统自动通过时由实收审批通过事件自动发起结佣；</li>
  *   <li>{@code PERF_EXPECT}（新签导入产生事实）：<b>触发实收审批通过</b>——查同业务键跨月 DRAFT
  *       实收事实（实收月 ≥ 新签月），对每个业务键/实收月调
  *       {@link ReceivedApplyPort#resolveDraftAfterNewSign} 重新评估：实收 ≥ 新签→实收单自动通过；
  *       实收 &lt; 新签→启动人工审批。覆盖「实收先导入（无新签→DRAFT）、新签后导入」场景。
- *       结佣单由业务人员在结佣列表对 APPROVED 实收手工发起（§3.2 前置），本处理器不建结佣单。</li>
+ *       实收自动通过后由 {@link ReceivedApplyApprovedHandler} 自动发起结佣；本处理器不建结佣单。</li>
  * </ul>
  * 幂等：resolveDraftAfterNewSign 仅处理 DRAFT 单（SUBMITTED/APPROVED 不打扰），
  * 重复事件无副作用；此处 catch ServiceException 跳过不重试。

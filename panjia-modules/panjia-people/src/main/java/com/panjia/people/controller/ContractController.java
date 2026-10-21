@@ -200,6 +200,8 @@ public class ContractController extends BaseController {
         result.put("genderLabel", emp.getGender() == null ? null : ("MALE".equals(emp.getGender()) ? "男" : "女"));
         result.put("phone", emp.getPhone());
         result.put("idCard", emp.getIdCard());
+        result.put("residence", emp.getResidence());
+        result.put("currentAddress", emp.getCurrentAddress());
         result.put("bankName", emp.getBankName());
         result.put("bankBranch", emp.getBankBranch());
         result.put("bankCardNo", emp.getBankCardNo());

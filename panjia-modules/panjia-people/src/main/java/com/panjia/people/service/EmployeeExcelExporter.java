@@ -112,6 +112,8 @@ public class EmployeeExcelExporter {
             case "post_names" -> vo.getPostNames() == null ? null : String.join("/", vo.getPostNames());
             case "phone" -> vo.getPhone();
             case "id_card" -> vo.getIdCard();
+            case "residence" -> vo.getResidence();
+            case "current_address" -> vo.getCurrentAddress();
             case "gender" -> genderLabel(vo.getGender());
             case "bank_name" -> vo.getBankName();
             case "bank_branch" -> vo.getBankBranch();

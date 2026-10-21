@@ -184,7 +184,10 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
             replay.setPeriod(apply.getPeriod());
             replay.setOrderNo(apply.getOrderNo());
             replay.setContractNo(apply.getContractNo());
+            replay.setBizType(apply.getBizType());
             replay.setOperatorId(operatorId);
+            // 撤销重放属于补偿动作，不触发结佣自动发起（避免批次撤销后重复建结佣单）
+            replay.setAutoApproved(false);
             eventPort.emit(replay);
             replayed++;
         }

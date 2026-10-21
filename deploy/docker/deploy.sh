@@ -372,12 +372,19 @@ if docker compose config --services | grep -q '^minio$'; then
     #   endpoint=minio:9000 —— server 容器走 compose 内网服务名（baseline 的 host.docker.internal 在 Linux 容器不可解析）
     #   domain_url —— 浏览器图片直链，经 nginx /oss/ 反代到 minio:9000（minio 只绑 127.0.0.1）
     #                 HTTPS 域名模式必须用 https://域名/oss，否则页面被浏览器按混合内容拦截图片
+    #                 纯 HTTP 模式必须带 .env 的 WEB_PORT（测试环境 8081 与生产 80 同机，
+    #                 漏端口会把回显打到生产 80 上，图片 404/裂图）
     #   凭证 = .env 的 MINIO_ROOT_USER/PASSWORD（baseline 的 ruoyi/ruoyi123 与服务器随机密码不符）
     OSS_CFG_ENDPOINT='minio:9000'
     if [ -n "$DOMAIN" ]; then
         OSS_CFG_DOMAIN="https://${DOMAIN}/oss"
     else
-        OSS_CFG_DOMAIN="http://${SERVER_IP}/oss"
+        OSS_WEB_PORT="${WEB_PORT:-80}"
+        if [ "${OSS_WEB_PORT}" = "80" ]; then
+            OSS_CFG_DOMAIN="http://${SERVER_IP}/oss"
+        else
+            OSS_CFG_DOMAIN="http://${SERVER_IP}:${OSS_WEB_PORT}/oss"
+        fi
     fi
     OSS_CFG_AK="${MINIO_ROOT_USER}"
     OSS_CFG_SK="${MINIO_ROOT_PASSWORD}"

@@ -87,6 +87,12 @@ public class EmployeeVO {
     /** 身份证号（详情展示，列表不返回） */
     private String idCard;
 
+    /** 户口所在地 */
+    private String residence;
+
+    /** 现住地址 */
+    private String currentAddress;
+
     /** 性别（字典 panjia_employee_gender：MALE/FEMALE） */
     private String gender;
 

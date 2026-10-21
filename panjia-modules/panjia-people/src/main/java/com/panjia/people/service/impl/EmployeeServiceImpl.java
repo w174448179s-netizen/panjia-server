@@ -210,6 +210,8 @@ public class EmployeeServiceImpl implements EmployeeService {
         emp.setDeptId(dto.getDeptId());
         emp.setPhone(dto.getPhone());
         emp.setIdCard(dto.getIdCard());
+        emp.setResidence(dto.getResidence());
+        emp.setCurrentAddress(dto.getCurrentAddress());
         emp.setGender(dto.getGender());
         emp.setBankName(dto.getBankName());
         emp.setBankBranch(dto.getBankBranch());
@@ -283,6 +285,12 @@ public class EmployeeServiceImpl implements EmployeeService {
         }
         if (dto.getIdCard() != null) {
             emp.setIdCard(dto.getIdCard());
+        }
+        if (dto.getResidence() != null) {
+            emp.setResidence(dto.getResidence());
+        }
+        if (dto.getCurrentAddress() != null) {
+            emp.setCurrentAddress(dto.getCurrentAddress());
         }
         if (dto.getGender() != null) {
             emp.setGender(dto.getGender());

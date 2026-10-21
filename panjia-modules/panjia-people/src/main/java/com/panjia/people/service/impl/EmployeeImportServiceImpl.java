@@ -448,6 +448,8 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setLevelCode(level);
         dto.setPhone(str(row, "phone"));
         dto.setIdCard(str(row, "id_card"));
+        dto.setResidence(str(row, "residence"));
+        dto.setCurrentAddress(str(row, "current_address"));
         dto.setGender(normalizeGender(str(row, "gender")));
         dto.setBankName(str(row, "bank_name"));
         dto.setBankBranch(str(row, "bank_branch"));
@@ -514,6 +516,8 @@ public class EmployeeImportServiceImpl implements EmployeeImportService {
         dto.setLevelCode(level);
         dto.setPhone(blankToNull(str(row, "phone")));
         dto.setIdCard(blankToNull(str(row, "id_card")));
+        dto.setResidence(blankToNull(str(row, "residence")));
+        dto.setCurrentAddress(blankToNull(str(row, "current_address")));
         dto.setGender(normalizeGender(str(row, "gender")));
         dto.setBankName(blankToNull(str(row, "bank_name")));
         dto.setBankBranch(blankToNull(str(row, "bank_branch")));
