@@ -27,7 +27,7 @@ import java.util.stream.Collectors;
  *       所属 SUBMITTED 单由 {@code revertSubmittedToDraftIfNeeded} 终止审批流程 + 回退 DRAFT
  *       + 按调整后新签金额重建明细；DRAFT 单直接重建明细；</li>
  *   <li>APPROVED（已审批）→ <b>金额一动不动</b>，仅置 origin_reversed = true + 告警
- *       （V4.2 §9.2-4：已审批数据永不覆盖，是否调整由人工走 DIFF 调整单决定）；</li>
+ *       （V4.2 §9.2-4：已审批数据永不覆盖，需人工撤销后重新发起）；</li>
  *   <li>REVERSED（已冲销）→ 忽略（终态）。</li>
  * </ul>
  * <p>
@@ -103,7 +103,7 @@ public class CommissionReverseService {
             .toList();
         for (CommissionItem item : approvedItems) {
             log.warn("[结佣-冲销联动] ★ 已审批明细的源业绩被冲销，金额保持不动（V4.2 §9.2-4），"
-                + "是否补差请人工走 DIFF 调整单：itemId={}, amount={}, factId={}, reason={}",
+                + "需人工撤销后重新发起：itemId={}, amount={}, factId={}, reason={}",
                 item.getId(), item.getAmount(), item.getPerformanceFactId(), reason);
         }
         if (!approvedItems.isEmpty()) {

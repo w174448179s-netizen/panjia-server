@@ -9,12 +9,11 @@ import org.dromara.common.mybatis.core.mapper.BaseMapperPlus;
 
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 结佣明细 Mapper。
  * <p>
- * CI C13：不得含 updateAmount 类方法 —— 已审批明细金额不可变，变更只能走调整单（新行）。
+ * CI C13：不得含 updateAmount 类方法 —— 已审批明细金额不可变，变更需先撤销后重新发起。
  */
 @Mapper
 public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, CommissionItem> {
@@ -122,14 +121,6 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                   OR (NOT rk.cur_nonzero AND chain.period &lt; rk.period))
             GROUP BY 1, 2, 3, 4, 5
         ),
-        reversed_real AS (
-            -- source_key 链最早 REVERSED 实收明细（历史口径结佣金额调整前原值）
-            SELECT DISTINCT ON (sk.source_key) sk.source_key, rdr.performance_amount
-            FROM item_src sk
-            JOIN pj_received_detail rdr ON rdr.source_key = sk.source_key
-               AND rdr.detail_status = 'REVERSED'
-            ORDER BY sk.source_key, rdr.id ASC
-        ),
         active_received AS (
             -- 当前 ACTIVE 实收明细按合同+员工+角色聚合（跨期合计，与结佣口径一致）
             SELECT rc.contract_no, rc.order_no,
@@ -201,38 +192,18 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                (f.source = 'MANUAL'
                 AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%')) AS "manualAdjust",
                ci.amount AS "amount",
-               -- 结佣金额「调整前」只认结佣调整（不认新签调整）：
-               -- ① 当前事实 adjust_id 命中结佣调整单：原额取同 sourceKey 链上紧邻前驱事实金额
-               --    （增加角色人链无前驱，按 0）；
-               -- ② sourceKey 链存在 REVERSED 实收明细（历史 rd 口径）；
-               -- ③ 其余：原额=当前金额，前端只显示单值。
-               CASE
-                   WHEN caj.id IS NOT NULL THEN
-                       COALESCE((SELECT x.performance_amount
-                                 FROM pj_perf_fact x
-                                 WHERE x.source_key = f.source_key
-                                   AND x.fact_type = 'PERF_EXPECT'
-                                   AND x.id &lt; f.id
-                                 ORDER BY x.id DESC
-                                 LIMIT 1), 0)
-                   WHEN rr.source_key IS NOT NULL THEN rr.performance_amount
-                   ELSE ci.amount
-               END AS "originalAmount",
-               (caj.id IS NOT NULL OR rr.source_key IS NOT NULL) AS "receivedAdjusted",
                ci.fee_item AS "feeItem",
                ci.status AS "status",
                COALESCE(arc.recv_amt, 0) AS "receivedAmount",
                -- 配对实收行的链原值合计：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
                COALESCE(orc.orig_recv_amt, 0) AS "originalReceivedAmount"
         FROM pj_commission_item ci
-        -- 绑定事实仅用于调整链：f.adjust_id 判结佣调整、同链前驱取原值、MANUAL 新人标记
+        -- 绑定事实仅用于新签调整链：同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
-        LEFT JOIN pj_commission_adjust caj ON caj.id = f.adjust_id
         LEFT JOIN active_expect ae ON ci.fact_type = 'PERF_EXPECT'
               AND ae.source_key = ci.source_key
         LEFT JOIN reversed_expect re ON ci.fact_type = 'PERF_EXPECT'
               AND re.source_key = ci.source_key
-        LEFT JOIN reversed_real rr ON rr.source_key = ci.source_key
         LEFT JOIN active_received arc
                ON (arc.order_no = ci.order_no OR arc.contract_no = ci.contract_no)
               AND arc.emp_code IS NOT DISTINCT FROM ci.employee_code
@@ -263,27 +234,6 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         </script>
         """)
     List<CommissionItemDetailVo> selectItemDetails(@Param("applicationId") Long applicationId);
-
-    /**
-     * 按结佣明细 ID 批量查业务类型（itemId → bizType）。
-     * <p>
-     * 结佣调整单列表 / 详情展示折算后金额时使用：调整单本身不存 bizType，
-     * 由其关联的结佣明细反查（结佣域自有表，不跨域）。折算比例由
-     * {@code ConversionFactorPort} 统一提供，本 Mapper 不直连规则表。
-     *
-     * @param itemIds 结佣明细 ID 集合（非空）
-     * @return 每行含 itemId / bizType
-     */
-    @Select("""
-        <script>
-        SELECT ci.id AS "itemId", ci.biz_type AS "bizType"
-        FROM pj_commission_item ci
-        WHERE ci.id IN
-        <foreach collection="itemIds" item="iid" open="(" separator="," close=")">#{iid}</foreach>
-        </script>
-    """)
-    List<Map<String, Object>> selectBizTypeByItemIds(@Param("itemIds") Collection<Long> itemIds);
-
 
     /**
      * 批量查「当前存在已生效增加角色人」的合同/订单键。

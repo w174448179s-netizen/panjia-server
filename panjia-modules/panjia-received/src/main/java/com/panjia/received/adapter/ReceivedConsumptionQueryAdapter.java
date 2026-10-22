@@ -15,9 +15,8 @@ import java.util.Objects;
 /**
  * 实收消费状态查询端口实现（入站适配器）。
  * <p>
- * 供业绩域撤销批次前置校验调用：提供本批实收合同业务键范围（补全结佣调整单
- * 按合同拦截的口径），以及本批明细被结佣调整 supersede 触碰的行数
- * （adjust_id 非空，含调整后新生效行）。
+ * 供业绩域撤销批次前置校验调用：提供本批实收合同业务键范围，以及本批明细
+ * 被调整 supersede 触碰的行数（adjust_id 非空，含调整后新生效行）。
  */
 @Component
 @RequiredArgsConstructor

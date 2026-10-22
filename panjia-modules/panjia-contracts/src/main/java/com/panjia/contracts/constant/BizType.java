@@ -16,8 +16,6 @@ public final class BizType {
     public static final String PERF_ADJUST = "PERF_ADJUST";
     /** 实收调整（pj_perf_received_adjust，2026-10-12 与新签调整物理拆表） */
     public static final String PERF_RECEIVED_ADJUST = "PERF_RECEIVED_ADJUST";
-    /** 结佣调整 */
-    public static final String COMMISSION_ADJUST = "COMMISSION_ADJUST";
     /** 薪酬批次 */
     public static final String PAYROLL_BATCH = "PAYROLL_BATCH";
     /** 职级变动通知（算薪自动晋升/降级，财务/总监知会） */

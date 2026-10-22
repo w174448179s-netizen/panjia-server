@@ -378,7 +378,7 @@ public class PayrollBatchService {
                 periodApprenticeMap.put(rp, apprenticeByMentor);
                 // 历史绩效积分（该月无事实的员工结佣时按 0 分处理）
                 periodScoreMap.put(rp, scoreQueryPort.scoreFacts(rp));
-                // 该月当时生效的人工调整单（结佣调整按新签月口径；APPROVED 且 start_month ≤ rp ≤ end_month）
+                // 该月当时生效的人工调整单（按新签月口径；APPROVED 且 start_month ≤ rp ≤ end_month）
                 periodAdjustMap.put(rp, rateAdjustService.loadEffectiveForPeriod(rp));
             } catch (Exception e) {
                 log.warn("[薪酬] 构建历史切片失败：period={}，该期间结佣提成回退算薪月口径", rp, e);

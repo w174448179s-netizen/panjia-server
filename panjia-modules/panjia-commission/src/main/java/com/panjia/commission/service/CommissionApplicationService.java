@@ -8,20 +8,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.commission.domain.ApplicationStatus;
-import com.panjia.commission.domain.AdjustStatus;
-import com.panjia.commission.domain.AdjustType;
-import com.panjia.commission.domain.CommissionAdjust;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.domain.CommissionConsumeLog;
 import com.panjia.commission.domain.CommissionItem;
 import com.panjia.commission.domain.ItemStatus;
 import com.panjia.commission.domain.ReversedReason;
-import com.panjia.commission.domain.bo.CommissionAdjustPayload;
 import com.panjia.commission.domain.bo.CommissionApplyBo;
 import com.panjia.commission.domain.vo.CommissionBatchResultVo;
 import com.panjia.commission.domain.vo.CommissionContractVo;
-import com.panjia.commission.domain.vo.CommissionItemDetailVo;
-import com.panjia.commission.mapper.CommissionAdjustMapper;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
 import com.panjia.commission.mapper.CommissionConsumeLogMapper;
 import com.panjia.commission.mapper.CommissionItemMapper;
@@ -45,20 +39,16 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.ServletUtils;
 import org.dromara.common.core.utils.SpringUtils;
 import org.dromara.common.core.utils.StringUtils;
-import org.dromara.common.json.utils.JsonUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.system.api.ConfigService;
 import org.dromara.system.api.DeptService;
-import org.dromara.system.api.domain.DeptDTO;
 import org.springframework.core.task.TaskExecutor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -115,8 +105,6 @@ public class CommissionApplicationService {
     private final CommissionApplicationMapper applicationMapper;
     private final CommissionItemMapper itemMapper;
     private final CommissionConsumeLogMapper consumeLogMapper;
-    /** 调整单 mapper：在途调整预演（列表/详情「调整审批中」标记与金额预览） */
-    private final CommissionAdjustMapper adjustMapper;
     /** 折算比例唯一来源：契约层端口（规则表由薪酬域持有，本域不直连） */
     private final ConversionFactorPort conversionFactorPort;
     private final CommissionPerformanceQueryPort performanceQueryPort;
@@ -580,7 +568,7 @@ public class CommissionApplicationService {
             if (existing.getStatus() == ApplicationStatus.APPROVED
                 || existing.getStatus() == ApplicationStatus.LOCKED) {
                 throw new ServiceException("合同 " + contractNo + " " + period
-                    + " 月结佣已审批锁定，新增或变更一律走调整单");
+                    + " 月结佣已审批锁定，不再支持新增或变更");
             }
             throw new ServiceException("合同 " + contractNo + " " + period
                 + " 月已存在" + existing.getStatus().getDesc() + "申请单（" + existing.getApplyNo() + "），请勿重复发起");
@@ -689,7 +677,7 @@ public class CommissionApplicationService {
         // 批量插入明细：insertBatch 替代逐条 insert（P1：N×K→1 次 round-trip）
         List<CommissionItem> items = new ArrayList<>(itemFacts.size());
         for (PerformanceFactSummaryDTO fact : itemFacts) {
-            items.add(buildItem(application, fact, fact.getAmount(), null));
+            items.add(buildItem(application, fact, fact.getAmount()));
         }
         try {
             itemMapper.insertBatch(items);
@@ -731,7 +719,7 @@ public class CommissionApplicationService {
         assertFactsNotSettled(itemFacts, application.getId(), contractNo);
         List<CommissionItem> items = new ArrayList<>(itemFacts.size());
         for (PerformanceFactSummaryDTO fact : itemFacts) {
-            items.add(buildItem(application, fact, fact.getAmount(), null));
+            items.add(buildItem(application, fact, fact.getAmount()));
         }
         try {
             itemMapper.insertBatch(items);
@@ -749,7 +737,7 @@ public class CommissionApplicationService {
      * <p>
      * 调用时机：CommissionReverseService.handleReversed 冲销 DRAFT 明细后调用。
      * 此时新签事实已落库（supersede 同事务，outbox 事件提交后投递）。
-     * 仅 DRAFT 单自动重建；SUBMITTED/APPROVED 需人工走调整单。
+     * 仅 DRAFT 单自动重建；SUBMITTED/APPROVED 需先撤销后重新发起。
      */
     public void rebuildItemsIfNeeded(Long applicationId) {
         CommissionApplication app = applicationMapper.selectById(applicationId);
@@ -1717,17 +1705,9 @@ public class CommissionApplicationService {
         int from = Math.min((pageNum - 1) * pageSize, total);
         int to = Math.min(from + pageSize, total);
         List<CommissionContractVo> pageRows = new ArrayList<>(all.subList(from, to));
-        // 结佣业绩「原值 → 调整后值」：仅对当前页批量查事实链最早值（避免全期间回表），
-        // 与当前合计不一致时置调整标记（口径与每人明细 originalAmount 一致）
-        // 按员工筛选时金额已改为员工口径，合同级调整原值不再适用，跳过以免误展示箭头
-        if (query.getEmployeeId() == null) {
-            fillOriginalReceivedAmounts(period, pageRows, factorMap);
-        }
         // 实收金额「原值 → 调整后值」：rd 链原值与当前合计不一致时置标记（实收调整已生效；
         // 行集跨期（行期间=申请单期间），链原值传 null 跨期查，键集已限定行集范围）
         fillRealAmountOriginals(pageRows);
-        // 合同级在途调整标记：审批中调整单 → 「调整审批中」标签
-        fillContractPendingAdjust(pageRows);
         // 合同级「新增角色人」标记：存在已生效的 MANUAL-ADJ/MANUAL-CADJ 新人事实 → 「新增角色人」标签
         // 行集跨期（行期间=申请单期间），加人事实按事实自身期间命中，传 null 跨期查
         fillAddMemberMark(null, pageRows);
@@ -2003,52 +1983,6 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 批量填充列表行的结佣业绩调整前合计。
-     * <p>
-     * 口径：结佣金额列的「原值 → 调整后值」只反映<b>结佣调整单(AMOUNT)</b>，不反映新签调整——
-     * 新签调整（含新签侧增加角色人）只在「新签业绩」列体现。原额 = 当前合计 − 该申请单下
-     * 已执行 AMOUNT 调整单的累计差额；无差额（纯新签调整/未调整）时保持 null，前端只显示单值。
-     */
-    private void fillOriginalReceivedAmounts(String period, List<CommissionContractVo> pageRows,
-                                             Map<String, BigDecimal> factorMap) {
-        if (pageRows == null || pageRows.isEmpty()) {
-            return;
-        }
-        Set<Long> applicationIds = pageRows.stream()
-            .map(CommissionContractVo::getApplicationId)
-            .filter(java.util.Objects::nonNull)
-            .collect(Collectors.toSet());
-        if (applicationIds.isEmpty()) {
-            return;
-        }
-        Map<Long, BigDecimal> deltaByApp = new HashMap<>();
-        for (Map<String, Object> row : adjustMapper.selectExecutedAmountDeltaSum(applicationIds)) {
-            Object id = row.get("applicationId");
-            Object delta = row.get("deltaSum");
-            if (id != null && delta instanceof BigDecimal bd) {
-                deltaByApp.put(((Number) id).longValue(), bd);
-            }
-        }
-        if (deltaByApp.isEmpty()) {
-            return;
-        }
-        for (CommissionContractVo vo : pageRows) {
-            if (vo.getApplicationId() == null || vo.getAmount() == null) {
-                continue;
-            }
-            BigDecimal delta = deltaByApp.get(vo.getApplicationId());
-            if (delta == null || delta.compareTo(BigDecimal.ZERO) == 0) {
-                continue;
-            }
-            BigDecimal original = vo.getAmount().subtract(delta);
-            vo.setReceivedAdjusted(true);
-            vo.setOriginalAmount(original);
-            BigDecimal factor = conversionFactorPort.factorOf(factorMap, vo.getBizType());
-            vo.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(original, factor));
-        }
-    }
-
-    /**
      * 合同行兜底排序（签约时间相同时）：订单号（空取合同号）升序，仍相同按申请单 ID 倒序。
      * 与新签/实收列表 SQL 的 COALESCE(order_no, contract_no), id DESC 口径一致。
      */
@@ -2228,195 +2162,7 @@ public class CommissionApplicationService {
     public List<com.panjia.commission.domain.vo.CommissionItemDetailVo> listItemDetails(Long applicationId) {
         List<com.panjia.commission.domain.vo.CommissionItemDetailVo> details = itemMapper.selectItemDetails(applicationId);
         fillItemDetailConversion(details);
-        fillItemDetailPendingAdjust(details, applicationId);
         return details;
-    }
-
-    /**
-     * 明细在途调整预演：审批中（SUBMITTED/APPROVED）调整单回填每人 adjustPending* 字段。
-     * <p>
-     * 口径（与新签明细页一致）：
-     * <ul>
-     *   <li>明细级调整（itemId 定位）：调整后金额取调整单 newAmount；</li>
-     *   <li>合同级 AMOUNT：优先按 payload.detailTargets 逐行指定值预演；旧单无快照按金额占比分摊总差额；</li>
-     *   <li>合同级 ADD_MEMBER：既有行按 payload.detailTargets 预演让出，新人合成虚拟行（0 → X）；</li>
-     *   <li>明细级优先：已命中明细级调整单的行不再叠加合同级预演。</li>
-     * </ul>
-     */
-    private void fillItemDetailPendingAdjust(List<CommissionItemDetailVo> rows, Long applicationId) {
-        // 按合同号查询在途调整单（同合同任意在途调整单，含其他期间申请单，均会改共享 PERF_EXPECT 事实）
-        CommissionApplication app = applicationMapper.selectById(applicationId);
-        String contractNo = app == null ? null : app.getContractNo();
-        LambdaQueryWrapper<CommissionAdjust> pendingWrapper = new LambdaQueryWrapper<CommissionAdjust>()
-            .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
-            .orderByDesc(CommissionAdjust::getId);
-        if (StringUtils.isNotBlank(contractNo)) {
-            pendingWrapper.eq(CommissionAdjust::getContractNo, contractNo);
-        } else {
-            pendingWrapper.eq(CommissionAdjust::getApplicationId, applicationId);
-        }
-        List<CommissionAdjust> pendings = adjustMapper.selectList(pendingWrapper);
-        if (pendings.isEmpty()) {
-            return;
-        }
-        for (CommissionAdjust adjust : pendings) {
-            if (adjust.getItemId() != null) {
-                // 明细级：直接命中目标行
-                for (CommissionItemDetailVo row : rows) {
-                    if (Boolean.TRUE.equals(row.getAdjustPending())
-                        || !adjust.getItemId().equals(row.getItemId())) {
-                        continue;
-                    }
-                    BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
-                    row.setAdjustPending(true);
-                    row.setAdjustPendingType(adjust.getAdjustType() != null ? adjust.getAdjustType().getCode() : null);
-                    row.setAdjustPendingAmount(adjust.getNewAmount());
-                    row.setAdjustPendingDelta(adjust.getNewAmount() == null ? null
-                        : adjust.getNewAmount().subtract(amount).setScale(2, RoundingMode.HALF_UP));
-                }
-                continue;
-            }
-            // 合同级：AMOUNT / ADD_MEMBER 按快照逐行预演
-            CommissionAdjustPayload payload = parseAdjustPayload(adjust.getPayloadJson());
-            if (adjust.getAdjustType() == AdjustType.AMOUNT || adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
-                Map<Long, BigDecimal> targetByItem = new HashMap<>();
-                if (payload != null && payload.getDetailTargets() != null) {
-                    for (CommissionAdjustPayload.DetailTarget t : payload.getDetailTargets()) {
-                        if (t != null && t.getItemId() != null && t.getTargetAmount() != null) {
-                            targetByItem.put(t.getItemId(), t.getTargetAmount());
-                        }
-                    }
-                }
-                if (!targetByItem.isEmpty()) {
-                    for (CommissionItemDetailVo row : rows) {
-                        if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                            continue; // 明细级优先，不叠加
-                        }
-                        BigDecimal target = targetByItem.get(row.getItemId());
-                        if (target == null) {
-                            continue;
-                        }
-                        BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
-                        row.setAdjustPending(true);
-                        row.setAdjustPendingType(adjust.getAdjustType().getCode());
-                        row.setAdjustPendingAmount(target);
-                        row.setAdjustPendingDelta(target.subtract(amount).setScale(2, RoundingMode.HALF_UP));
-                    }
-                } else if (adjust.getAdjustType() == AdjustType.AMOUNT
-                    && adjust.getNewAmount() != null && adjust.getOriginalAmount() != null && !rows.isEmpty()) {
-                    // 旧单无快照兜底：按金额占比分摊总差额
-                    BigDecimal delta = adjust.getNewAmount().subtract(adjust.getOriginalAmount());
-                    List<CommissionItemDetailVo> unmarked = rows.stream()
-                        .filter(r -> !Boolean.TRUE.equals(r.getAdjustPending())).toList();
-                    BigDecimal sum = unmarked.stream()
-                        .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
-                        .reduce(BigDecimal.ZERO, BigDecimal::add);
-                    for (CommissionItemDetailVo row : unmarked) {
-                        BigDecimal amount = row.getAmount() == null ? BigDecimal.ZERO : row.getAmount();
-                        BigDecimal part = sum.signum() == 0
-                            ? delta.divide(BigDecimal.valueOf(unmarked.size()), 2, RoundingMode.HALF_UP)
-                            : delta.multiply(amount).divide(sum, 2, RoundingMode.HALF_UP);
-                        row.setAdjustPending(true);
-                        row.setAdjustPendingType(AdjustType.AMOUNT.getCode());
-                        row.setAdjustPendingDelta(part);
-                        row.setAdjustPendingAmount(amount.add(part));
-                    }
-                }
-                // ADD_MEMBER：新人虚拟行（审批中新角色人尚无明细行）
-                if (adjust.getAdjustType() == AdjustType.ADD_MEMBER
-                    && payload != null && payload.getNewMember() != null) {
-                    CommissionAdjustPayload.NewMember nm = payload.getNewMember();
-                    CommissionItemDetailVo virtualRow = new CommissionItemDetailVo();
-                    virtualRow.setEmployeeId(nm.getEmployeeId());
-                    virtualRow.setEmployeeCode(nm.getEmployeeCode());
-                    virtualRow.setEmployeeName(nm.getEmployeeName());
-                    virtualRow.setRoleType(nm.getRoleType());
-                    virtualRow.setRoleName(nm.getRoleType());
-                    virtualRow.setShareRatio(nm.getShareRatio());
-                    virtualRow.setBizType(rows.isEmpty() ? null : rows.get(0).getBizType());
-                    virtualRow.setStatus(ItemStatus.APPROVED.getCode());
-                    virtualRow.setAdjustPending(true);
-                    virtualRow.setAdjustPendingType(AdjustType.ADD_MEMBER.getCode());
-                    virtualRow.setAdjustPendingAmount(nm.getAmount());
-                    virtualRow.setAdjustPendingDelta(nm.getAmount());
-                    virtualRow.setNewMemberPending(true);
-                    rows.add(virtualRow);
-                }
-            }
-        }
-    }
-
-    /** 解析调整单快照，解析失败返回 null（不影响主流程）。 */
-    private CommissionAdjustPayload parseAdjustPayload(String payloadJson) {
-        if (StringUtils.isBlank(payloadJson)) {
-            return null;
-        }
-        try {
-            return JsonUtils.parseObject(payloadJson, CommissionAdjustPayload.class);
-        } catch (Exception e) {
-            log.warn("[结佣-在途预演] 快照解析失败，跳过逐行还原：payload={}", payloadJson, e);
-            return null;
-        }
-    }
-
-    /**
-     * 合同列表在途调整标记：当前页合同存在审批中（SUBMITTED/APPROVED）的结佣调整单时，
-     * 回填 adjustPending / adjustPendingType / adjustPendingAmount（AMOUNT=调整后合计），
-     * 前端据此展示「调整审批中」标签。
-     * <p>2026-10-02 起按合同号互斥（同合同任意在途调整单，含明细级/其他期间申请单），
-     * 故查询条件从 applicationId + itemId IS NULL 放宽为 contractNo。
-     */
-    private void fillContractPendingAdjust(List<CommissionContractVo> rows) {
-        if (rows == null || rows.isEmpty()) {
-            return;
-        }
-        Set<String> contractNos = rows.stream()
-            .map(CommissionContractVo::getContractNo)
-            .filter(StringUtils::isNotBlank)
-            .collect(Collectors.toSet());
-        if (contractNos.isEmpty()) {
-            return;
-        }
-        List<CommissionAdjust> pendings = new ArrayList<>();
-        for (List<String> chunk : chunkKeys(contractNos)) {
-            pendings.addAll(adjustMapper.selectList(new LambdaQueryWrapper<CommissionAdjust>()
-                .in(CommissionAdjust::getContractNo, chunk)
-                .in(CommissionAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)));
-        }
-        if (pendings.isEmpty()) {
-            return;
-        }
-        // 索引：有订单号的调整单按「合同+订单」精确归位（同合同他订单调整不误标本行）；
-        // order_no 为空的历史调整单无法区分订单，保留合同级兜底
-        Map<String, CommissionAdjust> pendingByOrderKey = new HashMap<>();
-        Map<String, CommissionAdjust> pendingByContractOnly = new HashMap<>();
-        for (CommissionAdjust p : pendings) {
-            if (StringUtils.isNotBlank(p.getOrderNo())) {
-                pendingByOrderKey.putIfAbsent(p.getContractNo() + "|" + p.getOrderNo(), p);
-            } else {
-                pendingByContractOnly.putIfAbsent(p.getContractNo(), p);
-            }
-        }
-        for (CommissionContractVo row : rows) {
-            if (StringUtils.isBlank(row.getContractNo())) {
-                continue;
-            }
-            CommissionAdjust pending = StringUtils.isNotBlank(row.getOrderNo())
-                ? pendingByOrderKey.get(row.getContractNo() + "|" + row.getOrderNo())
-                : null;
-            if (pending == null) {
-                // 仅无订单号的历史在途调整单才按合同号兜底标记
-                pending = pendingByContractOnly.get(row.getContractNo());
-            }
-            if (pending == null) {
-                continue;
-            }
-            row.setAdjustPending(true);
-            row.setAdjustPendingType(pending.getAdjustType() != null ? pending.getAdjustType().getCode() : null);
-            if (pending.getAdjustType() == AdjustType.AMOUNT) {
-                row.setAdjustPendingAmount(pending.getNewAmount());
-            }
-        }
     }
 
     /**
@@ -2442,10 +2188,6 @@ public class CommissionApplicationService {
             // 调整前应收的折算后金额：与当前值同一因子，仅在原值存在时输出
             if (d.getOriginalExpectedAmount() != null) {
                 d.setOriginalConvertedAmount(conversionFactorPort.convert(d.getOriginalExpectedAmount(), factor));
-            }
-            // 调整前结佣业绩的折算后金额：仅被调整行展示，未调整时原值=当前值无需输出
-            if (Boolean.TRUE.equals(d.getReceivedAdjusted()) && d.getOriginalAmount() != null) {
-                d.setOriginalReceivedConvertedAmount(conversionFactorPort.convert(d.getOriginalAmount(), factor));
             }
         }
     }
@@ -2780,7 +2522,7 @@ public class CommissionApplicationService {
      * @param commissionAmount 结佣金额 = 绑定新签事实当前金额（调整后）
      */
     private CommissionItem buildItem(CommissionApplication application, PerformanceFactSummaryDTO fact,
-                                     BigDecimal commissionAmount, Long adjustId) {
+                                     BigDecimal commissionAmount) {
         CommissionItem item = new CommissionItem();
         item.setApplicationId(application.getId());
         item.setPerformanceFactId(fact.getFactId());
@@ -2807,7 +2549,6 @@ public class CommissionApplicationService {
         item.setAmount(commissionAmount);
         item.setStatus(ItemStatus.DRAFT);
         item.setOriginReversed(false);
-        item.setAdjustId(adjustId);
         return item;
     }
 

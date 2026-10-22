@@ -73,7 +73,7 @@ public class ReceivedDetail {
     /** 明细状态：ACTIVE=有效 / REVERSED=已红冲（对应调整） */
     private String detailStatus;
 
-    /** 关联调整单 ID（结佣调整/新签调整；仅 supersede 新行有值） */
+    /** 关联调整单 ID（实收/新签调整；仅 supersede 新行有值） */
     private Long adjustId;
 
     /** 本行被冲销原因（ReversedReason code；仅 REVERSED 行有值） */

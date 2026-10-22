@@ -76,7 +76,7 @@ public class SalaryCalculationEngine {
         public Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = Map.of();
         /** 新签导入月 → 伯乐员工ID → 当月生效千里马数（招聘加点按新签月伯乐切片；未命中回退算薪月） */
         public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
-        /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（结佣调整按新签月口径；该月无调整=不叠加） */
+        /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（按新签月口径；该月无调整=不叠加） */
         public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
         /**
          * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。

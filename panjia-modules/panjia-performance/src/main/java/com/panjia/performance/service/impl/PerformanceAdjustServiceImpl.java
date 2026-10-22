@@ -632,6 +632,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
 
+        // 封账期间禁止发起调整：与执行时口径一致，提前暴露；执行时仍保留复核，防发起后封账
+        String originalPeriodForCloseCheck = StringUtils.isNotBlank(dto.getOriginalPeriod())
+            ? dto.getOriginalPeriod() : dto.getPeriod();
+        assertPeriodNotClosed(originalPeriodForCloseCheck, "原业绩归属月");
+        assertPeriodNotClosed(dto.getPeriod(), "调整生效月");
+
         // 明细级：校验该事实是否已被锁定结佣明细绑定
         if (!SCOPE_CONTRACT.equals(scope) && dto.getFactId() != null) {
             PerformanceFact fact = factMapper.selectById(dto.getFactId());
@@ -1986,7 +1992,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         List<String> codes = items.stream()
             .map(ManualOffsetItem::getEmployeeCode)
             .filter(StringUtils::isNotBlank).map(String::trim).distinct().toList();
-        if (codes.size() != items.stream().filter(i -> StringUtils.isNotBlank(i.getEmployeeCode())).count()) {
+        // 逐行判空：同一工号可出现在多行（同一人多个角色），去重后数量不能用于判断空值
+        if (items.stream().anyMatch(i -> StringUtils.isBlank(i.getEmployeeCode()))) {
             throw new ServiceException("冲正明细存在员工工号为空的行，无法提交");
         }
         Map<String, Map<String, Object>> empByCode = adjustMapper.employeesByCodes(codes).stream()

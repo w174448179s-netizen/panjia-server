@@ -3,7 +3,6 @@ package com.panjia.received.mapper;
 import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
-import com.panjia.received.domain.ReceivedDetail;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -560,23 +559,6 @@ public interface ReceivedRealFactMapper {
         """)
     List<HistoryRealFactDTO> selectHistoryByBatch(@Param("period") String period,
                                                   @Param("batchId") Long batchId);
-
-    /** 按期间 + 订单号/合同号查 ACTIVE 实收明细实体（实收调整/对齐写路径用）；orderNo 非空双键精确限定。 */
-    @Select("""
-        <script>
-        SELECT rd.*
-        FROM pj_received_detail rd
-        JOIN pj_received_contract rc ON rc.id = rd.contract_id
-        WHERE rd.detail_status = 'ACTIVE'
-          <if test="period != null and period != ''">AND rd.period = #{period}</if>
-          <if test="orderNo != null and orderNo != ''">AND rc.order_no = #{orderNo}</if>
-          AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
-        ORDER BY rd.id
-        </script>
-        """)
-    List<ReceivedDetail> selectActiveDetailsByContract(@Param("period") String period,
-                                                        @Param("orderNo") String orderNo,
-                                                        @Param("contractNo") String contractNo);
 
     /**
      * 取合同下某员工的新签（PERF_EXPECT）事实镜像字段。

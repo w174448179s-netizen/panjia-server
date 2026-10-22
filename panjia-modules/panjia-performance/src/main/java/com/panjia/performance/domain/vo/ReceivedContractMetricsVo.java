@@ -34,7 +34,7 @@ public class ReceivedContractMetricsVo implements Serializable {
     /** 应收业绩合计（该合同本期间 ACTIVE PERF_EXPECT 事实合计，含已生效调整） */
     private BigDecimal expectedAmount;
 
-    /** 实收业绩合计（该合同本期间 ACTIVE PERF_REAL 事实合计，含已生效结佣调整） */
+    /** 实收业绩合计（该合同本期间 ACTIVE PERF_REAL 事实合计，含已生效调整） */
     private BigDecimal receivedAmount;
 
     /**

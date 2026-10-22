@@ -22,11 +22,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 实收「事实」跨域端口实现（PERF_REAL 拆表后的唯一读写落地处）。
@@ -47,8 +44,6 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     private static final String STATUS_REVERSED = "REVERSED";
     /** ReversedReason.SUPERSEDE（替换冲销） */
     private static final String REASON_SUPERSEDE = "SUPERSEDE";
-    /** ReversedReason.MANUAL_ADJUST（调整单冲销） */
-    private static final String REASON_MANUAL_ADJUST = "MANUAL_ADJUST";
 
     private final ReceivedRealFactMapper realMapper;
     private final ReceivedDetailMapper detailMapper;
@@ -144,8 +139,8 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     /**
-     * 「实收是否已调整」判定（2026-10-15 结佣发起闸门用）：业务键 ACTIVE 明细的
-     * source_key 链存在 REVERSED 行即 true；不限归属期间。
+     * 「实收是否已调整」判定：业务键 ACTIVE 明细的 source_key 链存在 REVERSED 行即 true；
+     * 不限归属期间。供结佣详情展示「原值 → 调整后值」。
      */
     @Override
     public boolean hasReversedChain(Collection<String> bizKeys) {
@@ -163,36 +158,7 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return realMapper.selectHistoryByBatch(period, batchId);
     }
 
-    // ==================== 写：结佣调整 ====================
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public Map<Long, Long> adjustContractDetailsAmount(String period, String orderNo, String contractNo,
-                                                        BigDecimal targetAmount, Long operatorId, Long adjustId) {
-        List<ReceivedDetail> details = realMapper.selectActiveDetailsByContract(period, orderNo, contractNo);
-        Map<Long, Long> mapping = new LinkedHashMap<>();
-        if (details.isEmpty()) {
-            return mapping;
-        }
-        BigDecimal total = sumDetails(details);
-        BigDecimal deltaTotal = MoneyUtil.round2(nvl(targetAmount).subtract(total));
-        if (MoneyUtil.isZero(deltaTotal)) {
-            return mapping;
-        }
-        List<BigDecimal> amounts = details.stream().map(ReceivedDetail::getPerformanceAmount).toList();
-        BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, deltaTotal);
-        for (int i = 0; i < details.size(); i++) {
-            if (MoneyUtil.isZero(parts[i])) {
-                continue;
-            }
-            ReceivedDetail oldDetail = details.get(i);
-            ReceivedDetail patch = new ReceivedDetail();
-            patch.setPerformanceAmount(MoneyUtil.round2(nvl(oldDetail.getPerformanceAmount()).add(parts[i])));
-            ReceivedDetail created = supersede(oldDetail, patch, operatorId, adjustId);
-            mapping.put(oldDetail.getId(), created.getId());
-        }
-        return mapping;
-    }
+    // ==================== 写：调整执行 ====================
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -369,40 +335,6 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return java.time.LocalDateTime.now();
     }
 
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public void voidDetail(Long detailId, Long operatorId, Long adjustId) {
-        ReceivedDetail detail = detailMapper.selectById(detailId);
-        if (detail == null) {
-            throw new IllegalStateException("实收明细不存在：detailId=" + detailId);
-        }
-        if (!STATUS_ACTIVE.equals(detail.getDetailStatus())) {
-            throw new IllegalStateException(
-                "实收明细状态不可冲销：detailId=" + detailId + ", currentStatus=" + detail.getDetailStatus());
-        }
-        // 单行置 REVERSED + 关联调整单（对应 ReverseService.reverseByAdjust 语义，不插新行）
-        detail.setDetailStatus(STATUS_REVERSED);
-        detail.setReversalType(REASON_MANUAL_ADJUST);
-        detail.setAdjustId(adjustId);
-        detail.setOperatorId(operatorId);
-        detailMapper.updateById(detail);
-        refreshContractAggregate(detail.getContractId());
-        emitReversed(detail.getPeriod(), List.of(detailId), REASON_MANUAL_ADJUST);
-        log.info("[实收冲销-调整单] 明细冲销完成：detailId={}, adjustId={}", detailId, adjustId);
-    }
-
-    @Override
-    @Transactional(rollbackFor = Exception.class)
-    public Long transferDetail(Long detailId, Long targetDeptId, Long operatorId, Long adjustId) {
-        ReceivedDetail oldDetail = detailMapper.selectById(detailId);
-        if (oldDetail == null) {
-            return null;
-        }
-        ReceivedDetail patch = new ReceivedDetail();
-        patch.setDeptId(targetDeptId);
-        return supersede(oldDetail, patch, operatorId, adjustId).getId();
-    }
-
     // ==================== 退化闸门支撑 ====================
 
     @Override
@@ -520,15 +452,5 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         event.setFactIds(ids);
         event.setReason(reason);
         eventPort.emit(event);
-    }
-
-    private static BigDecimal nvl(BigDecimal v) {
-        return v == null ? BigDecimal.ZERO : v;
-    }
-
-    private static BigDecimal sumDetails(List<ReceivedDetail> details) {
-        return details.stream()
-            .map(d -> d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount())
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 }

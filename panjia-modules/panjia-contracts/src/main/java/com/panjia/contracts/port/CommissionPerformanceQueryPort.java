@@ -1,6 +1,5 @@
 package com.panjia.contracts.port;
 
-import com.panjia.contracts.dto.CommissionAdjustMirrorDTO;
 import com.panjia.contracts.dto.HistoryRealFactDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
@@ -190,26 +189,7 @@ public interface CommissionPerformanceQueryPort {
     boolean hasInflightExpectAdjust(Collection<String> bizKeys);
 
     /**
-     * 合同级金额调整：按合同下指定口径各 ACTIVE 事实当前金额占比分摊
-     * （targetAmount − 当前合计）差额，逐条 supersede 为新金额（结佣调整用）。
-     * <p>
-     * 分摊尾差补到业绩金额绝对值最大的一条，保证 Σ新金额 = targetAmount 精确成立。
-     * 与 {@code PerformanceAdjustServiceImpl.executeContractAmountAdjust} 同口径。
-     *
-     * @param period       归属期间
-     * @param orderNo      订单号（可空；非空时订单号优先精确匹配）
-     * @param contractNo   合同号
-     * @param factType     事实口径（PERF_REAL / PERF_EXPECT）
-     * @param targetAmount 调整后合计
-     * @param operatorId   操作人 ID
-     * @param adjustId     调整单 ID（写入新事实 adjust_id 与冲销链）
-     * @return 旧事实 ID → 新事实 ID 映射（供结佣域回写 CommissionItem.performance_fact_id）
-     */
-    Map<Long, Long> adjustContractFactsAmount(String period, String orderNo, String contractNo, String factType,
-                                              BigDecimal targetAmount, Long operatorId, Long adjustId);
-
-    /**
-     * 明细级金额调整：单条事实 supersede 为 targetAmount（结佣调整用）。
+     * 明细级金额调整：单条事实 supersede 为 targetAmount（实收调整执行用）。
      *
      * @param factId       事实 ID
      * @param targetAmount 调整后金额
@@ -218,69 +198,6 @@ public interface CommissionPerformanceQueryPort {
      * @return 新事实 ID
      */
     Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId);
-
-    /**
-     * 明细级金额+角色占比调整：单条事实 supersede 为 targetAmount，
-     * shareRatio 非空时同步更新角色占比（结佣合同级指定值模式用，仅 PERF_EXPECT 路径）。
-     *
-     * @param factId       事实 ID
-     * @param targetAmount 调整后金额
-     * @param shareRatio   调整后角色占比（null=不变）
-     * @param operatorId   操作人 ID
-     * @param adjustId     调整单 ID
-     * @return 新事实 ID
-     */
-    Long adjustFactAmount(Long factId, BigDecimal targetAmount, BigDecimal shareRatio, Long operatorId, Long adjustId);
-
-    /**
-     * 新增角色人事实（结佣调整 ADD_MEMBER 用，仅 PERF_EXPECT 路径）：
-     * 以模板事实为基准复制合同/期间/业务类型等基础字段，覆盖员工/角色/金额，
-     * 来源=MANUAL，批次/归一化记录引用置空。
-     *
-     * @param templateFactId 模板事实 ID（合同既有任一 ACTIVE 新签事实）
-     * @param employeeId     新员工 ID
-     * @param employeeCode   新员工工号
-     * @param deptId         新部门 ID（null=跟随模板）
-     * @param roleType       角色类型
-     * @param amount         业绩金额
-     * @param shareRatio     角色占比（可空）
-     * @param operatorId     操作人 ID
-     * @param adjustId       调整单 ID（写入新事实 adjust_id 与 sourceKey 幂等键）
-     * @return 新事实 ID
-     */
-    Long createMemberFact(Long templateFactId, Long employeeId, String employeeCode, Long deptId,
-                          String roleType, BigDecimal amount, BigDecimal shareRatio, Long operatorId, Long adjustId);
-
-    /**
-     * 结佣调整执行后登记新签调整单镜像（pj_perf_adjust，status=EXECUTED，无审批流）。
-     * <p>
-     * 新签界面「原值 → 调整后值」展示依赖 pj_perf_adjust 快照还原；结佣调整直接 supersede
-     * 事实不产生新签调整单，执行时须同步登记镜像，否则新签侧只显示最终金额。
-     * 同事务：镜像写入失败则整个执行回滚。仅 AMOUNT / ADD_MEMBER 调用。
-     *
-     * @param mirror 镜像单据内容（adjustNo 取结佣调整单号，唯一幂等）
-     */
-    void recordExecutedAdjustMirror(CommissionAdjustMirrorDTO mirror);
-
-    /**
-     * 明细级业绩冲销：单条事实冲销（结佣调整 VOID 用）。
-     *
-     * @param factId     事实 ID
-     * @param operatorId 操作人 ID
-     * @param adjustId   调整单 ID
-     */
-    void voidFact(Long factId, Long operatorId, Long adjustId);
-
-    /**
-     * 明细级部门划转：单条事实 supersede 为新部门（结佣调整 TRANSFER 用）。
-     *
-     * @param factId       事实 ID
-     * @param targetDeptId 目标部门 ID
-     * @param operatorId   操作人 ID
-     * @param adjustId     调整单 ID
-     * @return 新事实 ID
-     */
-    Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId);
 
     /**
      * 历史工资导入批次实收事实明细（历史 LOCKED 结佣建单用）。

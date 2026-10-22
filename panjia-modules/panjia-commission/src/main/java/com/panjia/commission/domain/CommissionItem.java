@@ -22,7 +22,7 @@ import java.time.LocalDateTime;
  * 历史单（2026-09-27 前创建）明细仍绑 PERF_REAL 事实，调整链路双兼容。
  * 关键不变量（结佣域详细设计 §3.2）：
  * <ul>
- *   <li>已审批（APPROVED）明细金额不可变 —— 变更只能走调整单（新行）；</li>
+ *   <li>已审批（APPROVED）明细金额不可变 —— 变更需先撤销后重新发起；</li>
  *   <li>REVERSED 行永久保留；</li>
  *   <li>部分唯一索引 uk_citem_fact_active 排除 REVERSED 行（DISCOUNT 调整新行沿用同一 fact_id）；</li>
  *   <li>DIFF 差额行不挂 performance_fact_id（差额凭证，不指向具体事实）。</li>
@@ -110,9 +110,6 @@ public class CommissionItem implements Serializable {
 
     /** 源业绩事实已被冲销（已审批明细置 true + 告警，金额不动） */
     private Boolean originReversed;
-
-    /** 来源结佣调整单 ID */
-    private Long adjustId;
 
     /** 冲销原因 */
     private ReversedReason reversedReason;

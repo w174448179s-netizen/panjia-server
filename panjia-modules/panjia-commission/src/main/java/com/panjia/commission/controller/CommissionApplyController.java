@@ -120,7 +120,7 @@ public class CommissionApplyController extends BaseController {
      * <p>
      * 幂等：该订单当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
      * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
-     * 已审批/锁定拒绝，变更走调整单。
+     * 已审批/锁定拒绝，不再支持变更。
      *
      * @param dto 发起条件（期间 + 合同号 + 可选订单号）
      * @return 申请单 ID

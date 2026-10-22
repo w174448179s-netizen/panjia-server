@@ -105,7 +105,7 @@ public class ReceivedApply implements Serializable {
 
     /**
      * 实收已被调整（非入库字段；展示标记）。
-     * <p>当前 ACTIVE PERF_REAL 合计 ≠ 事实链最早值（结佣调整 AMOUNT 生效）时置 true，
+     * <p>当前 ACTIVE PERF_REAL 合计 ≠ 事实链最早值（实收调整生效）时置 true，
      * 前端据此显示「原值 → 调整后值」。部门划转金额不变，不置标记。</p>
      */
     @TableField(exist = false)

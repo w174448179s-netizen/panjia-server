@@ -8,7 +8,6 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 实收「事实」跨域端口（received 域对外契约）。
@@ -107,17 +106,6 @@ public interface ReceivedRealFactPort {
     /** 历史工资导入批次实收明细（ACTIVE，结佣 LOCKED 建单用；adjust_id 非空的调整新行不计入批次）。 */
     List<HistoryRealFactDTO> listRealFactsByBatch(String period, Long batchId);
 
-    /**
-     * 合同级实收金额调整：按订单下各 ACTIVE 明细当前金额占比分摊
-     * （targetAmount − 当前合计）差额，逐条 supersede 为新金额。
-     * <p>orderNo 非空时与 contractNo 双键精确限定（同合同号挂多订单防跨订单分摊）；
-     * 尾差补到金额绝对值最大的一条，保证 Σ新金额 = targetAmount 精确成立。
-     *
-     * @return 旧明细 ID → 新明细 ID 映射（供结佣域回写 CommissionItem.performance_fact_id）
-     */
-    Map<Long, Long> adjustContractDetailsAmount(String period, String orderNo, String contractNo,
-                                                 BigDecimal targetAmount, Long operatorId, Long adjustId);
-
     /** 明细级金额调整：单条实收明细 supersede 为 targetAmount。明细不存在返回 null。 */
     Long adjustDetailAmount(Long detailId, BigDecimal targetAmount, Long operatorId, Long adjustId);
 
@@ -172,12 +160,6 @@ public interface ReceivedRealFactPort {
                                   Long employeeId, String employeeCode, Long deptId,
                                   String roleType, BigDecimal amount, BigDecimal shareRatio,
                                   Long operatorId, Long adjustId);
-
-    /** 明细级冲销（结佣调整 VOID）：单行置 REVERSED + reversal_type=MANUAL_ADJUST + adjust_id，不插新行。 */
-    void voidDetail(Long detailId, Long operatorId, Long adjustId);
-
-    /** 明细级部门划转：单条实收明细 supersede 为新部门（新行 rd.dept_id 覆盖合同级口径）。 */
-    Long transferDetail(Long detailId, Long targetDeptId, Long operatorId, Long adjustId);
 
     /**
      * 统计某合同号在实收合同表（全局，不限期间/批次）的去重非空订单号数量。

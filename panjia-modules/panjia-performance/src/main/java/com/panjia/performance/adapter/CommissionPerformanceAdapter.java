@@ -1,20 +1,15 @@
 package com.panjia.performance.adapter;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.panjia.contracts.dto.CommissionAdjustMirrorDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ReceivedRealFactPort;
 import com.panjia.performance.domain.AdjustStatus;
-import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
-import com.panjia.performance.domain.PerformanceSource;
-import com.panjia.performance.domain.ReversedReason;
-import com.panjia.performance.domain.bo.AddMemberPayload;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.BizKeyMatchGuard;
@@ -24,13 +19,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
-import org.dromara.common.json.utils.JsonUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -548,64 +540,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         return dto;
     }
 
-    // ==================== 结佣调整：事实变更（同 PerformanceAdjustServiceImpl 口径） ====================
-
-    @Override
-    public Map<Long, Long> adjustContractFactsAmount(String period, String orderNo, String contractNo, String factType,
-                                                      BigDecimal targetAmount, Long operatorId, Long adjustId) {
-        if (isReal(factType)) {
-            // PERF_REAL 合同级调整落实收域 rd（分摊 + supersede 由实收端口实现），订单号双键精确限定
-            ReceivedRealFactPort port = realPort();
-            return port == null ? new HashMap<>()
-                : port.adjustContractDetailsAmount(period, orderNo, contractNo, targetAmount, operatorId, adjustId);
-        }
-        // 订单号+合同号双键精确匹配：订单号也可能重复（不同合同挂同订单号），避免跨订单/跨合同混排分摊
-        List<PerformanceFact> facts;
-        if (StringUtils.isNotBlank(orderNo)) {
-            facts = factMapper.selectActiveFactsByOrderAndContract(period, factType, orderNo, contractNo);
-            if (facts == null || facts.isEmpty()) {
-                // 双键未命中：双侧闸门通过才退化（兼容新签 order_no 误填合同号），否则禁止跨订单分摊
-                if (canDegradeExpectToReceived(period, contractNo)) {
-                    log.warn("[业绩端口] 双键未命中且新签/实收两侧订单唯一，退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
-                        orderNo, contractNo, period, factType);
-                    facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
-                } else {
-                    log.warn("[业绩端口] 双键未命中且两侧不满足订单唯一，禁止退化合同号匹配：orderNo={}, contractNo={}, period={}, factType={}",
-                        orderNo, contractNo, period, factType);
-                    facts = Collections.emptyList();
-                }
-            }
-        } else {
-            facts = factMapper.selectActiveFactsByContractNo(period, factType, contractNo);
-        }
-        Map<Long, Long> mapping = new HashMap<>();
-        if (facts == null || facts.isEmpty()) {
-            return mapping;
-        }
-        BigDecimal total = facts.stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal deltaTotal = MoneyUtil.round2(targetAmount.subtract(total));
-        if (MoneyUtil.isZero(deltaTotal)) {
-            return mapping;
-        }
-        List<BigDecimal> amounts = facts.stream()
-            .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
-            .toList();
-        BigDecimal[] parts = allocateByAmount(amounts, deltaTotal);
-        for (int i = 0; i < facts.size(); i++) {
-            if (MoneyUtil.isZero(parts[i])) {
-                continue;
-            }
-            PerformanceFact oldFact = facts.get(i);
-            PerformanceFact newFact = copyFactBase(oldFact);
-            newFact.setPerformanceAmount(MoneyUtil.round2(oldFact.getPerformanceAmount().add(parts[i])));
-            newFact.setAdjustId(adjustId);
-            PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
-            mapping.put(oldFact.getId(), created.getId());
-        }
-        return mapping;
-    }
+    // ==================== 调整执行：事实变更（同 PerformanceAdjustServiceImpl 口径） ====================
 
     @Override
     public Long adjustFactAmount(Long factId, BigDecimal targetAmount, Long operatorId, Long adjustId) {
@@ -625,29 +560,12 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         return created.getId();
     }
 
-    @Override
-    public Long adjustFactAmount(Long factId, BigDecimal targetAmount, BigDecimal shareRatio,
-                                 Long operatorId, Long adjustId) {
-        PerformanceFact oldFact = resolveActiveFactOrSuccessor(factId);
-        if (oldFact == null) {
-            return null;
-        }
-        PerformanceFact newFact = copyFactBase(oldFact);
-        newFact.setPerformanceAmount(MoneyUtil.round2(targetAmount));
-        if (shareRatio != null) {
-            newFact.setShareRatio(shareRatio);
-        }
-        newFact.setAdjustId(adjustId);
-        PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
-        return created.getId();
-    }
-
     /**
      * 解析待冲销事实：若 factId 仍 ACTIVE 则直接返回；
      * 若已被其他操作冲销（REVERSED），按身份键（员工+角色+业务类型+费项+业务日期+期间+合同）
      * 定位唯一 ACTIVE 后继行自动续接。
      * <p>
-     * 典型场景：结佣调整审批期间，同一合同另一张调整单抢先执行、把明细绑定的事实冲销并换了 ID；
+     * 典型场景：调整审批期间，同一合同另一张调整单抢先执行、把明细绑定的事实冲销并换了 ID；
      * 本张调整单执行时若直接 supersede 旧 factId 会触发「事实状态不可冲销」。此处自动续接到
      * 当前 ACTIVE 后继行，避免并发调整互相卡死。
      * <p>
@@ -678,184 +596,8 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
                 factId, successor.getId(), fact.getFactStatus());
             return successor;
         }
-        throw new ServiceException("执行失败：结佣明细绑定的业绩事实已被其他调整替换且无法唯一匹配当前明细"
+        throw new ServiceException("执行失败：调整单绑定的业绩事实已被其他调整替换且无法唯一匹配当前明细"
             + "（候选 " + successors.size() + " 条），请撤回该调整单后按最新明细重新发起：factId=" + factId);
-    }
-
-    @Override
-    public Long createMemberFact(Long templateFactId, Long employeeId, String employeeCode, Long deptId,
-                                 String roleType, BigDecimal amount, BigDecimal shareRatio,
-                                 Long operatorId, Long adjustId) {
-        PerformanceFact template = factMapper.selectById(templateFactId);
-        if (template == null) {
-            return null;
-        }
-        PerformanceFact newFact = copyFactBase(template);
-        newFact.setEmployeeId(employeeId);
-        newFact.setEmployeeExternalCode(employeeCode);
-        if (deptId != null) {
-            newFact.setDeptId(deptId);
-        }
-        newFact.setRoleType(roleType);
-        newFact.setRoleName(roleType);
-        // 新角色人占比：显式指定则落库，未指定保持 null（不继承模板行占比）
-        newFact.setShareRatio(shareRatio);
-        newFact.setPerformanceAmount(MoneyUtil.round2(amount));
-        newFact.setAdjustId(adjustId);
-        newFact.setBatchId(null);
-        newFact.setNormalizedRecordId(null);
-        newFact.setSource(PerformanceSource.MANUAL);
-        // sourceKey 对齐导入格式，角色人系统号用 MANUAL-CADJ-{adjustId} 虚拟值避开导入幂等键
-        newFact.setSourceKey(StringUtils.defaultString(template.getOrderNo()) + "|"
-            + StringUtils.defaultString(template.getContractNo()) + "|MANUAL-CADJ-" + adjustId
-            + "|" + StringUtils.defaultString(template.getFeeItem()) + "|"
-            + StringUtils.defaultString(roleType));
-        factMapper.insert(newFact);
-        return newFact.getId();
-    }
-
-    @Override
-    public void recordExecutedAdjustMirror(CommissionAdjustMirrorDTO mirror) {
-        PerformanceAdjust adjust = new PerformanceAdjust();
-        adjust.setAdjustNo(mirror.getAdjustNo());
-        adjust.setFactId(mirror.getFactId());
-        adjust.setPeriod(mirror.getPeriod());
-        adjust.setAdjustType(AdjustType.valueOf(mirror.getAdjustType()));
-        adjust.setAdjustScope(mirror.getAdjustScope());
-        adjust.setContractNo(mirror.getContractNo());
-        adjust.setOrderNo(mirror.getOrderNo());
-        adjust.setFactType(FactType.PERF_EXPECT.name());
-        adjust.setOriginalAmount(mirror.getOriginalAmount());
-        // 合同级调整无单员工/单部门，从合同首条 ACTIVE 事实回填（两列 NOT NULL），与新签合同级调整一致；
-        // 明细级调整从指定 factId 回填员工/部门
-        if ("CONTRACT".equals(mirror.getAdjustScope())) {
-            List<PerformanceFactSummaryDTO> facts = findActiveByBizKey(
-                mirror.getPeriod(), mirror.getOrderNo(), mirror.getContractNo(), FactType.PERF_EXPECT.name());
-            if (!facts.isEmpty()) {
-                adjust.setDeptId(facts.get(0).getDeptId());
-            }
-            adjust.setEmployeeId(0L);
-        } else if (mirror.getFactId() != null) {
-            PerformanceFactSummaryDTO fact = getByFactId(mirror.getFactId());
-            if (fact != null) {
-                adjust.setEmployeeId(fact.getEmployeeId());
-                adjust.setDeptId(fact.getDeptId());
-            } else {
-                adjust.setEmployeeId(0L);
-            }
-        } else {
-            adjust.setEmployeeId(0L);
-        }
-        adjust.setTargetAmount(mirror.getTargetAmount());
-        adjust.setReason(mirror.getReason());
-        adjust.setStatus(AdjustStatus.EXECUTED);
-        adjust.setApplicantId(mirror.getApplicantId());
-        adjust.setApproverId(mirror.getApproverId());
-        adjust.setOperatorId(mirror.getApproverId());
-        LocalDateTime now = LocalDateTime.now();
-        adjust.setApproveTime(now);
-        adjust.setExecuteTime(now);
-        if (AdjustType.ADD_MEMBER.name().equals(mirror.getAdjustType())) {
-            adjust.setEmployeeId(mirror.getNewEmployeeId());
-            adjust.setPayloadJson(buildAddMemberPayloadJson(mirror));
-        }
-        adjustMapper.insert(adjust);
-    }
-
-    /**
-     * 组装新签侧 ADD_MEMBER 快照 JSON（AddMemberPayload 结构）：
-     * allocations 携带旧事实 ID/员工/调整前后差额，供新签明细页逆向还原每人调整前金额。
-     */
-    private String buildAddMemberPayloadJson(CommissionAdjustMirrorDTO mirror) {
-        AddMemberPayload payload = new AddMemberPayload();
-        payload.setNewEmployeeId(mirror.getNewEmployeeId());
-        payload.setEmployeeCode(mirror.getNewEmployeeCode());
-        payload.setEmployeeName(mirror.getNewEmployeeName());
-        payload.setDeptId(mirror.getNewDeptId());
-        payload.setRoleType(mirror.getNewRoleType());
-        payload.setAmount(mirror.getTargetAmount());
-        payload.setNewShareRatio(mirror.getNewShareRatio());
-        payload.setContractTotal(mirror.getOriginalAmount());
-        payload.setAfterTotal(mirror.getAfterTotal());
-        if (mirror.getAllocations() != null) {
-            List<AddMemberPayload.Alloc> allocs = new ArrayList<>();
-            for (CommissionAdjustMirrorDTO.Alloc a : mirror.getAllocations()) {
-                AddMemberPayload.Alloc alloc = new AddMemberPayload.Alloc();
-                alloc.setFactId(a.getFactId());
-                alloc.setEmployeeId(a.getEmployeeId());
-                alloc.setEmployeeName(a.getEmployeeName());
-                alloc.setBefore(a.getBefore());
-                alloc.setDelta(a.getDelta());
-                allocs.add(alloc);
-            }
-            payload.setAllocations(allocs);
-        }
-        return JsonUtils.toJsonString(payload);
-    }
-
-    @Override
-    public void voidFact(Long factId, Long operatorId, Long adjustId) {
-        // rd 命中：实收明细单行冲销（不插新行）；否则走业绩事实冲销
-        ReceivedRealFactPort port = realPort();
-        if (port != null && port.getById(factId) != null) {
-            port.voidDetail(factId, operatorId, adjustId);
-            return;
-        }
-        reverseService.reverseByAdjust(factId, adjustId, ReversedReason.MANUAL_ADJUST, operatorId);
-    }
-
-    @Override
-    public Long transferFact(Long factId, Long targetDeptId, Long operatorId, Long adjustId) {
-        // rd 命中：实收明细部门划转 supersede；否则走业绩事实原路径
-        ReceivedRealFactPort port = realPort();
-        if (port != null && port.getById(factId) != null) {
-            return port.transferDetail(factId, targetDeptId, operatorId, adjustId);
-        }
-        PerformanceFact oldFact = factMapper.selectById(factId);
-        if (oldFact == null) {
-            return null;
-        }
-        PerformanceFact newFact = copyFactBase(oldFact);
-        newFact.setDeptId(targetDeptId);
-        newFact.setAdjustId(adjustId);
-        PerformanceFact created = reverseService.supersede(oldFact.getId(), newFact, operatorId);
-        return created.getId();
-    }
-
-    /** 按金额占比分摊差额（与 PerformanceAdjustServiceImpl.allocateByAmount 同口径）。 */
-    private BigDecimal[] allocateByAmount(List<BigDecimal> amounts, BigDecimal deltaTotal) {
-        BigDecimal total = amounts.stream()
-            .map(a -> a == null ? BigDecimal.ZERO : a)
-            .reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal[] parts = new BigDecimal[amounts.size()];
-        if (total.signum() == 0) {
-            BigDecimal even = amounts.isEmpty() ? BigDecimal.ZERO
-                : MoneyUtil.round2(deltaTotal.divide(BigDecimal.valueOf(amounts.size()), 8, RoundingMode.HALF_UP));
-            BigDecimal allocated = BigDecimal.ZERO;
-            for (int i = 0; i < amounts.size(); i++) {
-                parts[i] = even;
-                allocated = allocated.add(even);
-            }
-            if (!amounts.isEmpty()) {
-                parts[0] = MoneyUtil.round2(parts[0].add(deltaTotal.subtract(allocated)));
-            }
-            return parts;
-        }
-        BigDecimal allocated = BigDecimal.ZERO;
-        int largestIdx = 0;
-        BigDecimal largestAbs = BigDecimal.ZERO;
-        for (int i = 0; i < amounts.size(); i++) {
-            BigDecimal abs = amounts.get(i).abs();
-            if (abs.compareTo(largestAbs) > 0) {
-                largestAbs = abs;
-                largestIdx = i;
-            }
-            parts[i] = MoneyUtil.round2(deltaTotal.multiply(amounts.get(i)).divide(total, 8, RoundingMode.HALF_UP));
-            allocated = allocated.add(parts[i]);
-        }
-        BigDecimal tail = MoneyUtil.round2(deltaTotal.subtract(allocated));
-        parts[largestIdx] = MoneyUtil.round2(parts[largestIdx].add(tail));
-        return parts;
     }
 
     /** 复制事实基础字段（batchId 置空，避免被批次 supersede 误冲销），与新签调整一致。 */

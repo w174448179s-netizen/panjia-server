@@ -795,7 +795,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                                           @Param("contractNo") String contractNo);
 
     /**
-     * 按订单号+合同号双键精确查询 ACTIVE 事实摘要（结佣调整链路匹配用）。
+     * 按订单号+合同号双键精确查询 ACTIVE 事实摘要（调整执行匹配用）。
      * <p>
      * 同一合同号挂多个订单号时，按合同号（双键 OR）装载会跨订单混排明细；
      * 订单号也可能重复（不同合同挂同订单号），故双键同时满足才精确唯一。
@@ -1111,11 +1111,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         @Param("keys") java.util.Collection<java.util.Map<String, String>> keys);
 
     /**
-     * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
+     * 批量查合同维度「调整前」事实金额合计（结佣合同列表展示「原值 → 调整后值」用）。
      * <p>
      * 以各业务键当前 ACTIVE 事实的 sourceKey 集合为准，沿事实链（同 sourceKey，
      * 不区分 fact_status）取 id 最早一条事实金额求和——未调整时最早一条即 ACTIVE 自身，
-     * 已调整（新签调整 / 结佣调整 supersede 均保留 sourceKey）时为最早 REVERSED 原值。
+     * 已调整（新签/实收调整 supersede 均保留 sourceKey）时为最早 REVERSED 原值。
      * <p>
      * 增加角色人（ADD_MEMBER）例外：新角色人事实是凭空新增的链（sourceKey 含
      * MANUAL-ADJ/MANUAL-CADJ），调整前该角色在合同上不存在，其链按 0 计入原额；

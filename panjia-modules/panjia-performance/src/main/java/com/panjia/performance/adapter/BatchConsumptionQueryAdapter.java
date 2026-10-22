@@ -48,9 +48,8 @@ import java.util.Set;
  *       反查的下游单、本批实收合同按合同/订单反查的合并单（明细并入他批首建单
  *       时 apply.batch_id 不等于本批）；</li>
  *   <li>结佣域已消费：存在提交/审批/锁定（有流程实例）/驳回的结佣申请单，
- *       或存在未作废结佣调整单（含已执行联动：本批实收明细带结佣调整痕迹
- *       adjust_id 非空）。实收自动通过时产生的 DRAFT 结佣草稿（未提交、
- *       无流程实例）不算已结佣，允许撤销，随批删除并在旧批次恢复后重建。</li>
+ *       或本批实收明细带调整痕迹（adjust_id 非空）。实收自动通过时产生的 DRAFT
+ *       结佣草稿（未提交、无流程实例）不算已结佣，允许撤销，随批删除并在旧批次恢复后重建。</li>
  * </ol>
  */
 @Slf4j
@@ -127,13 +126,13 @@ public class BatchConsumptionQueryAdapter implements BatchConsumptionQueryPort {
         ReceivedConsumptionQueryPort.BatchReceivedScope receivedScope;
         try {
             receivedScope = receivedPort.loadBatchScope(batchId);
-            // 结佣调整执行时 supersede 实收明细（adjust_id 非空，含调整后新生效行）；
+            // 调整执行时 supersede 实收明细（adjust_id 非空，含调整后新生效行）；
             // 旧口径靠「实收单 APPROVED 全拦」间接挡住，自动通过放行后必须显式拦截
             long adjustedDetails = receivedPort.countAdjustedDetails(batchId);
             if (adjustedDetails > 0) {
                 return RevokeCheckResult.reject(
-                    "该批次实收明细存在结佣调整记录（" + adjustedDetails
-                        + " 条），禁止撤销，请先作废相关结佣调整单");
+                    "该批次实收明细存在调整记录（" + adjustedDetails
+                        + " 条），禁止撤销，请先作废相关调整单");
             }
         } catch (Exception e) {
             log.warn("[导入撤销] 实收消费校验异常，保守拒绝：batchId={}, error={}", batchId, e.getMessage());
