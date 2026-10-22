@@ -620,11 +620,13 @@ public class SalaryCalculationEngine {
             BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
                 .add(storeIncome).add(payableBaseSalary).add(mentorBonus).add(bonus).add(otherIncome)
                 .add(fullAttendance);
-            // 保底触发时，兜底 gross 至少等于保底线（避免中间 round2 精度丢失导致 gross < minSalary）
+            // 保底触发时，兜底 gross 至少等于「保底线 − 个人新签递延 + 结佣提成」（避免中间 round2 精度丢失导致 gross 偏低）；
+            // 个人新签提成递延、不计入当月应发（见上方组装注释），因此托底基线不能直接用 minSalary，
+            // 否则会把递延的个人新签提成重复计入当月应发。
             if (role == EmployeeRole.MANAGER && guaranteeFill.compareTo(BigDecimal.ZERO) > 0) {
                 BigDecimal minSal = d.getMinSalary() == null ? BigDecimal.ZERO : d.getMinSalary();
-                // 保底场景 gross = commissionIncome + teamIncome + guaranteeFill，应等于 minSalary + commissionIncome
-                BigDecimal expectedFloor = minSal.add(commissionIncome);
+                // 保底场景 gross = commissionIncome + teamIncome + guaranteeFill，应等于 (minSalary − 个人新签提成) + commissionIncome
+                BigDecimal expectedFloor = minSal.subtract(personalNewsign).add(commissionIncome);
                 if (gross.compareTo(expectedFloor) < 0) {
                     gross = expectedFloor;
                 }

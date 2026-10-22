@@ -59,6 +59,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -2771,6 +2772,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         Map<String, Map<String, Object>> empByCode = adjustMapper.employeesByCodes(employeeCodes).stream()
             .collect(Collectors.toMap(m -> String.valueOf(m.get("employeeCode")), m -> m, (a, b) -> a));
         int count = 0;
+        List<OffsetLinkRow> linkRows = new ArrayList<>();
         for (ManualOffsetItem item : items) {
             // 既有行按 factId 精确复制 → （工号,角色）匹配 → 最后才回退默认模板
             PerformanceFact template = item.getFactId() == null ? null : templateById.get(item.getFactId());
@@ -2816,10 +2818,180 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
             fact.setOperatorId(operatorId);
             factMapper.insert(fact);
+            // 实收联动明细：人员/角色/费用项/金额与刚写入的新签事实同口径
+            OffsetLinkRow linkRow = new OffsetLinkRow();
+            linkRow.employeeId = fact.getEmployeeId();
+            linkRow.employeeCode = fact.getEmployeeExternalCode();
+            linkRow.deptId = fact.getDeptId();
+            linkRow.roleType = item.getRoleType();
+            linkRow.feeItem = template.getFeeItem();
+            linkRow.shareRatio = fact.getShareRatio();
+            linkRow.amount = item.getAmount() == null ? BigDecimal.ZERO : MoneyUtil.round2(item.getAmount());
+            // 冲正弹窗新增的角色人行（无源事实）→ 实收侧无同行时需新建，口径同「增加角色人」
+            linkRow.newMember = item.getFactId() == null;
+            linkRows.add(linkRow);
             count++;
         }
+        // 实收联动：与新签调整同款「按（员工+角色+费用项）同额联动」，冲正后实收合计与新签自动对齐
+        linkReceivedForManualOffset(adjust, linkRows, operatorId);
         log.info("[调整单-业绩冲正] 执行完成：adjustId={}, contractNo={}, period={}, 记录数={}",
             adjust.getId(), adjust.getContractNo(), targetPeriod, count);
+    }
+
+    /** 冲正联动实收的明细行（已按员工主数据回填 ID/部门）。 */
+    private static final class OffsetLinkRow {
+        private Long employeeId;
+        private String employeeCode;
+        private Long deptId;
+        private String roleType;
+        private String feeItem;
+        private BigDecimal shareRatio;
+        private BigDecimal amount;
+        /** 是否为冲正弹窗新增的角色人行（源事实为空） */
+        private boolean newMember;
+    }
+
+    /**
+     * 业绩冲正实收联动：口径与新签调整 {@link #linkReceivedForAdjust} 完全一致——
+     * 按（员工 + 角色 + 费用项键）把冲正金额同额落到实收明细上（supersede 冲销链，正负均可）。
+     * <ul>
+     *   <li>命中同（员工+角色）实收行：按占比分摊后逐行调整；</li>
+     *   <li>未命中角色行但该员工实收侧有其它行：退化为按该员工实收行等比分摊；</li>
+     *   <li>新增角色人行（冲正弹窗添加的人）：实收侧无同行则新建实收行；</li>
+     *   <li>既有人员在实收侧完全不存在：不凭空建行，仅告警（与调整口径一致）；</li>
+     *   <li>合同整体无实收：按新签镜像建行，并直建一张审批通过的实收审批单。</li>
+     * </ul>
+     * 端口缺失时跳过。
+     */
+    private void linkReceivedForManualOffset(PerformanceAdjust adjust, List<OffsetLinkRow> linkRows,
+                                              Long operatorId) {
+        ReceivedRealFactPort port = receivedRealPort();
+        if (port == null) {
+            log.warn("[冲正单-实收联动] 实收端口缺失，跳过联动：adjustId={}", adjust.getId());
+            return;
+        }
+        if (linkRows == null || linkRows.isEmpty()) {
+            return;
+        }
+        String period = adjust.getPeriod();
+        String orderNo = adjust.getOrderNo();
+        String contractNo = adjust.getContractNo();
+        String bizType = adjust.getBizType();
+
+        List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
+        boolean hasAnyReceived = received != null && !received.isEmpty();
+        BigDecimal originalReceivedTotal = BigDecimal.ZERO;
+        BigDecimal appliedDelta = BigDecimal.ZERO;
+        boolean linkedTouched = false;
+        Map<Long, Map<String, List<PerformanceFactSummaryDTO>>> receivedByEmpRole = new HashMap<>();
+        Long templateDetailId = null;
+        if (received != null) {
+            for (PerformanceFactSummaryDTO r : received) {
+                if (r.getAmount() != null) {
+                    originalReceivedTotal = originalReceivedTotal.add(r.getAmount());
+                }
+                if (r.getEmployeeId() == null || r.getFactId() == null) {
+                    continue;
+                }
+                receivedByEmpRole
+                    .computeIfAbsent(r.getEmployeeId(), k -> new HashMap<>())
+                    .computeIfAbsent(normalizeRole(r.getRoleType()) + feeKeyOf(r.getFeeItem()), k -> new ArrayList<>())
+                    .add(r);
+                if (templateDetailId == null) {
+                    templateDetailId = r.getFactId();
+                }
+            }
+        }
+        // 同一（员工+角色+费用项）多行合并为一次联动，避免后续行基于已变动的实收金额重复分摊
+        Map<String, OffsetLinkRow> merged = new LinkedHashMap<>();
+        for (OffsetLinkRow row : linkRows) {
+            if (row.employeeId == null || MoneyUtil.isZero(row.amount)) {
+                continue;
+            }
+            String roleKey = normalizeRole(row.roleType) + feeKeyOf(row.feeItem);
+            String key = row.employeeId + "|" + roleKey;
+            OffsetLinkRow exist = merged.get(key);
+            if (exist == null) {
+                exist = new OffsetLinkRow();
+                exist.employeeId = row.employeeId;
+                exist.employeeCode = row.employeeCode;
+                exist.deptId = row.deptId;
+                exist.roleType = row.roleType;
+                exist.feeItem = row.feeItem;
+                exist.shareRatio = row.shareRatio;
+                exist.amount = BigDecimal.ZERO;
+                exist.newMember = row.newMember;
+                merged.put(key, exist);
+            }
+            exist.newMember = exist.newMember || row.newMember;
+            exist.amount = MoneyUtil.round2(exist.amount.add(row.amount));
+        }
+
+        for (OffsetLinkRow row : merged.values()) {
+            BigDecimal delta = MoneyUtil.round2(row.amount);
+            if (MoneyUtil.isZero(delta)) {
+                continue;
+            }
+            String roleKey = normalizeRole(row.roleType) + feeKeyOf(row.feeItem);
+            Map<String, List<PerformanceFactSummaryDTO>> empReceived = receivedByEmpRole.get(row.employeeId);
+            List<PerformanceFactSummaryDTO> matched = empReceived == null ? null : empReceived.get(roleKey);
+            if (matched != null && !matched.isEmpty()) {
+                adjustReceivedRows(port, matched, delta, adjust.getId(), operatorId);
+                appliedDelta = appliedDelta.add(delta);
+                linkedTouched = true;
+                log.info("[冲正单-实收联动] adjustId={}, employeeId={}, role={}, 同额={}, 实收命中 {} 行联动",
+                    adjust.getId(), row.employeeId, roleKey, delta, matched.size());
+                continue;
+            }
+            if (!row.newMember && empReceived != null && !empReceived.isEmpty()) {
+                // 角色口径不一致：退化为按该员工实收行等比分摊（不新建行）
+                List<PerformanceFactSummaryDTO> all = empReceived.values().stream()
+                    .flatMap(List::stream).toList();
+                adjustReceivedRows(port, all, delta, adjust.getId(), operatorId);
+                appliedDelta = appliedDelta.add(delta);
+                linkedTouched = true;
+                log.warn("[冲正单-实收联动] adjustId={}, employeeId={}, 角色={} 实收无同行，退化为按该员工 {} 行等比分摊",
+                    adjust.getId(), row.employeeId, roleKey, all.size());
+                continue;
+            }
+            if (hasAnyReceived && !row.newMember) {
+                log.warn("[冲正单-实收联动] adjustId={}, employeeId={}, 角色={}, delta={} 在实收侧不存在，"
+                    + "不凭空建实收行", adjust.getId(), row.employeeId, roleKey, delta);
+                continue;
+            }
+            // 新增角色人 / 合同整体无实收：新建实收行
+            String roleArg = StringUtils.isBlank(row.roleType) ? null : row.roleType;
+            if (hasAnyReceived && templateDetailId != null) {
+                port.addMemberDetail(templateDetailId, row.employeeId, row.employeeCode, row.deptId,
+                    roleArg, delta, row.shareRatio, operatorId, adjust.getId());
+            } else {
+                port.createDetailFromContract(orderNo, contractNo, period, bizType,
+                    row.employeeId, row.employeeCode, row.deptId, roleArg, delta, row.shareRatio,
+                    operatorId, adjust.getId());
+            }
+            appliedDelta = appliedDelta.add(delta);
+            linkedTouched = true;
+            log.info("[冲正单-实收联动] 实收新建角色行：adjustId={}, employeeId={}, role={}, amount={}",
+                adjust.getId(), row.employeeId, roleArg, delta);
+        }
+
+        if (!hasAnyReceived) {
+            ReceivedApplyPort applyPort = receivedApplyPort();
+            if (applyPort != null) {
+                int newApplies = applyPort.autoCreateApprovedForAdjust(period, orderNo, contractNo,
+                    operatorId, adjust.getId());
+                if (newApplies > 0) {
+                    log.info("[冲正单-实收联动] 无实收合同已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
+                        adjust.getId(), contractNo, newApplies);
+                }
+            } else {
+                log.warn("[冲正单-实收联动] 实收审批单端口缺失，跳过直建审批单：adjustId={}", adjust.getId());
+            }
+        }
+
+        if (linkedTouched) {
+            recordLinkedReceivedAdjustMirror(adjust, bizType, originalReceivedTotal, appliedDelta, operatorId);
+        }
     }
 
     /**

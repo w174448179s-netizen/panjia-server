@@ -1030,8 +1030,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 员工去重按员工主数据 ID（rd.employee_id 暂留空时回退外部工号）。
      * <p>
      * 应收合计仍取 ACTIVE PERF_EXPECT（含已生效调整），使列表「新签业绩」显示调整后金额；
-     * 金额口径当月优先：当月有<b>非零</b>新签 → 只取当月合计；当月为 0/无 → 不参与当月计算，
-     * 取历史（&lt;实收月）合计，与建单/结佣口径一致。
+     * 金额口径为<b>累计</b>：实收月及之前全部期间的新签合计（跨月冲正/调整新增一并计入），
+     * 与明细弹窗、结佣列表口径一致。曾用「当月有非零只取当月」的当月优先口径，
+     * 在当月发生冲正/补录时会把历史新签整体丢掉（合同新签从 4.5 万骤降为当月金额），已修正。
      * 实收明细（rd）暂无调整链，originalReceivedAmount 与 receivedAmount 同值
      * （前端据此不展示「原值 → 调整后值」）。
      * 匹配口径（订单号为唯一业务锚点，四分支）：
@@ -1065,30 +1066,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                             OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                          )
                      <if test="period != null and period != ''">
-                     AND (
-                           (pe.period = #{period} AND EXISTS (
-                               SELECT 1 FROM pj_perf_fact pc
-                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                                 AND pc.period = #{period}
-                                 AND pc.performance_amount != 0
-                                 AND (
-                                       (k.dg AND pc.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
-                                    OR (NOT k.dg AND k.ck = '' AND pc.order_no = k.ok)
-                                    OR (NOT k.dg AND k.ok = '' AND (pc.contract_no = k.ck OR pc.order_no = k.ck))
-                                     )))
-                        OR (pe.period &lt; #{period} AND NOT EXISTS (
-                               SELECT 1 FROM pj_perf_fact pc
-                               WHERE pc.fact_status = 'ACTIVE' AND pc.fact_type = 'PERF_EXPECT'
-                                 AND pc.period = #{period}
-                                 AND pc.performance_amount != 0
-                                 AND (
-                                       (k.dg AND pc.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pc.contract_no = k.ck AND pc.order_no = k.ok)
-                                    OR (NOT k.dg AND k.ck = '' AND pc.order_no = k.ok)
-                                    OR (NOT k.dg AND k.ok = '' AND (pc.contract_no = k.ck OR pc.order_no = k.ck))
-                                     )))
-                         )
+                     -- 累计口径：实收月及之前全部期间的新签合计（含跨月冲正/调整新增）；
+                     -- 不可用「当月有非零只取当月」，否则本月冲正后会把历史新签整体丢掉
+                     AND pe.period &lt;= #{period}
                      </if>
                ), 0) AS "expectedAmount"
         FROM (VALUES
