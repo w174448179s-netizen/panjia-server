@@ -15,6 +15,7 @@ import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.mapper.PerformanceScoreMapper;
 import com.panjia.people.mapper.ScoreApprovalMapper;
 import com.panjia.people.service.ScoreApprovalService;
+import com.panjia.people.service.ScoreAttendDaysResolver;
 import com.panjia.people.service.ScoreGradePolicy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -62,6 +63,7 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
     private final EmployeeMapper employeeMapper;
     private final ApprovalPort approvalPort;
     private final ScoreGradePolicy scoreGradePolicy;
+    private final ScoreAttendDaysResolver attendDaysResolver;
 
     @Override
     public ScoreApprovalVO getByPeriod(String period) {
@@ -304,6 +306,24 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
 
     // ==================== 内部方法 ====================
 
+    /** 批量解析考勤出勤天数（key = employeeId|yyyy-MM），作为平均积分分母 */
+    private Map<String, Integer> resolveAttendDays(List<PerformanceScore> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> employeeIds = rows.stream().map(PerformanceScore::getEmployeeId)
+            .filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        Set<LocalDate> months = rows.stream().map(PerformanceScore::getScoreMonth)
+            .filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        return attendDaysResolver.resolve(employeeIds, months);
+    }
+
+    /** 单行有效出勤天数：考勤汇总优先，考勤缺失时回退积分表填报天数 */
+    private Integer resolveAttendDays(PerformanceScore row, Map<String, Integer> attendDaysMap) {
+        Integer days = attendDaysMap.get(ScoreAttendDaysResolver.key(row.getEmployeeId(), row.getScoreMonth()));
+        return days != null ? days : row.getAttendDays();
+    }
+
     /**
      * 聚合扣点行快照 JSON。
      * 扣点口径：绩效等级 B（-2%）/ C（-4%）的行——均影响当月提成比例；
@@ -319,8 +339,9 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         }
         // 派生字段（平均积分/等级/扣点/积分扣款）实时计算，不落库；规则整单只查一次
         PointsRuleDTO rule = scoreGradePolicy.currentRule();
+        Map<String, Integer> attendDaysMap = resolveAttendDays(rows);
         List<PerformanceScore> deductRows = rows.stream().filter(r -> {
-            String grade = scoreGradePolicy.grade(rule, r.getTotalPoints(), r.getAttendDays());
+            String grade = scoreGradePolicy.grade(rule, r.getTotalPoints(), resolveAttendDays(r, attendDaysMap));
             return "B".equals(grade) || "C".equals(grade);
         }).toList();
 
@@ -345,8 +366,9 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             row.setEmployeeName(emp == null ? null : emp.getEmployeeName());
             row.setScoreMonth(r.getScoreMonth() == null ? null : r.getScoreMonth().toString());
             row.setTotalPoints(r.getTotalPoints());
-            row.setAttendDays(r.getAttendDays());
-            BigDecimal avg = scoreGradePolicy.avgPoints(r.getTotalPoints(), r.getAttendDays());
+            Integer attendDays = resolveAttendDays(r, attendDaysMap);
+            row.setAttendDays(attendDays);
+            BigDecimal avg = scoreGradePolicy.avgPoints(r.getTotalPoints(), attendDays);
             String grade = avg == null ? null : scoreGradePolicy.resolveGrade(rule, avg);
             row.setAvgPoints(avg);
             row.setGrade(grade);
@@ -359,7 +381,8 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
 
         Map<String, Long> gradeCounts = rows.stream()
             .collect(Collectors.groupingBy(
-                r -> StringUtils.defaultString(scoreGradePolicy.grade(rule, r.getTotalPoints(), r.getAttendDays())),
+                r -> StringUtils.defaultString(scoreGradePolicy.grade(rule, r.getTotalPoints(),
+                    resolveAttendDays(r, attendDaysMap))),
                 Collectors.counting()));
 
         Map<String, Object> snapshot = new LinkedHashMap<>();

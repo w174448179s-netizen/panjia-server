@@ -1076,18 +1076,19 @@ public class SalaryCalculationEngine {
      * <p>
      * 平均积分 = totalPoints / attendDays（HALF_UP 保留 4 位）；
      * 平均分 ≥ gradeA 阈值 → A；≥ gradeB 阈值 → B；否则 C；
-     * 无事实或出勤 0 天 → A（不扣点）。阈值来源=绩效方案 ruleContent（GRADE_RATE/GRADE_AMOUNT）
+     * <b>无积分事实、总积分为空或出勤 0 天 → 方案最差档</b>（堵住"当天积分低就不填报"
+     * 来抬高平均分、或整月不填报规避扣点的漏洞）。阈值来源=绩效方案 ruleContent（GRADE_RATE/GRADE_AMOUNT）
      * 或旧快照兜底的 policy.points；字段缺失时各阈值兜底默认 8/6（与
      * 员工域 ScoreGradePolicy 一致）。
      */
     private String resolveGrade(JsonNode thresholds, ScoreFactsDTO facts) {
         if (facts == null) {
-            return "A";
+            return worstGrade(thresholds);
         }
         BigDecimal totalPoints = facts.getTotalPoints();
         Integer attendDays = facts.getAttendDays();
         if (totalPoints == null || attendDays == null || attendDays <= 0) {
-            return "A";
+            return worstGrade(thresholds);
         }
         BigDecimal avg = totalPoints.divide(BigDecimal.valueOf(attendDays), 4, RoundingMode.HALF_UP);
         BigDecimal gradeAMin = bd(thresholds.path("gradeA").asText("8"));
@@ -1096,6 +1097,33 @@ public class SalaryCalculationEngine {
             return "A";
         }
         return avg.compareTo(gradeBMin) >= 0 ? "B" : "C";
+    }
+
+    /**
+     * 方案最差档：取规则里扣减力度最大的等级，不硬编码等级名。
+     * <p>
+     * 提点类（deductA/B/C，负值）取最小值；金额类（feeA/B/C，正值扣款）取最大值
+     * （统一换算成"负向分值"后比较）。规则里既无 deduct 也无 fee 时兜底 C。
+     */
+    private String worstGrade(JsonNode thresholds) {
+        String worst = null;
+        BigDecimal worstScore = null;
+        for (String grade : new String[]{"A", "B", "C"}) {
+            BigDecimal score = null;
+            if (thresholds.hasNonNull("deduct" + grade)) {
+                score = bd(thresholds.path("deduct" + grade).asText("0"));
+            } else if (thresholds.hasNonNull("fee" + grade)) {
+                score = bd(thresholds.path("fee" + grade).asText("0")).negate();
+            }
+            if (score == null) {
+                continue;
+            }
+            if (worstScore == null || score.compareTo(worstScore) < 0) {
+                worstScore = score;
+                worst = grade;
+            }
+        }
+        return worst == null ? "C" : worst;
     }
 
     /**

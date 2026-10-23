@@ -100,7 +100,7 @@ public class PayrollBatchService {
         if (!approvalStatus.isApproved()) {
             throw new ServiceException("当月考勤（" + period + "）未经总监审批通过，暂不能进入算薪");
         }
-        // 卡点：当月积分须总监审批通过（无积分数据期间不卡，绩效等级默认 A 不扣点）
+        // 卡点：当月积分须总监审批通过（无积分数据期间不卡，缺积分者按方案最差档扣）
         ScoreApprovalStatusDTO scoreApprovalStatus = scoreApprovalQueryPort.getApprovalStatus(period);
         if (!scoreApprovalStatus.isApproved()) {
             throw new ServiceException("当月积分（" + period + "）未经总监审批通过，暂不能进入算薪");
@@ -359,6 +359,14 @@ public class PayrollBatchService {
         Map<String, Map<Long, Integer>> periodApprenticeMap = new HashMap<>();
         Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = new HashMap<>();
         for (String rp : requiredPeriods) {
+            // rate_adjust 必须覆盖所有 requiredPeriod（含算薪月本身），
+            // 否则当期生效的人工扣点（如电话考核 -3% start_month=当期）在逐期间结佣重算时取不到，
+            // 导致算薪月的新签期间结佣提成少扣 rate_adjust。职级/伯乐/积分仍按原口径跳过算薪月（主快照已加载）。
+            try {
+                periodAdjustMap.put(rp, rateAdjustService.loadEffectiveForPeriod(rp));
+            } catch (Exception e) {
+                log.warn("[薪酬] 加载期间人工调整失败：period={}，该期间结佣提成人工调整回退 0", rp, e);
+            }
             if (rp.equals(period) || commissionEmpIds.isEmpty()) {
                 continue;
             }
@@ -378,8 +386,6 @@ public class PayrollBatchService {
                 periodApprenticeMap.put(rp, apprenticeByMentor);
                 // 历史绩效积分（该月无事实的员工结佣时按 0 分处理）
                 periodScoreMap.put(rp, scoreQueryPort.scoreFacts(rp));
-                // 该月当时生效的人工调整单（按新签月口径；APPROVED 且 start_month ≤ rp ≤ end_month）
-                periodAdjustMap.put(rp, rateAdjustService.loadEffectiveForPeriod(rp));
             } catch (Exception e) {
                 log.warn("[薪酬] 构建历史切片失败：period={}，该期间结佣提成回退算薪月口径", rp, e);
             }
@@ -548,7 +554,7 @@ public class PayrollBatchService {
         // 但 port 只装 ScoreFactsDTO（总积分/出勤天数/晚提交次数，等级/扣款不在
         // port 预先算好）—— 引擎按 policy.points（gradeA/gradeB/deductA/B/C/penaltyFee）
         // 派生等级与扣款（参见 AttendanceMetricsDTO 同模式）。
-        // 无积分数据的员工不在 Map 中，引擎默认 A 不扣点。
+        // 无积分数据的员工不在 Map 中，引擎按方案最差档默认扣（防规避扣点）。
         input.scoreFacts = scoreQueryPort.scoreFacts(period);
 
         // 提成点调整：APPROVED 且 start_month ≤ period ≤ end_month 的人工调整单，

@@ -18,6 +18,7 @@ import com.panjia.people.mapper.PerformanceScoreMapper;
 import com.panjia.people.mapper.ScoreDetailMapper;
 import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.ScoreApprovalService;
+import com.panjia.people.service.ScoreAttendDaysResolver;
 import com.panjia.people.service.ScoreGradePolicy;
 import com.panjia.people.service.ScoreService;
 import lombok.RequiredArgsConstructor;
@@ -73,6 +74,7 @@ public class ScoreServiceImpl implements ScoreService {
     private final DeptPort deptPort;
     private final ScoreApprovalService approvalService;
     private final ScoreGradePolicy scoreGradePolicy;
+    private final ScoreAttendDaysResolver attendDaysResolver;
 
     // ==================== 导入同步（ScoreArchiveHandler） ====================
 
@@ -280,7 +282,8 @@ public class ScoreServiceImpl implements ScoreService {
 
         Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
         PointsRuleDTO rule = scoreGradePolicy.currentRule();
-        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule)).toList();
+        Map<String, Integer> attendDaysMap = resolveAttendDays(page.getRecords());
+        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule, attendDaysMap)).toList();
         enrich(vos);
         return PageResult.build(vos, page.getTotal());
     }
@@ -291,7 +294,7 @@ public class ScoreServiceImpl implements ScoreService {
         if (record == null) {
             throw new ServiceException("积分记录不存在，id={}", id);
         }
-        ScoreVO vo = toVO(record, scoreGradePolicy.currentRule());
+        ScoreVO vo = toVO(record, scoreGradePolicy.currentRule(), resolveAttendDays(List.of(record)));
         enrich(List.of(vo));
         return vo;
     }
@@ -358,7 +361,8 @@ public class ScoreServiceImpl implements ScoreService {
 
         Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
         PointsRuleDTO rule = scoreGradePolicy.currentRule();
-        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule)).toList();
+        Map<String, Integer> attendDaysMap = resolveAttendDays(page.getRecords());
+        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule, attendDaysMap)).toList();
         enrich(vos);
         return PageResult.build(vos, page.getTotal());
     }
@@ -583,6 +587,8 @@ public class ScoreServiceImpl implements ScoreService {
         }
         List<PerformanceScore> rows = scoreMapper.selectList(new LambdaQueryWrapper<PerformanceScore>()
             .eq(PerformanceScore::getScoreMonth, monthStart));
+        // 出勤天数取考勤汇总（平均积分分母），考勤缺失回退积分填报天数
+        Map<String, Integer> attendDaysMap = resolveAttendDays(rows);
         Map<Long, ScoreFactsDTO> result = new HashMap<>();
         for (PerformanceScore row : rows) {
             if (row.getEmployeeId() == null) {
@@ -590,7 +596,8 @@ public class ScoreServiceImpl implements ScoreService {
             }
             ScoreFactsDTO dto = new ScoreFactsDTO();
             dto.setTotalPoints(row.getTotalPoints());
-            dto.setAttendDays(row.getAttendDays());
+            Integer attendDays = attendDaysMap.get(ScoreAttendDaysResolver.key(row.getEmployeeId(), monthStart));
+            dto.setAttendDays(attendDays != null ? attendDays : row.getAttendDays());
             dto.setLateSubmitCount(row.getLateSubmitCount());
             result.put(row.getEmployeeId(), dto);
         }
@@ -666,16 +673,35 @@ public class ScoreServiceImpl implements ScoreService {
         }
     }
 
-    private ScoreVO toVO(PerformanceScore record, PointsRuleDTO rule) {
+    private ScoreVO toVO(PerformanceScore record, PointsRuleDTO rule, Map<String, Integer> attendDaysMap) {
         ScoreVO vo = new ScoreVO();
         BeanUtil.copyProperties(record, vo);
+        // 出勤天数：优先取考勤汇总（平均积分分母），考勤缺失时回退积分填报天数
+        Integer attendDays = attendDaysMap.get(ScoreAttendDaysResolver.key(record.getEmployeeId(), record.getScoreMonth()));
+        if (attendDays == null) {
+            attendDays = record.getAttendDays();
+        }
+        vo.setAttendDays(attendDays);
         // 派生字段实时计算（不落库）：平均积分/绩效等级/提成扣点/积分扣款
         vo.setPointsFee(scoreGradePolicy.lateFeeOf(rule, record.getLateSubmitCount()));
-        BigDecimal avg = scoreGradePolicy.avgPoints(record.getTotalPoints(), record.getAttendDays());
+        BigDecimal avg = scoreGradePolicy.avgPoints(record.getTotalPoints(), attendDays);
         vo.setAvgPoints(avg);
-        vo.setGrade(avg == null ? null : scoreGradePolicy.resolveGrade(rule, avg));
+        // 无有效积分（总积分为空/出勤 0 天）默认方案最差档，与算薪引擎扣点口径一致
+        vo.setGrade(scoreGradePolicy.grade(rule, record.getTotalPoints(), attendDays));
         vo.setDeductRate(scoreGradePolicy.deductOf(rule, vo.getGrade()));
         return vo;
+    }
+
+    /** 批量解析考勤出勤天数（key = employeeId|yyyy-MM），平均积分分母 */
+    private Map<String, Integer> resolveAttendDays(List<PerformanceScore> records) {
+        if (records == null || records.isEmpty()) {
+            return Map.of();
+        }
+        Set<Long> employeeIds = records.stream().map(PerformanceScore::getEmployeeId)
+            .filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<LocalDate> months = records.stream().map(PerformanceScore::getScoreMonth)
+            .filter(Objects::nonNull).collect(Collectors.toSet());
+        return attendDaysResolver.resolve(employeeIds, months);
     }
 
     /** 批量填充工号/姓名/部门/锁定标记 */

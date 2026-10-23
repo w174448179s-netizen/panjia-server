@@ -56,10 +56,34 @@ public class ScoreGradePolicy {
         return totalPoints.divide(BigDecimal.valueOf(attendDays), 4, RoundingMode.HALF_UP);
     }
 
-    /** 绩效等级：平均分 ≥A门槛 → A；≥B门槛 → B；否则 C（出勤 0 天为 null，算薪默认 A 不扣点） */
+    /**
+     * 绩效等级：平均分 ≥A门槛 → A；≥B门槛 → B；否则 C。
+     * <b>总积分为空或出勤 0 天（无有效积分）→ 方案最差档</b>，与算薪引擎口径一致。
+     */
     public String grade(PointsRuleDTO rule, BigDecimal totalPoints, Integer attendDays) {
         BigDecimal avg = avgPoints(totalPoints, attendDays);
-        return avg == null ? null : resolveGrade(rule, avg);
+        return avg == null ? worstGrade(rule) : resolveGrade(rule, avg);
+    }
+
+    /** 方案最差档：取扣点力度最大的等级（A/B/C 中 deduct 最小者），规则缺失兜底 C */
+    public String worstGrade(PointsRuleDTO rule) {
+        String worst = "C";
+        BigDecimal worstDeduct = null;
+        if (rule != null) {
+            String[] grades = {"A", "B", "C"};
+            BigDecimal[] deducts = {rule.getDeductA(), rule.getDeductB(), rule.getDeductC()};
+            for (int i = 0; i < grades.length; i++) {
+                BigDecimal deduct = deducts[i];
+                if (deduct == null) {
+                    continue;
+                }
+                if (worstDeduct == null || deduct.compareTo(worstDeduct) < 0) {
+                    worstDeduct = deduct;
+                    worst = grades[i];
+                }
+            }
+        }
+        return worst;
     }
 
     /** 平均分 → 等级：≥A门槛 → A；≥B门槛 → B；否则 C */
