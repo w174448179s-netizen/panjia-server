@@ -621,9 +621,17 @@ public class SalaryCalculationEngine {
 
             // 日工资 = 底薪 / 当月自然天数（2026-10 改：不再用 21.75 工作日口径）。
             // 入职当月：底薪 = 入职日（含）至月底天数 × 日工资；非入职月发满月底薪。
-            // dailyWageFull 始终以满月底薪为基（请假/旷工扣款同口径），不受折算影响。
+            // dailyWageFull 始终以满月底薪为基（底薪折算专用），不受折算影响。
             BigDecimal dailyWageFull = baseSalary.signum() > 0
                 ? baseSalary.divide(BigDecimal.valueOf(monthDays), 6, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+            // 缺勤扣款日工资：底薪和保底共用同一基数——谁有就用谁（二者互斥，职级不会同时给）。
+            // 事假/旷工扣这天的固定收入，不区分底薪还是保底。
+            BigDecimal absentBaseSalary = baseSalary.signum() > 0
+                ? baseSalary
+                : bd(rank.path("minSalary").asText("0"));
+            BigDecimal dailyWageAbsent = absentBaseSalary.signum() > 0
+                ? absentBaseSalary.divide(BigDecimal.valueOf(monthDays), 6, RoundingMode.HALF_UP)
                 : BigDecimal.ZERO;
             BigDecimal payableBaseSalary = baseSalary;
             if (baseSalary.signum() > 0 && hireInPeriod) {
@@ -722,7 +730,6 @@ public class SalaryCalculationEngine {
                 BigDecimal absentBaseTimes = bd(cfg.path("absentWithBaseTimes").asText("3"));
                 BigDecimal absentNoBaseFee = bd(cfg.path("absentNoBaseFee").asText("50"));
                 BigDecimal personalLeaveFee = bd(cfg.path("personalLeaveFee").asText("50"));
-                boolean personalLeaveDeductWage = cfg.path("personalLeaveDeductDailyWage").asBoolean(true);
                 BigDecimal sickClinicWithBaseFee = bd(cfg.path("sickClinicWithBaseFee").asText("30"));
                 BigDecimal sickClinicNoBaseFee = bd(cfg.path("sickClinicNoBaseFee").asText("20"));
                 BigDecimal sickHospitalWithBaseFee = bd(cfg.path("sickHospitalWithBaseFee").asText("20"));
@@ -736,23 +743,17 @@ public class SalaryCalculationEngine {
                 if (att.getLateCount() != null && lateFee.signum() > 0) {
                     attendanceFee = attendanceFee.add(lateFee.multiply(BigDecimal.valueOf(att.getLateCount())));
                 }
-                // 旷工：有底薪扣三倍日工资；无底薪扣 50×3（倍数同为 absentWithBaseTimes）
+                // 旷工：缺勤日工资 × 倍数（底薪/保底谁有基数用谁）
                 if (att.getAbsentDays() != null && att.getAbsentDays().signum() > 0) {
-                    BigDecimal perDay = hasBase
-                        ? dailyWageFull.multiply(absentBaseTimes)
-                        : absentNoBaseFee.multiply(absentBaseTimes);
+                    BigDecimal perDay = dailyWageAbsent.multiply(absentBaseTimes);
                     attendanceFee = attendanceFee.add(att.getAbsentDays().multiply(perDay));
                 }
                 BigDecimal personalDays = nz(att.getPersonalLeaveDays());
                 BigDecimal sickClinicDays = nz(att.getSickClinicDays());
                 BigDecimal sickHospitalDays = nz(att.getSickHospitalDays());
-                // 事假：固定扣款 personalLeaveFee（50/天）+ 一天底薪（有底薪且规则开启时）
+                // 事假：缺勤日工资 × 天数（底薪/保底谁有基数用谁）
                 if (personalDays.signum() > 0) {
-                    BigDecimal perDay = personalLeaveFee;
-                    if (hasBase && personalLeaveDeductWage) {
-                        perDay = perDay.add(dailyWageFull);
-                    }
-                    attendanceFee = attendanceFee.add(personalDays.multiply(perDay));
+                    attendanceFee = attendanceFee.add(personalDays.multiply(dailyWageAbsent));
                 }
                 // 病假（诊所类证明）：有底薪 30/天，无底薪 20/天
                 if (sickClinicDays.signum() > 0) {
