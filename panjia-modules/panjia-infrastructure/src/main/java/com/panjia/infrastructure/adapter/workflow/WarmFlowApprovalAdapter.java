@@ -278,10 +278,19 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
         FlowNode node = flowNodeMapper.selectOne(Wrappers.lambdaQuery(FlowNode.class)
             .eq(FlowNode::getDefinitionId, task.getDefinitionId())
             .eq(FlowNode::getNodeCode, task.getNodeCode()));
+        if (node == null) {
+            return false;
+        }
+        return matchNodeHandler(node, currentRoleIds(), userId);
+    }
+
+    /**
+     * 节点 permission_flag 与角色集合的内存匹配（批量场景复用，避免逐任务回表查节点）。
+     */
+    private boolean matchNodeHandler(FlowNode node, Set<Long> roleIds, String userId) {
         if (node == null || StringUtils.isBlank(node.getPermissionFlag())) {
             return false;
         }
-        Set<Long> roleIds = currentRoleIds();
         // 引擎写节点配置用 @@，兼容历史逗号 / 竖线
         for (String token : node.getPermissionFlag().split("@@|,|\\|")) {
             String t = token.trim();
@@ -359,16 +368,40 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
         if (currentTaskByInst.isEmpty()) {
             return Map.of();
         }
-        // ③ 一次 IN 查当前用户在这些待办任务上的授权（flow_user.processedBy）
+        // ③ 鉴权口径与 claim 一致：超管全放行；flow_user 已授权放行；
+        //    否则按节点 permission_flag 角色匹配——历史任务可能未写 flow_user
+        //    （如早期建的任务无授权行），仅靠 flow_user 会导致批量审批误跳过
         String userId = LoginHelper.getUserIdStr();
         List<Long> taskIds = currentTaskByInst.values().stream().map(FlowTask::getId).toList();
-        List<FlowUser> grants = flwUserMapper.selectList(
-            Wrappers.lambdaQuery(FlowUser.class)
-                .in(FlowUser::getAssociated, taskIds)
-                .eq(FlowUser::getProcessedBy, userId));
-        Set<Long> grantedTaskIds = grants.stream()
-            .map(FlowUser::getAssociated)
-            .collect(Collectors.toSet());
+        Set<Long> grantedTaskIds = new HashSet<>(taskIds.size() * 2);
+        if (LoginHelper.isSuperAdmin()) {
+            grantedTaskIds.addAll(taskIds);
+        } else {
+            List<FlowUser> grants = flwUserMapper.selectList(
+                Wrappers.lambdaQuery(FlowUser.class)
+                    .in(FlowUser::getAssociated, taskIds)
+                    .eq(FlowUser::getProcessedBy, userId));
+            grantedTaskIds.addAll(grants.stream().map(FlowUser::getAssociated).collect(Collectors.toSet()));
+            // 角色匹配兜底：批量取当前任务的节点定义，内存匹配当前用户角色
+            Set<Long> roleIds = currentRoleIds();
+            if (!roleIds.isEmpty()) {
+                List<FlowTask> pendingTasks = currentTaskByInst.values().stream()
+                    .filter(t -> !grantedTaskIds.contains(t.getId())).toList();
+                if (!pendingTasks.isEmpty()) {
+                    List<FlowNode> nodes = flowNodeMapper.selectList(Wrappers.lambdaQuery(FlowNode.class)
+                        .in(FlowNode::getDefinitionId, pendingTasks.stream().map(FlowTask::getDefinitionId).distinct().toList())
+                        .in(FlowNode::getNodeCode, pendingTasks.stream().map(FlowTask::getNodeCode).distinct().toList()));
+                    Map<String, FlowNode> nodeByDefAndCode = nodes.stream()
+                        .collect(Collectors.toMap(n -> n.getDefinitionId() + "|" + n.getNodeCode(), n -> n, (a, b) -> a));
+                    for (FlowTask task : pendingTasks) {
+                        FlowNode node = nodeByDefAndCode.get(task.getDefinitionId() + "|" + task.getNodeCode());
+                        if (node != null && matchNodeHandler(node, roleIds, userId)) {
+                            grantedTaskIds.add(task.getId());
+                        }
+                    }
+                }
+            }
+        }
         // ④ 反查组装：仅返回被授权单据
         Map<Long, MyTaskBrief> result = new HashMap<>(grantedTaskIds.size() * 2);
         currentTaskByInst.forEach((instanceId, task) -> {
