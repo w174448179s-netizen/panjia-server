@@ -644,6 +644,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         snap.setUserId(emp.getUserId());
         snap.setDeptId(emp.getDeptId());
         snap.setHireDate(emp.getHireDate());
+        snap.setLeaveDate(emp.getLeaveDate());
         if (factValues != null) {
             // 职级
             snap.setLevelCode(factValues.get(FactType.LEVEL.getCode()));

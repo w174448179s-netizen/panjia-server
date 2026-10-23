@@ -66,6 +66,14 @@ public class EmployeeSnapshot implements Serializable {
      */
     private LocalDate hireDate;
 
+    /**
+     * 离职日期（员工主数据事实，null=在职）。
+     * <p>
+     * 算薪用途：离职当月按「月初至离职日天数 × 日工资」折算底薪/保底（折算因子与入职折算共用
+     * 同一公式：在岗天数 ÷ 当月自然天数）。
+     */
+    private LocalDate leaveDate;
+
     // ==================== 职级（时点生效，salary_fact LEVEL） ====================
 
     /** 职级编码（A0~A5 / S1 / S2，取快照月所在闭开区间切片） */

@@ -357,6 +357,31 @@ public class SalaryCalculationEngine {
             BigDecimal storeIncome = BigDecimal.ZERO;
             BigDecimal guaranteeFill = BigDecimal.ZERO;
 
+            // 当月自然天数 + 入职/离职折算（底薪与保底共用同一口径）
+            YearMonth periodMonth = resolvePeriodMonth(input);
+            int monthDays = periodMonth.lengthOfMonth();
+            LocalDate monthStart = periodMonth.atDay(1);
+            LocalDate monthEnd = periodMonth.atEndOfMonth();
+            LocalDate hireDate = emp.getHireDate();
+            LocalDate leaveDate = emp.getLeaveDate();
+            boolean hireInPeriod = hireDate != null
+                && YearMonth.from(hireDate).equals(periodMonth)
+                && hireDate.getDayOfMonth() > 1;
+            boolean leaveInPeriod = leaveDate != null
+                && YearMonth.from(leaveDate).equals(periodMonth)
+                && leaveDate.isBefore(monthEnd);
+            BigDecimal prorateFactor;
+            if (hireInPeriod || leaveInPeriod) {
+                // 在岗天数 = min(月底, 离职日 or 月底) − max(1, 入职日 or 1) + 1
+                LocalDate periodStart = hireInPeriod ? hireDate : monthStart;
+                LocalDate periodEnd = leaveInPeriod ? leaveDate : monthEnd;
+                int employedDays = (int) (periodEnd.toEpochDay() - periodStart.toEpochDay()) + 1;
+                prorateFactor = BigDecimal.valueOf(employedDays)
+                    .divide(BigDecimal.valueOf(monthDays), 6, RoundingMode.HALF_UP);
+            } else {
+                prorateFactor = BigDecimal.ONE;
+            }
+
             if (role == EmployeeRole.MANAGER) {
                 // finalRate 已在上方用 personalRate 口径计算，这里只保留非提成的逻辑
 
@@ -385,10 +410,11 @@ public class SalaryCalculationEngine {
                 // 落地：当月新签业绩（折算后）
                 d.setNewSignPerformance(MoneyUtil.round2(personalNewsignPerf));
 
-                // 保底补足 = MAX(min, team+ps) - ps - team
+                // 保底补足 = MAX(min, team+ps) - ps - team（入职当月保底同底薪折算）
                 BigDecimal minSalary = bd(rank.path("minSalary").asText("0"));
+                BigDecimal proratedMinSalary = MoneyUtil.round2(minSalary.multiply(prorateFactor));
                 BigDecimal sumTp = teamIncome.add(personalNewsign);
-                BigDecimal maxOfMin = minSalary.max(sumTp);
+                BigDecimal maxOfMin = proratedMinSalary.max(sumTp);
                 guaranteeFill = MoneyUtil.round2(maxOfMin.subtract(personalNewsign).subtract(teamIncome));
                 if (guaranteeFill.compareTo(BigDecimal.ZERO) < 0) {
                     guaranteeFill = BigDecimal.ZERO;
@@ -425,7 +451,7 @@ public class SalaryCalculationEngine {
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(deptSocial));
                 d.setDeptDiffAmount(MoneyUtil.round2(deptDiff));
                 d.setTeamRate(teamRate);
-                d.setMinSalary(minSalary);
+                d.setMinSalary(proratedMinSalary);
 
             } else if (role == EmployeeRole.DIRECTOR) {
                 baseSalary = bd(rank.path("baseSalary").asText("6000"));
@@ -567,17 +593,23 @@ public class SalaryCalculationEngine {
                         }
                         personalNewsign = MoneyUtil.round2(personalNewsign);
                     }
-                    // 保底补足 = MAX(保底工资, 个人新签提成) - 个人新签提成
-                    guaranteeFill = MoneyUtil.round2(minSalary.max(personalNewsign).subtract(personalNewsign));
+                    // 保底补足 = MAX(保底工资折算, 个人新签提成) - 个人新签提成
+                    // 入职当月保底折算：minSalary × (入职日到月底天数 / 当月自然天数)，口径与底薪一致
+                    BigDecimal proratedMinSalary = MoneyUtil.round2(minSalary.multiply(prorateFactor));
+                    guaranteeFill = MoneyUtil.round2(proratedMinSalary.max(personalNewsign).subtract(personalNewsign));
                     if (guaranteeFill.compareTo(BigDecimal.ZERO) < 0) {
                         guaranteeFill = BigDecimal.ZERO;
                     }
                     d.setPersonalNewsignIncome(personalNewsign);
                     d.setGuaranteeFill(guaranteeFill);
-                    d.setMinSalary(minSalary);
+                    d.setMinSalary(proratedMinSalary);
                     // 保底补足计算过程：保底线 vs 个人新签提成（含分笔回溯），未触发也落地供前端展示
                     Map<String, Object> gp = new java.util.LinkedHashMap<>();
                     gp.put("minSalary", minSalary);
+                    if (hireInPeriod) {
+                        gp.put("proratedMinSalary", proratedMinSalary);
+                        gp.put("prorateFactor", prorateFactor);
+                    }
                     gp.put("compareLabel", "个人新签提成");
                     gp.put("compareValue", personalNewsign);
                     gp.put("newsignSteps", nsSteps);
@@ -590,15 +622,11 @@ public class SalaryCalculationEngine {
             // 日工资 = 底薪 / 当月自然天数（2026-10 改：不再用 21.75 工作日口径）。
             // 入职当月：底薪 = 入职日（含）至月底天数 × 日工资；非入职月发满月底薪。
             // dailyWageFull 始终以满月底薪为基（请假/旷工扣款同口径），不受折算影响。
-            YearMonth periodMonth = resolvePeriodMonth(input);
-            int monthDays = periodMonth.lengthOfMonth();
             BigDecimal dailyWageFull = baseSalary.signum() > 0
                 ? baseSalary.divide(BigDecimal.valueOf(monthDays), 6, RoundingMode.HALF_UP)
                 : BigDecimal.ZERO;
             BigDecimal payableBaseSalary = baseSalary;
-            if (baseSalary.signum() > 0 && emp.getHireDate() != null
-                && YearMonth.from(emp.getHireDate()).equals(periodMonth)
-                && emp.getHireDate().getDayOfMonth() > 1) {
+            if (baseSalary.signum() > 0 && hireInPeriod) {
                 int employedDays = monthDays - emp.getHireDate().getDayOfMonth() + 1;
                 payableBaseSalary = MoneyUtil.round2(dailyWageFull.multiply(BigDecimal.valueOf(employedDays)));
                 d.setBaseSalary(payableBaseSalary);
