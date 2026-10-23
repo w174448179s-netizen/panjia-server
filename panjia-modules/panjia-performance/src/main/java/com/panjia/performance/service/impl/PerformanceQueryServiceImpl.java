@@ -32,6 +32,7 @@ import com.panjia.performance.domain.vo.PerformanceSummaryVo;
 import com.panjia.performance.domain.bo.PerformanceSearchBo;
 import com.panjia.performance.domain.bo.PerformanceSearchBizTypesBo;
 import com.panjia.performance.domain.bo.PerformanceSearchEmployeeOptionsBo;
+import com.panjia.performance.mapper.PerfRefundMapper;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.util.MoneyUtil;
 import com.panjia.performance.mapper.PerformanceFactMapper;
@@ -86,6 +87,8 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     private final PerformanceFactMapper factMapper;
     private final PerformanceAdjustMapper adjustMapper;
+    /** 退单表 pj_perf_refund（合同退单状态源：存在 EXECUTED 退单即合同「已退单」） */
+    private final PerfRefundMapper perfRefundMapper;
     /**
      * 实收调整单 Mapper（pj_perf_received_adjust，2026-10-12 拆表）：
      * PERF_REAL 的「调整审批中」标记/预演必须查实收调整表，新签调整表已不再含 RECEIVED_AMOUNT 单。
@@ -218,6 +221,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             fillContractOriginalAmount(contracts, period, factType);
             fillContractPendingAdjust(contracts, period, factType);
             fillContractConversion(contracts);
+            fillContractRefund(contracts);
         }
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
@@ -1296,6 +1300,38 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             row.setOriginalConvertedAmount(conversionFactorPort.convert(row.getOriginalAmount(), factor));
             // 带出折算系数：调整弹窗录入业绩后前端自动算折算金额（折算列不可编辑）
             row.setConversionFactor(factor);
+        }
+    }
+
+    /**
+     * 合同管理列表：回填合同退单状态（退单表即合同退单状态源）。
+     * <p>
+     * 合同无独立主表，存在状态为 EXECUTED 的退单即视为合同「已退单」，
+     * 并带出最近一次退单的落账月；一次 IN 查询覆盖本页合同，避免逐行查询。
+     */
+    private void fillContractRefund(List<PerformanceManageContractVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return;
+        }
+        List<String> contractNos = rows.stream()
+            .map(PerformanceManageContractVo::getContractNo)
+            .filter(StringUtils::isNotBlank)
+            .distinct()
+            .toList();
+        Map<String, String> refundedMap = new HashMap<>();
+        if (!contractNos.isEmpty()) {
+            for (Map<String, Object> row : perfRefundMapper.selectRefundedPeriods(contractNos)) {
+                Object contractNo = row.get("contractNo");
+                Object refundPeriod = row.get("refundPeriod");
+                if (contractNo != null && refundPeriod != null) {
+                    refundedMap.put(contractNo.toString(), refundPeriod.toString());
+                }
+            }
+        }
+        for (PerformanceManageContractVo row : rows) {
+            String refundPeriod = row.getContractNo() == null ? null : refundedMap.get(row.getContractNo());
+            row.setRefundPeriod(refundPeriod);
+            row.setRefunded(refundPeriod != null);
         }
     }
 

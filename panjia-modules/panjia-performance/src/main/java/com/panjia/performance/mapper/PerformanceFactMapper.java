@@ -74,9 +74,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <!-- 已退单：合同存在已执行退单（退单表即合同退单状态源），业绩事实本身仍为 ACTIVE -->
+          <when test="factStatus == 'REFUNDED'">f.fact_status = 'ACTIVE'</when>
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
+        <if test="factStatus == 'REFUNDED'">
+          AND EXISTS (
+            SELECT 1 FROM pj_perf_refund r
+            WHERE r.status = 'EXECUTED'
+              AND (r.contract_no = f.contract_no
+                   OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
+          )
+        </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           <if test="deptId != null">
@@ -124,9 +134,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <!-- 已退单：合同存在已执行退单（退单表即合同退单状态源），业绩事实本身仍为 ACTIVE -->
+          <when test="factStatus == 'REFUNDED'">f.fact_status = 'ACTIVE'</when>
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
+        <if test="factStatus == 'REFUNDED'">
+          AND EXISTS (
+            SELECT 1 FROM pj_perf_refund r
+            WHERE r.status = 'EXECUTED'
+              AND (r.contract_no = f.contract_no
+                   OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
+          )
+        </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           <if test="deptId != null">
@@ -253,9 +273,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <!-- 已退单：合同存在已执行退单（退单表即合同退单状态源），业绩事实本身仍为 ACTIVE -->
+          <when test="factStatus == 'REFUNDED'">f.fact_status = 'ACTIVE'</when>
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
+        <if test="factStatus == 'REFUNDED'">
+          AND EXISTS (
+            SELECT 1 FROM pj_perf_refund r
+            WHERE r.status = 'EXECUTED'
+              AND (r.contract_no = f.contract_no
+                   OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
+          )
+        </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
@@ -308,9 +338,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE
         <choose>
           <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
+          <!-- 已退单：合同存在已执行退单（退单表即合同退单状态源），业绩事实本身仍为 ACTIVE -->
+          <when test="factStatus == 'REFUNDED'">f.fact_status = 'ACTIVE'</when>
           <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
           <otherwise>f.fact_status = 'ACTIVE'</otherwise>
         </choose>
+        <if test="factStatus == 'REFUNDED'">
+          AND EXISTS (
+            SELECT 1 FROM pj_perf_refund r
+            WHERE r.status = 'EXECUTED'
+              AND (r.contract_no = f.contract_no
+                   OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
+          )
+        </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND COALESCE(f.order_no, f.contract_no) IS NOT NULL

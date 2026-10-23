@@ -162,8 +162,30 @@ public interface ReceivedRealFactPort {
                                   Long operatorId, Long adjustId);
 
     /**
+     * 退单联动：按模板实收明细镜像生成一条<b>负</b>实收明细（合同退单口径）。
+     * <p>
+     * 与 {@link #createDetailFromContract}（新签调整 delta 联动）的区别：
+     * <ul>
+     *   <li>费用项 / 角色名 / 占比 / 员工 全部镜像模板明细，保证「逐条全额冲退」可溯源；</li>
+     *   <li>落账期间取 {@code refundPeriod}，在「(orderNo/contractNo) + refundPeriod」合同壳下建行，
+     *       与模板原期间的壳互不影响；</li>
+     *   <li>sourceKey 用 {@code MANUAL-RFND-{refundId}-{templateDetailId}} 锚点，避开导入幂等键与
+     *       ACTIVE 部分唯一索引；</li>
+     *   <li>{@code refund_of_detail_id} 指向模板明细，反查退单来源。</li>
+     * </ul>
+     *
+     * @param templateDetailId 模板实收明细 ID（{@code pj_received_detail.id}）
+     * @param refundPeriod     退单落账期间 YYYY-MM（负明细归属月）
+     * @param operatorId       执行人 ID
+     * @param refundId         退单申请单 ID
+     * @return 新负明细 ID；模板不存在或非 ACTIVE 返回 null
+     */
+    Long createRefundDetail(Long templateDetailId, String refundPeriod, Long operatorId, Long refundId);
+
+    /**
      * 统计某合同号在实收合同表（全局，不限期间/批次）的去重非空订单号数量。
-     * <p>双键未命中退化按合同号归属的闸门组成部分：新签事实订单唯一 <b>且</b> 实收合同订单唯一
+     * <p>
+     * 双键未命中退化按合同号归属的闸门组成部分：新签事实订单唯一 <b>且</b> 实收合同订单唯一
      * 才允许退化（兼容新签 order_no 误填成合同号），防止同合同多订单/分批到账单重复归属。
      *
      * @param contractNo 合同号

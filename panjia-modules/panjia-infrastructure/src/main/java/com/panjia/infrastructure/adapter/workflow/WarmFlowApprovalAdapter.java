@@ -270,8 +270,9 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
 
     /**
      * 按当前任务的节点 permission_flag 校验用户是否具备办理身份。
-     * <p>解析口径与工作流模块一致：逗号分隔多标识，支持 {@code role:角色ID} /
-     * {@code user:用户ID} / 裸用户ID；dept/post/SpEL（如 ${initiator}）不参与认领判定。
+     * <p>支持 {@code role:角色ID} / {@code user:用户ID} / 裸用户ID；
+     * 多标识分隔符兼容工作流引擎的 {@code @@}（或）、逗号、竖线三种。
+     * SpEL（如 ${initiator}）不参与认领判定。
      */
     private boolean matchNodeHandler(FlowTask task, String userId) {
         FlowNode node = flowNodeMapper.selectOne(Wrappers.lambdaQuery(FlowNode.class)
@@ -281,8 +282,12 @@ public class WarmFlowApprovalAdapter implements ApprovalPort {
             return false;
         }
         Set<Long> roleIds = currentRoleIds();
-        for (String token : node.getPermissionFlag().split(StringUtils.SEPARATOR)) {
+        // 引擎写节点配置用 @@，兼容历史逗号 / 竖线
+        for (String token : node.getPermissionFlag().split("@@|,|\\|")) {
             String t = token.trim();
+            if (t.isEmpty() || t.startsWith("${")) {
+                continue; // 跳过 SpEL 占位符
+            }
             if (t.startsWith("role:")) {
                 Long roleId = parseLong(t.substring(5));
                 if (roleId != null && roleIds.contains(roleId)) {

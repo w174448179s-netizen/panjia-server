@@ -29,6 +29,9 @@ public final class BizType {
     /** 考勤修改申请（经纪人发起，人事审批） */
     public static final String ATTENDANCE_RECTIFY = "ATTENDANCE_RECTIFY";
 
+    /** 退单申请（合同退单，负新签 + 负实收联动，2026-10-23） */
+    public static final String PERF_REFUND = "PERF_REFUND";
+
     private BizType() {
     }
 }

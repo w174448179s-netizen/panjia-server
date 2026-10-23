@@ -72,4 +72,10 @@ public class PerformanceManageContractVo {
 
     /** 是否存在已生效的「新增角色人」调整（合同下有 ACTIVE 的 MANUAL-ADJ 事实行） */
     private Boolean hasAddMember;
+
+    /** 合同退单落账期间 YYYY-MM（存在已执行退单时有值，null=未退单） */
+    private String refundPeriod;
+
+    /** 合同是否已退单（存在 EXECUTED 状态的退单，退单表即合同退单状态源） */
+    private Boolean refunded;
 }

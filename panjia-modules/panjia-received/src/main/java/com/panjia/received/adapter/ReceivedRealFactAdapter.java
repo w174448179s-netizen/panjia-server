@@ -325,6 +325,100 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         return n.getId();
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long createRefundDetail(Long templateDetailId, String refundPeriod, Long operatorId, Long refundId) {
+        if (templateDetailId == null || refundPeriod == null || refundPeriod.isBlank()) {
+            return null;
+        }
+        ReceivedDetail template = detailMapper.selectById(templateDetailId);
+        if (template == null || !STATUS_ACTIVE.equals(template.getDetailStatus())) {
+            return null;
+        }
+        ReceivedContract templateContract = contractMapper.selectById(template.getContractId());
+        String orderNo = templateContract == null ? null : templateContract.getOrderNo();
+        String contractNo = templateContract == null ? null : templateContract.getContractNo();
+
+        // 1. 找或建「退单月份」合同壳：退单负流水必须落在退单月，不能挂在原期间壳上
+        ReceivedContract shell = findOrCreateContractShell(orderNo, contractNo, refundPeriod, templateContract);
+
+        // 2. 镜像模板明细，金额取负
+        ReceivedDetail n = new ReceivedDetail();
+        n.setContractId(shell.getId());
+        n.setEmployeeId(template.getEmployeeId());
+        n.setDeptId(template.getDeptId());
+        n.setEmployeeExternalCode(template.getEmployeeExternalCode());
+        n.setRoleType(template.getRoleType());
+        n.setRoleName(template.getRoleName());
+        n.setShareRatio(template.getShareRatio());
+        n.setPerformanceAmount(MoneyUtil.round2(
+            template.getPerformanceAmount() == null ? BigDecimal.ZERO : template.getPerformanceAmount().negate()));
+        n.setFeeItem(template.getFeeItem());
+        n.setPeriod(refundPeriod);
+        n.setEffectiveDate(refundPeriod.equals(template.getPeriod()) && template.getEffectiveDate() != null
+            ? template.getEffectiveDate() : periodEndFallback(refundPeriod).toLocalDate());
+        n.setExpireDate(null);
+        String on = orderNo == null ? "" : orderNo;
+        String cn = contractNo == null ? "" : contractNo;
+        n.setSourceKey(on + "|" + cn + "|MANUAL-RFND-" + refundId + "-" + templateDetailId
+            + "|" + (template.getFeeItem() == null ? "" : template.getFeeItem())
+            + "|" + (template.getRoleType() == null ? "" : template.getRoleType()));
+        n.setSourceBatchId(null);
+        n.setNormalizedRecordId(null);
+        n.setReceivedApplyId(null);
+        n.setDetailStatus(STATUS_ACTIVE);
+        n.setOperatorId(operatorId);
+        n.setAdjustId(null);
+        n.setReversalType(null);
+        n.setRefundOfDetailId(template.getId());
+        detailMapper.insert(n);
+        refreshContractAggregate(shell.getId());
+        log.info("[实收-退单冲减] refundId={}, templateDetailId={}, newDetailId={}, period={}, amount={}",
+            refundId, templateDetailId, n.getId(), refundPeriod, n.getPerformanceAmount());
+        return n.getId();
+    }
+
+    /**
+     * 退单落账月的实收合同壳：按（订单号优先，合同号退化）+ 期间定位；不存在则镜像原壳建一条。
+     */
+    private ReceivedContract findOrCreateContractShell(String orderNo, String contractNo,
+                                                       String period, ReceivedContract template) {
+        ReceivedContract shell = null;
+        if (orderNo != null && !orderNo.isBlank()) {
+            shell = contractMapper.selectOne(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedContract>()
+                    .eq(ReceivedContract::getOrderNo, orderNo)
+                    .eq(ReceivedContract::getPeriod, period)
+                    .last("LIMIT 1"));
+        }
+        if (shell == null && contractNo != null && !contractNo.isBlank()) {
+            shell = contractMapper.selectOne(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedContract>()
+                    .eq(ReceivedContract::getContractNo, contractNo)
+                    .eq(ReceivedContract::getPeriod, period)
+                    .last("LIMIT 1"));
+        }
+        if (shell != null) {
+            return shell;
+        }
+        shell = new ReceivedContract();
+        shell.setOrderNo(orderNo != null ? orderNo : (template == null ? null : template.getOrderNo()));
+        shell.setContractNo(contractNo != null ? contractNo : (template == null ? null : template.getContractNo()));
+        shell.setBizType(template == null ? null : template.getBizType());
+        shell.setPeriod(period);
+        shell.setSourceType("MANUAL");
+        shell.setBusinessDate(template != null && template.getBusinessDate() != null
+            ? template.getBusinessDate() : periodEndFallback(period));
+        shell.setDeptId(template == null ? null : template.getDeptId());
+        shell.setPropertyAddress(template == null ? null : template.getPropertyAddress());
+        shell.setPeriodTotalReceived(BigDecimal.ZERO);
+        shell.setItemCount(0);
+        contractMapper.insert(shell);
+        log.info("[实收-退单建壳] period={}, contractNo={}, orderNo={}, contractId={}",
+            period, contractNo, orderNo, shell.getId());
+        return shell;
+    }
+
     /**
      * 新签事实缺 business_date 时的兜底：当期月末 23:59:59，再不行取当前时间（该列 NOT NULL）。
      */

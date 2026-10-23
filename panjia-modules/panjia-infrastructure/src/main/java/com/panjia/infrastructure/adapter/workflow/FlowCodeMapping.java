@@ -22,7 +22,8 @@ final class FlowCodeMapping {
         Map.entry(BizType.ATTENDANCE_APPROVAL, "attendance_approval"),
         Map.entry(BizType.SCORE_APPROVAL, "score_approval"),
         Map.entry(BizType.RATE_ADJUST, "rate_adjust_approval"),
-        Map.entry(BizType.ATTENDANCE_RECTIFY, "attendance_rectify")
+        Map.entry(BizType.ATTENDANCE_RECTIFY, "attendance_rectify"),
+        Map.entry(BizType.PERF_REFUND, "perf_refund")
     );
 
     /** flowCode → bizType（事件转译用逆映射） */
@@ -35,7 +36,8 @@ final class FlowCodeMapping {
         "attendance_approval", BizType.ATTENDANCE_APPROVAL,
         "score_approval", BizType.SCORE_APPROVAL,
         "rate_adjust_approval", BizType.RATE_ADJUST,
-        "attendance_rectify", BizType.ATTENDANCE_RECTIFY
+        "attendance_rectify", BizType.ATTENDANCE_RECTIFY,
+        "perf_refund", BizType.PERF_REFUND
     );
 
     private FlowCodeMapping() {
