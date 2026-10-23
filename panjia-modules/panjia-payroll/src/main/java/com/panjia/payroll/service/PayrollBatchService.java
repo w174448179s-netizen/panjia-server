@@ -90,6 +90,7 @@ public class PayrollBatchService {
     private final DeptMonthlyConfigService deptMonthlyConfigService;
     private final CommissionPerformanceQueryPort commissionPerformanceQueryPort;
     private final PromotionService promotionService;
+    private final ISelfPurchaseService selfPurchaseService;
 
     // ==================== 创建 ====================
 
@@ -405,6 +406,16 @@ public class PayrollBatchService {
         input.newsignByEmp = newsignItems.stream()
             .filter(it -> it.getEmployeeId() != null)
             .collect(Collectors.groupingBy(CommissionItemDTO::getEmployeeId));
+
+        // 自购单提成加成：已审批通过的自购单（员工ID → 合同号 → 加成点数），仅影响该员工该合同号的结佣提点
+        Set<Long> selfPurchaseEmpIds = new HashSet<>();
+        for (CommissionItemDTO it : lockedItems) {
+            if (it.getEmployeeId() != null) selfPurchaseEmpIds.add(it.getEmployeeId());
+        }
+        for (CommissionItemDTO it : newsignItems) {
+            if (it.getEmployeeId() != null) selfPurchaseEmpIds.add(it.getEmployeeId());
+        }
+        input.selfPurchaseByEmp = selfPurchaseService.loadApprovedByEmployee(selfPurchaseEmpIds);
 
         // 新签按事实行原始 deptId 分组（折算后）；门店级 roll-up 在下方统一做。
         // 「不计入店长团队」（EXCLUDE_TEAM 事实，2026-10-19 拆分口径）：开关开启的员工，其新签

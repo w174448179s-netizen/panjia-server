@@ -45,7 +45,9 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -1348,9 +1350,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     @Override
     public CompletableFuture<BatchApproveResultVo> batchApproveByContractAsync(String period, List<String> contractNos) {
-        if (StringUtils.isBlank(period)) {
-            throw new ServiceException("结算月不能为空");
-        }
+        // period 可空：空 = 全部期间，同合同多期实收（如 6、7 月各一笔）一次批量审批全部 SUBMITTED 单
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
@@ -1376,21 +1376,29 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         // ② myCurrentTasks 以 3 条 SQL 完成全部单据的待办鉴权（替代逐单 isMyTask 的 3N 条 SQL）。
         BatchApproveResultVo result = new BatchApproveResultVo();
         result.setTotal(deduped.size());
-        Map<String, ReceivedApply> submittedApplies = loadSubmittedAppliesBatch(period, deduped);
-        List<ReceivedApply> applyList = submittedApplies.values().stream().distinct().toList();
+        Map<String, List<ReceivedApply>> submittedApplies = loadSubmittedAppliesBatch(period, deduped);
+        List<ReceivedApply> applyList = submittedApplies.values().stream().flatMap(List::stream).distinct().toList();
         Map<Long, MyTaskBrief> myTaskMap = applyList.isEmpty()
             ? Map.of()
             : approvalPort.myCurrentTasks(BizType.REAL_CONFIRM,
                 applyList.stream().map(ReceivedApply::getId).toList());
-        // 按用户输入顺序组装可办任务，异步直接用 taskId 办理
-        List<RcvApproveItem> approveItems = new ArrayList<>(deduped.size());
+        // 按用户输入顺序组装可办任务，异步直接用 taskId 办理；
+        // 同合同多期单据逐期各生成一个办理项（期间升序，先审早期月份），同一审批单去重防重复办理
+        List<RcvApproveItem> approveItems = new ArrayList<>();
+        Set<Long> addedApplyIds = new HashSet<>();
         for (String contractNo : deduped) {
-            ReceivedApply apply = submittedApplies.get(contractNo);
-            if (apply == null || myTaskMap.get(apply.getId()) == null) {
-                result.getSkippedContracts().add(contractNo);
-                continue;
+            boolean actionable = false;
+            for (ReceivedApply apply : submittedApplies.getOrDefault(contractNo, List.of())) {
+                MyTaskBrief task = myTaskMap.get(apply.getId());
+                if (task == null || !addedApplyIds.add(apply.getId())) {
+                    continue;
+                }
+                approveItems.add(new RcvApproveItem(contractNo, apply, task));
+                actionable = true;
             }
-            approveItems.add(new RcvApproveItem(contractNo, apply, myTaskMap.get(apply.getId())));
+            if (!actionable) {
+                result.getSkippedContracts().add(contractNo);
+            }
         }
         result.setSkipped(result.getSkippedContracts().size());
         result.setFailed(result.getFailedContracts().size());
@@ -1417,38 +1425,32 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 分片 IN 查询批量取指定合同当月 SUBMITTED 实收审批单（批量审批预检用）。
-     * <p>按输入字符串（合同号或订单号）双键建映射，同一合同取 ID 最大（最新）一张。
+     * 分片 IN 查询批量取指定合同 SUBMITTED 实收审批单（批量审批预检用）。
+     * <p>period 为空时不限期间（跨期合并视图批量审批场景），同一合同可能命中多期单据，
+     * 全部返回由调用方逐期办理；按输入字符串（合同号或订单号）双键建映射，
+     * 列表内按期间升序（先审早期月份）、同期间按 ID 升序。
      */
-    private Map<String, ReceivedApply> loadSubmittedAppliesBatch(String period, Collection<String> contractNos) {
+    private Map<String, List<ReceivedApply>> loadSubmittedAppliesBatch(String period, Collection<String> contractNos) {
         if (contractNos.isEmpty()) {
             return Map.of();
         }
         List<ReceivedApply> applies = new ArrayList<>();
         for (List<String> chunk : chunkKeys(contractNos)) {
             applies.addAll(applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
-                .eq(ReceivedApply::getPeriod, period)
+                .eq(StringUtils.isNotBlank(period), ReceivedApply::getPeriod, period)
                 .and(w -> w.in(ReceivedApply::getContractNo, chunk)
                     .or().in(ReceivedApply::getOrderNo, chunk))
                 .eq(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED)));
         }
-        // 跨分片合并后按 ID 全局降序（下方 putIfAbsent 取最新依赖全局有序）
-        applies.sort((a, b) -> Long.compare(b.getId(), a.getId()));
-        Map<String, ReceivedApply> byContract = new HashMap<>();
-        Map<String, ReceivedApply> byOrder = new HashMap<>();
-        for (ReceivedApply apply : applies) {
-            if (apply.getContractNo() != null) {
-                byContract.putIfAbsent(apply.getContractNo(), apply);
-            }
-            if (apply.getOrderNo() != null) {
-                byOrder.putIfAbsent(apply.getOrderNo(), apply);
-            }
-        }
-        Map<String, ReceivedApply> resultMap = new HashMap<>(contractNos.size() * 2);
+        applies.sort(Comparator.comparing(ReceivedApply::getPeriod, Comparator.nullsLast(String::compareTo))
+            .thenComparing(ReceivedApply::getId));
+        Map<String, List<ReceivedApply>> resultMap = new HashMap<>(contractNos.size() * 2);
         for (String input : contractNos) {
-            ReceivedApply apply = byContract.getOrDefault(input, byOrder.get(input));
-            if (apply != null) {
-                resultMap.put(input, apply);
+            List<ReceivedApply> matched = applies.stream()
+                .filter(a -> input.equals(a.getContractNo()) || input.equals(a.getOrderNo()))
+                .toList();
+            if (!matched.isEmpty()) {
+                resultMap.put(input, matched);
             }
         }
         return resultMap;
@@ -1603,6 +1605,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         QueryWrapper<ReceivedApply> wrapper = buildListCondition(query, effectiveDeptId);
         wrapper.orderByDesc("business_date")
             .last(", COALESCE(order_no, contract_no), id DESC");
+        // 未选期间：同一合同/订单的 8、9 月单据合并为一行（详情按期间展开）；
+        // 选定期：保持单据维度，退单月展示 TD 冲减单
+        if (StringUtils.isBlank(query.getPeriod())) {
+            return listMergedByContract(query, pageQuery, wrapper);
+        }
         Page<ReceivedApply> page = applyMapper.selectPage(pageQuery.build(), wrapper);
         List<ReceivedApply> records = page.getRecords();
         fillContractMetrics(records);
@@ -1712,6 +1719,203 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
         result.setSummary(summary);
         return result;
+    }
+
+    /**
+     * 未选期间时的合同维度列表：同合同/订单多期单据合并为一行
+     * （8、9 月两笔 → 一行，期间列展示「2026-08、2026-09、2026-10」）；
+     * 实收取各期净额（退单月负数相抵），新签取累计口径（{@link #fillMergedExpect}），
+     * 逐期明细由 {@link #getContractDetail} 按期间展开。
+     */
+    private PageResult<ReceivedApply> listMergedByContract(ReceivedApplyBo query, PageQuery pageQuery,
+                                                           QueryWrapper<ReceivedApply> wrapper) {
+        List<ReceivedApply> all = applyMapper.selectList(wrapper);
+        if (all == null) {
+            all = new ArrayList<>();
+        }
+        fillContractMetrics(all);
+        fillManualReviewReason(all);
+        // 按员工筛选：行金额改为该员工口径（先按单据换算，合并时再按期间求和）
+        if (query.getEmployeeId() != null && !all.isEmpty()) {
+            List<Object> applyIds = new ArrayList<>(all.size());
+            for (ReceivedApply a : all) {
+                applyIds.add(a.getId());
+            }
+            List<Map<String, Object>> empRows = detailMapper.selectEmployeeAmountsByApplyIds(applyIds, query.getEmployeeId());
+            if (empRows == null) {
+                empRows = java.util.Collections.emptyList();
+            }
+            Map<String, Map<String, Object>> empByApply = new HashMap<>();
+            for (Map<String, Object> r : empRows) {
+                empByApply.put(String.valueOf(r.get("applyId")), r);
+            }
+            Map<String, BigDecimal> rowFactorMap = conversionFactorPort.factorsOf(all.stream()
+                .map(ReceivedApply::getBizType).filter(StringUtils::isNotBlank)
+                .collect(Collectors.toSet()));
+            for (ReceivedApply a : all) {
+                Map<String, Object> r = empByApply.get(String.valueOf(a.getId()));
+                BigDecimal empReceived = r == null || r.get("receivedAmount") == null
+                    ? BigDecimal.ZERO : new BigDecimal(String.valueOf(r.get("receivedAmount")));
+                BigDecimal empExpected = r == null || r.get("expectedAmount") == null
+                    ? BigDecimal.ZERO : new BigDecimal(String.valueOf(r.get("expectedAmount")));
+                a.setReceivedAmount(empReceived);
+                a.setExpectedAmount(empExpected);
+                a.setExpectedConvertedAmount(conversionFactorPort.convert(empExpected,
+                    conversionFactorPort.factorOf(rowFactorMap, a.getBizType())));
+                a.setReceivedAdjusted(false);
+                a.setOriginalReceivedAmount(null);
+                a.setExpectedAdjusted(false);
+                a.setOriginalExpectedAmount(null);
+                a.setOriginalExpectedConvertedAmount(null);
+            }
+        }
+        List<ReceivedApply> merged = mergeByContractKey(all);
+        fillMergedExpect(merged);
+        // 汇总与列表同口径：合并后行金额全量求和（跨页不随分页变化）
+        BigDecimal totalReceivedAmount = BigDecimal.ZERO;
+        BigDecimal totalExpectedAmount = BigDecimal.ZERO;
+        BigDecimal totalExpectedConvertedAmount = BigDecimal.ZERO;
+        for (ReceivedApply row : merged) {
+            if (row.getReceivedAmount() != null) {
+                totalReceivedAmount = totalReceivedAmount.add(row.getReceivedAmount());
+            }
+            if (row.getExpectedAmount() != null) {
+                totalExpectedAmount = totalExpectedAmount.add(row.getExpectedAmount());
+            }
+            if (row.getExpectedConvertedAmount() != null) {
+                totalExpectedConvertedAmount = totalExpectedConvertedAmount.add(row.getExpectedConvertedAmount());
+            }
+        }
+        int total = merged.size();
+        int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
+        int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
+        int from = Math.min((pageNum - 1) * pageSize, total);
+        int to = Math.min(from + pageSize, total);
+        PageResult<ReceivedApply> result = PageResult.build(new ArrayList<>(merged.subList(from, to)), total);
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("totalReceivedAmount", totalReceivedAmount);
+        summary.put("totalExpectedAmount", totalExpectedAmount);
+        summary.put("totalExpectedConvertedAmount", totalExpectedConvertedAmount);
+        result.setSummary(summary);
+        return result;
+    }
+
+    /**
+     * 同一合同/订单的多期审批单合并为一行（订单号优先；合同号/订单号都为空时各自成行）。
+     * <p>
+     * 实收取各期净额（跨期正负相抵，全额退单后归零）；新签（应收）为累计口径，
+     * 由 {@link #fillMergedExpect} 批量覆盖（不可把各期累计值相加，会重复累计）。
+     */
+    private List<ReceivedApply> mergeByContractKey(List<ReceivedApply> all) {
+        Map<String, List<ReceivedApply>> groups = new LinkedHashMap<>();
+        for (ReceivedApply a : all) {
+            String key = StringUtils.isNotBlank(a.getOrderNo()) ? "O|" + a.getOrderNo()
+                : (StringUtils.isNotBlank(a.getContractNo()) ? "C|" + a.getContractNo() : "I|" + a.getId());
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(a);
+        }
+        List<ReceivedApply> merged = new ArrayList<>(groups.size());
+        for (List<ReceivedApply> group : groups.values()) {
+            if (group.size() == 1) {
+                merged.add(group.get(0));
+                continue;
+            }
+            // 代表行：最近期间的非退单冲减单（TD 前缀为退单负镜像单），保留审批单号/状态留痕
+            ReceivedApply base = null;
+            for (ReceivedApply a : group) {
+                if (StringUtils.isNotBlank(a.getApplyNo()) && a.getApplyNo().startsWith("TD")) {
+                    continue;
+                }
+                if (base == null || StringUtils.trimToEmpty(a.getPeriod())
+                    .compareTo(StringUtils.trimToEmpty(base.getPeriod())) >= 0) {
+                    base = a;
+                }
+            }
+            if (base == null) {
+                base = group.get(0);
+            }
+            java.util.TreeSet<String> periods = new java.util.TreeSet<>();
+            BigDecimal received = BigDecimal.ZERO;
+            int itemCount = 0;
+            int employeeCount = 0;
+            for (ReceivedApply a : group) {
+                if (StringUtils.isNotBlank(a.getPeriod())) {
+                    periods.add(a.getPeriod());
+                }
+                if (a.getReceivedAmount() != null) {
+                    received = received.add(a.getReceivedAmount());
+                }
+                itemCount += a.getItemCount() == null ? 0 : a.getItemCount();
+                int cnt = a.getEmployeeCount() == null ? 0 : a.getEmployeeCount();
+                employeeCount = Math.max(employeeCount, cnt);
+            }
+            // 实收取各期净额（跨期正负相抵），全额退单后归零，配合「已退单」标记展示；
+            // 新签（应收）为累计口径，由 fillMergedExpect 统一按全部期间批量覆盖
+            base.setReceivedAmount(received);
+            base.setItemCount(itemCount);
+            base.setEmployeeCount(employeeCount);
+            base.setPeriods(String.join("、", periods));
+            base.setReceivedAdjusted(false);
+            base.setOriginalReceivedAmount(null);
+            merged.add(base);
+        }
+        return merged;
+    }
+
+    /**
+     * 合并行的新签（应收）口径：累计到最后一期 = 全部期间 ACTIVE 新签合计（按 period=null 批量取），
+     * 不能把各期累计值相加（会重复累计翻倍）；全额退单后与明细一致归零。
+     */
+    private void fillMergedExpect(List<ReceivedApply> rows) {
+        List<ReceivedApply> targets = new ArrayList<>();
+        Map<String, Map<String, String>> keyMap = new LinkedHashMap<>();
+        // 退化判定走批量闸门（1 条分组 SQL），避免按行回表
+        Set<String> preciseContracts = rows.stream()
+            .filter(r -> StringUtils.isNotBlank(r.getPeriods())
+                && StringUtils.isNotBlank(r.getContractNo()) && StringUtils.isNotBlank(r.getOrderNo()))
+            .map(ReceivedApply::getContractNo)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<String> degradableContracts = globallyDegradableContracts(preciseContracts);
+        for (ReceivedApply row : rows) {
+            if (StringUtils.isBlank(row.getPeriods())) {
+                continue;
+            }
+            String contractNo = StringUtils.isBlank(row.getContractNo()) ? "" : row.getContractNo();
+            String orderNo = StringUtils.isBlank(row.getOrderNo()) ? "" : row.getOrderNo();
+            if (contractNo.isEmpty() && orderNo.isEmpty()) {
+                continue;
+            }
+            Map<String, String> key = new HashMap<>(3);
+            key.put("contractNo", contractNo);
+            key.put("orderNo", orderNo);
+            key.put("degrade", !contractNo.isEmpty() && !orderNo.isEmpty()
+                && degradableContracts.contains(row.getContractNo()) ? "true" : "false");
+            keyMap.putIfAbsent(metricsPairKey(contractNo, orderNo), key);
+            targets.add(row);
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        Map<String, ReceivedContractMetricsVo> metrics = new HashMap<>();
+        for (ReceivedContractMetricsVo m : factMapper.selectReceivedContractMetrics(null, keyMap.values())) {
+            metrics.put(metricsPairKey(m.getContractNo(), StringUtils.isBlank(m.getOrderNo()) ? "" : m.getOrderNo()), m);
+        }
+        Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(targets.stream()
+            .map(ReceivedApply::getBizType).filter(StringUtils::isNotBlank).collect(Collectors.toSet()));
+        for (ReceivedApply row : targets) {
+            ReceivedContractMetricsVo m = metrics.get(metricsPairKey(
+                StringUtils.isBlank(row.getContractNo()) ? "" : row.getContractNo(),
+                StringUtils.isBlank(row.getOrderNo()) ? "" : row.getOrderNo()));
+            if (m == null) {
+                continue;
+            }
+            BigDecimal expected = m.getExpectedAmount() == null ? BigDecimal.ZERO : m.getExpectedAmount();
+            row.setExpectedAmount(expected);
+            row.setExpectedConvertedAmount(conversionFactorPort.convert(expected,
+                conversionFactorPort.factorOf(factorMap, row.getBizType())));
+            row.setExpectedAdjusted(false);
+            row.setOriginalExpectedAmount(null);
+            row.setOriginalExpectedConvertedAmount(null);
+        }
     }
 
     /**
@@ -1860,8 +2064,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             List<ReceivedContractMetricsVo> rows =
                 factMapper.selectReceivedContractMetrics(entry.getKey(), entry.getValue().values());
             for (ReceivedContractMetricsVo row : rows) {
+                // 键含单据 ID：同合同同期间的正常单与退单 TD 冲减单各自归属自身明细金额；
+                // 空 applyId 行为历史未绑单明细的合同粒度聚合（lookup 兜底用）
                 metrics.put(metricsKey(entry.getKey(), row.getContractNo(),
-                    StringUtils.isBlank(row.getOrderNo()) ? "" : row.getOrderNo()), row);
+                    StringUtils.isBlank(row.getOrderNo()) ? "" : row.getOrderNo())
+                    + "|" + (row.getApplyId() == null ? "" : row.getApplyId()), row);
             }
         }
         // 一次性批量取本页全部 bizType 的折算因子（避免循环内逐条 factorOf(String) 触发全表扫描 pj_payroll_conversion_rule）
@@ -1944,7 +2151,12 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         for (ReceivedApply apply : records) {
             String effContract = StringUtils.isBlank(apply.getContractNo()) ? "" : apply.getContractNo();
             String effOrder = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
-            ReceivedContractMetricsVo m = metrics.get(metricsKey(apply.getPeriod(), effContract, effOrder));
+            String mKey = metricsKey(apply.getPeriod(), effContract, effOrder);
+            // 单据粒度精确匹配；历史明细未绑单（received_apply_id 为空）时回退合同粒度聚合行
+            ReceivedContractMetricsVo m = metrics.get(mKey + "|" + (apply.getId() == null ? "" : apply.getId()));
+            if (m == null) {
+                m = metrics.get(mKey + "|");
+            }
             if (m != null) {
                 // 业务类型优先用落库快照值；旧数据（列新增前建单）为空时回退实时聚合
                 String bizType = StringUtils.isBlank(apply.getBizType()) ? m.getBizType() : apply.getBizType();
@@ -2111,7 +2323,151 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             apply.setExpectedAmount(expected);
         }
         List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
-            apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect);
+            apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect, apply.getId());
+        return assemble(apply, mergeFactRows(facts, false));
+    }
+
+    /**
+     * 按合同/订单跨期间查询实收明细：基准单取最近一张非退单冲减单（保留审批单号/状态等留痕），
+     * 明细合并全部期间的 ACTIVE 实收事实，每行带 period（期间列逐笔展示 8/9/10 月）。
+     */
+    @Override
+    public ReceivedApplyDetail getContractDetail(String contractNo, String orderNo) {
+        if (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo)) {
+            throw new ServiceException("合同号与订单号不能同时为空");
+        }
+        List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+            .eq(StringUtils.isNotBlank(contractNo), ReceivedApply::getContractNo, contractNo)
+            .eq(StringUtils.isNotBlank(orderNo), ReceivedApply::getOrderNo, orderNo)
+            .ne(ReceivedApply::getStatus, ReceivedApplyStatus.CANCELLED)
+            .orderByAsc(ReceivedApply::getPeriod)
+            .orderByAsc(ReceivedApply::getId));
+        if (applies == null || applies.isEmpty()) {
+            throw new ServiceException("该合同暂无实收单据");
+        }
+        // 基准单：最近期间的非退单冲减单（退单冲减单 applyNo 以 TD 开头，金额为负数镜像）
+        ReceivedApply base = null;
+        for (ReceivedApply a : applies) {
+            if (StringUtils.isNotBlank(a.getApplyNo()) && a.getApplyNo().startsWith("TD")) {
+                continue;
+            }
+            if (base == null || StringUtils.trimToEmpty(a.getPeriod())
+                .compareTo(StringUtils.trimToEmpty(base.getPeriod())) >= 0) {
+                base = a;
+            }
+        }
+        if (base == null) {
+            base = applies.get(applies.size() - 1);
+        }
+        // 期间串：全部单据期间去重升序（头部「期间」展示，如「2026-08、2026-09、2026-10」）
+        java.util.TreeSet<String> periodSet = new java.util.TreeSet<>();
+        for (ReceivedApply a : applies) {
+            if (StringUtils.isNotBlank(a.getPeriod())) {
+                periodSet.add(a.getPeriod());
+            }
+        }
+        // 应收口径：全部期间 ACTIVE 新签净额（退单月负数与历史正数相抵），
+        // 与列表合并行同口径；单期详情仍走「当月优先」口径（退单月显示本次冲减金额）
+        boolean degradeExpect = StringUtils.isNotBlank(base.getOrderNo())
+            && canDegradeExpectToReceived(base.getContractNo());
+        String baseContractNo = StringUtils.isBlank(base.getContractNo()) ? "" : base.getContractNo();
+        String baseOrderNo = StringUtils.isBlank(base.getOrderNo()) ? "" : base.getOrderNo();
+        if (!baseContractNo.isEmpty() || !baseOrderNo.isEmpty()) {
+            Map<String, String> key = new HashMap<>(3);
+            key.put("contractNo", baseContractNo);
+            key.put("orderNo", baseOrderNo);
+            key.put("degrade", degradeExpect ? "true" : "false");
+            BigDecimal expected = BigDecimal.ZERO;
+            for (ReceivedContractMetricsVo m : factMapper.selectReceivedContractMetrics(null, List.of(key))) {
+                if (m.getExpectedAmount() != null) {
+                    expected = m.getExpectedAmount();
+                }
+            }
+            base.setExpectedAdjusted(base.getExpectedAmount() != null
+                && base.getExpectedAmount().compareTo(expected) != 0);
+            base.setOriginalExpectedAmount(base.getExpectedAmount());
+            base.setExpectedAmount(expected);
+        }
+        List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
+            null, base.getOrderNo(), base.getContractNo(), degradeExpect, null);
+        for (ReceivedFactDetailVo f : facts) {
+            if (StringUtils.isNotBlank(f.getPeriod())) {
+                periodSet.add(f.getPeriod());
+            }
+        }
+        base.setPeriods(String.join("、", periodSet));
+        return assemble(base, mergeFactRows(facts, true));
+    }
+
+    /**
+     * 明细行合并：跨期合同详情按（员工+角色+是否退单行）合并、单张单详情按（员工+角色+期间）合并。
+     * <p>
+     * 口径（2026-10-24 用户定稿）：正常行与退单冲减行是两条线，分开合并展示——
+     * 正常行：跨期汇总各期实收，对应新签取最晚正常期间行的「正部累计」（退单负数不抵消，
+     * 即「退单不影响 8、9 月实收的显示」）；退单行（TD 单明细）：按角色合并为一行
+     * （实收退单=被退各期实收的合计），对应新签=退单月的负新签（行级当期负部口径）。
+     * 同时解决「两笔实收对应一笔新签」时累计口径在多期行上重复显示翻倍的问题。
+     */
+    private List<ReceivedFactDetailVo> mergeFactRows(List<ReceivedFactDetailVo> facts, boolean crossPeriod) {
+        Map<String, ReceivedFactDetailVo> merged = new LinkedHashMap<>();
+        Map<String, String> latestPeriod = new HashMap<>();
+        Map<String, java.util.LinkedHashSet<String>> periodsByKey = new HashMap<>();
+        for (ReceivedFactDetailVo f : facts) {
+            boolean refundRow = isRefundFactRow(f);
+            String key = String.valueOf(f.getEmployeeCode()) + "|" + String.valueOf(f.getRoleType())
+                + (crossPeriod ? (refundRow ? "|R" : "|N") : "|" + String.valueOf(f.getPeriod()));
+            if (crossPeriod) {
+                periodsByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>()).add(f.getPeriod());
+            }
+            ReceivedFactDetailVo m = merged.get(key);
+            if (m == null) {
+                merged.put(key, f);
+                if (crossPeriod && !refundRow) {
+                    // 正常合并行：对应新签取正部累计口径，后续被更晚正常期间行覆盖（数据按期间正序到达）
+                    f.setExpectedAmount(f.getExpectedCumAmount());
+                    f.setOriginalExpectedAmount(f.getExpectedCumOriginalAmount());
+                    latestPeriod.put(key, f.getPeriod());
+                }
+                // 退单合并行：保留行级当期负部口径（对应退单月的负新签），同键行同值取首行
+                continue;
+            }
+            if (m.getAmount() != null || f.getAmount() != null) {
+                m.setAmount((m.getAmount() == null ? BigDecimal.ZERO : m.getAmount())
+                    .add(f.getAmount() == null ? BigDecimal.ZERO : f.getAmount()));
+            }
+            if (m.getOriginalAmount() != null || f.getOriginalAmount() != null) {
+                m.setOriginalAmount((m.getOriginalAmount() == null ? BigDecimal.ZERO : m.getOriginalAmount())
+                    .add(f.getOriginalAmount() == null ? BigDecimal.ZERO : f.getOriginalAmount()));
+            }
+            if (Boolean.TRUE.equals(f.getReceivedAdjusted())) m.setReceivedAdjusted(true);
+            if (Boolean.TRUE.equals(f.getExpectedAdjusted())) m.setExpectedAdjusted(true);
+            if (crossPeriod && !refundRow) {
+                String lp = latestPeriod.get(key);
+                if (f.getPeriod() != null && (lp == null || f.getPeriod().compareTo(lp) >= 0)) {
+                    latestPeriod.put(key, f.getPeriod());
+                    m.setExpectedAmount(f.getExpectedCumAmount());
+                    m.setOriginalExpectedAmount(f.getExpectedCumOriginalAmount());
+                }
+            }
+        }
+        if (crossPeriod) {
+            for (Map.Entry<String, ReceivedFactDetailVo> entry : merged.entrySet()) {
+                entry.getValue().setPeriod(String.join("、", periodsByKey.get(entry.getKey())));
+            }
+        }
+        return new java.util.ArrayList<>(merged.values());
+    }
+
+    /** 退单冲减行判定：归属 TD 前缀冲减单的明细；历史未绑单明细以金额正负兜底。 */
+    private static boolean isRefundFactRow(ReceivedFactDetailVo f) {
+        if (StringUtils.isNotBlank(f.getApplyNo())) {
+            return f.getApplyNo().startsWith("TD");
+        }
+        return f.getAmount() != null && f.getAmount().signum() < 0;
+    }
+
+    /** 明细行折算、合计与审批提示组装（单期详情与跨期合同详情共用）。 */
+    private ReceivedApplyDetail assemble(ReceivedApply apply, List<ReceivedFactDetailVo> facts) {
         // 实收不再做折算；应收折算因子按合同业务类型取（整单同一因子）
         String bizType = apply.getBizType();
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(

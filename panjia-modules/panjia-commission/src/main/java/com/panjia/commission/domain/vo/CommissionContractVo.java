@@ -83,6 +83,12 @@ public class CommissionContractVo implements Serializable {
     /** 业绩归属月 */
     private String period;
 
+    /**
+     * 合并展示的期间串（未选期间时同一合同多期申请单合并为一行，
+     * 形如「2026-08、2026-09、2026-10」；选定期查询时为空）。
+     */
+    private String periods;
+
     /** 该期间是否已封账（封账后不可作废/调整，仅展示） */
     private Boolean periodClosed;
 

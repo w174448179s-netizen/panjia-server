@@ -23,21 +23,23 @@ final class FlowCodeMapping {
         Map.entry(BizType.SCORE_APPROVAL, "score_approval"),
         Map.entry(BizType.RATE_ADJUST, "rate_adjust_approval"),
         Map.entry(BizType.ATTENDANCE_RECTIFY, "attendance_rectify"),
-        Map.entry(BizType.PERF_REFUND, "perf_refund")
+        Map.entry(BizType.PERF_REFUND, "perf_refund"),
+        Map.entry(BizType.SELF_PURCHASE, "self_purchase_approval")
     );
 
     /** flowCode → bizType（事件转译用逆映射） */
-    private static final Map<String, String> FLOW_TO_BIZ = Map.of(
-        "perf_received", BizType.REAL_CONFIRM,
-        "commission_apply", BizType.COMMISSION,
-        "perf_adjust", BizType.PERF_ADJUST,
-        "perf_received_adjust", BizType.PERF_RECEIVED_ADJUST,
-        "payroll_batch", BizType.PAYROLL_BATCH,
-        "attendance_approval", BizType.ATTENDANCE_APPROVAL,
-        "score_approval", BizType.SCORE_APPROVAL,
-        "rate_adjust_approval", BizType.RATE_ADJUST,
-        "attendance_rectify", BizType.ATTENDANCE_RECTIFY,
-        "perf_refund", BizType.PERF_REFUND
+    private static final Map<String, String> FLOW_TO_BIZ = Map.ofEntries(
+        Map.entry("perf_received", BizType.REAL_CONFIRM),
+        Map.entry("commission_apply", BizType.COMMISSION),
+        Map.entry("perf_adjust", BizType.PERF_ADJUST),
+        Map.entry("perf_received_adjust", BizType.PERF_RECEIVED_ADJUST),
+        Map.entry("payroll_batch", BizType.PAYROLL_BATCH),
+        Map.entry("attendance_approval", BizType.ATTENDANCE_APPROVAL),
+        Map.entry("score_approval", BizType.SCORE_APPROVAL),
+        Map.entry("rate_adjust_approval", BizType.RATE_ADJUST),
+        Map.entry("attendance_rectify", BizType.ATTENDANCE_RECTIFY),
+        Map.entry("perf_refund", BizType.PERF_REFUND),
+        Map.entry("self_purchase_approval", BizType.SELF_PURCHASE)
     );
 
     private FlowCodeMapping() {

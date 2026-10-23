@@ -59,6 +59,18 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(receivedApplyService.listPeriods());
     }
 
+    /**
+     * 按合同/订单跨期间查询实收明细（列表未选期间时合并行的详情）。
+     * <p>明细合并该合同全部期间 ACTIVE 实收事实（含退单月负数），每行带期间逐笔展示。
+     */
+    @SaCheckPermission("perf:received:query")
+    @GetMapping("/contract-detail")
+    public R<IReceivedApplyService.ReceivedApplyDetail> getContractDetail(
+        @org.springframework.web.bind.annotation.RequestParam(required = false) String contractNo,
+        @org.springframework.web.bind.annotation.RequestParam(required = false) String orderNo) {
+        return R.ok(receivedApplyService.getContractDetail(contractNo, orderNo));
+    }
+
     /** 详情（含合同下每人实收事实） */
     @SaCheckPermission("perf:received:query")
     @GetMapping("/{id}")

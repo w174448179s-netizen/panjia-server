@@ -911,12 +911,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * @param orderNo             订单号（可空）
      * @param contractNo          合同号（可空；仅 orderNo 为空的历史单据走双列 OR 兼容）
      * @param degradeToContract   双键未命中且双侧订单唯一时，新签侧退化仅按合同号配对
+     * @param applyId             单据粒度过滤（可空）：单张单详情传入审批单 ID，只展示本单明细
+     *                            （退单负数明细归属 TD 冲减单，不混入同期正常单详情）；
+     *                            跨期合同详情传 null 合并全部单据明细
      * @return 每人实收明细行
      */
     @Select("""
         <script>
         WITH rc AS (
-            SELECT rc.id, rc.order_no, rc.contract_no
+            SELECT rc.id, rc.order_no, rc.contract_no, rc.period
             FROM pj_received_contract rc
             WHERE 1=1
               <choose>
@@ -928,29 +931,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 <otherwise>AND 1 = 0</otherwise>
               </choose>
               <if test="period != null and period != ''">AND rc.period = #{period}</if>
-        ),
-        active_expect AS (
-            SELECT pe.employee_external_code AS emp_code, pe.role_type,
-                   -- 理房通空角色回填行 fee_item=贷款服务费，匹配新签贷款服务费；
-                   -- 有角色人原始行 fee_item 空，匹配新签非贷款服务费（居间代理费等）。
-                   SUM(CASE WHEN pe.fee_item = '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS loan_fee_amt,
-                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt
-            FROM pj_perf_fact pe
-            WHERE pe.fact_status = 'ACTIVE'
-              AND pe.fact_type = 'PERF_EXPECT'
-              <choose>
-                <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
-                <when test="orderNo != null and orderNo != ''">
-                  AND pe.order_no = #{orderNo}
-                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
-                </when>
-                <when test="contractNo != null and contractNo != ''">
-                  AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
-                </when>
-                <otherwise>AND 1 = 0</otherwise>
-              </choose>
-              <if test="period != null and period != ''">AND pe.period &lt;= #{period}</if>
-            GROUP BY pe.employee_external_code, pe.role_type
         ),
         reversed_chain AS (
             SELECT DISTINCT ON (a.source_key)
@@ -988,6 +968,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             GROUP BY 1, 2, 3, 4
         )
         SELECT rd.id AS "factId",
+               rc.period AS "period",
                e.employee_id AS "employeeId",
                COALESCE(e.employee_code, rd.employee_external_code) AS "employeeCode",
                e.employee_name AS "employeeName",
@@ -1006,10 +987,27 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                rd.role_type AS "roleType",
                rd.role_name AS "roleName",
                rd.share_ratio AS "shareRatio",
-               CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_fee_amt ELSE ae.other_fee_amt END AS "expectedAmount",
+               -- 应收口径：正数行取该实收期间及之前累计（含历史）；负数行（退单红冲冲减行）取当期负部新签。
+               -- 行级判定而非期间级：退单月可能与正常实收单月相同（如退到 9 月而 9 月有正数实收），
+               -- 期间级判定（当期合计为负）会把同月正数行误切当期口径显示成负数
+               CASE WHEN rd.fee_item = '贷款服务费'
+                    THEN CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.loan_neg_amt, ae.loan_fee_amt) ELSE ae.loan_fee_amt END
+                    ELSE CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.other_neg_amt, ae.other_fee_amt) ELSE ae.other_fee_amt END
+               END AS "expectedAmount",
+               -- 全期累计口径新签（仅正数事实）：跨期合并「正常行」的对应新签取最晚正常期间行的该值，
+               -- 退单负数不抵消正常行的新签对比口径；退单行本身取行级 expectedAmount（当期负部）
+               COALESCE(CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_pos_amt ELSE ae.other_pos_amt END, 0) AS "expectedCumAmount",
+               COALESCE(CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END,
+                        CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_pos_amt ELSE ae.other_pos_amt END, 0) AS "expectedCumOriginalAmount",
+               -- 归属审批单号：跨期合并时按 TD 前缀区分退单冲减行与正常行，分开合并展示
+               rra.apply_no AS "applyNo",
+               -- 原值同口径：有调整前事实取链原值，否则回退当前值（退单行跟随当期负数，避免出现「正 → 负」假箭头）
                COALESCE(
                    CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END,
-                   CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_fee_amt ELSE ae.other_fee_amt END
+                   CASE WHEN rd.fee_item = '贷款服务费'
+                        THEN CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.loan_neg_amt, ae.loan_fee_amt) ELSE ae.loan_fee_amt END
+                        ELSE CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.other_neg_amt, ae.other_fee_amt) ELSE ae.other_fee_amt END
+                   END
                ) AS "originalExpectedAmount",
                (CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END IS NOT NULL) AS "expectedAdjusted",
                rd.performance_amount AS "amount",
@@ -1030,12 +1028,65 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                      AND rdr.detail_status = 'REVERSED')) AS "receivedAdjusted"
         FROM rc
         JOIN pj_received_detail rd ON rd.contract_id = rc.id AND rd.detail_status = 'ACTIVE'
+        -- 单据粒度：单张单详情只展示本单明细。退单负数明细挂在同期合同下但以 received_apply_id
+        -- 归属 TD 冲减单，不过滤会混入正常单详情；历史未绑单明细（NULL）保留展示
+        <if test="applyId != null">AND (rd.received_apply_id = #{applyId} OR rd.received_apply_id IS NULL)</if>
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
+        LEFT JOIN pj_perf_received_apply rra ON rra.id = rd.received_apply_id
         LEFT JOIN sys_dept d ON d.dept_id = e.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        LEFT JOIN active_expect ae ON ae.emp_code IS NOT DISTINCT FROM rd.employee_external_code
-                                  AND ae.role_type IS NOT DISTINCT FROM rd.role_type
+        -- 应收累计（该实收期间及之前）：按行员工+角色配对，跨期明细每行各自取到本行期间；
+        -- loan_pos_amt/other_pos_amt 仅累计正数事实（跨期合并正常行的对应新签用：
+        -- 退单/冲正负数不影响正常实收行的新签对比口径，「退单是另一条」独立展示）
+        LEFT JOIN LATERAL (
+            SELECT SUM(CASE WHEN pe.fee_item = '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS loan_fee_amt,
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt,
+                   SUM(CASE WHEN pe.fee_item = '贷款服务费' AND pe.performance_amount &gt; 0 THEN pe.performance_amount END) AS loan_pos_amt,
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' AND pe.performance_amount &gt; 0 THEN pe.performance_amount END) AS other_pos_amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE'
+              AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period &lt;= rc.period
+              AND pe.employee_external_code IS NOT DISTINCT FROM rd.employee_external_code
+              AND pe.role_type IS NOT DISTINCT FROM rd.role_type
+              <choose>
+                <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
+                <when test="orderNo != null and orderNo != ''">
+                  AND pe.order_no = #{orderNo}
+                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
+                </when>
+                <when test="contractNo != null and contractNo != ''">
+                  AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
+                </when>
+                <otherwise>AND 1 = 0</otherwise>
+              </choose>
+        ) ae ON TRUE
+        -- 应收当期（仅本行期间）：loan_fee_amt/other_fee_amt 为当期净额，
+        -- loan_neg_amt/other_neg_amt 为当期负部（仅负数事实，退单红冲行展示用，无负部时回退累计口径）
+        LEFT JOIN LATERAL (
+            SELECT SUM(CASE WHEN pe.fee_item = '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS loan_fee_amt,
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt,
+                   SUM(CASE WHEN pe.fee_item = '贷款服务费' AND pe.performance_amount &lt; 0 THEN pe.performance_amount END) AS loan_neg_amt,
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' AND pe.performance_amount &lt; 0 THEN pe.performance_amount END) AS other_neg_amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE'
+              AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period = rc.period
+              AND pe.employee_external_code IS NOT DISTINCT FROM rd.employee_external_code
+              AND pe.role_type IS NOT DISTINCT FROM rd.role_type
+              <choose>
+                <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
+                <when test="orderNo != null and orderNo != ''">
+                  AND pe.order_no = #{orderNo}
+                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
+                </when>
+                <when test="contractNo != null and contractNo != ''">
+                  AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
+                </when>
+                <otherwise>AND 1 = 0</otherwise>
+              </choose>
+        ) ap ON TRUE
         LEFT JOIN original_expect oe ON
                                     <choose>
                                       <when test="degradeToContract">
@@ -1054,13 +1105,15 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                     </choose>
                                     AND oe.emp_code IS NOT DISTINCT FROM rd.employee_external_code
                                     AND oe.role_type IS NOT DISTINCT FROM rd.role_type
-        ORDER BY e.employee_name, e.dept_id, rd.role_type, rd.id
+        -- 期间优先：跨期详情按 8、9、10 月逐段排列（单期详情所有行同期间，顺序不变）
+        ORDER BY rc.period, e.employee_name, e.dept_id, rd.role_type, rd.id
         </script>
         """)
     List<ReceivedFactDetailVo> selectReceivedFactDetails(@Param("period") String period,
                                                            @Param("orderNo") String orderNo,
                                                            @Param("contractNo") String contractNo,
-                                                           @Param("degradeToContract") boolean degradeToContract);
+                                                           @Param("degradeToContract") boolean degradeToContract,
+                                                           @Param("applyId") Long applyId);
 
     /**
      * 按期间 + (合同号,订单号) 键对集合查询实收明细列表的补充字段（涉及人数、应收合计），每键对一行。
@@ -1091,26 +1144,46 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         <script>
         SELECT k.ck AS "contractNo",
                k.ok AS "orderNo",
+               -- 单据粒度：退单负实收明细挂在同期已有合同行（contract_id）下、以 received_apply_id
+               -- 区分 TD 冲减单；按合同聚合会把负数算进正常单，且正常单/TD 单各算一遍导致合并翻倍
+               rd.received_apply_id AS "applyId",
                MAX(rc.biz_type) AS "bizType",
                COUNT(DISTINCT COALESCE(e.employee_id::text, rd.employee_external_code)) AS "employeeCount",
                COALESCE(SUM(rd.performance_amount), 0) AS "receivedAmount",
                COALESCE(SUM(rd.performance_amount), 0) AS "originalReceivedAmount",
-               COALESCE((
-                   SELECT SUM(pe.performance_amount)
-                   FROM pj_perf_fact pe
-                   WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-                     AND (
-                               (k.dg AND pe.contract_no = k.ck)
-                            OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
-                            OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
-                            OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
-                         )
-                     <if test="period != null and period != ''">
-                     -- 累计口径：实收月及之前全部期间的新签合计（含跨月冲正/调整新增）；
-                     -- 不可用「当月有非零只取当月」，否则本月冲正后会把历史新签整体丢掉
-                     AND pe.period &lt;= #{period}
-                     </if>
-               ), 0) AS "expectedAmount"
+               CASE
+                   -- 退单负实收行（当期合计为负）用「当期负部新签」展示本次冲减对应的新签退单
+                   WHEN COALESCE(SUM(rd.performance_amount), 0) &lt; 0 THEN COALESCE((
+                       SELECT SUM(CASE WHEN pe.performance_amount &lt; 0 THEN pe.performance_amount ELSE 0 END)
+                       FROM pj_perf_fact pe
+                       WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                         AND (
+                                   (k.dg AND pe.contract_no = k.ck)
+                                OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                             )
+                         <if test="period != null and period != ''">AND pe.period = #{period}</if>
+                   ), 0)
+                   -- 正常行：正部累计（仅正数事实），退单负事实不抵消正常单的新签显示；
+                   -- 新签调整走 supersede+新增（旧事实离开 ACTIVE），不受正部口径影响
+                   ELSE COALESCE((
+                       SELECT SUM(CASE WHEN pe.performance_amount &gt; 0 THEN pe.performance_amount ELSE 0 END)
+                       FROM pj_perf_fact pe
+                       WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                         AND (
+                                   (k.dg AND pe.contract_no = k.ck)
+                                OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                             )
+                         <if test="period != null and period != ''">
+                         -- 累计口径：实收月及之前全部期间的新签合计（含跨月冲正/调整新增）；
+                         -- 不可用「当月有非零只取当月」，否则本月冲正后会把历史新签整体丢掉
+                         AND pe.period &lt;= #{period}
+                         </if>
+                   ), 0)
+               END AS "expectedAmount"
         FROM (VALUES
           <foreach collection="keys" item="k" separator=",">(CAST(#{k.contractNo} AS text), CAST(#{k.orderNo} AS text), CAST(#{k.degrade} AS boolean))</foreach>
         ) AS k(ck, ok, dg)
@@ -1123,7 +1196,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
         WHERE 1=1
         <if test="period != null and period != ''">AND rc.period = #{period}</if>
-        GROUP BY k.ck, k.ok, k.dg
+        GROUP BY k.ck, k.ok, k.dg, rd.received_apply_id
         </script>
         """)
     List<ReceivedContractMetricsVo> selectReceivedContractMetrics(

@@ -31,6 +31,8 @@ public final class BizType {
 
     /** 退单申请（合同退单，负新签 + 负实收联动，2026-10-23） */
     public static final String PERF_REFUND = "PERF_REFUND";
+    /** 自购单提成（经纪人自购，总监审批后该合同号结佣提点额外加成） */
+    public static final String SELF_PURCHASE = "SELF_PURCHASE";
 
     private BizType() {
     }

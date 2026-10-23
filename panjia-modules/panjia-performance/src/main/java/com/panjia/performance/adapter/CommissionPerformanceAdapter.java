@@ -8,8 +8,10 @@ import com.panjia.contracts.port.ReceivedRealFactPort;
 import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
+import com.panjia.performance.domain.PerfRefund;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
+import com.panjia.performance.mapper.PerfRefundMapper;
 import com.panjia.performance.mapper.PerformanceAdjustMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.service.BizKeyMatchGuard;
@@ -47,6 +49,8 @@ import java.util.Set;
 public class CommissionPerformanceAdapter implements CommissionPerformanceQueryPort {
 
     private final PerformanceFactMapper factMapper;
+    /** 退单表 pj_perf_refund（合同退单状态唯一来源：存在 EXECUTED 退单即合同「已退单」） */
+    private final PerfRefundMapper perfRefundMapper;
     /** 双键未命中退化合同号匹配的单侧闸门（事实行订单唯一性） */
     private final BizKeyMatchGuard bizKeyMatchGuard;
     private final ReverseService reverseService;
@@ -235,6 +239,30 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         List<PerformanceFactSummaryDTO> list = toSummaries(factMapper.selectList(wrapper));
         enrichWithEmployeeData(list);
         return list;
+    }
+
+    @Override
+    public Set<String> findRefundedBizKeys(java.util.Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptySet();
+        }
+        // 合同退单状态唯一来源 pj_perf_refund：存在 EXECUTED 记录即「已退单」；
+        // 退单记录上合同号/订单号任一命中即视为已退单，返回两列全集供调用方双键匹配
+        List<PerfRefund> refunds = perfRefundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
+            .select(PerfRefund::getContractNo, PerfRefund::getOrderNo)
+            .eq(PerfRefund::getStatus, AdjustStatus.EXECUTED)
+            .and(w -> w.in(PerfRefund::getContractNo, bizKeys)
+                .or().in(PerfRefund::getOrderNo, bizKeys)));
+        Set<String> refunded = new HashSet<>();
+        for (PerfRefund r : refunds) {
+            if (StringUtils.isNotBlank(r.getContractNo())) {
+                refunded.add(r.getContractNo());
+            }
+            if (StringUtils.isNotBlank(r.getOrderNo())) {
+                refunded.add(r.getOrderNo());
+            }
+        }
+        return refunded;
     }
 
     @Override

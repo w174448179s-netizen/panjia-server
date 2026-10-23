@@ -39,6 +39,13 @@ public class ReceivedApply implements Serializable {
     /** 结算月 YYYY-MM */
     private String period;
 
+    /**
+     * 合并展示的期间串（非入库字段；未选期间查询时同一合同/订单多期单据合并为一行，
+     * 形如「2026-08、2026-09、2026-10」，供列表期间列展示；选定期查询时为空，回退 {@link #period}）。
+     */
+    @TableField(exist = false)
+    private String periods;
+
     /** 合同号 */
     private String contractNo;
 

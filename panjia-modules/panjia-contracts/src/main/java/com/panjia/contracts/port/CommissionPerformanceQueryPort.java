@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 业绩事实跨域查询端口（performance 域对外契约，对结佣域唯一出口）。
@@ -246,6 +247,18 @@ public interface CommissionPerformanceQueryPort {
      * @return bizKey → 该员工应收合计；无事实的键不在结果中
      */
     Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriodForEmployee(Collection<String> bizKeys, Long employeeId);
+
+    /**
+     * 按业务键集合（订单号/合同号）查存在「已执行退单」（pj_perf_refund status=EXECUTED）的业务键。
+     * <p>
+     * 合同全额退单后业绩已全部冲销、无可结佣内容，结佣发起列表据此排除、发起接口据此拦截；
+     * 退单记录上合同号/订单号任一命中输入键即视为已退单，返回值为命中行的合同号与订单号全集，
+     * 调用方按行上两个字段分别匹配即可。
+     *
+     * @param bizKeys 合同号/订单号业务键集合（空集合返回空集，不发起 SQL）
+     * @return 已退单业务键集合（含命中行的 contractNo 与 orderNo）
+     */
+    Set<String> findRefundedBizKeys(Collection<String> bizKeys);
 
     /**
      * 解析实收事实对应的<b>新签导入月</b>（薪酬域结佣提成规则期间用，2026-10-17 改）。

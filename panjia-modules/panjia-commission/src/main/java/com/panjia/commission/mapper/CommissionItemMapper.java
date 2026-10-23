@@ -122,14 +122,16 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             GROUP BY 1, 2, 3, 4, 5
         ),
         active_received AS (
-            -- 当前 ACTIVE 实收明细按合同+员工+角色聚合（跨期合计，与结佣口径一致）
+            -- 当前 ACTIVE 实收明细按合同+员工+角色+期间聚合；
+            -- recv_amt=当期合计，recv_neg_amt=当期负部（退单红冲行展示用，当期无负数时为 NULL）
             SELECT rc.contract_no, rc.order_no,
-                   rd.employee_external_code AS emp_code, rd.role_type,
-                   SUM(rd.performance_amount) AS recv_amt
+                   rd.employee_external_code AS emp_code, rd.role_type, rd.period,
+                   SUM(rd.performance_amount) AS recv_amt,
+                   SUM(rd.performance_amount) FILTER (WHERE rd.performance_amount &lt; 0) AS recv_neg_amt
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
             WHERE rd.detail_status = 'ACTIVE'
-            GROUP BY 1, 2, 3, 4
+            GROUP BY 1, 2, 3, 4, 5
         ),
         reversed_rd_chain AS (
             -- rd 全量链最早 REVERSED 金额（实收调整 supersede 链原值，一次预聚合替代逐行相关子查询）
@@ -139,20 +141,25 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             ORDER BY source_key, id ASC
         ),
         original_received AS (
-            -- 与 active_received 同配对的 ACTIVE rd 行，逐行取链原值求和
-            -- （实收加人新人行 MANUAL-RADJ 无前序，按 0 计，与新签 MANUAL-ADJ 同口径）
+            -- 与 active_received 同配对的 ACTIVE rd 行，逐行取链原值求和（同按期间分组）；
+            -- orig_neg_amt=当期负部行链原值（实收加人新人行 MANUAL-RADJ 无前序，按 0 计）
             SELECT rc.contract_no, rc.order_no,
-                   rd.employee_external_code AS emp_code, rd.role_type,
+                   rd.employee_external_code AS emp_code, rd.role_type, rd.period,
                    SUM(CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
-                            ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END) AS orig_recv_amt
+                            ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END) AS orig_recv_amt,
+                   SUM(CASE WHEN rd.performance_amount &lt; 0 THEN
+                            CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                                 ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END
+                       END) AS orig_neg_amt
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
             LEFT JOIN reversed_rd_chain rrc ON rrc.source_key = rd.source_key
             WHERE rd.detail_status = 'ACTIVE'
-            GROUP BY 1, 2, 3, 4
+            GROUP BY 1, 2, 3, 4, 5
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
+               ci.period AS "period",
                ci.employee_id AS "employeeId",
                ci.dept_id AS "deptId",
                COALESCE(ci.employee_code, e.employee_code) AS "employeeCode",
@@ -173,12 +180,20 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ci.role_name AS "roleName",
                ci.share_ratio AS "shareRatio",
                ci.biz_type AS "bizType",
-               COALESCE(ae.performance_amount, rae.exp_amt) AS "expectedAmount",
+               -- 新签业绩：正常行按 sourceKey 配对当前 ACTIVE 事实（含调整后继任值）；
+               -- 负数行（退单红冲）source_key 为 RFND- 前缀无法配对，但其 performance_fact_id
+               -- 直接绑定退单生成的负新签事实，ACTIVE 时直接取该负值
+               CASE WHEN ci.amount &lt; 0 AND f.fact_status = 'ACTIVE' AND f.performance_amount &lt; 0
+                    THEN f.performance_amount
+                    ELSE COALESCE(ae.performance_amount, rae.exp_amt) END AS "expectedAmount",
                COALESCE(ae.exp_period, rae.exp_period,
                         re.exp_period, roe.orig_period,
                         f.period,
                         CASE WHEN ci.fact_type = 'PERF_REAL' THEN ci.period END) AS "expectPeriod",
                CASE
+                   -- 退单红冲负数行：原值跟随负值本身，避免出现「正 → 负」假箭头
+                   WHEN ci.amount &lt; 0 AND f.fact_status = 'ACTIVE' AND f.performance_amount &lt; 0
+                        THEN f.performance_amount
                    -- 增加角色人（ADD_MEMBER）新人事实：无 REVERSED 前序，调整前新签业绩按 0 展示
                    WHEN f.source = 'MANUAL'
                         AND (f.source_key LIKE '%|MANUAL-ADJ%' OR f.source_key LIKE '%|MANUAL-CADJ%') THEN 0
@@ -194,9 +209,13 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ci.amount AS "amount",
                ci.fee_item AS "feeItem",
                ci.status AS "status",
-               COALESCE(arc.recv_amt, 0) AS "receivedAmount",
-               -- 配对实收行的链原值合计：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
-               COALESCE(orc.orig_recv_amt, 0) AS "originalReceivedAmount"
+               -- 实收金额行级口径（与实收明细详情一致）：正数行=累计到本行期间，
+               -- 负数行（退单冲减）=当期负部，无负部时回退累计；避免跨期净额把退单行冲成 0
+               CASE WHEN ci.amount &lt; 0 THEN COALESCE(arc.recv_neg, arc.recv_cum, 0)
+                    ELSE COALESCE(arc.recv_cum, 0) END AS "receivedAmount",
+               -- 配对实收行的链原值合计（同口径）：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
+               CASE WHEN ci.amount &lt; 0 THEN COALESCE(orc.orig_neg, orc.orig_cum, 0)
+                    ELSE COALESCE(orc.orig_cum, 0) END AS "originalReceivedAmount"
         FROM pj_commission_item ci
         -- 绑定事实仅用于新签调整链：同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
@@ -204,14 +223,25 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND ae.source_key = ci.source_key
         LEFT JOIN reversed_expect re ON ci.fact_type = 'PERF_EXPECT'
               AND re.source_key = ci.source_key
-        LEFT JOIN active_received arc
-               ON (arc.order_no = ci.order_no OR arc.contract_no = ci.contract_no)
-              AND arc.emp_code IS NOT DISTINCT FROM ci.employee_code
-              AND arc.role_type IS NOT DISTINCT FROM ci.role_type
-        LEFT JOIN original_received orc
-               ON (orc.order_no = ci.order_no OR orc.contract_no = ci.contract_no)
-              AND orc.emp_code IS NOT DISTINCT FROM ci.employee_code
-              AND orc.role_type IS NOT DISTINCT FROM ci.role_type
+        -- 实收累计（≤本行期间）与当期负部（=本行期间）：LATERAL 逐行聚合，替代原跨期合计直连
+        LEFT JOIN LATERAL (
+            SELECT SUM(a.recv_amt) AS recv_cum,
+                   SUM(a.recv_neg_amt) FILTER (WHERE a.period = ci.period) AS recv_neg
+            FROM active_received a
+            WHERE (a.order_no = ci.order_no OR a.contract_no = ci.contract_no)
+              AND a.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND a.role_type IS NOT DISTINCT FROM ci.role_type
+              AND a.period &lt;= ci.period
+        ) arc ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT SUM(o.orig_recv_amt) AS orig_cum,
+                   SUM(o.orig_neg_amt) FILTER (WHERE o.period = ci.period) AS orig_neg
+            FROM original_received o
+            WHERE (o.order_no = ci.order_no OR o.contract_no = ci.contract_no)
+              AND o.emp_code IS NOT DISTINCT FROM ci.employee_code
+              AND o.role_type IS NOT DISTINCT FROM ci.role_type
+              AND o.period &lt;= ci.period
+        ) orc ON TRUE
         LEFT JOIN rd_active_expect rae
                ON ci.fact_type = 'PERF_REAL'
               AND rae.period IS NOT DISTINCT FROM ci.period

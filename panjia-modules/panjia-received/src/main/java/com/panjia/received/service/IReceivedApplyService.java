@@ -128,6 +128,17 @@ public interface IReceivedApplyService {
     /** 详情（含合同下每人实收明细，列口径对齐合同业绩明细） */
     ReceivedApplyDetail getDetail(Long id);
 
+    /**
+     * 按合同/订单跨期间查询实收明细（不选期间时的合同维度详情）。
+     * <p>基准单据取该合同最近一张非退单冲减单，头部信息（合同/房源/应收）沿用该单口径；
+     * 明细合并该合同全部期间 ACTIVE 实收事实（含退单月负数），每行带 period 逐笔展示。
+     *
+     * @param contractNo 合同号（可空，一手房等以订单号为准）
+     * @param orderNo    订单号（可空）
+     * @return 合并视图
+     */
+    ReceivedApplyDetail getContractDetail(String contractNo, String orderNo);
+
     /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
     Long getInstanceId(Long id);
 

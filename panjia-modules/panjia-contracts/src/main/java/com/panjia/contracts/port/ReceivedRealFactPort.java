@@ -183,6 +183,28 @@ public interface ReceivedRealFactPort {
     Long createRefundDetail(Long templateDetailId, String refundPeriod, Long operatorId, Long refundId);
 
     /**
+     * 退单联动：把退单月生成的负实收明细归入实收审批单，保证实收管理页可见。
+     * <p>
+     * 实收管理页按「审批单」维度展示，未挂单的明细不出现。退单生成的负明细默认
+     * {@code received_apply_id} 为空，故此处按（期间 + 订单号）定位或直建一张
+     * {@code APPROVED} 审批单（无流程实例，审批人=执行人），再把负明细绑定上去；
+     * 同期间同订单已存在活跃审批单时合并绑定，避免撞 {@code uk_rapp_period_order}。
+     * <p>
+     * 单据金额/条数按绑定后的 ACTIVE 明细实时重算。退单单据号 = 退单号（{@code TD} 前缀），
+     * 结佣发起候选查询按该前缀排除，避免负实收与新签负事实重复冲减。
+     *
+     * @param refundNo     退单号（同时作为审批单号，TD 前缀）
+     * @param refundPeriod 退单落账期间 YYYY-MM
+     * @param orderNo      订单号（可空；空时不参与唯一索引）
+     * @param contractNo   合同号
+     * @param detailIds    本次退单生成的负实收明细 ID
+     * @param operatorId   执行人 ID
+     * @return 审批单 ID；无明细返回 null
+     */
+    Long createRefundApply(String refundNo, String refundPeriod, String orderNo, String contractNo,
+                           List<Long> detailIds, Long operatorId);
+
+    /**
      * 统计某合同号在实收合同表（全局，不限期间/批次）的去重非空订单号数量。
      * <p>
      * 双键未命中退化按合同号归属的闸门组成部分：新签事实订单唯一 <b>且</b> 实收合同订单唯一

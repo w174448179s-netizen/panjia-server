@@ -6,6 +6,9 @@ import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.PerformanceFactReversedEvent;
 import com.panjia.contracts.port.ReceivedRealFactPort;
+import com.panjia.performance.domain.ReceivedApply;
+import com.panjia.performance.domain.ReceivedApplyStatus;
+import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.performance.util.MoneyUtil;
 import com.panjia.received.domain.ReceivedContract;
 import com.panjia.received.domain.ReceivedDetail;
@@ -48,6 +51,7 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     private final ReceivedRealFactMapper realMapper;
     private final ReceivedDetailMapper detailMapper;
     private final ReceivedContractMapper contractMapper;
+    private final ReceivedApplyMapper applyMapper;
     private final EventPort eventPort;
 
     // ==================== 读 ====================
@@ -417,6 +421,88 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         log.info("[实收-退单建壳] period={}, contractNo={}, orderNo={}, contractId={}",
             period, contractNo, orderNo, shell.getId());
         return shell;
+    }
+
+    /**
+     * 退单负实收挂单：实收管理页按审批单维度展示，未挂单的负明细页面不可见，
+     * 故按退单号直建一张 APPROVED 单（无流程实例，与当月正常实收单并存；
+     * 唯一索引 {@code uk_rapp_period_order} 已排除 TD 单号），再把负明细绑定上去并重算金额/条数。
+     * <p>
+     * 幂等：同退单号已有单据时直接复用（退单执行回调重试场景）。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Long createRefundApply(String refundNo, String refundPeriod, String orderNo, String contractNo,
+                                  List<Long> detailIds, Long operatorId) {
+        if (detailIds == null || detailIds.isEmpty()
+            || refundPeriod == null || refundPeriod.isBlank()) {
+            return null;
+        }
+        ReceivedApply apply = findRefundApply(refundNo);
+        if (apply == null) {
+            ReceivedDetail first = detailMapper.selectById(detailIds.get(0));
+            ReceivedContract shell = first == null ? null : contractMapper.selectById(first.getContractId());
+            apply = new ReceivedApply();
+            // 单号沿用退单号（TD 前缀），结佣发起候选查询据此排除负实收
+            apply.setApplyNo(refundNo);
+            apply.setPeriod(refundPeriod);
+            apply.setOrderNo(orderNo);
+            apply.setContractNo(contractNo);
+            if (shell != null) {
+                apply.setBizType(shell.getBizType());
+                apply.setPropertyAddress(shell.getPropertyAddress());
+                apply.setBusinessDate(shell.getBusinessDate());
+                apply.setDeptId(shell.getDeptId());
+            }
+            apply.setReceivedAmount(BigDecimal.ZERO);
+            apply.setExpectedAmount(BigDecimal.ZERO);
+            apply.setItemCount(0);
+            // 退单执行即终态：直接 APPROVED，无工作流实例
+            apply.setStatus(ReceivedApplyStatus.APPROVED);
+            apply.setCurrentNode(null);
+            apply.setApplicantId(operatorId);
+            apply.setApproverId(operatorId);
+            apply.setApproveTime(java.time.LocalDateTime.now());
+            try {
+                applyMapper.insert(apply);
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                // 并发重试：另一事务已建同单号单据，取回复用
+                apply = findRefundApply(refundNo);
+                if (apply == null) {
+                    log.warn("[实收-退单挂单] 建单冲突且找不到退单单据，跳过：refundNo={}", refundNo);
+                    return null;
+                }
+            }
+        }
+        // 负明细归属退单冲减单
+        detailMapper.update(null,
+            new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ReceivedDetail>()
+                .in(ReceivedDetail::getId, detailIds)
+                .set(ReceivedDetail::getReceivedApplyId, apply.getId()));
+        // 单据金额/条数按绑定后的 ACTIVE 明细实时重算
+        List<ReceivedDetail> bound = detailMapper.selectList(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedDetail>()
+                .eq(ReceivedDetail::getReceivedApplyId, apply.getId())
+                .eq(ReceivedDetail::getDetailStatus, STATUS_ACTIVE));
+        apply.setItemCount(bound.size());
+        apply.setReceivedAmount(bound.stream()
+            .map(d -> d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        applyMapper.updateById(apply);
+        log.info("[实收-退单挂单] refundNo={}, applyId={}, period={}, 明细数={}, 实收合计={}",
+            refundNo, apply.getId(), refundPeriod, apply.getItemCount(), apply.getReceivedAmount());
+        return apply.getId();
+    }
+
+    /** 按退单号（同时是审批单号）查退单冲减单，无则返回 null。 */
+    private ReceivedApply findRefundApply(String refundNo) {
+        if (refundNo == null || refundNo.isBlank()) {
+            return null;
+        }
+        return applyMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getApplyNo, refundNo)
+                .last("LIMIT 1"));
     }
 
     /**

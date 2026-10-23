@@ -18,7 +18,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -153,28 +152,26 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
     }
 
     /**
-     * 负明细承载单：优先复用退单月同订单的活跃结佣单（避免 uk_capp_period_order 冲突），
-     * 无则新建一张状态为 APPROVED 的退单冲减单。
+     * 负明细承载单：一律独立建「退单冲减结佣单」（单号 {@code TD + 退单ID}，状态 APPROVED）。
+     * <p>
+     * 不复用同期间同订单的已有结佣单：原单可能已 LOCKED（已进工资），追加负数会篡改历史单据合计，
+     * 且在申请列表里看不到独立的退单冲减记录。唯一索引 {@code uk_capp_period_order}
+     * 已排除 TD 单号，故同期间同订单可与原单并存。
+     * <p>
+     * 幂等：同退单号已有单据时直接复用（退单执行回调重试场景）。
      */
     private Long resolveContainer(String contractNo, String orderNo, String refundPeriod,
                                   Long refundId, Long operatorId) {
-        LambdaQueryWrapper<CommissionApplication> wrapper = new LambdaQueryWrapper<>();
-        wrapper.eq(CommissionApplication::getPeriod, refundPeriod)
-            .in(CommissionApplication::getStatus, Arrays.asList(
-                ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
-                ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
-        if (StringUtils.isNotBlank(orderNo)) {
-            wrapper.eq(CommissionApplication::getOrderNo, orderNo);
-        } else {
-            wrapper.eq(CommissionApplication::getContractNo, contractNo);
-        }
-        wrapper.orderByDesc(CommissionApplication::getCreateTime).last("LIMIT 1");
-        CommissionApplication existing = applicationMapper.selectOne(wrapper);
-        if (existing != null) {
-            return existing.getId();
+        String applyNo = "TD" + refundId;
+        CommissionApplication exists = applicationMapper.selectOne(
+            new LambdaQueryWrapper<CommissionApplication>()
+                .eq(CommissionApplication::getApplyNo, applyNo)
+                .last("LIMIT 1"));
+        if (exists != null) {
+            return exists.getId();
         }
         CommissionApplication app = new CommissionApplication();
-        app.setApplyNo("TD" + refundId);
+        app.setApplyNo(applyNo);
         app.setPeriod(refundPeriod);
         app.setContractNo(contractNo);
         app.setOrderNo(orderNo);

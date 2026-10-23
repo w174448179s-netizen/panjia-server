@@ -585,6 +585,23 @@ public class CommissionApplicationService {
                 + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
 
+        // 已退单拦截（2026-10-23 定稿）：存在 EXECUTED 退单的合同已全额冲销，无可结佣内容；
+        // 列表已排除，此处兜底拦截「录入合同号」批量发起/接口直调绕过列表的场景。
+        // 键集取入参 + 实收事实上的合同号/订单号（入参可能是订单号，需归一化后双键匹配）
+        Set<String> refundCheckKeys = new HashSet<>();
+        refundCheckKeys.add(contractNo);
+        for (PerformanceFactSummaryDTO f : nonZeroFacts) {
+            if (StringUtils.isNotBlank(f.getContractNo())) {
+                refundCheckKeys.add(f.getContractNo());
+            }
+            if (StringUtils.isNotBlank(f.getOrderNo())) {
+                refundCheckKeys.add(f.getOrderNo());
+            }
+        }
+        if (!performanceQueryPort.findRefundedBizKeys(refundCheckKeys).isEmpty()) {
+            throw new ServiceException("合同 " + contractNo + " 已退单，业绩已全额冲销，不能再发起结佣");
+        }
+
         // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣。
         // 历史导入放行：实收审批流程上线前，导入批次归档即产生 ACTIVE 实收事实、从未挂过实收单
         // （received_apply_id 为空但 source_batch_id 非空），此类行按「导入即确认的实收」放行；
@@ -1595,13 +1612,67 @@ public class CommissionApplicationService {
             .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
             .orderByDesc(CommissionApplication::getId));
         // 同时按 contractNo 和 orderNo 建索引，支持一手房/房产金融/家装荐客以订单号为准
+        // 两轮入库：正常结佣单优先，退单冲减单（TD 前缀）仅在当期无正常单时兜底，
+        // 保证「原单 + 退单冲减单」同期间同订单并存时，合同行仍绑定原单不张冠李戴
         Map<String, CommissionApplication> appMap = new LinkedHashMap<>();
+        List<CommissionApplication> refundApps = new ArrayList<>();
         for (CommissionApplication app : applications) {
+            if (isRefundApply(app)) {
+                refundApps.add(app);
+                continue;
+            }
             if (StringUtils.isNotBlank(app.getContractNo())) {
                 appMap.putIfAbsent(app.getContractNo(), app);
             }
             if (StringUtils.isNotBlank(app.getOrderNo())) {
                 appMap.putIfAbsent(app.getOrderNo(), app);
+            }
+        }
+        for (CommissionApplication app : refundApps) {
+            if (StringUtils.isNotBlank(app.getContractNo())) {
+                appMap.putIfAbsent(app.getContractNo(), app);
+            }
+            if (StringUtils.isNotBlank(app.getOrderNo())) {
+                appMap.putIfAbsent(app.getOrderNo(), app);
+            }
+        }
+
+        // 期间口径的合同汇总：选定期同时取一份「仅当期」的汇总，用于覆盖行上的新签/实收金额。
+        // 主汇总跨期取数（rd.period 跨期发起场景需要），退单月会把正负流水抵消成 0，
+        // 导致退单行「对应新签/实收」显示 0（用户 2026-10-23 反馈）
+        Map<String, PerformanceContractSummaryDTO> periodSummaryMap = new HashMap<>();
+        if (StringUtils.isNotBlank(period)) {
+            for (PerformanceContractSummaryDTO pc : performanceQueryPort.listContractSummaries(
+                period, effectiveDeptId, FACT_TYPE_REAL, query.getEmployeeId(), keyword)) {
+                if (StringUtils.isNotBlank(pc.getOrderNo())) {
+                    periodSummaryMap.putIfAbsent(pc.getOrderNo(), pc);
+                }
+                if (StringUtils.isNotBlank(pc.getContractNo())) {
+                    periodSummaryMap.putIfAbsent(pc.getContractNo(), pc);
+                }
+            }
+        }
+
+        // 未选期间时合同行为跨期合并行：期间串（8、9、10 月）与结佣业绩净额（原单 + 退单冲减单相抵）
+        Map<String, java.util.TreeSet<String>> appPeriodsMap = new HashMap<>();
+        Map<String, BigDecimal> netAmountMap = new HashMap<>();
+        if (period == null) {
+            for (CommissionApplication app : applications) {
+                if (app.getStatus() == null
+                    || ApplicationStatus.CANCELLED.getCode().equals(app.getStatus().getCode())) {
+                    continue;
+                }
+                for (String key : new String[]{app.getContractNo(), app.getOrderNo()}) {
+                    if (StringUtils.isBlank(key)) {
+                        continue;
+                    }
+                    if (StringUtils.isNotBlank(app.getPeriod())) {
+                        appPeriodsMap.computeIfAbsent(key, k -> new java.util.TreeSet<>()).add(app.getPeriod());
+                    }
+                    if (app.getTotalAmount() != null) {
+                        netAmountMap.merge(key, app.getTotalAmount(), BigDecimal::add);
+                    }
+                }
             }
         }
 
@@ -1670,6 +1741,34 @@ public class CommissionApplicationService {
             String rowPeriod = app.getPeriod();
             boolean rowClosed = closedCache.computeIfAbsent(rowPeriod, p -> periodCloseQueryPort.isClosed(p));
             CommissionContractVo vo = toContractVO(rowPeriod, rowClosed, c, app, status, conversionFactorPort.factorOf(factorMap, c.getBizType()));
+            // 未选期间：合同行=跨期合并行，期间串展示全部期间（8、9、10），结佣业绩取各期净额（含退单负数）
+            if (period == null) {
+                String mergeKey = StringUtils.isNotBlank(c.getOrderNo()) ? c.getOrderNo() : c.getContractNo();
+                java.util.TreeSet<String> allPeriods = appPeriodsMap.get(mergeKey);
+                if (allPeriods != null && !allPeriods.isEmpty()) {
+                    vo.setPeriods(String.join("、", allPeriods));
+                }
+                BigDecimal net = netAmountMap.get(mergeKey);
+                if (net != null) {
+                    vo.setAmount(net);
+                    vo.setConvertedAmount(conversionFactorPort.convert(net,
+                        conversionFactorPort.factorOf(factorMap, c.getBizType())));
+                }
+            }
+            // 期间金额覆盖：行期间=申请单期间，选定期时用「仅当期」汇总的新签/实收覆盖跨期合并值，
+            // 否则退单月的正负流水在跨期汇总里抵消为 0，看不出本次冲减金额
+            PerformanceContractSummaryDTO periodSummary = StringUtils.isNotBlank(c.getOrderNo())
+                ? periodSummaryMap.get(c.getOrderNo()) : null;
+            if (periodSummary == null && StringUtils.isNotBlank(c.getContractNo())) {
+                periodSummary = periodSummaryMap.get(c.getContractNo());
+            }
+            if (periodSummary != null) {
+                BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
+                vo.setExpectedAmount(periodSummary.getExpectedAmount());
+                vo.setExpectedConvertedAmount(conversionFactorPort.convert(vo.getExpectedAmount(), factor));
+                vo.setReceivedAmount(periodSummary.getAmount());
+                vo.setReceivedStatus(periodSummary.getReceivedStatus());
+            }
             // 按员工筛选时：金额改为该员工口径的新签业绩（覆盖申请单合同全量总额）
             if (query.getEmployeeId() != null) {
                 BigDecimal empAmt = empExpectMap.get(c.getOrderNo());
@@ -1822,6 +1921,13 @@ public class CommissionApplicationService {
             }
         }
 
+        // 已退单合同排除（2026-10-23 定稿）：存在 EXECUTED 退单即全额冲销、无可结佣内容，
+        // 不出现在可发起列表（否则实收金额显示正数、结佣业绩净额为 0，误导用户重复发起）
+        Set<String> refundedKeys = new HashSet<>();
+        for (List<String> chunk : chunkKeys(expectKeys)) {
+            refundedKeys.addAll(performanceQueryPort.findRefundedBizKeys(chunk));
+        }
+
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
@@ -1829,6 +1935,11 @@ public class CommissionApplicationService {
         for (PerformanceContractSummaryDTO c : contracts) {
             String rowKey = StringUtils.isNotBlank(c.getOrderNo()) ? c.getOrderNo() : c.getContractNo();
             if (appliedKeys.contains(rowKey)) {
+                continue;
+            }
+            // 已退单合同整行排除（合同号/订单号任一命中即跳过）
+            if ((c.getOrderNo() != null && refundedKeys.contains(c.getOrderNo()))
+                || (c.getContractNo() != null && refundedKeys.contains(c.getContractNo()))) {
                 continue;
             }
             BigDecimal amount = expectMap.get(c.getOrderNo());
@@ -1900,6 +2011,7 @@ public class CommissionApplicationService {
         vo.setEmployeeCount(c.getEmployeeCount());
         vo.setDetailCount(c.getDetailCount());
         vo.setExpectedAmount(c.getExpectedAmount());
+        vo.setPeriod(c.getPeriod());
         vo.setReceivedStatus(c.getReceivedStatus());
         // 可发起合同：金额 = 新签应收合计（与发起后申请单金额口径一致）
         vo.setAmount(c.getExpectedAmount());
@@ -2014,6 +2126,11 @@ public class CommissionApplicationService {
             return -1;
         }
         return ib.compareTo(ia);
+    }
+
+    /** 退单冲减结佣单判定：单号 TD 前缀（退单执行时生成，与正常结佣单区分）。 */
+    private boolean isRefundApply(CommissionApplication app) {
+        return app.getApplyNo() != null && app.getApplyNo().startsWith("TD");
     }
 
     /**
@@ -2147,6 +2264,86 @@ public class CommissionApplicationService {
             .filter(Objects::nonNull)
             .findFirst()
             .ifPresent(app::setBusinessDate);
+    }
+
+    /**
+     * 按合同/订单跨期间查询结佣明细（列表未选期间时合并行的详情）。
+     * <p>合并该合同全部期间申请单（含退单冲减单 TD）的明细，每行带 period 逐笔展示；
+     * 头部沿用最近一张非退单申请单，结佣合计改按合并明细求和。
+     */
+    public Map<String, Object> getContractDetail(String contractNo, String orderNo) {
+        if (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo)) {
+            throw new ServiceException("合同号与订单号不能同时为空");
+        }
+        List<CommissionApplication> apps = applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
+            .eq(StringUtils.isNotBlank(contractNo), CommissionApplication::getContractNo, contractNo)
+            .eq(StringUtils.isNotBlank(orderNo), CommissionApplication::getOrderNo, orderNo)
+            .ne(CommissionApplication::getStatus, "CANCELLED")
+            .orderByAsc(CommissionApplication::getPeriod)
+            .orderByAsc(CommissionApplication::getId));
+        if (apps == null || apps.isEmpty()) {
+            throw new ServiceException("该合同暂无结佣申请单");
+        }
+        CommissionApplication base = null;
+        for (CommissionApplication a : apps) {
+            if (isRefundApply(a)) {
+                continue;
+            }
+            if (base == null || StringUtils.trimToEmpty(a.getPeriod())
+                .compareTo(StringUtils.trimToEmpty(base.getPeriod())) >= 0) {
+                base = a;
+            }
+        }
+        if (base == null) {
+            base = apps.get(apps.size() - 1);
+        }
+        java.util.TreeSet<String> periods = new java.util.TreeSet<>();
+        List<com.panjia.commission.domain.vo.CommissionItemDetailVo> items = new ArrayList<>();
+        for (CommissionApplication a : apps) {
+            if (StringUtils.isNotBlank(a.getPeriod())) {
+                periods.add(a.getPeriod());
+            }
+            List<com.panjia.commission.domain.vo.CommissionItemDetailVo> one = itemMapper.selectItemDetails(a.getId());
+            if (one != null) {
+                items.addAll(one);
+            }
+        }
+        items.sort(java.util.Comparator
+            .comparing((com.panjia.commission.domain.vo.CommissionItemDetailVo d) ->
+                StringUtils.trimToEmpty(d.getPeriod()))
+            .thenComparing(d -> d.getItemId() == null ? 0L : d.getItemId()));
+        fillItemDetailConversion(items);
+        BigDecimal totalAmount = BigDecimal.ZERO;
+        for (com.panjia.commission.domain.vo.CommissionItemDetailVo d : items) {
+            if (d.getAmount() != null) {
+                totalAmount = totalAmount.add(d.getAmount());
+            }
+        }
+        base.setTotalAmount(totalAmount);
+        base.setPeriod(String.join("、", periods));
+        // 头部「新签合计」改取跨期 ACTIVE 新签净额（与合并列表行同口径）：
+        // 基准单快照只是本单期间值，退单冲减场景会继续显示 437.87 与明细/列表净额 0 对不上
+        List<String> expectKeys = new ArrayList<>(2);
+        if (StringUtils.isNotBlank(base.getOrderNo())) {
+            expectKeys.add(base.getOrderNo());
+        }
+        if (StringUtils.isNotBlank(base.getContractNo())) {
+            expectKeys.add(base.getContractNo());
+        }
+        if (!expectKeys.isEmpty()) {
+            Map<String, BigDecimal> expectNetMap = performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(expectKeys);
+            BigDecimal expectNet = StringUtils.isNotBlank(base.getOrderNo())
+                ? expectNetMap.get(base.getOrderNo()) : null;
+            if (expectNet == null && StringUtils.isNotBlank(base.getContractNo())) {
+                expectNet = expectNetMap.get(base.getContractNo());
+            }
+            base.setExpectedAmount(expectNet != null ? expectNet : BigDecimal.ZERO);
+            // 头部「折算后」由前端按明细行 expectedConvertedAmount 求和，负数行取到负值后自然归零
+        }
+        Map<String, Object> resp = new java.util.LinkedHashMap<>();
+        resp.put("application", base);
+        resp.put("items", items);
+        return resp;
     }
 
     public List<CommissionItem> listItems(Long applicationId) {
@@ -2390,6 +2587,9 @@ public class CommissionApplicationService {
     private List<CommissionApplication> listActiveApplications(String period) {
         return applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
             .eq(CommissionApplication::getPeriod, period)
+            // 退单冲减单（TD）是已终态的账务容器，不参与「活跃单」判定
+            .and(w -> w.isNull(CommissionApplication::getApplyNo)
+                .or().notLikeRight(CommissionApplication::getApplyNo, "TD"))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
     }
@@ -2424,6 +2624,9 @@ public class CommissionApplicationService {
             .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
             .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
                 .or().eq(CommissionApplication::getOrderNo, contractNo))
+            // 退单冲减单（TD）不参与「同期唯一活跃单」判定，避免退单月无法正常发起结佣
+            .and(w -> w.isNull(CommissionApplication::getApplyNo)
+                .or().notLikeRight(CommissionApplication::getApplyNo, "TD"))
             .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
             .orderByDesc(CommissionApplication::getCreateTime)

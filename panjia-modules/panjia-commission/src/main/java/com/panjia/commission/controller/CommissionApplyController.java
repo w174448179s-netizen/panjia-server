@@ -92,6 +92,18 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
+     * 按合同/订单跨期间查询结佣明细（列表未选期间时合并行的详情）。
+     * <p>合并该合同全部期间申请单（含退单冲减单）的明细，每行带期间逐笔展示。
+     */
+    @SaCheckPermission("commission:apply:query")
+    @GetMapping("/contract-detail")
+    public R<Map<String, Object>> getContractDetail(
+        @RequestParam(required = false) String contractNo,
+        @RequestParam(required = false) String orderNo) {
+        return R.ok(applicationService.getContractDetail(contractNo, orderNo));
+    }
+
+    /**
      * 申请单详情（含明细）。
      *
      * @param id 申请单 ID

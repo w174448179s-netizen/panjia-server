@@ -25,6 +25,12 @@ public class ReceivedContractMetricsVo implements Serializable {
     /** 订单号（同合同号挂多订单时与合同号双键精确匹配；历史数据为空串，退化合同号口径） */
     private String orderNo;
 
+    /**
+     * 实收审批单 ID（rd.received_apply_id）：同合同同期间可能有多张单（正常单 + 退单 TD 冲减单），
+     * 金额必须按单据粒度归属，否则退单负数会污染同期正常单；历史明细未绑单时为 null
+     */
+    private Long applyId;
+
     /** 业务类型（同合同多事实时取 MAX） */
     private String bizType;
 

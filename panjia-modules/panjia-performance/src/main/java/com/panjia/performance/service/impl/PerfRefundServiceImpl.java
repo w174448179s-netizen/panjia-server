@@ -203,7 +203,7 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         result.put("factCount", facts.size());
         result.put("realCount", reals.size());
         result.put("bizType", facts.isEmpty() ? null : facts.get(0).getBizType());
-        result.put("blocked", blockReason(contractNo, refundPeriod, facts));
+        result.put("blocked", blockReason(refundPeriod));
 
         // 实收明细（退单月在退单月生成同额负明细）
         List<Map<String, Object>> realLines = new ArrayList<>();
@@ -259,7 +259,7 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         if (facts.isEmpty()) {
             throw new ServiceException("该合同无可退的新签业绩（已退单或不存在正业绩事实）");
         }
-        String blocked = blockReason(contractNo, refundPeriod, facts);
+        String blocked = blockReason(refundPeriod);
         if (blocked != null) {
             throw new ServiceException(blocked);
         }
@@ -357,24 +357,16 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
     }
 
     /**
-     * 退单拦截原因：退单落账月封账、原事实归属月封账（已发薪）均禁止退单。
+     * 退单拦截原因：仅校验「退单落账月」封账。
+     * <p>
+     * 原事实归属月封账（已发薪）不再拦截——退单是独立业务单据，负流水只落在退单月，
+     * 不动原期间事实，历史已发薪期间不受影响；只要退单月未封账（待结算月）即可退单。
      *
      * @return 拦截原因；可退返回 null
      */
-    private String blockReason(String contractNo, String refundPeriod, List<PerformanceFact> facts) {
+    private String blockReason(String refundPeriod) {
         if (StringUtils.isNotBlank(refundPeriod) && periodCloseService.isClosed(refundPeriod)) {
             return "退单月份 " + refundPeriod + " 已封账（已算薪锁定），不可退单";
-        }
-        List<String> closedPeriods = facts.stream()
-            .map(PerformanceFact::getPeriod)
-            .filter(StringUtils::isNotBlank)
-            .distinct()
-            .filter(periodCloseService::isClosed)
-            .sorted()
-            .collect(Collectors.toList());
-        if (!closedPeriods.isEmpty()) {
-            return "该合同业绩归属月 " + String.join("、", closedPeriods)
-                + " 已封账（已发薪），不可退单";
         }
         return null;
     }
@@ -452,6 +444,11 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
      * 执行退单：生成负新签事实 + 负实收明细 + 已结佣部分的负结佣明细（归属月=退单月），原事实不动。
      */
     private void execute(PerfRefund refund) {
+        // 执行阶段复核封账：审批期间退单月可能已算薪锁定，此时负流水无法进当批工资
+        String blocked = blockReason(refund.getRefundPeriod());
+        if (blocked != null) {
+            throw new ServiceException(blocked);
+        }
         List<PerformanceFact> facts = loadRefundableExpectFacts(refund.getContractNo(), refund.getOrderNo());
         BigDecimal expectSum = BigDecimal.ZERO;
         // 原事实 ID → 本次生成的负事实 ID（结佣冲减明细要绑定负事实，避免后续发起结佣重复抵扣）
@@ -490,6 +487,8 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         ReceivedRealFactPort port = receivedRealFactPortProvider.getIfAvailable();
         BigDecimal realSum = BigDecimal.ZERO;
         int realCount = 0;
+        // 本次生成的负实收明细 ID，循环结束后统一挂到退单月实收审批单（实收管理页按审批单维度展示）
+        List<Long> refundRealDetailIds = new ArrayList<>();
         if (port != null) {
             List<PerformanceFactSummaryDTO> reals = loadRefundableRealFacts(
                 refund.getContractNo(), refund.getOrderNo());
@@ -500,8 +499,12 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
                 if (newDetailId != null) {
                     realSum = realSum.add(negative);
                     realCount++;
+                    refundRealDetailIds.add(newDetailId);
                 }
             }
+            // 负实收挂单：未绑定审批单时实收管理页看不到，按退单月直建 APPROVED 单
+            port.createRefundApply(refund.getRefundNo(), refund.getRefundPeriod(), refund.getOrderNo(),
+                refund.getContractNo(), refundRealDetailIds, refund.getOperatorId());
         }
 
         // 负结佣：仅对已结佣（APPROVED 结佣明细）部分生成同额负明细，落退单月；

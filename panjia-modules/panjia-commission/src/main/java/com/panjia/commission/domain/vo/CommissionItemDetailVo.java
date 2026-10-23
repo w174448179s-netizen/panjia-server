@@ -24,6 +24,9 @@ public class CommissionItemDetailVo implements Serializable {
     /** 业绩事实 ID */
     private Long factId;
 
+    /** 结佣明细归属期间 YYYY-MM（跨期详情按期间逐笔展示） */
+    private String period;
+
     /** 员工 ID */
     private Long employeeId;
 

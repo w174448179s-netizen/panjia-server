@@ -34,6 +34,9 @@ public class SalaryCalculationEngine {
     /** 招聘加点上限 +10% */
     private static final BigDecimal MENTOR_CAP = new BigDecimal("0.10");
 
+    /** 自购单加成上限：finalRate + bonus 不超过 100%（提点为比率，超过 100% 无业务意义） */
+    private static final BigDecimal MAX_SELF_PURCHASE_RATE = BigDecimal.ONE;
+
     /** 门店计缴参保人数比例阈值（个人社保比例严格 > 30% 才计入） */
     private static final BigDecimal HUNDRED = new BigDecimal("100");
     private static final BigDecimal THIRTY = new BigDecimal("30");
@@ -78,6 +81,11 @@ public class SalaryCalculationEngine {
         public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
         /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（按新签月口径；该月无调整=不叠加） */
         public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
+        /**
+         * employeeId → 合同号 → 提点加成（已审批通过的自购单）。
+         * 仅对该员工在该合同号下的结佣提点额外加成，其他合同/其他参与人不受影响；仅经纪人角色生效。
+         */
+        public Map<Long, Map<String, BigDecimal>> selfPurchaseByEmp = Map.of();
         /**
          * 多期间规则快照缓存：key=规则期间（YYYY-MM），value=该期间的 ParsedSnapshot。
          * <p>
@@ -304,7 +312,12 @@ public class SalaryCalculationEngine {
                         periodScore, periodAdjustItems, periodRank.path("ruleContent"), periodMentorAdd, role,
                         periodPerf);
 
-                    BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
+                    // 自购单加成：仅经纪人角色，且仅命中该员工自购单合同号的明细（提点 +bonus，百分点）
+                    SelfPurchaseSplit sp = splitSelfPurchase(input, role, emp.getEmployeeId(),
+                        periodItems, periodSnap, periodFinalRate);
+                    BigDecimal periodIncome = sp.perf.signum() == 0
+                        ? MoneyUtil.round2(periodPerf.multiply(periodFinalRate))
+                        : MoneyUtil.round2(periodPerf.subtract(sp.perf).multiply(periodFinalRate)).add(sp.income);
                     commissionPerf = commissionPerf.add(periodPerf);
                     commissionIncome = commissionIncome.add(periodIncome);
                     // 收集分笔过程：month=新签导入月（无回溯时=算薪月）
@@ -313,13 +326,20 @@ public class SalaryCalculationEngine {
                     step.put("perf", periodPerf);
                     step.put("rate", periodFinalRate);
                     step.put("income", periodIncome);
+                    if (sp.perf.signum() != 0) {
+                        step.put("spPerf", MoneyUtil.round2(sp.perf));
+                        step.put("spIncome", sp.income);
+                        step.put("spBonus", sp.bonus);
+                    }
                     calcProcess.add(step);
                 }
-                // 仅当存在跨月回溯（新签导入月 ≠ 算薪月）时落地计算过程；全部当月结佣保持原样
+                // 仅当存在跨月回溯（新签导入月 ≠ 算薪月）或自购单加成时落地计算过程；
+                // 全部当月结佣且无加成保持原样（不写冗余 JSON）
                 // 注意：此处用 input.period（d.period 由批次服务在引擎返回后才赋值，引擎内为 null）
                 boolean hasBacktrack = calcProcess.stream()
                     .anyMatch(p -> !input.period.equals(p.get("month")));
-                if (hasBacktrack) {
+                boolean hasSelfPurchase = calcProcess.stream().anyMatch(p -> p.containsKey("spPerf"));
+                if (hasBacktrack || hasSelfPurchase) {
                     try {
                         d.setCommissionCalcProcess(
                             new tools.jackson.databind.ObjectMapper().writeValueAsString(calcProcess));
@@ -581,7 +601,14 @@ public class SalaryCalculationEngine {
                                 periodScore, periodAdjustItems, periodRank.path("ruleContent"), BigDecimal.ZERO, role,
                                 periodPerf);
 
-                            BigDecimal periodIncome = MoneyUtil.round2(periodPerf.multiply(periodFinalRate));
+                            // 自购单加成：仅命中该员工自购单合同号的明细，提点额外 +bonus（百分点）
+                            SelfPurchaseSplit sp = splitSelfPurchase(input, role, emp.getEmployeeId(),
+                                periodItems, periodSnap, periodFinalRate);
+
+                            BigDecimal periodIncome = sp.perf.signum() == 0
+                                ? MoneyUtil.round2(periodPerf.multiply(periodFinalRate))
+                                : MoneyUtil.round2(periodPerf.subtract(sp.perf).multiply(periodFinalRate))
+                                    .add(sp.income);
                             personalNewsign = personalNewsign.add(periodIncome);
                             // 收集分笔过程：month=新签导入月
                             Map<String, Object> nsStep = new java.util.LinkedHashMap<>();
@@ -589,6 +616,11 @@ public class SalaryCalculationEngine {
                             nsStep.put("perf", periodPerf);
                             nsStep.put("rate", periodFinalRate);
                             nsStep.put("income", periodIncome);
+                            if (sp.perf.signum() != 0) {
+                                nsStep.put("spPerf", MoneyUtil.round2(sp.perf));
+                                nsStep.put("spIncome", sp.income);
+                                nsStep.put("spBonus", sp.bonus);
+                            }
                             nsSteps.add(nsStep);
                         }
                         personalNewsign = MoneyUtil.round2(personalNewsign);
@@ -1311,6 +1343,71 @@ public class SalaryCalculationEngine {
     private static BigDecimal bd(String s) {
         if (s == null || s.isBlank()) return BigDecimal.ZERO;
         return new BigDecimal(s);
+    }
+
+    /**
+     * 自购单提成加成拆分。
+     * <p>
+     * 命中该员工自购单（已审批通过）合同号的结佣明细，单独按「该期间 finalRate + 加成点数」
+     * 计算提成，其余明细保持原费率；同一员工其他合同、同一合同其他参与经纪人均不受影响。
+     * <p>
+     * 仅经纪人角色生效（店长/总监不适用员工福利）。
+     */
+    private SelfPurchaseSplit splitSelfPurchase(CalcInput input, EmployeeRole role, Long employeeId,
+                                                List<CommissionItemDTO> items,
+                                                RuleService.ParsedSnapshot snapshot,
+                                                BigDecimal periodFinalRate) {
+        if (role != EmployeeRole.AGENT || items == null || items.isEmpty()
+            || input.selfPurchaseByEmp.isEmpty()) {
+            return SelfPurchaseSplit.EMPTY;
+        }
+        Map<String, BigDecimal> byContract = input.selfPurchaseByEmp.get(employeeId);
+        if (byContract == null || byContract.isEmpty()) {
+            return SelfPurchaseSplit.EMPTY;
+        }
+        BigDecimal spPerf = BigDecimal.ZERO;
+        BigDecimal spBonus = BigDecimal.ZERO;
+        for (CommissionItemDTO it : items) {
+            if (it.getAmount() == null || it.getContractNo() == null) continue;
+            BigDecimal bonus = byContract.get(it.getContractNo().trim());
+            if (bonus == null || bonus.signum() <= 0) continue;
+            BigDecimal factor = snapshot.conversionFactor(it.getBizType());
+            spPerf = spPerf.add(it.getAmount().multiply(factor));
+            // 加成封顶：该单比率不超过 100%
+            BigDecimal spRate = periodFinalRate.add(bonus);
+            if (spRate.compareTo(MAX_SELF_PURCHASE_RATE) > 0) {
+                spRate = MAX_SELF_PURCHASE_RATE;
+            }
+            spBonus = spBonus.add(it.getAmount().multiply(factor)
+                .multiply(spRate.subtract(periodFinalRate)));
+        }
+        if (spPerf.signum() == 0) {
+            return SelfPurchaseSplit.EMPTY;
+        }
+        return new SelfPurchaseSplit(spPerf, MoneyUtil.round2(spBonus),
+            MoneyUtil.round2(spPerf.multiply(periodFinalRate)).add(MoneyUtil.round2(spBonus)));
+    }
+
+    /**
+     * 自购单加成拆分结果：命中加成明细的折算业绩、加成金额、该部分提成合计。
+     * 未命中时为 {@link #EMPTY}（perf=0，调用方按原口径整笔计算，不做拆分）。
+     */
+    private static final class SelfPurchaseSplit {
+        static final SelfPurchaseSplit EMPTY = new SelfPurchaseSplit(BigDecimal.ZERO,
+            BigDecimal.ZERO, BigDecimal.ZERO);
+
+        /** 命中自购单合同号的折算业绩 */
+        final BigDecimal perf;
+        /** 加成部分金额（业绩 × 加成点数） */
+        final BigDecimal bonus;
+        /** 该部分提成合计（业绩 × finalRate + 加成金额） */
+        final BigDecimal income;
+
+        SelfPurchaseSplit(BigDecimal perf, BigDecimal bonus, BigDecimal income) {
+            this.perf = perf;
+            this.bonus = bonus;
+            this.income = income;
+        }
     }
 
     /** null 安全的 BigDecimal 归零 */

@@ -208,6 +208,17 @@ public interface ReceivedRealFactMapper {
               AND pe.period &lt;= #{period}
               <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
             GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        ), expect_period_sum AS (
+            -- 当期新签口径：仅当期 ACTIVE PERF_EXPECT 合计（含退单负事实）。
+            -- 退单负实收行（amount &lt; 0）用该口径展示「本次冲减对应的新签」，
+            -- 累计口径在退单月会与历史正数抵消为 0，看不出冲减
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period = #{period}
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
         )
             </when>
             <otherwise>
@@ -218,6 +229,9 @@ public interface ReceivedRealFactMapper {
             WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
               <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
             GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        ), expect_period_sum AS (
+            -- 跨期间查询（不选月份）无「当期」概念，负行沿用累计口径
+            SELECT NULL::text AS biz_key, 0::numeric AS amt WHERE FALSE
         )
             </otherwise>
         </choose>
@@ -265,12 +279,17 @@ public interface ReceivedRealFactMapper {
             -- biz_key（真实订单号）与 PERF_EXPECT 侧 biz_key（contract_no 退化）对不上，
             -- 新签合计展示为 0 的问题（2026-10-21 修复，差异 2,232.37 元 / 2 笔合同）
             SELECT s.*,
-                   COALESCE(es1.amt, es2.amt, 0) AS expect_before_agg
+                   COALESCE(es1.amt, es2.amt, 0) AS expect_before_agg,
+                   COALESCE(ep1.amt, ep2.amt, 0) AS expect_period_agg
             FROM s
             LEFT JOIN expect_sum es1
                    ON s.order_no IS NOT NULL AND es1.biz_key = s.order_no
             LEFT JOIN expect_sum es2
                    ON es1.amt IS NULL AND s.contract_no IS NOT NULL AND es2.biz_key = s.contract_no
+            LEFT JOIN expect_period_sum ep1
+                   ON s.order_no IS NOT NULL AND ep1.biz_key = s.order_no
+            LEFT JOIN expect_period_sum ep2
+                   ON ep1.amt IS NULL AND s.contract_no IS NOT NULL AND ep2.biz_key = s.contract_no
         )
         SELECT MAX(w.contract_no) AS "contractNo",
                MAX(w.order_no) AS "orderNo",
@@ -279,7 +298,12 @@ public interface ReceivedRealFactMapper {
                MAX(w.business_date) AS "businessDate",
                MIN(w.period) AS "period",
                COALESCE(SUM(w.amount), 0) AS "amount",
-               COALESCE(MAX(w.expect_before_agg), 0) AS "expectedAmount",
+               -- 退单负实收行（当期合计为负）用当期新签口径展示冲减对应的新签；
+               -- 正常实收行沿用「实收月及之前累计」口径
+               CASE
+                   WHEN COALESCE(SUM(w.amount), 0) &lt; 0 THEN COALESCE(MAX(w.expect_period_agg), 0)
+                   ELSE COALESCE(MAX(w.expect_before_agg), 0)
+               END AS "expectedAmount",
                CASE
                    WHEN bool_or(w.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
                    WHEN bool_or(w.ra_status = 'DRAFT') THEN 'DRAFT'
@@ -383,6 +407,9 @@ public interface ReceivedRealFactMapper {
             GROUP BY dd.received_apply_id
         ) agg ON agg.received_apply_id = ra.id
         WHERE ra.status = 'APPROVED'
+          <!-- 退单负实收单（单号沿用 TD 退单号）不进结佣发起候选：
+               负部分已由结佣冲减明细/负新签事实处理，避免与新签负事实重复冲减 -->
+          AND ra.apply_no NOT LIKE 'TD%'
         <if test="keyword != null and keyword != ''">
           AND (ra.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
                OR ra.order_no LIKE CONCAT('%', #{keyword}::text, '%')
