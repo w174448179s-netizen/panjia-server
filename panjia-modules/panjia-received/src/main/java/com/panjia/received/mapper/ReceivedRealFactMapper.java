@@ -520,10 +520,12 @@ public interface ReceivedRealFactMapper {
      * （「实收是否已调整」判定用，不限归属期间，2026-10-15 结佣发起闸门用）。
      * <p>
      * 口径：以各业务键当前 ACTIVE rd 的 source_key 集合为准，任一链上存在
-     * REVERSED 明细即计入；调用方以返回值 &gt; 0 判定「已调整」。
+     * REVERSED 明细即计入；另，ACTIVE 行 adjust_id 非空（调整联动新建行，如
+     * MANUAL-RADJ 新人行/无壳建行，源键无 REVERSED 前驱）同样计入。
+     * 调用方以返回值 &gt; 0 判定「已调整」。
      *
      * @param keys 合同号/订单号业务键集合（不可为空，空集合由调用方拦截不发起 SQL）
-     * @return 存在 REVERSED 行的链数；0 = 从未调整
+     * @return 已调整标志数（REVERSED 链数 + 调整新建 ACTIVE 行数）；0 = 从未调整
      */
     @Select("""
         <script>
@@ -538,16 +540,21 @@ public interface ReceivedRealFactMapper {
             FROM k JOIN pj_received_contract rc ON rc.contract_no = k.key
         ),
         sk AS (
-            SELECT DISTINCT rd.source_key
+            SELECT DISTINCT rd.source_key, rd.adjust_id
             FROM hit h
             JOIN pj_received_detail rd ON rd.contract_id = h.id
                                      AND rd.detail_status = 'ACTIVE'
                                      AND rd.source_key IS NOT NULL
         )
         SELECT COUNT(*)
-        FROM sk
-        JOIN pj_received_detail x ON x.source_key = sk.source_key
-                                 AND x.detail_status = 'REVERSED'
+        FROM (
+            SELECT 1
+            FROM sk
+            JOIN pj_received_detail x ON x.source_key = sk.source_key
+                                     AND x.detail_status = 'REVERSED'
+            UNION ALL
+            SELECT 1 FROM sk WHERE sk.adjust_id IS NOT NULL
+        ) t
         </script>
         """)
     long existsReversedChainByKeys(@Param("keys") Collection<String> keys);
