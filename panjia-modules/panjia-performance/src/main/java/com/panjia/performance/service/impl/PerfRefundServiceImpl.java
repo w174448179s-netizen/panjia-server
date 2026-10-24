@@ -646,7 +646,21 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         if (batchId == null) {
             return 0;
         }
-        return cancelSupersededImportedRefunds(List.of(batchId));
+        // 新签事实已硬删，退单同步物理删除；负结佣冲减单先走结佣域作废（REVERSED/CANCELLED 留痕）
+        CommissionRefundPort port = commissionRefundPortProvider.getIfAvailable();
+        List<PerfRefund> refunds = refundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
+            .eq(PerfRefund::getStatus, AdjustStatus.EXECUTED)
+            .apply("payload_json IS NOT NULL AND payload_json::jsonb ->> 'batchId' = {0}",
+                String.valueOf(batchId)));
+        for (PerfRefund refund : refunds) {
+            if (port != null) {
+                port.cancelRefundReversal(refund.getId(), refund.getOperatorId());
+            }
+            refundMapper.deleteById(refund.getId());
+            log.info("[退单-导入登记] 批次撤销硬删退单：refundNo={}, contractNo={}, refundPeriod={}, batchId={}",
+                refund.getRefundNo(), refund.getContractNo(), refund.getRefundPeriod(), batchId);
+        }
+        return refunds.size();
     }
 
     /** 撤销被重导冲销的旧批次所生成的导入退单（含其负结佣冲减单） */
@@ -654,7 +668,7 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         if (supersededBatchIds == null || supersededBatchIds.isEmpty()) {
             return 0;
         }
-        int cancelled = 0;
+        int deleted = 0;
         CommissionRefundPort port = commissionRefundPortProvider.getIfAvailable();
         for (Long oldBatchId : supersededBatchIds) {
             List<PerfRefund> olds = refundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
@@ -665,14 +679,13 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
                 if (port != null) {
                     port.cancelRefundReversal(old.getId(), old.getOperatorId());
                 }
-                old.setStatus(AdjustStatus.CANCELLED);
-                refundMapper.updateById(old);
-                cancelled++;
-                log.info("[退单-导入登记] 旧批次退单已撤销：refundNo={}, contractNo={}, refundPeriod={}, oldBatchId={}",
+                refundMapper.deleteById(old.getId());
+                deleted++;
+                log.info("[退单-导入登记] 重导冲销硬删旧批次退单：refundNo={}, contractNo={}, refundPeriod={}, oldBatchId={}",
                     old.getRefundNo(), old.getContractNo(), old.getRefundPeriod(), oldBatchId);
             }
         }
-        return cancelled;
+        return deleted;
     }
 
     /**

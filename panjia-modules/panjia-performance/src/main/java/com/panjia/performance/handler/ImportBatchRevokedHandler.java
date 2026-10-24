@@ -36,7 +36,8 @@ import java.util.Set;
  *   <li>硬删该批次业绩事实（pj_perf_fact）；</li>
  *   <li>硬删实收审批单（pj_perf_received_apply）及关联流程实例（走 ApprovalPort 系统级链路）；</li>
  *   <li>硬删消费日志（pj_perf_consume_log）；</li>
- *   <li>撤销本批次自动登记的导入退单及其负结佣冲减单（pj_perf_refund → CANCELLED）；</li>
+ *   <li>硬删本批次自动登记的导入退单及其负结佣冲减单（pj_perf_refund 物理删除，
+       负结佣冲减单先作废为 REVERSED/CANCELLED 留痕后删退单）；</li>
  *   <li><b>保底恢复（2026-10-02）</b>：restoredBatchIds 非空时，把被冲销旧批次的
  *       REVERSED/SUPERSEDE 事实翻回 ACTIVE，并对恢复合同重放实收通过事件
  *       （结佣域据此重建 DRAFT 草稿单）；</li>

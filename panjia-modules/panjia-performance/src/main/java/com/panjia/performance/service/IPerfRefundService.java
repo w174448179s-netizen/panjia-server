@@ -64,13 +64,13 @@ public interface IPerfRefundService {
 
     /**
      * 撤销某导入批次自动登记的退单（批次撤销场景）：
-     * 作废其负结佣冲减单（{@code TD + 退单ID}）并将退单状态置为 CANCELLED。
-     * <p>背景：批次撤销会硬删业绩事实，若退单残留，合同仍被标记「已退单」，
+     * 作废其负结佣冲减单（{@code TD + 退单ID}）后物理删除退单记录。
+     * <p>背景：批次撤销会硬删业绩事实，退单残留会导致合同仍被标记「已退单」、
      * 退单管理出现幽灵记录、结佣发起被误拦截。
      * <p>幂等：重复调用安全（仅处理 EXECUTED 状态的退单）。
      *
      * @param batchId 被撤销的导入批次 ID
-     * @return 撤销的退单笔数
+     * @return 删除的退单笔数
      */
     int cancelImportedRefundsByBatch(Long batchId);
 
