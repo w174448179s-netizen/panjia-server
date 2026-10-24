@@ -67,6 +67,42 @@ public interface PerfRefundMapper extends BaseMapper<PerfRefund> {
     List<Map<String, Object>> deptNames(@Param("deptIds") List<Long> deptIds);
 
     /**
+     * 业务键（合同号/订单号）是否已有生效中的手工退单（SUBMITTED/APPROVED/EXECUTED）。
+     * <p>
+     * 用于导入侧互斥（2026-10-25 定稿）：手工退单已镜像生成负新签/负实收/负结佣，
+     * 此时再导入贝壳的退单负数行会重复冲减；命中即跳过该批次的负数行。
+     * 含 SUBMITTED（审批中）：避免审批通过后才执行、导入已写入造成重复。
+     *
+     * @param contractNo 合同号（可空）
+     * @param orderNo    订单号（可空）
+     * @return 生效中退单条数；0 = 无手工退单
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(1)
+        FROM pj_perf_refund
+        WHERE status IN ('SUBMITTED', 'APPROVED', 'EXECUTED')
+          <!-- 排除贝壳导入自动登记的退单记录：其本身由导入负数生成，不能反过来拦截后续批次的部分退单行 -->
+          AND (payload_json IS NULL OR payload_json NOT LIKE '%"source":"IMPORT"%')
+          AND (
+            <choose>
+              <when test="contractNo != null and contractNo != ''">
+                contract_no = #{contractNo}
+                <if test="orderNo != null and orderNo != ''">
+                  OR order_no = #{orderNo}
+                </if>
+              </when>
+              <otherwise>
+                order_no = #{orderNo}
+              </otherwise>
+            </choose>
+          )
+        </script>
+        """)
+    long countEffectiveByBizKeys(@Param("contractNo") String contractNo,
+                                 @Param("orderNo") String orderNo);
+
+    /**
      * 某合同是否已有生效中的退单（SUBMITTED/APPROVED/EXECUTED）——重复退单拦截。
      */
     @Select("""

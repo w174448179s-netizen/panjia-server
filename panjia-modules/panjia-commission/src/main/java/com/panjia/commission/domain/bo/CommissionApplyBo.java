@@ -36,4 +36,14 @@ public class CommissionApplyBo implements Serializable {
 
     /** 当前审批节点（DIRECTOR/FINANCE） */
     private String currentNode;
+
+    /**
+     * 退单三态筛选（合同级已退单口径）。
+     * <ul>
+     *   <li>REFUND=仅退单（存在已执行退单）；</li>
+     *   <li>NORMAL=仅正常（排除已退单）；</li>
+     *   <li>空=全部。</li>
+     * </ul>
+     */
+    private String refundFilter;
 }

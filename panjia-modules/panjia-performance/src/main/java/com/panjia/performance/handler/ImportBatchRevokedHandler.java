@@ -15,6 +15,7 @@ import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
 import com.panjia.performance.mapper.ReceivedApplyMapper;
+import com.panjia.performance.service.IPerfRefundService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -35,6 +36,7 @@ import java.util.Set;
  *   <li>硬删该批次业绩事实（pj_perf_fact）；</li>
  *   <li>硬删实收审批单（pj_perf_received_apply）及关联流程实例（走 ApprovalPort 系统级链路）；</li>
  *   <li>硬删消费日志（pj_perf_consume_log）；</li>
+ *   <li>撤销本批次自动登记的导入退单及其负结佣冲减单（pj_perf_refund → CANCELLED）；</li>
  *   <li><b>保底恢复（2026-10-02）</b>：restoredBatchIds 非空时，把被冲销旧批次的
  *       REVERSED/SUPERSEDE 事实翻回 ACTIVE，并对恢复合同重放实收通过事件
  *       （结佣域据此重建 DRAFT 草稿单）；</li>
@@ -56,6 +58,7 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
     private final PerformanceConsumeLogMapper consumeLogMapper;
     private final ApprovalPort approvalPort;
     private final EventPort eventPort;
+    private final IPerfRefundService perfRefundService;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -106,6 +109,13 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
         // ③ 硬删消费日志
         int logCount = consumeLogMapper.delete(new LambdaQueryWrapper<com.panjia.performance.domain.PerformanceConsumeLog>()
             .eq(com.panjia.performance.domain.PerformanceConsumeLog::getBatchId, batchId));
+
+        // ③.5 撤销本批次自动登记的导入退单（含其负结佣冲减单）：
+        // 事实已硬删，退单残留会导致合同仍被标记「已退单」、退单管理出幽灵记录、结佣发起被误拦截
+        int cancelledRefunds = perfRefundService.cancelImportedRefundsByBatch(batchId);
+        if (cancelledRefunds > 0) {
+            log.info("[批次撤销-业绩域] 导入退单已撤销：batchId={}, count={}", batchId, cancelledRefunds);
+        }
 
         // ④ 保底恢复：旧批次事实翻回 ACTIVE
         int restoredFacts = 0;

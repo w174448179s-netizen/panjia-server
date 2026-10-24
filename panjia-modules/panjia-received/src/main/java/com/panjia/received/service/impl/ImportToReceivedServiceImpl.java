@@ -5,6 +5,7 @@ import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.ImportToReceivedPort;
+import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.received.domain.ReceivedContract;
 import com.panjia.received.domain.ReceivedDetail;
@@ -45,6 +46,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
     private final ReceivedContractMapper contractMapper;
     private final ReceivedDetailMapper detailMapper;
     private final PeopleQueryPort peopleQueryPort;
+    private final CommissionPerformanceQueryPort commissionPerformanceQueryPort;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -52,6 +54,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         log.info("[实收写入] 开始：batchId={}, sourceType={}, period={}", batchId, sourceType, period);
         int newContracts = 0;
         int newDetails = 0;
+        int skippedRefundRows = 0;
         int pageNum = 1;
         Map<String, ReceivedContract> contractCache = new LinkedHashMap<>();
 
@@ -70,8 +73,32 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             }
             Map<String, EmployeeMainDataDTO> empMap = peopleQueryPort.findEmployeeMainDataByCodes(pageCodes);
 
+            // 页级批量预查「已手工退单」业务键（2026-10-25 互斥）：手工退单执行时已镜像生成
+            // 负实收明细，此时再写入贝壳导入的负到账行即重复冲减，这些行必须跳过
+            Set<String> negativeKeys = new HashSet<>();
             for (NormalizedRecordDTO record : pageResult.getRows()) {
                 if (!isReceivedRecord(record, sourceType)) continue;
+                BigDecimal amt = record.getReceivedAmount();
+                if (amt != null && amt.signum() < 0) {
+                    if (record.getOrderNo() != null) negativeKeys.add(record.getOrderNo());
+                    if (record.getContractNo() != null) negativeKeys.add(record.getContractNo());
+                }
+            }
+            Set<String> refundedKeys = negativeKeys.isEmpty()
+                ? Set.of() : commissionPerformanceQueryPort.findManualRefundedBizKeys(negativeKeys);
+
+            for (NormalizedRecordDTO record : pageResult.getRows()) {
+                if (!isReceivedRecord(record, sourceType)) continue;
+
+                // 负到账行 + 合同已手工退单 → 跳过（避免同一笔退单被冲减两次）
+                BigDecimal rowAmount = record.getReceivedAmount();
+                if (rowAmount != null && rowAmount.signum() < 0
+                    && (refundedKeys.contains(record.getOrderNo()) || refundedKeys.contains(record.getContractNo()))) {
+                    log.warn("[实收写入] 合同已手工退单，跳过导入的负到账行：contractNo={}, orderNo={}, recordId={}",
+                        record.getContractNo(), record.getOrderNo(), record.getId());
+                    skippedRefundRows++;
+                    continue;
+                }
 
                 EmployeeMainDataDTO emp = record.getEmployeeCode() == null ? null : empMap.get(record.getEmployeeCode());
 
@@ -120,8 +147,9 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             contractMapper.updateById(c);
         }
 
-        log.info("[实收写入] 完成：batchId={}, newContracts={}, newDetails={}", batchId, newContracts, newDetails);
-        return new ImportToReceivedResult(newContracts, newDetails);
+        log.info("[实收写入] 完成：batchId={}, newContracts={}, newDetails={}, skippedRefundRows={}",
+            batchId, newContracts, newDetails, skippedRefundRows);
+        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows);
     }
 
     @Override

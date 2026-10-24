@@ -77,9 +77,11 @@ public interface ReceivedRealFactPort {
      * @param employeeId 员工 ID（null 不过滤）
      * @param keyword    关键字（可空）
      * @param bizType    业务类型（可空；精确匹配）
+     * @param refundFilter 退单三态筛选（可空；REFUND=仅退单，NORMAL=仅正常，空=全部）
      * @return 审批单行（按签约日期倒序，id 次序兜底）；无数据返回空列表
      */
-    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType);
+    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType,
+                                                            String refundFilter);
 
     /**
      * 批量查合同维度「调整前」实收金额合计。

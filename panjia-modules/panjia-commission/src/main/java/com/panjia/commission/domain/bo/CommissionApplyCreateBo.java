@@ -20,8 +20,7 @@ public class CommissionApplyCreateBo implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    /** 业绩归属月（结算月 YYYY-MM） */
-    @NotBlank(message = "结算月不能为空")
+    /** 业绩归属月（结算月 YYYY-MM）；留空 = 结佣全部未结佣业绩并落账当前月 */
     private String period;
 
     /** 合同号（必填；快照归一化与新签双键匹配用） */

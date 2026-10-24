@@ -146,9 +146,11 @@ public interface CommissionPerformanceQueryPort {
      * @param employeeId 员工 ID（null 不过滤；经实收明细 COALESCE(员工 ID, 工号兜底) 匹配）
      * @param keyword    关键字（可空；合同号/订单号/房源地址 LIKE）
      * @param bizType    业务类型（可空；精确匹配）
+     * @param refundFilter 退单三态筛选（可空；REFUND=仅退单，NORMAL=仅正常，空=全部）
      * @return 审批单行（按签约日期倒序，id 次序兜底）；无数据返回空列表
      */
-    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType);
+    List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType,
+                                                            String refundFilter);
 
     /**
      * 批量查合同维度「调整前」事实金额合计（结佣明细列表展示「原值 → 调整后值」用）。
@@ -259,6 +261,18 @@ public interface CommissionPerformanceQueryPort {
      * @return 已退单业务键集合（含命中行的 contractNo 与 orderNo）
      */
     Set<String> findRefundedBizKeys(Collection<String> bizKeys);
+
+    /**
+     * 按业务键集合查存在「生效中手工退单」（pj_perf_refund status in SUBMITTED/APPROVED/EXECUTED）的业务键。
+     * <p>
+     * 与 {@link #findRefundedBizKeys} 的区别：包含<b>审批中</b>的退单（不仅是已执行）。
+     * 用于导入侧互斥（2026-10-25）：手工退单已/将镜像生成负数业绩，
+     * 此时贝壳导入的退单负数行必须跳过，避免同一笔退单被冲减两次。
+     *
+     * @param bizKeys 合同号/订单号业务键集合（空集合返回空集，不发起 SQL）
+     * @return 命中业务键集合（含命中行的 contractNo 与 orderNo）
+     */
+    Set<String> findManualRefundedBizKeys(Collection<String> bizKeys);
 
     /**
      * 解析实收事实对应的<b>新签导入月</b>（薪酬域结佣提成规则期间用，2026-10-17 改）。

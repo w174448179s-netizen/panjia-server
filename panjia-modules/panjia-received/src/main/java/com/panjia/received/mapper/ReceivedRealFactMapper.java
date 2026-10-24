@@ -438,13 +438,29 @@ public interface ReceivedRealFactMapper {
               WHERE dd.received_apply_id = ra.id AND dd.detail_status = 'ACTIVE'
                 AND COALESCE(dd.employee_id, e.employee_id) = #{employeeId})
         </if>
+        <!-- 退单三态筛选（合同级已退单口径）：REFUND=存在已执行退单，NORMAL=排除已退单，空=全部 -->
+        <if test="refundFilter == 'REFUND'">
+          AND EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = ra.contract_no
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = ra.order_no)))
+        </if>
+        <if test="refundFilter == 'NORMAL'">
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = ra.contract_no
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = ra.order_no)))
+        </if>
         ORDER BY ra.business_date DESC, ra.id DESC
         </script>
         """)
     List<PerformanceContractSummaryDTO> selectApprovedApplies(@Param("deptId") Long deptId,
                                                               @Param("employeeId") Long employeeId,
                                                               @Param("keyword") String keyword,
-                                                              @Param("bizType") String bizType);
+                                                              @Param("bizType") String bizType,
+                                                              @Param("refundFilter") String refundFilter);
 
     /**
      * 批量查合同维度「调整前」实收金额合计：以各业务键当前 ACTIVE rd 的 sourceKey 为准，

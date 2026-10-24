@@ -266,6 +266,33 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Set<String> findManualRefundedBizKeys(java.util.Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptySet();
+        }
+        // 含审批中的退单：手工退单一旦提交，后续审批通过会镜像生成负数，
+        // 导入侧必须提前跳过，避免执行后再冲一遍造成重复
+        List<PerfRefund> refunds = perfRefundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
+            .select(PerfRefund::getContractNo, PerfRefund::getOrderNo)
+            .in(PerfRefund::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED, AdjustStatus.EXECUTED)
+            // 排除贝壳导入自动登记退单：它是导入负数的结果，不能反过来阻止后续批次的部分退单负数行
+            .and(w -> w.isNull(PerfRefund::getPayloadJson)
+                .or().notLike(PerfRefund::getPayloadJson, "\"source\":\"IMPORT\""))
+            .and(w -> w.in(PerfRefund::getContractNo, bizKeys)
+                .or().in(PerfRefund::getOrderNo, bizKeys)));
+        Set<String> refunded = new HashSet<>();
+        for (PerfRefund r : refunds) {
+            if (StringUtils.isNotBlank(r.getContractNo())) {
+                refunded.add(r.getContractNo());
+            }
+            if (StringUtils.isNotBlank(r.getOrderNo())) {
+                refunded.add(r.getOrderNo());
+            }
+        }
+        return refunded;
+    }
+
+    @Override
     public Map<Long, String> findNewSignPeriodsByRealFacts(java.util.Collection<PerformanceFactSummaryDTO> realFacts) {
         if (realFacts == null || realFacts.isEmpty()) {
             return Collections.emptyMap();
@@ -401,10 +428,11 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType) {
+    public List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType,
+                                                                   String refundFilter) {
         // 实收审批单行全部落在实收域；performance 域无 PERF_REAL 数据，端口缺失时返回空
         ReceivedRealFactPort port = realPort();
-        return port == null ? Collections.emptyList() : port.listApprovedApplies(deptId, employeeId, keyword, bizType);
+        return port == null ? Collections.emptyList() : port.listApprovedApplies(deptId, employeeId, keyword, bizType, refundFilter);
     }
 
     @Override

@@ -272,8 +272,9 @@ public class EmployeeServiceImpl implements EmployeeService {
             throw new ServiceException("员工不存在，employeeId={}", employeeId);
         }
         Long operator = operatorId != null ? operatorId : SYSTEM_OPERATOR_ID;
-        // 算薪事实（职级/社保/公积金/商保/宿舍/兼职/排除团队/各项费用/绩效方案）及状态、伯乐
+        // 算薪事实（职级/社保/公积金/商保/宿舍/兼职/排除团队/各项费用/绩效方案）及伯乐
         // 走时间线，必须显式传入 effectiveDate 才会处理；未传则仅修改基本信息，不触碰算薪事实。
+        // 状态变更（含离职）不依赖 effectiveDate，见下方 ③ 立即生效。
         LocalDate effect = dto.getEffectiveDate() != null ? monthStart(dto.getEffectiveDate()) : null;
 
         // ① 基本信息直改
@@ -317,7 +318,7 @@ public class EmployeeServiceImpl implements EmployeeService {
             emp.setLeaveDate(dto.getLeaveDate());
         }
 
-        // ②~⑤ 走时间线的事实变更（伯乐/状态/职级/算薪开关与金额/绩效方案）
+        // ②~⑤ 走时间线的事实变更（伯乐/职级/算薪开关与金额/绩效方案）
         // 仅当显式传入 effectiveDate 时才处理；仅改基本信息时不触碰，避免无意义的变更记录。
         if (effect != null) {
             // ② 伯乐（mentorCode 非 null 即参与比对；空白=解除伯乐关系）
@@ -327,24 +328,6 @@ public class EmployeeServiceImpl implements EmployeeService {
                     changeFact(employeeId, FactType.MENTOR,
                         newMentorId != null ? String.valueOf(newMentorId) : NO_MENTOR, effect, operator);
                     emp.setMentorEmployeeId(newMentorId);
-                }
-            }
-
-            // ③ 状态（离职 → 禁用账户）
-            if (StringUtils.isNotBlank(dto.getStatus())) {
-                EmployeeStatus newStatus = EmployeeStatus.fromCode(dto.getStatus());
-                if (newStatus == null) {
-                    throw new ServiceException("非法员工状态：{}", dto.getStatus());
-                }
-                if (newStatus != emp.getStatus()) {
-                    changeFact(employeeId, FactType.STATUS, newStatus.getCode(), effect, operator);
-                    emp.setStatus(newStatus);
-                    if (newStatus == EmployeeStatus.LEFT) {
-                        emp.setLeaveDate(dto.getLeaveDate() != null ? dto.getLeaveDate() : effect);
-                        if (emp.getUserId() != null) {
-                            accountPort.disableUser(emp.getUserId());
-                        }
-                    }
                 }
             }
 
@@ -377,6 +360,26 @@ public class EmployeeServiceImpl implements EmployeeService {
                         validatePerfScheme(target, emp);
                     }
                     changeFact(employeeId, FactType.PERF_SCHEME, target, effect, operator);
+                }
+            }
+        }
+
+        // ③ 状态变更（立即生效，不依赖变更生效月：列表/算薪名单/账户禁用均直查员工表 status 字段，
+        // STATUS 事实仅作留痕，落库生效日=离职日期所在月；未传离职日期时取当天）
+        if (StringUtils.isNotBlank(dto.getStatus())) {
+            EmployeeStatus newStatus = EmployeeStatus.fromCode(dto.getStatus());
+            if (newStatus == null) {
+                throw new ServiceException("非法员工状态：{}", dto.getStatus());
+            }
+            if (newStatus != emp.getStatus()) {
+                LocalDate statusEffect = monthStart(dto.getLeaveDate() != null ? dto.getLeaveDate() : LocalDate.now());
+                changeFact(employeeId, FactType.STATUS, newStatus.getCode(), statusEffect, operator);
+                emp.setStatus(newStatus);
+                if (newStatus == EmployeeStatus.LEFT) {
+                    emp.setLeaveDate(dto.getLeaveDate() != null ? dto.getLeaveDate() : LocalDate.now());
+                    if (emp.getUserId() != null) {
+                        accountPort.disableUser(emp.getUserId());
+                    }
                 }
             }
         }

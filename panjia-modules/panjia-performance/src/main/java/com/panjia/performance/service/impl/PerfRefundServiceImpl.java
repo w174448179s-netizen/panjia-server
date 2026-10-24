@@ -253,6 +253,9 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         if (refundMapper.countEffectiveByContract(contractNo) > 0) {
             throw new ServiceException("该合同已存在退单（审批中或已执行），不可重复退单");
         }
+        // 1.5 与贝壳导入退单互斥（2026-10-25 定稿）：导入负数行已按原事实镜像冲减过，
+        //     再手工退单会重复生成一笔负数（两套负数叠加），直接拦截
+        assertNoImportRedink(contractNo, dto.getOrderNo());
 
         // 2. 装载可退事实并校验封账
         List<PerformanceFact> facts = loadRefundableExpectFacts(contractNo, dto.getOrderNo());
@@ -319,6 +322,20 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
             refund.getId(), refund.getRefundNo(), contractNo, refundPeriod,
             refund.getExpectAmount(), refund.getRealAmount());
         return refund;
+    }
+
+    /**
+     * 导入退单互斥校验（2026-10-25 定稿）：贝壳导入的负数行已按原事实镜像冲减，
+     * 手工退单再冲一次会产生两笔负数（合同净额翻负）。命中即拒绝手工退单。
+     *
+     * @param contractNo 合同号
+     * @param orderNo    订单号（可空）
+     */
+    private void assertNoImportRedink(String contractNo, String orderNo) {
+        if (factMapper.countImportRedinkByBizKeys(contractNo, orderNo) > 0) {
+            throw new ServiceException("合同 " + contractNo
+                + " 已通过贝壳导入退单（存在导入红冲负数业绩），不可重复手工退单");
+        }
     }
 
     /**
@@ -450,6 +467,8 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
             throw new ServiceException(blocked);
         }
         List<PerformanceFact> facts = loadRefundableExpectFacts(refund.getContractNo(), refund.getOrderNo());
+        // 执行阶段复核导入互斥：审批期间可能已导入贝壳退单负数，此时再生成负数即重复冲减
+        assertNoImportRedink(refund.getContractNo(), refund.getOrderNo());
         BigDecimal expectSum = BigDecimal.ZERO;
         // 原事实 ID → 本次生成的负事实 ID（结佣冲减明细要绑定负事实，避免后续发起结佣重复抵扣）
         Map<Long, Long> factMapping = new HashMap<>();
@@ -523,6 +542,273 @@ public class PerfRefundServiceImpl implements IPerfRefundService {
         refundMapper.updateById(refund);
         log.info("[退单] 执行完成：refundId={}, 负新签={}（{}笔）, 负实收={}（{}笔）, 负结佣={}, 落账月={}",
             refund.getId(), expectSum, facts.size(), realSum, realCount, commissionSum, refund.getRefundPeriod());
+    }
+
+    // ==================== 贝壳导入退单自动登记 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int createFromImportedBatch(Long batchId, String period, Long operatorId,
+                                       List<Long> supersededBatchIds) {
+        if (batchId == null) {
+            return 0;
+        }
+        // applicant_id 非空约束：导入事件未带操作人时兜底超管
+        Long opId = operatorId != null ? operatorId : 1L;
+        // 重导冲销旧批次：先撤销旧批次生成的自动退单及其负结佣冲减单，
+        // 避免新旧两笔退单/负结佣重复扣减（原负事实已由 supersede 链路冲销）
+        cancelSupersededImportedRefunds(supersededBatchIds);
+        // 本批次导入的负数新签事实（经纪人明细表退单行 → 已按原事实镜像红冲）
+        List<PerformanceFact> redinks = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getBatchId, batchId)
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getReversalType, ReversalType.REDINK_REFUND)
+            .eq(PerformanceFact::getSource, PerformanceSource.IMPORT)
+            .lt(PerformanceFact::getPerformanceAmount, BigDecimal.ZERO)
+            .orderByAsc(PerformanceFact::getId));
+        if (redinks.isEmpty()) {
+            return 0;
+        }
+        // 按「合同 + 订单 + 退单月」分组：8 月退一部分、9 月又退一部分 → 各自一笔退单记录
+        Map<String, List<PerformanceFact>> groups = new LinkedHashMap<>();
+        for (PerformanceFact fact : redinks) {
+            String key = StringUtils.trimToEmpty(fact.getContractNo()) + "|"
+                + StringUtils.trimToEmpty(fact.getOrderNo()) + "|"
+                + StringUtils.trimToEmpty(fact.getPeriod());
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(fact);
+        }
+        int created = 0;
+        for (List<PerformanceFact> facts : groups.values()) {
+            PerformanceFact first = facts.get(0);
+            String orderNo = first.getOrderNo();
+            // 退单表 contract_no 非空：一手房等无合同号业务以订单号兜底，两者都空则跳过（脏数据）
+            String contractNo = StringUtils.isNotBlank(first.getContractNo())
+                ? first.getContractNo() : StringUtils.trimToNull(orderNo);
+            String refundPeriod = StringUtils.isNotBlank(first.getPeriod())
+                ? first.getPeriod() : period;
+            if (contractNo == null || StringUtils.isBlank(refundPeriod)) {
+                log.warn("[退单-导入登记] 缺少合同号/订单号或退单月，跳过：batchId={}, factId={}",
+                    batchId, first.getId());
+                continue;
+            }
+            // 幂等：同批次同合同同退单月已登记过则跳过（事件重试）
+            long exists = refundMapper.selectCount(new LambdaQueryWrapper<PerfRefund>()
+                .eq(PerfRefund::getContractNo, contractNo)
+                .eq(PerfRefund::getRefundPeriod, refundPeriod)
+                .apply("payload_json IS NOT NULL AND payload_json::jsonb ->> 'batchId' = {0}",
+                    String.valueOf(batchId)));
+            if (exists > 0) {
+                continue;
+            }
+
+            PerfRefund refund = new PerfRefund();
+            refund.setRefundNo(REFUND_NO_PREFIX + LocalDateTime.now().format(DATE_FORMATTER)
+                + RandomUtil.randomNumbers(6));
+            refund.setContractNo(contractNo);
+            refund.setOrderNo(orderNo);
+            refund.setRefundPeriod(refundPeriod);
+            refund.setBizType(first.getBizType());
+            refund.setEmployeeId(first.getEmployeeId());
+            refund.setDeptId(first.getDeptId());
+            refund.setExpectAmount(MoneyUtil.round2(facts.stream()
+                .map(PerformanceFact::getPerformanceAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)));
+            // 负到账可能在其他批次（理房通），此刻先按已有负实收明细回填，收到实收批次后再刷新
+            refund.setRealAmount(sumNegativeReceived(contractNo, orderNo, refundPeriod));
+            refund.setReason("贝壳导入退单（系统自动生成，无需审批）");
+            refund.setStatus(AdjustStatus.EXECUTED);
+            refund.setApplicantId(opId);
+            refund.setApproverId(opId);
+            refund.setApproveTime(LocalDateTime.now());
+            refund.setOperatorId(opId);
+            refund.setExecuteTime(LocalDateTime.now());
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("source", "IMPORT");
+            payload.put("batchId", batchId);
+            payload.put("lines", buildPayload(facts));
+            refund.setPayloadJson(JsonUtils.toJsonString(payload));
+            refundMapper.insert(refund);
+
+            // 负新签单独到位不产生负结佣：仅当负实收此前已先行导入时才在此补冲减
+            applyImportedCommissionReversal(refund);
+            created++;
+            log.info("[退单-导入登记] contractNo={}, orderNo={}, refundPeriod={}, expect={}, real={}, commission={}, batchId={}",
+                contractNo, orderNo, refundPeriod, refund.getExpectAmount(), refund.getRealAmount(),
+                refund.getCommissionAmount(), batchId);
+        }
+        return created;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int cancelImportedRefundsByBatch(Long batchId) {
+        if (batchId == null) {
+            return 0;
+        }
+        return cancelSupersededImportedRefunds(List.of(batchId));
+    }
+
+    /** 撤销被重导冲销的旧批次所生成的导入退单（含其负结佣冲减单） */
+    private int cancelSupersededImportedRefunds(List<Long> supersededBatchIds) {
+        if (supersededBatchIds == null || supersededBatchIds.isEmpty()) {
+            return 0;
+        }
+        int cancelled = 0;
+        CommissionRefundPort port = commissionRefundPortProvider.getIfAvailable();
+        for (Long oldBatchId : supersededBatchIds) {
+            List<PerfRefund> olds = refundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
+                .eq(PerfRefund::getStatus, AdjustStatus.EXECUTED)
+                .apply("payload_json IS NOT NULL AND payload_json::jsonb ->> 'batchId' = {0}",
+                    String.valueOf(oldBatchId)));
+            for (PerfRefund old : olds) {
+                if (port != null) {
+                    port.cancelRefundReversal(old.getId(), old.getOperatorId());
+                }
+                old.setStatus(AdjustStatus.CANCELLED);
+                refundMapper.updateById(old);
+                cancelled++;
+                log.info("[退单-导入登记] 旧批次退单已撤销：refundNo={}, contractNo={}, refundPeriod={}, oldBatchId={}",
+                    old.getRefundNo(), old.getContractNo(), old.getRefundPeriod(), oldBatchId);
+            }
+        }
+        return cancelled;
+    }
+
+    /**
+     * 导入退单产生负结佣的唯一闸门（2026-10-25 用户定稿）：
+     * <ol>
+     *   <li>负新签已到位（本退单记录即负新签登记结果）；</li>
+     *   <li>负实收已到位（同合同/订单、同退单月存在负实收明细）；</li>
+     *   <li>该合同确有已结佣记录（APPROVED 正金额结佣明细，且绑定被红冲的原新签事实）。</li>
+     * </ol>
+     * 任一条件不满足都不产生负结佣；已生成过（commissionAmount 非 0）则跳过，保证幂等。
+     */
+    private void applyImportedCommissionReversal(PerfRefund refund) {
+        if (refund.getCommissionAmount() != null && refund.getCommissionAmount().signum() != 0) {
+            return;
+        }
+        if (StringUtils.isBlank(refund.getRefundPeriod())) {
+            return;
+        }
+        // 条件 2：负实收必须已到位
+        if (sumNegativeReceived(refund.getContractNo(), refund.getOrderNo(),
+            refund.getRefundPeriod()).signum() == 0) {
+            log.info("[退单-导入登记] 负实收未到位，暂不产生负结佣：refundNo={}, contractNo={}, period={}",
+                refund.getRefundNo(), refund.getContractNo(), refund.getRefundPeriod());
+            return;
+        }
+        // 本次退单对应的负新签事实（按合同/订单 + 退单月定位，含部分退多笔）
+        LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getContractNo, refund.getContractNo())
+            .eq(StringUtils.isNotBlank(refund.getOrderNo()), PerformanceFact::getOrderNo, refund.getOrderNo())
+            .eq(PerformanceFact::getPeriod, refund.getRefundPeriod())
+            .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getReversalType, ReversalType.REDINK_REFUND)
+            .eq(PerformanceFact::getSource, PerformanceSource.IMPORT)
+            .lt(PerformanceFact::getPerformanceAmount, BigDecimal.ZERO);
+        List<PerformanceFact> facts = factMapper.selectList(wrapper);
+        if (facts.isEmpty()) {
+            return;
+        }
+        BigDecimal sum = createImportedRefundReversal(refund, facts);
+        // 条件 3：无已结佣记录时 port 返回 0，不生成任何负结佣
+        if (sum.signum() == 0) {
+            log.info("[退单-导入登记] 无可冲减的已结佣记录，不产生负结佣：refundNo={}, contractNo={}",
+                refund.getRefundNo(), refund.getContractNo());
+            return;
+        }
+        refund.setCommissionAmount(MoneyUtil.round2(sum));
+        refundMapper.updateById(refund);
+        log.info("[退单-导入登记] 负结佣已冲减：refundNo={}, contractNo={}, refundPeriod={}, commission={}",
+            refund.getRefundNo(), refund.getContractNo(), refund.getRefundPeriod(), refund.getCommissionAmount());
+    }
+
+    /**
+     * 导入退单的负结佣：按「负事实/原事实」的实际红冲比例缩放已结佣明细金额。
+     *
+     * @param refund 已落库的导入退单记录
+     * @param facts  本次退单的负新签事实
+     * @return 负结佣合计（负数）；无已结佣明细返回 0
+     */
+    private BigDecimal createImportedRefundReversal(PerfRefund refund, List<PerformanceFact> facts) {
+        CommissionRefundPort port = commissionRefundPortProvider.getIfAvailable();
+        if (port == null || facts.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        Map<Long, Long> factMapping = new HashMap<>();
+        Map<Long, BigDecimal> ratios = new HashMap<>();
+        for (PerformanceFact fact : facts) {
+            if (fact.getRefundOfFactId() == null) {
+                continue;
+            }
+            factMapping.put(fact.getRefundOfFactId(), fact.getId());
+            PerformanceFact original = factMapper.selectById(fact.getRefundOfFactId());
+            if (original == null || original.getPerformanceAmount() == null
+                || original.getPerformanceAmount().signum() == 0) {
+                continue;
+            }
+            // 比例带符号（负数）：负事实金额 ÷ 原正事实金额
+            ratios.put(original.getId(), fact.getPerformanceAmount()
+                .divide(original.getPerformanceAmount(), 8, java.math.RoundingMode.HALF_UP));
+        }
+        if (factMapping.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        return port.createRefundReversal(refund.getContractNo(), refund.getOrderNo(),
+            refund.getRefundPeriod(), refund.getId(), refund.getOperatorId(), factMapping, ratios);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int syncImportedRefunds(String period) {
+        if (StringUtils.isBlank(period)) {
+            return 0;
+        }
+        List<PerfRefund> records = refundMapper.selectList(new LambdaQueryWrapper<PerfRefund>()
+            .eq(PerfRefund::getStatus, AdjustStatus.EXECUTED)
+            .eq(PerfRefund::getRefundPeriod, period)
+            .like(PerfRefund::getPayloadJson, "\"source\":\"IMPORT\""));
+        int updated = 0;
+        for (PerfRefund record : records) {
+            // 回填「冲减实收」：负到账合计
+            BigDecimal real = sumNegativeReceived(record.getContractNo(), record.getOrderNo(), period);
+            if (real.signum() != 0 && (record.getRealAmount() == null
+                || record.getRealAmount().compareTo(real) != 0)) {
+                record.setRealAmount(real);
+                refundMapper.updateById(record);
+                updated++;
+            }
+            // 负实收到位后，才评估是否产生负结佣（前提：存在已结佣记录）
+            applyImportedCommissionReversal(record);
+        }
+        return updated;
+    }
+
+    /** 某合同/订单在指定退单月的负实收明细合计（负数）；无实收明细返回 0 */
+    private BigDecimal sumNegativeReceived(String contractNo, String orderNo, String period) {
+        ReceivedRealFactPort port = receivedRealFactPortProvider.getIfAvailable();
+        if (port == null) {
+            return BigDecimal.ZERO;
+        }
+        List<String> keys = new ArrayList<>();
+        if (StringUtils.isNotBlank(contractNo)) {
+            keys.add(contractNo);
+        }
+        if (StringUtils.isNotBlank(orderNo)) {
+            keys.add(orderNo);
+        }
+        if (keys.isEmpty()) {
+            return BigDecimal.ZERO;
+        }
+        String orderKey = StringUtils.isBlank(orderNo) ? null : orderNo.trim();
+        return MoneyUtil.round2(port.findActiveByBizKeys(keys).stream()
+            .filter(r -> r.getAmount() != null && r.getAmount().signum() < 0)
+            .filter(r -> period == null || period.equals(r.getPeriod()))
+            .filter(r -> orderKey == null || orderKey.equals(r.getOrderNo()))
+            .map(r -> r.getAmount())
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
     }
 
     private PerfRefund requireRefund(Long id) {

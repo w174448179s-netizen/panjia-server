@@ -210,14 +210,15 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             deptId = DeptScopeUtils.enforceSelfDeptScope(deptId, deptService::selectDeptAndChildById, "业绩");
         }
 
-        long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
+        long total = factMapper.countManageContracts(period, factType, deptId, employeeId, bizType, kw, factStatus,
+            query.getRefundFilter(), selfEmployeeId);
         vo.setTotal(total);
 
         List<PerformanceManageContractVo> contracts = List.of();
         if (total > 0) {
             long offset = (long) (page - 1) * size;
             contracts = factMapper.selectManagePageContracts(
-                period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId, offset, size);
+                period, factType, deptId, employeeId, bizType, kw, factStatus, query.getRefundFilter(), selfEmployeeId, offset, size);
             fillContractOriginalAmount(contracts, period, factType);
             fillContractPendingAdjust(contracts, period, factType);
             fillContractConversion(contracts);
@@ -227,7 +228,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
         Map<String, Object> stat = factMapper.selectManageSummary(
-            period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
+            period, factType, deptId, employeeId, bizType, kw, factStatus, query.getRefundFilter(), selfEmployeeId);
         PerformanceManagePageVo.Summary summary = new PerformanceManagePageVo.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
@@ -236,7 +237,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
         // 折算后合计：按业务类型分组金额 × 该类型系数累加（口径与列表行 convertedAmount 一致）
         List<Map<String, Object>> bizGroups = factMapper.selectManageSummaryByBizType(
-            period, factType, deptId, employeeId, bizType, kw, factStatus, selfEmployeeId);
+            period, factType, deptId, employeeId, bizType, kw, factStatus, query.getRefundFilter(), selfEmployeeId);
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizGroups.stream()
             .map(g -> (String) g.get("bizType"))
             .filter(Objects::nonNull)
@@ -412,11 +413,12 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         Long filterEmployeeId = resolveSearchEmployeeId(selfEmployeeId, employeeId, effectiveDeptId);
 
         long total = factMapper.countFactSearchByContract(period, effectiveDeptId,
-            StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled());
+            StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled(), query.getRefundFilter());
         List<PerformanceFactSearchVo> rows = total == 0
             ? List.of()
             : factMapper.selectFactSearchByContract(period, effectiveDeptId,
-                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled(), offset, pageSize);
+                StringUtils.trimToNull(bizType), keyword, filterEmployeeId, query.getSettled(), query.getRefundFilter(),
+                offset, pageSize);
         fillSearchConversion(rows);
 
         // 实收金额权限：仅总监/超管可见，经纪人/店长等角色返回空值
@@ -430,7 +432,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 汇总条：三个指标各按自身归属月统计（新签月/实收月/结佣月），跨页全量；
         // 与列表行（合同全周期）口径不同，故合同数直接取列表 total
         result.setSummary(buildSearchSummary(period, effectiveDeptId, bizType, keyword, filterEmployeeId,
-            query.getSettled(), seeReal, total));
+            query.getSettled(), query.getRefundFilter(), seeReal, total));
         return result;
     }
 
@@ -441,10 +443,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
      * 无实收查看权限时不返回实收汇总（与行数据置空一致）。
      */
     private Map<String, Object> buildSearchSummary(String period, Long deptId, String bizType, String keyword,
-                                                   Long employeeId, Boolean settled, boolean seeReal,
-                                                   long contractCount) {
+                                                   Long employeeId, Boolean settled, String refundFilter,
+                                                   boolean seeReal, long contractCount) {
         List<Map<String, Object>> groups = factMapper.selectFactSearchSummary(period, deptId,
-            StringUtils.trimToNull(bizType), keyword, employeeId, settled);
+            StringUtils.trimToNull(bizType), keyword, employeeId, settled, refundFilter);
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(groups.stream()
             .map(g -> (String) g.get("bizType"))
             .filter(Objects::nonNull)

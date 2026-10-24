@@ -87,6 +87,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
           )
         </if>
+        <!-- 退单三态筛选（行级红冲行口径）：REFUND=仅红冲行，NORMAL=排除红冲行，空=全部 -->
+        <if test="refundFilter == 'REFUND'">
+          AND f.reversal_type = 'REDINK_REFUND'
+        </if>
+        <if test="refundFilter == 'NORMAL'">
+          AND (f.reversal_type IS NULL OR f.reversal_type != 'REDINK_REFUND')
+        </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           <if test="deptId != null">
@@ -120,6 +127,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                       @Param("bizType") String bizType,
                                                       @Param("keyword") String keyword,
                                                       @Param("factStatus") String factStatus,
+                                                      @Param("refundFilter") String refundFilter,
                                                       @Param("selfEmployeeId") Long selfEmployeeId);
 
     /**
@@ -146,6 +154,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND (r.contract_no = f.contract_no
                    OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
           )
+        </if>
+        <!-- 退单三态筛选（行级红冲行口径）：REFUND=仅红冲行，NORMAL=排除红冲行，空=全部 -->
+        <if test="refundFilter == 'REFUND'">
+          AND f.reversal_type = 'REDINK_REFUND'
+        </if>
+        <if test="refundFilter == 'NORMAL'">
+          AND (f.reversal_type IS NULL OR f.reversal_type != 'REDINK_REFUND')
         </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
@@ -181,6 +196,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                                       @Param("bizType") String bizType,
                                                       @Param("keyword") String keyword,
                                                       @Param("factStatus") String factStatus,
+                                                      @Param("refundFilter") String refundFilter,
                                                       @Param("selfEmployeeId") Long selfEmployeeId);
 
 
@@ -260,6 +276,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         SELECT MAX(f.contract_no) AS "contractNo",
                MAX(f.order_no) AS "orderNo",
                MAX(f.biz_type) AS "bizType",
+               -- 期间：单期间筛选=该期间；跨期合并=合同涉及全部期间按序拼接（与实收列表合并行口径一致）
+               STRING_AGG(DISTINCT f.period, '、' ORDER BY f.period) AS "period",
                MAX(f.property_address) AS "propertyAddress",
                MAX(f.business_date) AS "businessDate",
                COALESCE(SUM(f.performance_amount), 0) AS "amount",
@@ -289,6 +307,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
           AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
+        <!-- 退单三态筛选（行级红冲行口径）：REFUND=仅红冲行，NORMAL=排除红冲行，空=全部 -->
+        <if test="refundFilter == 'REFUND'">
+          AND f.reversal_type = 'REDINK_REFUND'
+        </if>
+        <if test="refundFilter == 'NORMAL'">
+          AND (f.reversal_type IS NULL OR f.reversal_type != 'REDINK_REFUND')
+        </if>
           <if test="deptId != null">
             AND (f.dept_id = #{deptId}
                  OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
@@ -323,6 +348,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("bizType") String bizType,
                                             @Param("keyword") String keyword,
                                             @Param("factStatus") String factStatus,
+                                            @Param("refundFilter") String refundFilter,
                                             @Param("selfEmployeeId") Long selfEmployeeId,
                                             @Param("offset") long offset,
                                             @Param("pageSize") int pageSize);
@@ -350,6 +376,13 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND (r.contract_no = f.contract_no
                    OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
           )
+        </if>
+        <!-- 退单三态筛选（行级红冲行口径）：REFUND=仅红冲行，NORMAL=排除红冲行，空=全部 -->
+        <if test="refundFilter == 'REFUND'">
+          AND f.reversal_type = 'REDINK_REFUND'
+        </if>
+        <if test="refundFilter == 'NORMAL'">
+          AND (f.reversal_type IS NULL OR f.reversal_type != 'REDINK_REFUND')
         </if>
           <if test="period != null and period != ''">AND f.period = #{period}</if>
           AND f.fact_type = #{factType}
@@ -385,6 +418,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                               @Param("bizType") String bizType,
                               @Param("keyword") String keyword,
                               @Param("factStatus") String factStatus,
+                              @Param("refundFilter") String refundFilter,
                               @Param("selfEmployeeId") Long selfEmployeeId);
 
     /**
@@ -994,12 +1028,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                     THEN CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.loan_neg_amt, ae.loan_fee_amt) ELSE ae.loan_fee_amt END
                     ELSE CASE WHEN rd.performance_amount &lt; 0 THEN COALESCE(ap.other_neg_amt, ae.other_fee_amt) ELSE ae.other_fee_amt END
                END AS "expectedAmount",
-               -- 全期累计口径新签（仅正数事实）：跨期合并「正常行」的对应新签取最晚正常期间行的该值，
-               -- 退单负数不抵消正常行的新签对比口径；退单行本身取行级 expectedAmount（当期负部）
-               COALESCE(CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_pos_amt ELSE ae.other_pos_amt END, 0) AS "expectedCumAmount",
-               COALESCE(CASE WHEN rd.fee_item = '贷款服务费' THEN oe.loan_orig_amt ELSE oe.other_orig_amt END,
-                        CASE WHEN rd.fee_item = '贷款服务费' THEN ae.loan_pos_amt ELSE ae.other_pos_amt END, 0) AS "expectedCumOriginalAmount",
-               -- 归属审批单号：跨期合并时按 TD 前缀区分退单冲减行与正常行，分开合并展示
+               -- 归属审批单号：跨期详情按 TD 前缀区分退单冲减行与正常行（红冲行按月独立成行，不与正常行互抵）
                rra.apply_no AS "applyNo",
                -- 原值同口径：有调整前事实取链原值，否则回退当前值（退单行跟随当期负数，避免出现「正 → 负」假箭头）
                COALESCE(
@@ -1036,14 +1065,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN sys_dept d ON d.dept_id = e.dept_id
         LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
-        -- 应收累计（该实收期间及之前）：按行员工+角色配对，跨期明细每行各自取到本行期间；
-        -- loan_pos_amt/other_pos_amt 仅累计正数事实（跨期合并正常行的对应新签用：
-        -- 退单/冲正负数不影响正常实收行的新签对比口径，「退单是另一条」独立展示）
+        -- 应收累计（该实收期间及之前）：按行员工+角色配对，跨期明细每行各自取到本行期间
         LEFT JOIN LATERAL (
             SELECT SUM(CASE WHEN pe.fee_item = '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS loan_fee_amt,
-                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt,
-                   SUM(CASE WHEN pe.fee_item = '贷款服务费' AND pe.performance_amount &gt; 0 THEN pe.performance_amount END) AS loan_pos_amt,
-                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' AND pe.performance_amount &gt; 0 THEN pe.performance_amount END) AS other_pos_amt
+                   SUM(CASE WHEN pe.fee_item IS DISTINCT FROM '贷款服务费' THEN pe.performance_amount ELSE 0 END) AS other_fee_amt
             FROM pj_perf_fact pe
             WHERE pe.fact_status = 'ACTIVE'
               AND pe.fact_type = 'PERF_EXPECT'
@@ -1136,7 +1161,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 合同号为空串（一手房/家装荐客等无合同号业务）→ 按订单号；
      * 订单号为空串（历史单据）→ 退化 contract_no/order_no 双键 OR 旧口径。
      *
-     * @param period 归属期间
+     * @param period 归属期间；为空时返回合同粒度净额行（每键对一行：新签=全部期间 ACTIVE 净额，
+     *               退单负数与历史正数相抵，全额退单后归零，供跨期合并行/合同详情头部使用）；
+     *               非空时返回单据粒度分部口径行（每键对每张审批单一行：正常单正部累计、TD 冲减单当期负部）
      * @param keys   键对集合（每项含 contractNo 可空串、orderNo 可空串，两者不全空、degrade=true/false；不可为空）
      * @return 每键对一行的业务类型、涉及人数、实收/应收合计
      */
@@ -1144,17 +1171,22 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         <script>
         SELECT k.ck AS "contractNo",
                k.ok AS "orderNo",
-               -- 单据粒度：退单负实收明细挂在同期已有合同行（contract_id）下、以 received_apply_id
-               -- 区分 TD 冲减单；按合同聚合会把负数算进正常单，且正常单/TD 单各算一遍导致合并翻倍
+               <if test="period != null and period != ''">
+               -- 单据粒度（仅单期口径）：退单负实收明细挂在同期已有合同行（contract_id）下、以 received_apply_id
+               -- 区分 TD 冲减单；按合同聚合会把负数算进正常单，且正常单与 TD 单各算一遍导致合并翻倍。
+               -- 跨期合并行（period 为空）按合同粒度聚合，不输出 applyId
                rd.received_apply_id AS "applyId",
+               </if>
                MAX(rc.biz_type) AS "bizType",
                COUNT(DISTINCT COALESCE(e.employee_id::text, rd.employee_external_code)) AS "employeeCount",
                COALESCE(SUM(rd.performance_amount), 0) AS "receivedAmount",
                COALESCE(SUM(rd.performance_amount), 0) AS "originalReceivedAmount",
-               CASE
-                   -- 退单负实收行（当期合计为负）用「当期负部新签」展示本次冲减对应的新签退单
-                   WHEN COALESCE(SUM(rd.performance_amount), 0) &lt; 0 THEN COALESCE((
-                       SELECT SUM(CASE WHEN pe.performance_amount &lt; 0 THEN pe.performance_amount ELSE 0 END)
+               <choose>
+                   <when test="period == null or period == ''">
+                   -- 跨期合并行/合同详情头部（period 为空）：全部期间 ACTIVE 新签净额，
+                   -- 退单负数与历史正数相抵，全额退单后归零（与结佣侧合并行净额口径一致）
+                   COALESCE((
+                       SELECT SUM(pe.performance_amount)
                        FROM pj_perf_fact pe
                        WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                          AND (
@@ -1163,27 +1195,42 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                 OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                 OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                              )
-                         <if test="period != null and period != ''">AND pe.period = #{period}</if>
                    ), 0)
-                   -- 正常行：正部累计（仅正数事实），退单负事实不抵消正常单的新签显示；
-                   -- 新签调整走 supersede+新增（旧事实离开 ACTIVE），不受正部口径影响
-                   ELSE COALESCE((
-                       SELECT SUM(CASE WHEN pe.performance_amount &gt; 0 THEN pe.performance_amount ELSE 0 END)
-                       FROM pj_perf_fact pe
-                       WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-                         AND (
-                                   (k.dg AND pe.contract_no = k.ck)
-                                OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
-                                OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
-                                OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
-                             )
-                         <if test="period != null and period != ''">
-                         -- 累计口径：实收月及之前全部期间的新签合计（含跨月冲正/调整新增）；
-                         -- 不可用「当月有非零只取当月」，否则本月冲正后会把历史新签整体丢掉
-                         AND pe.period &lt;= #{period}
-                         </if>
-                   ), 0)
-               END AS "expectedAmount"
+                   </when>
+                   <otherwise>
+                   CASE
+                       -- 退单负实收行（当期合计为负）用「当期负部新签」展示本次冲减对应的新签退单
+                       WHEN COALESCE(SUM(rd.performance_amount), 0) &lt; 0 THEN COALESCE((
+                           SELECT SUM(CASE WHEN pe.performance_amount &lt; 0 THEN pe.performance_amount ELSE 0 END)
+                           FROM pj_perf_fact pe
+                           WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                             AND (
+                                       (k.dg AND pe.contract_no = k.ck)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                                 )
+                             AND pe.period = #{period}
+                       ), 0)
+                       -- 正常行：正部累计（仅正数事实），退单负事实不抵消正常单的新签显示；
+                       -- 新签调整走 supersede+新增（旧事实离开 ACTIVE），不受正部口径影响
+                       ELSE COALESCE((
+                           SELECT SUM(CASE WHEN pe.performance_amount &gt; 0 THEN pe.performance_amount ELSE 0 END)
+                           FROM pj_perf_fact pe
+                           WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                             AND (
+                                       (k.dg AND pe.contract_no = k.ck)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                                 )
+                             -- 累计口径：实收月及之前全部期间的新签合计（含跨月冲正/调整新增）；
+                             -- 不可用「当月有非零只取当月」，否则本月冲正后会把历史新签整体丢掉
+                             AND pe.period &lt;= #{period}
+                       ), 0)
+                   END
+                   </otherwise>
+               </choose> AS "expectedAmount"
         FROM (VALUES
           <foreach collection="keys" item="k" separator=",">(CAST(#{k.contractNo} AS text), CAST(#{k.orderNo} AS text), CAST(#{k.degrade} AS boolean))</foreach>
         ) AS k(ck, ok, dg)
@@ -1196,7 +1243,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
         WHERE 1=1
         <if test="period != null and period != ''">AND rc.period = #{period}</if>
-        GROUP BY k.ck, k.ok, k.dg, rd.received_apply_id
+        <choose>
+            <when test="period == null or period == ''">GROUP BY k.ck, k.ok, k.dg</when>
+            <otherwise>GROUP BY k.ck, k.ok, k.dg, rd.received_apply_id</otherwise>
+        </choose>
         </script>
         """)
     List<ReceivedContractMetricsVo> selectReceivedContractMetrics(
@@ -1777,6 +1827,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="settled != null and settled == false">
             (lc.status IS NULL OR lc.status NOT IN ('APPROVED', 'LOCKED', 'CLOSED'))
           </if>
+          <!-- 退单三态筛选（合同级已退单口径）：REFUND=存在已执行退单，NORMAL=排除已退单，空=全部 -->
+          <if test="refundFilter == 'REFUND'">
+            AND EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = fa."contractNo"
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = fa."orderNo"))
+            )
+          </if>
+          <if test="refundFilter == 'NORMAL'">
+            AND NOT EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = fa."contractNo"
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = fa."orderNo"))
+            )
+          </if>
         </where>
         ORDER BY fa."signDate" DESC, fa."contractNo"
         LIMIT #{pageSize} OFFSET #{offset}
@@ -1789,6 +1856,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("keyword") String keyword,
             @Param("employeeId") Long employeeId,
             @Param("settled") Boolean settled,
+            @Param("refundFilter") String refundFilter,
             @Param("offset") long offset,
             @Param("pageSize") int pageSize);
 
@@ -1869,6 +1937,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 AND ca.status IN ('APPROVED', 'LOCKED', 'CLOSED')
             )
           </if>
+          <!-- 退单三态筛选（合同级已退单口径）：REFUND=存在已执行退单，NORMAL=排除已退单，空=全部 -->
+          <if test="refundFilter == 'REFUND'">
+            AND EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = all_rows.contract_no
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = all_rows.order_no))
+            )
+          </if>
+          <if test="refundFilter == 'NORMAL'">
+            AND NOT EXISTS (
+              SELECT 1 FROM pj_perf_refund r
+              WHERE r.status = 'EXECUTED'
+                AND (r.contract_no = all_rows.contract_no
+                     OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = all_rows.order_no))
+            )
+          </if>
         </script>
         """)
     long countFactSearchByContract(
@@ -1877,7 +1962,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("bizType") String bizType,
             @Param("keyword") String keyword,
             @Param("employeeId") Long employeeId,
-            @Param("settled") Boolean settled);
+            @Param("settled") Boolean settled,
+            @Param("refundFilter") String refundFilter);
 
     /**
      * 完整业绩查询的全量汇总（汇总条）：三个指标「各按自身归属月」独立统计，不再与列表同口径
@@ -1924,6 +2010,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                   OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
                   OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
               </if>
+              <!-- 退单三态筛选（合同级已退单口径） -->
+              <if test="refundFilter == 'REFUND'">
+                AND EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = f.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = f.order_no))
+                )
+              </if>
+              <if test="refundFilter == 'NORMAL'">
+                AND NOT EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = f.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = f.order_no))
+                )
+              </if>
             UNION ALL
             -- ② 实收：按实收月（pj_received_detail.period）统计
             SELECT rc.biz_type,
@@ -1954,6 +2057,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 AND (rc.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
                   OR rc.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
                   OR rc.property_address ILIKE CONCAT('%', #{keyword}::text, '%'))
+              </if>
+              <!-- 退单三态筛选（合同级已退单口径） -->
+              <if test="refundFilter == 'REFUND'">
+                AND EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = rc.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = rc.order_no))
+                )
+              </if>
+              <if test="refundFilter == 'NORMAL'">
+                AND NOT EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = rc.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = rc.order_no))
+                )
               </if>
             UNION ALL
             -- ③ 结佣：按结佣月（业绩归属月 pj_commission_item.period）统计；REVERSED 明细永久保留但不计入
@@ -1989,6 +2109,23 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               <if test="settled != null and settled == false">
                 AND ci.status &lt;&gt; 'APPROVED'
               </if>
+              <!-- 退单三态筛选（合同级已退单口径） -->
+              <if test="refundFilter == 'REFUND'">
+                AND EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = ci.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = ci.order_no))
+                )
+              </if>
+              <if test="refundFilter == 'NORMAL'">
+                AND NOT EXISTS (
+                  SELECT 1 FROM pj_perf_refund r
+                  WHERE r.status = 'EXECUTED'
+                    AND (r.contract_no = ci.contract_no
+                         OR (r.order_no IS NOT NULL AND r.order_no &lt;&gt; '' AND r.order_no = ci.order_no))
+                )
+              </if>
         )
         SELECT t.biz_type AS "bizType",
                COALESCE(SUM(t.expect_amt), 0) AS "totalExpectAmount",
@@ -2004,7 +2141,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("bizType") String bizType,
             @Param("keyword") String keyword,
             @Param("employeeId") Long employeeId,
-            @Param("settled") Boolean settled);
+            @Param("settled") Boolean settled,
+            @Param("refundFilter") String refundFilter);
 
     /**
      * 完整业绩查询的业务类型下拉选项：在与列表完全相同的数据范围（期间/部门子树/经纪人本人）
@@ -2470,5 +2608,42 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     List<Map<String, Object>> sumActiveByEmployeePeriods(@Param("employeeIds") Collection<Long> employeeIds,
                                                          @Param("fromPeriod") String fromPeriod,
                                                          @Param("toPeriod") String toPeriod);
+
+    /**
+     * 业务键（合同号/订单号）是否已有<b>导入生成</b>的退单红冲负数事实（ACTIVE）。
+     * <p>
+     * 用于手工退单互斥（2026-10-25 定稿）：贝壳导入的负数行已按原事实镜像冲减过，
+     * 再手工退单会重复生成一笔负数，两套负数叠加导致合同净额翻负。
+     * 仅统计 {@code source='IMPORT'} 的红冲事实，手工退单自己生成的（source=MANUAL）不计，
+     * 避免误拦同一合同再次发起合法的其他批次退单判定。
+     *
+     * @param contractNo 合同号（可空）
+     * @param orderNo    订单号（可空）
+     * @return 导入红冲事实条数；0 = 无导入退单
+     */
+    @Select("""
+        <script>
+        SELECT COUNT(1)
+        FROM pj_perf_fact
+        WHERE fact_status = 'ACTIVE'
+          AND reversal_type = 'REDINK_REFUND'
+          AND source = 'IMPORT'
+          AND (
+            <choose>
+              <when test="contractNo != null and contractNo != ''">
+                contract_no = #{contractNo}
+                <if test="orderNo != null and orderNo != ''">
+                  OR order_no = #{orderNo}
+                </if>
+              </when>
+              <otherwise>
+                order_no = #{orderNo}
+              </otherwise>
+            </choose>
+          )
+        </script>
+        """)
+    long countImportRedinkByBizKeys(@Param("contractNo") String contractNo,
+                                    @Param("orderNo") String orderNo);
 }
 

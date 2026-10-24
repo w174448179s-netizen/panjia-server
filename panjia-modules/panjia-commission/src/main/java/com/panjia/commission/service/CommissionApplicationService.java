@@ -54,6 +54,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -62,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
@@ -222,9 +224,11 @@ public class CommissionApplicationService {
                                                     Long operatorId, boolean systemInitiated) {
         // 业务键以订单号为准；合同号可空（一手房/家装荐客等无合同号业务）
         String bizKey = StringUtils.isNotBlank(orderNo) ? orderNo.trim() : StringUtils.trimToNull(contractNo);
-        if (StringUtils.isBlank(period) || bizKey == null) {
-            throw new ServiceException("结算月与合同号/订单号不能为空");
+        if (bizKey == null) {
+            throw new ServiceException("合同号/订单号不能为空");
         }
+        // 结佣期间留空 = 结佣全部未结佣业绩并落账当前月（2026-10-25 定稿）
+        period = resolveApplyPeriod(period);
         checkPeriodOpen(period, "发起结佣");
         // ctx 各 Map（申请单/事实/应收）统一按 bizKey 索引，
         // 5 参 apply 与 createApplicationWithItems 无需感知输入是合同号还是订单号
@@ -273,13 +277,12 @@ public class CommissionApplicationService {
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId,
                                        boolean skipDeptScope, BatchApplyContext ctx, boolean systemInitiated) {
-        if (StringUtils.isBlank(period) || StringUtils.isBlank(contractNo)) {
-            throw new ServiceException("结算月与合同号不能为空");
-        }
+        String applyPeriod = resolveApplyPeriod(period);
         // 批量入口已查过封账状态，跳过（P1：N→1 次）
         if (ctx == null) {
-            checkPeriodOpen(period, "发起结佣");
+            checkPeriodOpen(applyPeriod, "发起结佣");
         }
+        period = applyPeriod;
 
         // 驳回单重提：从 ctx 取预加载的驳回单，避免逐单查（P1）
         CommissionApplication rejected = ctx != null
@@ -336,11 +339,8 @@ public class CommissionApplicationService {
      */
     public CompletableFuture<CommissionBatchResultVo> batchApplyByContract(
             String period, List<String> contractNos, Long operatorId) {
-        // 结佣期间必选：由发起人显式选择归属月，不再默认当前月
-        final String applyPeriod = StringUtils.trimToNull(period);
-        if (applyPeriod == null) {
-            throw new ServiceException("请选择结佣期间");
-        }
+        // 结佣期间可选：留空 = 结佣全部未结佣业绩并落账到当前月（2026-10-25 定稿）
+        final String applyPeriod = resolveApplyPeriod(period);
         if (contractNos == null || contractNos.isEmpty()) {
             throw new ServiceException("合同号列表不能为空");
         }
@@ -585,22 +585,9 @@ public class CommissionApplicationService {
                 + " 无实收记录，暂不能发起结佣（实收审批通过后方可结佣）");
         }
 
-        // 已退单拦截（2026-10-23 定稿）：存在 EXECUTED 退单的合同已全额冲销，无可结佣内容；
-        // 列表已排除，此处兜底拦截「录入合同号」批量发起/接口直调绕过列表的场景。
-        // 键集取入参 + 实收事实上的合同号/订单号（入参可能是订单号，需归一化后双键匹配）
-        Set<String> refundCheckKeys = new HashSet<>();
-        refundCheckKeys.add(contractNo);
-        for (PerformanceFactSummaryDTO f : nonZeroFacts) {
-            if (StringUtils.isNotBlank(f.getContractNo())) {
-                refundCheckKeys.add(f.getContractNo());
-            }
-            if (StringUtils.isNotBlank(f.getOrderNo())) {
-                refundCheckKeys.add(f.getOrderNo());
-            }
-        }
-        if (!performanceQueryPort.findRefundedBizKeys(refundCheckKeys).isEmpty()) {
-            throw new ServiceException("合同 " + contractNo + " 已退单，业绩已全额冲销，不能再发起结佣");
-        }
+        // 不再按合同整体拦截「已退单」：退单/导入红冲会生成负数实收与负数新签，负向结佣本身
+        // 就是合法的冲减单；「是否还有可结佣内容」统一由事实级未结佣校验（loadExpectItemFacts /
+        // assertFactsNotSettled）判定，已全额结佣且已冲减的合同自然无未结佣事实而报错。
 
         // §3.2 前置校验：仅可对实收审批通过的业绩发起结佣。
         // 历史导入放行：实收审批流程上线前，导入批次归档即产生 ACTIVE 实收事实、从未挂过实收单
@@ -664,7 +651,10 @@ public class CommissionApplicationService {
         application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
         application.setStatus(ApplicationStatus.DRAFT);
         application.setApplicantId(operatorId);
-        // 结佣金额口径（2026-09-30 定稿）：当月有新签用当月，当月无新签用历史（实收月之前全部月合计）
+        // 结佣金额口径（2026-10-24 定稿）：**全部未结佣**的新签事实（含负数红冲），
+        // 不再「当月优先」——导入退单红冲（8 月收 9 月退、6 月收 7 月退 8 月又补一部分）时，
+        // 各期正负未结佣事实必须一并参与，否则旧期间负向事实会被当月正数挤掉而永远结不掉；
+        // 已结佣事实已在 loadExpectItemFacts 内剔除，因此全额参与不会重复结佣。
         // 金额 = 新签事实当前值（调整后）；实收事实仅用于 §3.2 审批校验与合同快照
         List<PerformanceFactSummaryDTO> itemFacts = loadExpectItemFacts(nonZeroFacts, period);
         if (itemFacts.isEmpty()) {
@@ -1003,10 +993,9 @@ public class CommissionApplicationService {
                 .toList();
             settledFactIds.forEach(expectById::remove);
         }
-        // 结佣金额口径（2026-09-30 定稿）：当月有非零新签用当月，当月为 0/无新签用历史
-        // （实收月之前全部月合计）。0 元新签不参与计算、不视为"当月有新签"，仍回退汇总历史
-        List<PerformanceFactSummaryDTO> currentMonth = new ArrayList<>();
-        List<PerformanceFactSummaryDTO> history = new ArrayList<>();
+        // 结佣金额口径（2026-10-24 定稿）：全部未结佣新签事实（含负数红冲）一并参与，
+        // 与列表「未结佣跨期新签净额」同口径；已结佣事实已在上面剔除，不重复结佣
+        List<PerformanceFactSummaryDTO> result = new ArrayList<>(expectById.size());
         for (PerformanceFactSummaryDTO e : expectById.values()) {
             // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
             if (e.getEmployeeId() == null) {
@@ -1015,20 +1004,27 @@ public class CommissionApplicationService {
             if (e.getAmount() == null || e.getAmount().signum() == 0) {
                 continue;
             }
+            // 发起月及之前的事实才可结佣（未来期间新签不提前结）；期间为空时不做时间截断
             String ep = e.getPeriod();
-            if (period.equals(ep)) {
-                currentMonth.add(e);
-            } else if (ep != null && ep.compareTo(period) < 0) {
-                history.add(e);
+            if (period != null && ep != null && ep.compareTo(period) > 0) {
+                continue;
             }
+            result.add(e);
         }
-        // 当月与历史均有非零新签时合并返回（冲正事实可能落在历史月，需同时参与结佣计算）
-        if (!currentMonth.isEmpty() && !history.isEmpty()) {
-            List<PerformanceFactSummaryDTO> merged = new ArrayList<>(currentMonth);
-            merged.addAll(history);
-            return merged;
-        }
-        return !currentMonth.isEmpty() ? currentMonth : history;
+        result.sort(Comparator.comparing(PerformanceFactSummaryDTO::getPeriod,
+            Comparator.nullsLast(Comparator.naturalOrder())));
+        return result;
+    }
+
+    /**
+     * 发起结佣期间解析（2026-10-25 定稿）：留空时默认当前月。
+     * <p>留空语义 = 结佣该合同全部未结佣业绩（含跨期正负事实），落账到当前月；
+     * 显式选择期间则只结佣该月及之前的事实。</p>
+     */
+    private String resolveApplyPeriod(String period) {
+        String p = StringUtils.trimToNull(period);
+        return p != null ? p
+            : java.time.YearMonth.now().format(DateTimeFormatter.ofPattern("yyyy-MM"));
     }
 
     /**
@@ -1883,27 +1879,14 @@ public class CommissionApplicationService {
         // 实收审批通过的审批单行（订单维度，一行=一张审批单；展示字段取审批单快照）
         String bizType = StringUtils.trimToNull(query.getBizType());
         List<PerformanceContractSummaryDTO> contracts =
-            performanceQueryPort.listApprovedApplies(effectiveDeptId, query.getEmployeeId(), keyword, bizType);
+            performanceQueryPort.listApprovedApplies(effectiveDeptId, query.getEmployeeId(), keyword, bizType,
+                query.getRefundFilter());
 
-        // 排除已结佣：订单号（空退合同号）已出现在任一活跃结佣单（DRAFT/SUBMITTED/APPROVED/LOCKED）即整体隐藏。
-        // 活跃结佣单量小（百级），全量拉订单号+合同号两个快照列即可，无需按业务键分片过滤
-        Set<String> appliedKeys = new HashSet<>();
-        for (CommissionApplication app : applicationMapper.selectList(new LambdaQueryWrapper<CommissionApplication>()
-                .select(CommissionApplication::getOrderNo, CommissionApplication::getContractNo)
-                .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
-                    ApplicationStatus.APPROVED, ApplicationStatus.LOCKED))) {
-            if (StringUtils.isNotBlank(app.getOrderNo())) {
-                appliedKeys.add(app.getOrderNo());
-            }
-            if (StringUtils.isNotBlank(app.getContractNo())) {
-                appliedKeys.add(app.getContractNo());
-            }
-        }
+        // 发起候选按「事实级增量」判定（2026-10-24 定稿）：不再按合同/订单整体隐藏。
+        // 贝壳导入退单红冲很常见（8 月收 9 月退、6 月收 7 月退 8 月又补一部分），若合同已有
+        // 锁定单就整行隐藏，负向与补充业绩将永远无法发起结佣；改为只排除已被结佣明细绑定的事实。
+        // 结佣业绩口径：该合同/订单**未结佣**的跨期新签净额（正负均可发起），实收仅做 §3.2 门控。
 
-        // 结佣金额：订单号+合同号全部键一次批量查（分片防 SQL 膨胀），行级先订单号、未命中再合同号、仍未命中记 0；
-        // 贝壳新签 order_no 误填成合同号的脏数据场景由合同号兜底命中
-        // 按员工筛选时用员工口径的新签业绩合计，否则用合同全量口径
-        Map<String, BigDecimal> expectMap = new HashMap<>();
         Set<String> expectKeys = new HashSet<>();
         for (PerformanceContractSummaryDTO c : contracts) {
             if (StringUtils.isNotBlank(c.getOrderNo())) {
@@ -1913,49 +1896,92 @@ public class CommissionApplicationService {
                 expectKeys.add(c.getContractNo());
             }
         }
-        for (List<String> chunk : chunkKeys(expectKeys)) {
-            if (query.getEmployeeId() != null) {
-                expectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriodForEmployee(chunk, query.getEmployeeId()));
-            } else {
-                expectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriod(chunk));
-            }
+        List<PerformanceFactSummaryDTO> activeExpects = expectKeys.isEmpty()
+            ? Collections.emptyList()
+            : performanceQueryPort.findActiveByBizKeys(expectKeys, FACT_TYPE_EXPECT);
+        Set<Long> settledFactIds = new HashSet<>();
+        List<Long> expectFactIds = activeExpects.stream()
+            .map(PerformanceFactSummaryDTO::getFactId).filter(Objects::nonNull).distinct().toList();
+        for (int from = 0; from < expectFactIds.size(); from += IN_KEYS_CHUNK) {
+            List<Long> chunk = expectFactIds.subList(from, Math.min(from + IN_KEYS_CHUNK, expectFactIds.size()));
+            settledFactIds.addAll(itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+                    .select(CommissionItem::getPerformanceFactId)
+                    .in(CommissionItem::getPerformanceFactId, chunk)
+                    .ne(CommissionItem::getStatus, ItemStatus.REVERSED))
+                .stream().map(CommissionItem::getPerformanceFactId).filter(Objects::nonNull).toList());
         }
-
-        // 已退单合同排除（2026-10-23 定稿）：存在 EXECUTED 退单即全额冲销、无可结佣内容，
-        // 不出现在可发起列表（否则实收金额显示正数、结佣业绩净额为 0，误导用户重复发起）
-        Set<String> refundedKeys = new HashSet<>();
-        for (List<String> chunk : chunkKeys(expectKeys)) {
-            refundedKeys.addAll(performanceQueryPort.findRefundedBizKeys(chunk));
+        Map<String, BigDecimal> unsettledExpectMap = new HashMap<>();
+        for (PerformanceFactSummaryDTO f : activeExpects) {
+            if (f.getFactId() != null && settledFactIds.contains(f.getFactId())) {
+                continue;
+            }
+            // 按员工筛选时只统计该员工的新签业绩（与 sumExpectAmountsByKeysCrossPeriodForEmployee 同口径）
+            if (query.getEmployeeId() != null && !query.getEmployeeId().equals(f.getEmployeeId())) {
+                continue;
+            }
+            BigDecimal amt = f.getAmount() == null ? BigDecimal.ZERO : f.getAmount();
+            if (StringUtils.isNotBlank(f.getOrderNo()) && expectKeys.contains(f.getOrderNo())) {
+                unsettledExpectMap.merge(f.getOrderNo(), amt, BigDecimal::add);
+            }
+            if (StringUtils.isNotBlank(f.getContractNo()) && expectKeys.contains(f.getContractNo())) {
+                unsettledExpectMap.merge(f.getContractNo(), amt, BigDecimal::add);
+            }
         }
 
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
-        List<CommissionContractVo> all = new ArrayList<>();
+        // 同合同多期实收审批单合并为一行（期间串展示），避免同一合同出现多行重复发起；
+        // 代表行取 first（SQL 按 business_date 倒序，即最新一期），金额/条数按合并合计输出
+        Map<String, List<PerformanceContractSummaryDTO>> grouped = new LinkedHashMap<>();
         for (PerformanceContractSummaryDTO c : contracts) {
             String rowKey = StringUtils.isNotBlank(c.getOrderNo()) ? c.getOrderNo() : c.getContractNo();
-            if (appliedKeys.contains(rowKey)) {
+            if (StringUtils.isBlank(rowKey)) {
                 continue;
             }
-            // 已退单合同整行排除（合同号/订单号任一命中即跳过）
-            if ((c.getOrderNo() != null && refundedKeys.contains(c.getOrderNo()))
-                || (c.getContractNo() != null && refundedKeys.contains(c.getContractNo()))) {
-                continue;
-            }
-            BigDecimal amount = expectMap.get(c.getOrderNo());
+            grouped.computeIfAbsent(rowKey, k -> new ArrayList<>()).add(c);
+        }
+
+        List<CommissionContractVo> all = new ArrayList<>();
+        for (Map.Entry<String, List<PerformanceContractSummaryDTO>> entry : grouped.entrySet()) {
+            List<PerformanceContractSummaryDTO> group = entry.getValue();
+            PerformanceContractSummaryDTO c = group.get(0);
+            BigDecimal amount = unsettledExpectMap.get(entry.getKey());
             if (amount == null) {
-                amount = expectMap.get(c.getContractNo());
+                amount = unsettledExpectMap.get(c.getContractNo());
             }
-            c.setExpectedAmount(amount != null ? amount : BigDecimal.ZERO);
+            // 未结佣新签净额 0 / 无未结佣事实：没有可结佣内容（全部已结佣或已全额退单冲销），
+            // 整行不展示；负数保留（导入退单红冲场景需发起负向结佣去冲减已结佣业绩）
+            if (amount == null || amount.signum() == 0) {
+                continue;
+            }
+            c.setExpectedAmount(amount);
             // 发起页不显示期间封账状态（还没选结佣期间），period 留空
             CommissionContractVo row = toAvailableContractVO(c, conversionFactorPort.factorOf(factorMap, c.getBizType()));
-            // 实收金额「原值 → 调整后值」：快照（审批通过时点）≠ 实时合计说明实收调整已生效；
+            // 合并期间串与实收合计（同合同多期实收审批单，如 8 月收 9 月退 → 净额 0）
+            TreeSet<String> periods = new TreeSet<>();
+            BigDecimal receivedSum = BigDecimal.ZERO;
+            BigDecimal originalSum = BigDecimal.ZERO;
+            long detailCount = 0L;
+            long employeeCount = 0L;
+            for (PerformanceContractSummaryDTO g : group) {
+                if (StringUtils.isNotBlank(g.getPeriod())) {
+                    periods.add(g.getPeriod());
+                }
+                receivedSum = receivedSum.add(g.getAmount() == null ? BigDecimal.ZERO : g.getAmount());
+                originalSum = originalSum.add(g.getOriginalAmount() == null ? BigDecimal.ZERO : g.getOriginalAmount());
+                detailCount += g.getDetailCount();
+                employeeCount = Math.max(employeeCount, g.getEmployeeCount());
+            }
+            row.setPeriods(String.join("、", periods));
+            row.setReceivedAmount(receivedSum);
+            row.setDetailCount(detailCount);
+            row.setEmployeeCount(employeeCount);
+            // 实收金额「原值 → 调整后值」：合并快照 ≠ 合并实时合计说明实收调整已生效；
             // 员工口径下 amount 已是该员工实时合计，与合同级快照不可比，跳过
-            if (query.getEmployeeId() == null && c.getOriginalAmount() != null
-                && row.getReceivedAmount() != null
-                && c.getOriginalAmount().compareTo(row.getReceivedAmount()) != 0) {
+            if (query.getEmployeeId() == null && originalSum.compareTo(receivedSum) != 0) {
                 row.setReceivedAmountAdjusted(true);
-                row.setOriginalReceivedAmount(c.getOriginalAmount());
+                row.setOriginalReceivedAmount(originalSum);
             }
             all.add(row);
         }

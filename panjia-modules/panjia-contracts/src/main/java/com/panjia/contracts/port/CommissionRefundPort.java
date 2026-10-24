@@ -45,6 +45,38 @@ public interface CommissionRefundPort {
                                     java.util.Map<Long, Long> expectFactIdMapping);
 
     /**
+     * 执行（部分退单）：按已结佣明细镜像生成负结佣明细，金额按红冲比例缩放。
+     * <p>
+     * 贝壳导入退单允许部分退（如 8 月退一部分、9 月再退剩余），本次红冲的负新签事实
+     * 金额可能只是原事实的一部分，负结佣须同比例冲减；比例缺失（该已结佣事实本次未被
+     * 红冲）时该明细不生成负行，留待后续退单处理。
+     *
+     * @param contractNo             合同号
+     * @param orderNo                订单号（可空）
+     * @param refundPeriod           退单落账月 YYYY-MM
+     * @param refundId               退单 ID（溯源/幂等）
+     * @param operatorId             操作人
+     * @param expectFactIdMapping    原新签事实 ID → 本次生成的负事实 ID
+     * @param ratioByOriginalFactId  原新签事实 ID → 红冲比例（负数，-0.5 = 冲减一半）；
+     *                               为 null 时按全额冲减（手工退单口径）
+     * @return 负结佣业绩合计（负数）；无可冲减明细返回 0
+     */
+    BigDecimal createRefundReversal(String contractNo, String orderNo, String refundPeriod,
+                                    Long refundId, Long operatorId,
+                                    java.util.Map<Long, Long> expectFactIdMapping,
+                                    java.util.Map<Long, java.math.BigDecimal> ratioByOriginalFactId);
+
+    /**
+     * 撤销退单冲减：重导旧批次被冲销时，把该退单此前生成的负结佣冲减单作废
+     * （明细置 REVERSED、单据置 CANCELLED），避免重导后新旧两笔负结佣重复扣减。
+     *
+     * @param refundId   退单 ID（对应冲减单号 {@code TD + refundId}）
+     * @param operatorId 操作人
+     * @return 作废的负明细条数；未找到冲减单返回 0
+     */
+    int cancelRefundReversal(Long refundId, Long operatorId);
+
+    /**
      * 结佣明细行（供业绩域组装冲减行）。
      *
      * @param contractNo 合同号

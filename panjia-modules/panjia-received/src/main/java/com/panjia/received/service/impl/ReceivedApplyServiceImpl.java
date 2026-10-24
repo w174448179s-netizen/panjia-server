@@ -760,17 +760,18 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     /**
      * 合同维度分流判定：返回 true = 需人工审批。
-     * <p>负数（实收到账 &lt; 0 或 新签 &lt; 0，退单红冲扣回）直接人工，与「实收 &lt; 新签」同口径；
-     * 否则到账 &lt; 订单跨月新签合计 → 人工（≥ 视为到账已覆盖，自动通过）。
+     * <p>正数场景：到账 &lt; 新签 → 人工；到账 ≥ 新签 → 自动通过。
+     * <p>负数退单场景（2026-10-25 定稿）：负实收与负新签同为贝壳退单流水（全额退/部分退，
+     * 且实收到账额可大于新签额），无需人工比对金额 → 自动通过并触发结佣；
+     * 仅负实收却无负新签（数据异常，无冲减依据）→ 人工核对。
      */
     private static boolean needManualReview(BigDecimal arrival, BigDecimal expectTotal) {
         BigDecimal amt = arrival == null ? BigDecimal.ZERO : arrival;
         BigDecimal expect = expectTotal == null ? BigDecimal.ZERO : expectTotal;
-        // 负数（实收到账<0 或 新签<0，退单红冲扣回）直接人工审批，与「实收<新签」同口径
-        if (amt.signum() < 0 || expect.signum() < 0) {
-            return true;
+        if (amt.signum() < 0 && expect.signum() < 0) {
+            // 双负 = 同一笔退单的负实收 + 负新签，自动通过（不用人工审批退单）
+            return false;
         }
-        // 到账>=0 且 新签>=0：到账<新签→人工，到账>=新签→自动通过
         return amt.compareTo(expect) < 0;
     }
 
@@ -1724,8 +1725,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     /**
      * 未选期间时的合同维度列表：同合同/订单多期单据合并为一行
      * （8、9 月两笔 → 一行，期间列展示「2026-08、2026-09、2026-10」）；
-     * 实收取各期净额（退单月负数相抵），新签取累计口径（{@link #fillMergedExpect}），
-     * 逐期明细由 {@link #getContractDetail} 按期间展开。
+     * 实收取各期净额（退单月负数相抵），新签取全部期间 ACTIVE 净额（{@link #fillMergedExpect}，
+     * 全额退单后归零），逐期明细由 {@link #getContractDetail} 按期间展开。
      */
     private PageResult<ReceivedApply> listMergedByContract(ReceivedApplyBo query, PageQuery pageQuery,
                                                            QueryWrapper<ReceivedApply> wrapper) {
@@ -1803,8 +1804,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     /**
      * 同一合同/订单的多期审批单合并为一行（订单号优先；合同号/订单号都为空时各自成行）。
      * <p>
-     * 实收取各期净额（跨期正负相抵，全额退单后归零）；新签（应收）为累计口径，
-     * 由 {@link #fillMergedExpect} 批量覆盖（不可把各期累计值相加，会重复累计）。
+     * 实收取各期净额（跨期正负相抵，全额退单后归零）；新签（应收）为全部期间 ACTIVE 净额口径，
+     * 由 {@link #fillMergedExpect} 批量覆盖（退单负数与历史正数相抵，全额退单后归零）。
      */
     private List<ReceivedApply> mergeByContractKey(List<ReceivedApply> all) {
         Map<String, List<ReceivedApply>> groups = new LinkedHashMap<>();
@@ -1849,7 +1850,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 employeeCount = Math.max(employeeCount, cnt);
             }
             // 实收取各期净额（跨期正负相抵），全额退单后归零，配合「已退单」标记展示；
-            // 新签（应收）为累计口径，由 fillMergedExpect 统一按全部期间批量覆盖
+            // 新签（应收）为全部期间 ACTIVE 净额口径，由 fillMergedExpect 统一批量覆盖
             base.setReceivedAmount(received);
             base.setItemCount(itemCount);
             base.setEmployeeCount(employeeCount);
@@ -1862,8 +1863,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 合并行的新签（应收）口径：累计到最后一期 = 全部期间 ACTIVE 新签合计（按 period=null 批量取），
-     * 不能把各期累计值相加（会重复累计翻倍）；全额退单后与明细一致归零。
+     * 合并行的新签（应收）口径：全部期间 ACTIVE 新签净额（按 period=null 批量取，
+     * metrics SQL 合同粒度净额分支），退单负数与历史正数相抵，全额退单后归零。
      */
     private void fillMergedExpect(List<ReceivedApply> rows) {
         List<ReceivedApply> targets = new ArrayList<>();
@@ -1967,6 +1968,29 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     + " AND rd.detail_status = 'ACTIVE'"
                     + " AND e.employee_id = {0})",
                 query.getEmployeeId());
+        }
+        // 退单三态筛选：选定期间（单据维度）按行过滤 TD 冲减单（apply_no 以 'TD' 开头）；
+        // 未选期间（同合同多期单据合并为一行）无法按行过滤，改按「该合同是否存在 TD 冲减单」EXISTS 过滤
+        String refundFilter = query.getRefundFilter();
+        if (StringUtils.isNotBlank(refundFilter)) {
+            if (StringUtils.isNotBlank(query.getPeriod())) {
+                if ("REFUND".equals(refundFilter)) {
+                    wrapper.apply("apply_no LIKE 'TD%'");
+                } else if ("NORMAL".equals(refundFilter)) {
+                    wrapper.apply("(apply_no NOT LIKE 'TD%' OR apply_no IS NULL)");
+                }
+            } else {
+                String tdExists = "EXISTS (SELECT 1 FROM pj_perf_received_apply td"
+                    + " WHERE td.apply_no LIKE 'TD%' AND td.status != 'CANCELLED'"
+                    + " AND (td.contract_no = pj_perf_received_apply.contract_no"
+                    + " OR (td.order_no IS NOT NULL AND td.order_no != ''"
+                    + " AND td.order_no = pj_perf_received_apply.order_no)))";
+                if ("REFUND".equals(refundFilter)) {
+                    wrapper.apply(tdExists);
+                } else if ("NORMAL".equals(refundFilter)) {
+                    wrapper.apply("NOT " + tdExists);
+                }
+            }
         }
         return wrapper;
     }
@@ -2328,8 +2352,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 按合同/订单跨期间查询实收明细：基准单取最近一张非退单冲减单（保留审批单号/状态等留痕），
-     * 明细合并全部期间的 ACTIVE 实收事实，每行带 period（期间列逐笔展示 8/9/10 月）。
+     * 按合同/订单跨期间查询实收明细：基准单取最近一张非退单冲减单（保留审批单号/状态留痕），
+     * 明细覆盖全部期间的 ACTIVE 实收事实，按（员工+角色+期间）逐月分行展示
+     * （同月多笔部分实收合并为一行；退单红冲冲减行按月独立成行，负数展示）。
      */
     @Override
     public ReceivedApplyDetail getContractDetail(String contractNo, String orderNo) {
@@ -2400,35 +2425,23 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 明细行合并：跨期合同详情按（员工+角色+是否退单行）合并、单张单详情按（员工+角色+期间）合并。
+     * 明细行合并：按月分行展示，与新签明细一致——
+     * 同月同员工同角色的多笔部分实收合并为一行；跨期合同详情中退单红冲冲减行
+     * 按月独立成行（期间=退单落账月，负数展示），不与正常行跨期合并、也不与同月正常行互抵。
      * <p>
-     * 口径（2026-10-24 用户定稿）：正常行与退单冲减行是两条线，分开合并展示——
-     * 正常行：跨期汇总各期实收，对应新签取最晚正常期间行的「正部累计」（退单负数不抵消，
-     * 即「退单不影响 8、9 月实收的显示」）；退单行（TD 单明细）：按角色合并为一行
-     * （实收退单=被退各期实收的合计），对应新签=退单月的负新签（行级当期负部口径）。
-     * 同时解决「两笔实收对应一笔新签」时累计口径在多期行上重复显示翻倍的问题。
+     * 各行「对应新签」保留 SQL 行级口径：正数行=该实收期间及之前累计，
+     * 负数行=当期负部新签（本次冲减对应的新签退单）；
+     * 与选定期间后的单期详情逐月口径完全一致。
      */
     private List<ReceivedFactDetailVo> mergeFactRows(List<ReceivedFactDetailVo> facts, boolean crossPeriod) {
         Map<String, ReceivedFactDetailVo> merged = new LinkedHashMap<>();
-        Map<String, String> latestPeriod = new HashMap<>();
-        Map<String, java.util.LinkedHashSet<String>> periodsByKey = new HashMap<>();
         for (ReceivedFactDetailVo f : facts) {
-            boolean refundRow = isRefundFactRow(f);
             String key = String.valueOf(f.getEmployeeCode()) + "|" + String.valueOf(f.getRoleType())
-                + (crossPeriod ? (refundRow ? "|R" : "|N") : "|" + String.valueOf(f.getPeriod()));
-            if (crossPeriod) {
-                periodsByKey.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>()).add(f.getPeriod());
-            }
+                + "|" + String.valueOf(f.getPeriod())
+                + (crossPeriod && isRefundFactRow(f) ? "|R" : "");
             ReceivedFactDetailVo m = merged.get(key);
             if (m == null) {
                 merged.put(key, f);
-                if (crossPeriod && !refundRow) {
-                    // 正常合并行：对应新签取正部累计口径，后续被更晚正常期间行覆盖（数据按期间正序到达）
-                    f.setExpectedAmount(f.getExpectedCumAmount());
-                    f.setOriginalExpectedAmount(f.getExpectedCumOriginalAmount());
-                    latestPeriod.put(key, f.getPeriod());
-                }
-                // 退单合并行：保留行级当期负部口径（对应退单月的负新签），同键行同值取首行
                 continue;
             }
             if (m.getAmount() != null || f.getAmount() != null) {
@@ -2441,19 +2454,6 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             }
             if (Boolean.TRUE.equals(f.getReceivedAdjusted())) m.setReceivedAdjusted(true);
             if (Boolean.TRUE.equals(f.getExpectedAdjusted())) m.setExpectedAdjusted(true);
-            if (crossPeriod && !refundRow) {
-                String lp = latestPeriod.get(key);
-                if (f.getPeriod() != null && (lp == null || f.getPeriod().compareTo(lp) >= 0)) {
-                    latestPeriod.put(key, f.getPeriod());
-                    m.setExpectedAmount(f.getExpectedCumAmount());
-                    m.setOriginalExpectedAmount(f.getExpectedCumOriginalAmount());
-                }
-            }
-        }
-        if (crossPeriod) {
-            for (Map.Entry<String, ReceivedFactDetailVo> entry : merged.entrySet()) {
-                entry.getValue().setPeriod(String.join("、", periodsByKey.get(entry.getKey())));
-            }
         }
         return new java.util.ArrayList<>(merged.values());
     }

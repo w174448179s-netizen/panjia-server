@@ -78,15 +78,6 @@ public class ReceivedFactDetailVo implements Serializable {
     /** 应收业绩折算后原始金额（originalExpectedAmount × conversionFactor） */
     private BigDecimal originalConvertedAmount;
 
-    /**
-     * 对应新签·全期累计口径（累计到本行期间为止的 ACTIVE 净额；跨期详情按角色合并行时
-     * 取最晚期间行的该值 = 全期净额，避免「两笔实收对应一笔新签」时行级口径多期重复显示翻倍）
-     */
-    private BigDecimal expectedCumAmount;
-
-    /** 对应新签原值·全期累计口径（跨期合并行原值取数用） */
-    private BigDecimal expectedCumOriginalAmount;
-
-    /** 归属审批单号（rd.received_apply_id 关联；跨期合并时按 TD 前缀区分退单冲减行与正常行） */
+    /** 归属审批单号（rd.received_apply_id 关联；跨期详情按 TD 前缀区分退单冲减行与正常行） */
     private String applyNo;
 }

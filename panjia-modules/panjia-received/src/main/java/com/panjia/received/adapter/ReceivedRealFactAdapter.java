@@ -121,8 +121,9 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType) {
-        return realMapper.selectApprovedApplies(deptId, employeeId, keyword, bizType);
+    public List<PerformanceContractSummaryDTO> listApprovedApplies(Long deptId, Long employeeId, String keyword, String bizType,
+                                                                   String refundFilter) {
+        return realMapper.selectApprovedApplies(deptId, employeeId, keyword, bizType, refundFilter);
     }
 
     @Override

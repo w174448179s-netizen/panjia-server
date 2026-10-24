@@ -6,6 +6,7 @@ import com.panjia.contracts.port.ImportBatchWritePort;
 import com.panjia.contracts.port.ImportToReceivedPort;
 import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.performance.domain.PerformanceConsumeLog;
+import com.panjia.performance.service.IPerfRefundService;
 import com.panjia.performance.service.PerformanceEngine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +47,7 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
     private final ImportToReceivedPort importToReceivedPort;
     private final ReceivedApplyPort receivedApplyPort;
     private final ImportBatchWritePort importBatchWritePort;
+    private final IPerfRefundService perfRefundService;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -96,6 +98,17 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
             event.getOperatorId(), supersededIds, event.getSourceType(), event.getPeriod());
         log.info("[导入归档] KE_SIGNED 消费完成：batchId={}, period={}",
             event.getBatchId(), consumeLog.getPeriod());
+
+        // 贝壳导入负数（退单行）→ 自动登记退单记录（EXECUTED，无需人工审批），
+        // 已结佣部分同步生成退单月负结佣；失败不阻断导入，回写批次问题清单供人工核对
+        try {
+            int refunds = perfRefundService.createFromImportedBatch(
+                event.getBatchId(), event.getPeriod(), event.getOperatorId(), supersededIds);
+            log.info("[导入归档] 导入退单自动登记完成：batchId={}, created={}", event.getBatchId(), refunds);
+        } catch (Exception e) {
+            log.error("[导入归档] 导入退单自动登记失败：batchId={}", event.getBatchId(), e);
+            importBatchWritePort.recordBatchError(event.getBatchId(), "导入退单自动登记失败：" + e.getMessage());
+        }
     }
 
     /** KE_RECEIVED / HISTORY_PAYROLL → ImportToReceivedPort 写实收表 + 建审批单 */
@@ -104,8 +117,9 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
         importToReceivedPort.supersedeBatches(convertSupersededIds(event.getSupersededBatchIds()));
         ImportToReceivedPort.ImportToReceivedResult result = importToReceivedPort
             .consumeBatch(event.getBatchId(), period, event.getSourceType(), event.getOperatorId());
-        log.info("[导入归档] 实收表写入完成：batchId={}, sourceType={}, contracts={}, details={}",
-            event.getBatchId(), event.getSourceType(), result.newContracts(), result.newDetails());
+        log.info("[导入归档] 实收表写入完成：batchId={}, sourceType={}, contracts={}, details={}, skippedRefundRows={}",
+            event.getBatchId(), event.getSourceType(), result.newContracts(), result.newDetails(),
+            result.skippedRefundRows());
 
         // 实收审批单
         int created;
@@ -115,6 +129,17 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
             created = receivedApplyPort.autoCreateForReceivedBatch(event.getBatchId(), period, event.getOperatorId());
         }
         log.info("[导入归档] 实收审批单新建：batchId={}, created={}", event.getBatchId(), created);
+
+        // 负实收到位后同步导入退单：回填冲减实收合计；负实收+负新签都已到位且存在已结佣记录时，
+        // 按红冲比例生成退单月负结佣（负新签单独到位不产生负结佣）
+        try {
+            int updated = perfRefundService.syncImportedRefunds(period);
+            log.info("[导入归档] 导入退单同步完成：batchId={}, period={}, updated={}",
+                event.getBatchId(), period, updated);
+        } catch (Exception e) {
+            log.error("[导入归档] 导入退单同步失败：batchId={}, period={}", event.getBatchId(), period, e);
+            importBatchWritePort.recordBatchError(event.getBatchId(), "导入退单同步失败：" + e.getMessage());
+        }
     }
 
     private List<Long> convertSupersededIds(List<String> ids) {

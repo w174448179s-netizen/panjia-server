@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -53,6 +54,32 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int cancelRefundReversal(Long refundId, Long operatorId) {
+        if (refundId == null) {
+            return 0;
+        }
+        CommissionApplication app = applicationMapper.selectOne(
+            new LambdaQueryWrapper<CommissionApplication>()
+                .eq(CommissionApplication::getApplyNo, "TD" + refundId)
+                .last("LIMIT 1"));
+        if (app == null) {
+            return 0;
+        }
+        List<CommissionItem> items = itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, app.getId())
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
+        for (CommissionItem item : items) {
+            item.setStatus(ItemStatus.REVERSED);
+            itemMapper.updateById(item);
+        }
+        app.setStatus(ApplicationStatus.CANCELLED);
+        applicationMapper.updateById(app);
+        log.info("[退单结佣] 撤销冲减单：applyNo={}, 作废明细={}", app.getApplyNo(), items.size());
+        return items.size();
+    }
+
+    @Override
     public List<CommissionRefundLine> listSettledLines(String contractNo, String orderNo) {
         List<CommissionRefundLine> lines = new ArrayList<>();
         for (CommissionItem item : listSettledItems(contractNo, orderNo)) {
@@ -81,6 +108,17 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
     public BigDecimal createRefundReversal(String contractNo, String orderNo, String refundPeriod,
                                            Long refundId, Long operatorId,
                                            Map<Long, Long> expectFactIdMapping) {
+        // 手工退单为整单全额冲退：比例为 null 时按明细原额取负（等价 -1）
+        return createRefundReversal(contractNo, orderNo, refundPeriod, refundId, operatorId,
+            expectFactIdMapping, null);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public BigDecimal createRefundReversal(String contractNo, String orderNo, String refundPeriod,
+                                           Long refundId, Long operatorId,
+                                           Map<Long, Long> expectFactIdMapping,
+                                           Map<Long, BigDecimal> ratioByOriginalFactId) {
         List<CommissionItem> items = listSettledItems(contractNo, orderNo);
         if (items.isEmpty()) {
             return BigDecimal.ZERO;
@@ -92,6 +130,12 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
             Long negativeFactId = expectFactIdMapping == null
                 ? null : expectFactIdMapping.get(item.getPerformanceFactId());
             if (negativeFactId == null) {
+                continue;
+            }
+            // 部分退单：比例缺失说明该已结佣事实本次未红冲，不生成负明细
+            BigDecimal ratio = ratioByOriginalFactId == null
+                ? null : ratioByOriginalFactId.get(item.getPerformanceFactId());
+            if (ratioByOriginalFactId != null && ratio == null) {
                 continue;
             }
             // 幂等：该负事实已被绑定（重复执行退单）则跳过
@@ -122,7 +166,11 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
             n.setBizType(item.getBizType());
             n.setRoleType(item.getRoleType());
             n.setFeeItem(item.getFeeItem());
-            n.setAmount(item.getAmount().negate());
+            // 部分退：按红冲比例缩放已结佣金额；未传比例（手工退单/整单退）取原额相反数
+            BigDecimal negativeAmount = ratio != null
+                ? item.getAmount().multiply(ratio).setScale(2, RoundingMode.HALF_UP)
+                : item.getAmount().negate();
+            n.setAmount(negativeAmount);
             n.setStatus(ItemStatus.APPROVED);
             n.setOriginReversed(false);
             itemMapper.insert(n);

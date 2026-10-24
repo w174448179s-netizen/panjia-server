@@ -28,6 +28,9 @@ public class PerformanceManageContractVo {
     /** 业务类型（二手买卖/租赁/...） */
     private String bizType;
 
+    /** 归属期间（单期间筛选=该期间；未选期间跨期合并时=合同涉及全部期间按序「、」拼接） */
+    private String period;
+
     /** 房源地址 */
     private String propertyAddress;
 

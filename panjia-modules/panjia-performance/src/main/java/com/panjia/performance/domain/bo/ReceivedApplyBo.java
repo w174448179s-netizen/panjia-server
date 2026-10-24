@@ -31,4 +31,14 @@ public class ReceivedApplyBo {
 
     /** 业务类型 */
     private String bizType;
+
+    /**
+     * 退单三态筛选。
+     * <ul>
+     *   <li>REFUND=仅退单（单据为 TD 冲减单，apply_no 以 'TD' 开头；合并行按合同是否存在 TD 冲减单过滤）；</li>
+     *   <li>NORMAL=仅正常（排除 TD 冲减单）；</li>
+     *   <li>空=全部。</li>
+     * </ul>
+     */
+    private String refundFilter;
 }

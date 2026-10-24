@@ -30,4 +30,14 @@ public class PerformanceManageContractBo {
 
     /** 事实状态 */
     private String factStatus;
+
+    /**
+     * 退单三态筛选（行级红冲行口径）。
+     * <ul>
+     *   <li>REFUND=仅退单（reversal_type = 'REDINK_REFUND' 的红冲行）；</li>
+     *   <li>NORMAL=仅正常（排除红冲行）；</li>
+     *   <li>空=全部。</li>
+     * </ul>
+     */
+    private String refundFilter;
 }

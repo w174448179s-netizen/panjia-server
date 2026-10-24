@@ -20,6 +20,7 @@ import com.panjia.performance.domain.ReversalType;
 import com.panjia.contracts.snapshot.EmployeeSnapshot;
 import com.panjia.performance.mapper.PerformanceConsumeLogMapper;
 import com.panjia.performance.mapper.PerformanceFactMapper;
+import com.panjia.performance.mapper.PerfRefundMapper;
 import com.panjia.performance.port.EmployeeSnapshotQueryPort;
 import com.panjia.performance.service.IPeriodCloseService;
 import com.panjia.performance.util.MoneyUtil;
@@ -73,6 +74,7 @@ public class PerformanceEngine {
     private final ConfigService configService;
     private final IPeriodCloseService periodCloseService;
     private final ReceivedApplyPort receivedApplyPort;
+    private final PerfRefundMapper perfRefundMapper;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /** 期间格式：YYYY-MM */
@@ -202,6 +204,9 @@ public class PerformanceEngine {
         // 发事件前再按 factType 分组（结佣域只消费 PERF_REAL 事件，PERF_EXPECT 事件其直接忽略）
         List<PerformanceFact> createdFacts = new ArrayList<>();
 
+        // 因合同已手工退单而被跳过的导入负数行（合同号集合），完成后回写消费日志提示
+        Set<String> skippedRedinkContracts = new LinkedHashSet<>();
+
         PageResult<NormalizedRecordDTO> pageResult;
         do {
             pageResult = importQueryPort.listByBatchId(batchId, pageNum, pageSize);
@@ -226,7 +231,7 @@ public class PerformanceEngine {
                         continue;
                     }
                     for (FactType factType : factTypes) {
-                        buildSingleFact(record, factType, operatorId, createdFacts);
+                        buildSingleFact(record, factType, operatorId, createdFacts, skippedRedinkContracts);
                     }
                     // 计数口径＝归一化行数（一行无论发几条事实都算处理成功 1 行），
                     // 实际新建事实条数以 createdFacts / 库表为准并在完成日志中打印
@@ -249,6 +254,11 @@ public class PerformanceEngine {
         consumeLog.setStatus(ConsumeStatus.SUCCESS);
         if (totalCount == 0) {
             consumeLog.setMessage("批次无数据");
+        } else if (!skippedRedinkContracts.isEmpty()) {
+            // 导入/手工退单互斥留痕：这些合同的贝壳退单负数行未写入（手工退单已冲减）
+            consumeLog.setMessage("已跳过 " + skippedRedinkContracts.size()
+                + " 个合同的贝壳退单负数行（该合同已手工退单）："
+                + String.join("、", skippedRedinkContracts.stream().limit(10).toList()));
         }
 
         consumeLogMapper.updateById(consumeLog);
@@ -418,6 +428,24 @@ public class PerformanceEngine {
      */
     public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId,
                                            List<PerformanceFact> createdCollector) {
+        return buildSingleFact(record, factType, operatorId, createdCollector, null);
+    }
+
+    /**
+     * 构建单条业绩事实（带新建事实收集器 + 跳过合同收集器）。
+     * <p>
+     * 与 4 参重载一致；额外收集「因已手工退单而被跳过的负数行」合同号，
+     * 供消费日志回写提示（2026-10-25 导入/手工退单互斥）。
+     *
+     * @param record           归一化记录
+     * @param factType         事实口径
+     * @param operatorId       操作人 ID
+     * @param createdCollector 新建事实收集器（可空）
+     * @param skippedRedink    被跳过（手工退单已存在）的负数行合同号收集器（可空）
+     * @return 构建的业绩事实；跳过时返回 null
+     */
+    public PerformanceFact buildSingleFact(NormalizedRecordDTO record, FactType factType, Long operatorId,
+                                           List<PerformanceFact> createdCollector, Set<String> skippedRedink) {
         // 幂等锚点与贝壳「当前金额」两条路径共用，提前解析
         String sourceKey = generateSourceKey(record);
         BigDecimal currentAmount = resolveFactCurrentAmount(record, factType);
@@ -429,8 +457,24 @@ public class PerformanceEngine {
         // ★ 例外：贝壳实收导入（KE_RECEIVED）负数行 = 负实收（到账退回），直接按到账金额
         //   落库，不走红冲镜像——其比较基准是新签应收（PERF_EXPECT），且到账金额可超过
         //   历史实收正数额，红冲的超额拦截会误杀。
+        // 兜底标记：负数行未匹配到成交月原正数事实（如原签约月未导入）时走当期口径兜底落库，
+        //   但业务本质仍是退单红冲，必须打 REDINK_REFUND 标记——否则 createFromImportedBatch
+        //   扫不到该负事实，退单管理缺记录、已退单合同也无法拦截结佣
+        boolean fallbackRedink = false;
         if (MoneyUtil.isNegative(currentAmount)
                 && !RECORD_TYPE_KE_RECEIVED.equals(record.getRecordType())) {
+            // ★ 与手工退单互斥（2026-10-25 定稿）：手工退单执行时已按原事实镜像生成负数
+            //   （负新签/负实收/负结佣），此处再导入贝壳负数行即重复冲减，整单净额会翻负。
+            //   命中只跳过该行（不整批失败），并在消费日志中提示涉及的合同。
+            if (perfRefundMapper.countEffectiveByBizKeys(record.getContractNo(), record.getOrderNo()) > 0) {
+                log.warn("[业绩红冲] 合同已手工退单，跳过导入的退单负数行：contractNo={}, orderNo={}, recordId={}",
+                    record.getContractNo(), record.getOrderNo(), record.getId());
+                if (skippedRedink != null) {
+                    skippedRedink.add(StringUtils.isNotBlank(record.getContractNo())
+                        ? record.getContractNo() : record.getOrderNo());
+                }
+                return null;
+            }
             // 红冲回溯用剥离批内冲突后缀（#行号，同批正负对冲行）的原始业务键前缀，
             // 保证能找到历史成交月原正数事实；generateSourceKey 幂等锚点仍用完整 key。
             // 排除当前批次：同批次的正负行（签约补录+比例调整）不互为红冲原事实。
@@ -442,6 +486,7 @@ public class PerformanceEngine {
             }
             log.warn("[业绩红冲] 负数行未匹配到成交月原正数事实，按当期口径兜底生成（无法保证快照一致）："
                 + "sourceKey={}, factType={}", sourceKey, factType);
+            fallbackRedink = true;
         }
 
         // ========== 0.5 新签直接取当月应收，不做跨月增量计算 ==========
@@ -528,6 +573,10 @@ public class PerformanceEngine {
 
         fact.setFactStatus(FactStatus.ACTIVE);
         fact.setSource(PerformanceSource.IMPORT);
+        // 兜底路径的退单负数行：无原事实可镜像（refund_of_fact_id 留空），但红冲性质不变
+        if (fallbackRedink) {
+            fact.setReversalType(ReversalType.REDINK_REFUND);
+        }
         fact.setOperatorId(operatorId);
 
         factMapper.insert(fact);
