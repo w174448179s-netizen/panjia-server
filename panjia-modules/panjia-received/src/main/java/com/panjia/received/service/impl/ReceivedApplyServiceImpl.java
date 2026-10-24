@@ -1969,19 +1969,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     + " AND e.employee_id = {0})",
                 query.getEmployeeId());
         }
-        // 退单三态筛选：选定期间（单据维度）按行过滤 TD 冲减单（apply_no 以 'TD' 开头）；
-        // 未选期间（同合同多期单据合并为一行）无法按行过滤，改按「该合同是否存在 TD 冲减单」EXISTS 过滤
+        // 退单三态筛选：选定期间（单据维度）按行过滤退单行——判定兼容两类：
+        // 手工退单生成的 TD 前缀冲减单、贝壳导入的负金额实收单（RCV 前缀 + 负数，无 TD 标记）；
+        // 未选期间（同合同多期单据合并为一行）无法按行过滤，改按「该合同是否存在退单行」EXISTS 过滤
         String refundFilter = query.getRefundFilter();
         if (StringUtils.isNotBlank(refundFilter)) {
             if (StringUtils.isNotBlank(query.getPeriod())) {
                 if ("REFUND".equals(refundFilter)) {
-                    wrapper.apply("apply_no LIKE 'TD%'");
+                    wrapper.apply("(apply_no LIKE 'TD%' OR received_amount < 0)");
                 } else if ("NORMAL".equals(refundFilter)) {
-                    wrapper.apply("(apply_no NOT LIKE 'TD%' OR apply_no IS NULL)");
+                    wrapper.apply("apply_no NOT LIKE 'TD%' AND received_amount >= 0");
                 }
             } else {
                 String tdExists = "EXISTS (SELECT 1 FROM pj_perf_received_apply td"
-                    + " WHERE td.apply_no LIKE 'TD%' AND td.status != 'CANCELLED'"
+                    + " WHERE (td.apply_no LIKE 'TD%' OR td.received_amount < 0) AND td.status != 'CANCELLED'"
                     + " AND (td.contract_no = pj_perf_received_apply.contract_no"
                     + " OR (td.order_no IS NOT NULL AND td.order_no != ''"
                     + " AND td.order_no = pj_perf_received_apply.order_no)))";

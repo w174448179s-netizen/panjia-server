@@ -1681,6 +1681,23 @@ public class CommissionApplicationService {
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
             contracts.stream().map(PerformanceContractSummaryDTO::getBizType).collect(Collectors.toSet()));
 
+        // 退单三态筛选：合同级口径，已退单 = pj_perf_refund 存在 EXECUTED 记录（合同号/订单号双键命中）。
+        // 批量预查已退单 bizKey 集合，循环内内存过滤，避免逐行回表
+        String refundFilter = StringUtils.trimToNull(query.getRefundFilter());
+        Set<String> refundedKeys = Collections.emptySet();
+        if (refundFilter != null && !contracts.isEmpty()) {
+            Set<String> refundBizKeys = new HashSet<>();
+            for (PerformanceContractSummaryDTO c : contracts) {
+                if (StringUtils.isNotBlank(c.getOrderNo())) {
+                    refundBizKeys.add(c.getOrderNo());
+                }
+                if (StringUtils.isNotBlank(c.getContractNo())) {
+                    refundBizKeys.add(c.getContractNo());
+                }
+            }
+            refundedKeys = performanceQueryPort.findRefundedBizKeys(refundBizKeys);
+        }
+
         // 按员工筛选时：结佣业绩列/合计展示该员工口径的新签业绩，而非申请单合同全量总额
         Map<String, BigDecimal> empExpectMap = new HashMap<>();
         if (query.getEmployeeId() != null) {
@@ -1718,6 +1735,13 @@ public class CommissionApplicationService {
             String status = app.getStatus().getCode();
             if (StringUtils.isNotBlank(query.getStatus()) && !query.getStatus().equals(status)) {
                 continue;
+            }
+            // 退单筛选：仅退单=命中已退单 bizKey；仅正常=未命中
+            if (refundFilter != null) {
+                boolean refunded = refundedKeys.contains(c.getOrderNo()) || refundedKeys.contains(c.getContractNo());
+                if ("REFUND".equals(refundFilter) != refunded) {
+                    continue;
+                }
             }
             // 审批节点数据隔离：审批中（SUBMITTED）单据仅「本人角色对应节点」或「申请人本人」可见；
             // 财务→FINANCE、总监→DIRECTOR，店长/经纪人看不到他人审批中的单据但能看到自己发起的，超管看全部
