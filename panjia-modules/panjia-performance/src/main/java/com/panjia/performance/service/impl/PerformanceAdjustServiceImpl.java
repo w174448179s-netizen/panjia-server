@@ -2574,6 +2574,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     /**
      * 对给定实收明细行按金额占比分摊 delta 后逐行 supersede（{@link MoneyUtil#allocateByAmount}，尾差补最大行）。
      * <p>金额允许为负：严格同额，扣减超实收不截断。
+     * <p>supersede 后就地回写 DTO 的 factId/amount：receivedByEmpRole 是执行前一次性加载的快照，
+     * 同一员工的多个角色行（或退化分支）可能先后命中同一条实收明细，不回写会让后续角色行
+     * 再次冲销已 REVERSED 的旧行（生产 TG2603925248 余璇双角色案例）。
      */
     private void adjustReceivedRows(ReceivedRealFactPort port, List<PerformanceFactSummaryDTO> rows,
                                     BigDecimal delta, Long adjustId, Long operatorId) {
@@ -2589,7 +2592,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 continue;
             }
             BigDecimal newAmount = MoneyUtil.round2(amounts.get(i).add(parts[i]));
-            port.adjustDetailAmount(rows.get(i).getFactId(), newAmount, operatorId, adjustId);
+            Long newDetailId = port.adjustDetailAmount(rows.get(i).getFactId(), newAmount, operatorId, adjustId);
+            if (newDetailId != null) {
+                rows.get(i).setFactId(newDetailId);
+                rows.get(i).setAmount(newAmount);
+            }
         }
     }
 
