@@ -114,7 +114,8 @@ public class ScoreServiceImpl implements ScoreService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details) {
+    public void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details,
+                                 List<Long> supersededBatchIds) {
         if (details == null || details.isEmpty()) {
             return;
         }
@@ -137,15 +138,31 @@ public class ScoreServiceImpl implements ScoreService {
                 .select(Employee::getEmployeeId, Employee::getEmployeeCode))
             .stream()
             .collect(Collectors.toMap(Employee::getEmployeeCode, Employee::getEmployeeId, (a, b) -> a));
-
-        // 先删后插：删除本月已匹配员工的明细，再批量插入
-        if (!codeToEmployeeId.isEmpty()) {
-            scoreDetailMapper.delete(new LambdaQueryWrapper<ScoreDetail>()
-                .in(ScoreDetail::getEmployeeId, codeToEmployeeId.values())
-                .eq(ScoreDetail::getScoreMonth, monthStart));
+        if (codeToEmployeeId.isEmpty()) {
+            return;
         }
 
+        // 1. 整批替换：被本批替代的旧批次写入的本月明细先清理（其他仍生效的批次不动，
+        //    例如同月的租赁批次），否则重导后文件里删掉的行会残留
+        if (supersededBatchIds != null && !supersededBatchIds.isEmpty()) {
+            int removed = scoreDetailMapper.delete(new LambdaQueryWrapper<ScoreDetail>()
+                .in(ScoreDetail::getSourceBatchId, supersededBatchIds)
+                .eq(ScoreDetail::getScoreMonth, monthStart));
+            log.info("[积分明细同步] 已清理被替代批次明细：期间 {}，旧批次 {}，删除 {} 行",
+                period, supersededBatchIds, removed);
+        }
+
+        // 2. 按 (员工, 日期) 覆盖写入：同一天只保留提交时间最晚的一条，跨批次自然合并
+        Set<Long> employeeIds = new java.util.HashSet<>(codeToEmployeeId.values());
+        Map<String, ScoreDetail> existsByKey = scoreDetailMapper.selectList(new LambdaQueryWrapper<ScoreDetail>()
+                .in(ScoreDetail::getEmployeeId, employeeIds)
+                .eq(ScoreDetail::getScoreMonth, monthStart))
+            .stream()
+            .collect(Collectors.toMap(d -> detailKey(d.getEmployeeId(), d.getPointDate()),
+                d -> d, (a, b) -> a));
+
         int inserted = 0;
+        int updated = 0;
         int skipped = 0;
         for (ScoreDetailSyncDTO dto : details) {
             String code = dto.getEmployeeCode() == null ? null : dto.getEmployeeCode().trim();
@@ -154,18 +171,128 @@ public class ScoreServiceImpl implements ScoreService {
                 skipped++;
                 continue;
             }
-            ScoreDetail detail = new ScoreDetail();
-            detail.setEmployeeId(employeeId);
-            detail.setScoreMonth(monthStart);
-            detail.setPointDate(dto.getPointDate());
-            detail.setSubmitTime(dto.getSubmitTime());
-            detail.setScore(dto.getScore());
-            detail.setIsValid(dto.isValid());
-            detail.setIsLateSubmit(dto.isLateSubmit());
-            scoreDetailMapper.insert(detail);
-            inserted++;
+            String key = detailKey(employeeId, dto.getPointDate());
+            ScoreDetail target = existsByKey.get(key);
+            if (target != null && !shouldOverwrite(target.getSubmitTime(), dto.getSubmitTime())) {
+                skipped++;
+                continue;
+            }
+            boolean isNew = target == null;
+            if (isNew) {
+                target = new ScoreDetail();
+                target.setEmployeeId(employeeId);
+                target.setScoreMonth(monthStart);
+                target.setPointDate(dto.getPointDate());
+            }
+            target.setSubmitTime(dto.getSubmitTime());
+            target.setScore(dto.getScore());
+            target.setIsValid(dto.isValid());
+            target.setIsLateSubmit(dto.isLateSubmit());
+            target.setSourceBatchId(dto.getSourceBatchId());
+            if (isNew) {
+                scoreDetailMapper.insert(target);
+                existsByKey.put(key, target);
+                inserted++;
+            } else {
+                target.setUpdateTime(java.time.LocalDateTime.now());
+                scoreDetailMapper.updateById(target);
+                updated++;
+            }
         }
-        log.info("[积分明细同步] 期间 {} 完成：插入 {} 条，跳过 {} 条", period, inserted, skipped);
+        log.info("[积分明细同步] 期间 {} 完成：新增 {}，覆盖 {}，跳过 {}",
+            period, inserted, updated, skipped);
+
+        // 3. 汇总由明细全量重算：跨批次合并后口径一致，撤销后也能自愈
+        for (Long employeeId : employeeIds) {
+            recomputeSummary(employeeId, monthStart, period);
+        }
+        // 4. 数据被导入覆盖，审批单失效回待提交，防止按旧审批算薪
+        approvalService.invalidateOnDataChange(period);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void revokeScoreBatch(String period, Long batchId) {
+        LocalDate monthStart = parseMonthStart(period);
+        if (monthStart == null || batchId == null) {
+            return;
+        }
+        Set<Long> employeeIds = scoreDetailMapper.selectList(new LambdaQueryWrapper<ScoreDetail>()
+                .select(ScoreDetail::getEmployeeId)
+                .eq(ScoreDetail::getSourceBatchId, batchId)
+                .eq(ScoreDetail::getScoreMonth, monthStart))
+            .stream()
+            .map(ScoreDetail::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        int removed = scoreDetailMapper.delete(new LambdaQueryWrapper<ScoreDetail>()
+            .eq(ScoreDetail::getSourceBatchId, batchId)
+            .eq(ScoreDetail::getScoreMonth, monthStart));
+        for (Long employeeId : employeeIds) {
+            recomputeSummary(employeeId, monthStart, period);
+        }
+        approvalService.invalidateOnDataChange(period);
+        log.info("[积分明细撤销] 期间 {} 批次 {}：删除明细 {} 行，重算 {} 人汇总",
+            period, batchId, removed, employeeIds.size());
+    }
+
+    /** 明细维度键：员工 + 填报日期 */
+    private String detailKey(Long employeeId, LocalDate pointDate) {
+        return employeeId + "|" + pointDate;
+    }
+
+    /**
+     * 同一天重复时覆盖判定：保留提交时间最晚的一条。
+     * <p>
+     * 任意一方提交时间缺失时按覆盖处理（宁可用新数据，也不保留无法比对的旧值）。
+     */
+    private boolean shouldOverwrite(java.time.LocalDateTime existing, java.time.LocalDateTime incoming) {
+        if (existing == null || incoming == null) {
+            return true;
+        }
+        return !incoming.isBefore(existing);
+    }
+
+    /**
+     * 由每日明细全量重算月度汇总（一员工一月一行）。
+     * <p>
+     * 总积分 = 有效行 score 之和；出勤天数 = 有填报的 DISTINCT 日期数；
+     * 晚提交次数 = 晚提交的 DISTINCT 日期数。明细清空时删除导入来源的汇总行。
+     */
+    private void recomputeSummary(Long employeeId, LocalDate monthStart, String period) {
+        List<ScoreDetail> rows = scoreDetailMapper.selectList(new LambdaQueryWrapper<ScoreDetail>()
+            .eq(ScoreDetail::getEmployeeId, employeeId)
+            .eq(ScoreDetail::getScoreMonth, monthStart));
+        if (rows.isEmpty()) {
+            int removed = scoreMapper.delete(new LambdaQueryWrapper<PerformanceScore>()
+                .eq(PerformanceScore::getEmployeeId, employeeId)
+                .eq(PerformanceScore::getScoreMonth, monthStart)
+                .eq(PerformanceScore::getDataSource, DATA_SOURCE_IMPORT));
+            if (removed > 0) {
+                log.info("[积分汇总重算] 员工 {} 期间 {} 无明细，删除导入汇总行 {}", employeeId, period, removed);
+            }
+            return;
+        }
+        BigDecimal totalPoints = BigDecimal.ZERO;
+        Set<LocalDate> attendDates = new java.util.HashSet<>();
+        Set<LocalDate> lateDates = new java.util.HashSet<>();
+        for (ScoreDetail row : rows) {
+            if (Boolean.TRUE.equals(row.getIsValid()) && row.getScore() != null) {
+                totalPoints = totalPoints.add(row.getScore());
+            }
+            if (row.getPointDate() != null) {
+                attendDates.add(row.getPointDate());
+                if (Boolean.TRUE.equals(row.getIsLateSubmit())) {
+                    lateDates.add(row.getPointDate());
+                }
+            }
+        }
+        ScoreSummarySyncDTO summary = new ScoreSummarySyncDTO();
+        summary.setScoreMonth(monthStart);
+        summary.setTotalPoints(totalPoints);
+        summary.setAttendDays(attendDates.size());
+        summary.setLateSubmitCount(lateDates.size());
+        upsertFromImport(employeeId, summary);
     }
 
     /** 汇总 upsert 公共段：按工号匹配员工后逐条覆盖写入，返回成功条数。 */

@@ -38,4 +38,7 @@ public class ScoreDetailSyncDTO implements Serializable {
 
     /** 是否计入总积分（早于 19:30 提交为 false） */
     private boolean valid;
+
+    /** 来源导入批次 ID（整批替换/撤销时按此精确清理本批写入的行） */
+    private Long sourceBatchId;
 }

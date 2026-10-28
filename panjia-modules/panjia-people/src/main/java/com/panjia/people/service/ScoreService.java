@@ -62,12 +62,25 @@ public interface ScoreService extends PeopleScoreQueryPort {
     PageResult<ScoreVO> pageMy(Long userId, ScoreQuery query, PageQuery pageQuery);
 
     /**
-     * 导入同步：保存积分每日明细（先删后插，同人同月覆盖，事件重投幂等）。
+     * 导入同步：保存积分每日明细（按 (员工, 日期) 覆盖，同一天保留提交时间最晚的一条）。
+     * <p>
+     * 跨批次（如二手 + 租赁同月）按日期合并；被本批替代的旧批次写入的行按
+     * {@code supersededBatchIds} 精确清理。明细落库后，受影响员工的当月月度汇总
+     * 由明细全量重算（总积分/出勤天数/晚提交次数均可从明细还原）。
+     *
+     * @param period              归属期间（YYYY-MM）
+     * @param details             每日明细列表
+     * @param supersededBatchIds  被本批替代的旧批次 ID（整批替换时清其明细，可为空）
+     */
+    void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details, List<Long> supersededBatchIds);
+
+    /**
+     * 积分批次撤销：删除该批次写入的每日明细，并按明细重算受影响员工的当月汇总。
      *
      * @param period  归属期间（YYYY-MM）
-     * @param details 每日明细列表
+     * @param batchId 被撤销的批次 ID
      */
-    void syncScoreDetails(String period, List<ScoreDetailSyncDTO> details);
+    void revokeScoreBatch(String period, Long batchId);
 
     /**
      * 查询当前登录用户在指定月份的积分每日明细。

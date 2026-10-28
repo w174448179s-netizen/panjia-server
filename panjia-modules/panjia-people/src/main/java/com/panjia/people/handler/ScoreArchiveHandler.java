@@ -61,18 +61,39 @@ public class ScoreArchiveHandler implements DomainEventHandler {
             return;
         }
         List<ScoreSummarySyncDTO> summaries = event.getScoreSummaries();
-        if (summaries == null || summaries.isEmpty()) {
-            log.info("[积分消费] 归档事件无积分汇总：batchId={}, period={}", event.getBatchId(), event.getPeriod());
+        List<ScoreDetailSyncDTO> details = event.getScoreDetails();
+        boolean hasDetails = details != null && !details.isEmpty();
+        if (!hasDetails && (summaries == null || summaries.isEmpty())) {
+            log.info("[积分消费] 归档事件无积分数据：batchId={}, period={}", event.getBatchId(), event.getPeriod());
             return;
         }
-        // 抛出异常交由 Dispatcher 重试（upsert 幂等，重投安全）
-        scoreService.syncScoreSummaries(event.getPeriod(), summaries);
-        // 积分每日明细同步（先删后插，幂等）
-        List<ScoreDetailSyncDTO> details = event.getScoreDetails();
-        if (details != null && !details.isEmpty()) {
-            scoreService.syncScoreDetails(event.getPeriod(), details);
+        if (hasDetails) {
+            // 明细按 (员工, 日期) 覆盖写入，月度汇总由明细全量重算——
+            // 同月多个批次（二手 + 租赁）按日期合并，后导入者覆盖同日数据
+            scoreService.syncScoreDetails(event.getPeriod(), details, toBatchIds(event.getSupersededBatchIds()));
+        } else {
+            // 兼容无明细的旧事件：退回批内汇总覆盖
+            scoreService.syncScoreSummaries(event.getPeriod(), summaries);
         }
-        log.info("[积分消费] 归档事件积分同步完成：batchId={}, period={}, 人数={}",
-            event.getBatchId(), event.getPeriod(), summaries.size());
+        log.info("[积分消费] 归档事件积分同步完成：batchId={}, period={}, 明细行={}",
+            event.getBatchId(), event.getPeriod(), hasDetails ? details.size() : 0);
+    }
+
+    /** 事件中的批次 ID 为字符串，转换为 Long（非法值忽略） */
+    private List<Long> toBatchIds(List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        return ids.stream()
+            .filter(id -> id != null && !id.isBlank())
+            .map(id -> {
+                try {
+                    return Long.valueOf(id.trim());
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+            })
+            .filter(id -> id != null)
+            .toList();
     }
 }

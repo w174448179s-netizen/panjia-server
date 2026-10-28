@@ -576,7 +576,11 @@ public class ImportEngine {
         //   执行（status=3 触发唯一索引），所以 marker 必须抢在此之前 commit。
         //   整个 doNormalizePhase 是单个事务，与 batch.updateById 一起 all-or-nothing。
         if (ImportBatchStatus.ARCHIVED.equals(batch.getStatus())) {
-            supersedeIfDuplicate(batch);
+            // 积分同月可并存多个批次（二手/租赁/简版各一份文件），按 (员工, 日期) 合并，
+            // 故不做整批替换；其他来源仍走「新批替换旧批」
+            if (!isMergeSource(batch.getSourceType())) {
+                supersedeIfDuplicate(batch);
+            }
             // ★ 自动归档路径发 ImportBatchArchivedEvent（同一事务内 Outbox INSERT 与业务表
             //   UPDATE 原子提交，EventPort 强制要求 MANDATORY 事务上下文）。
             //   supersedeIfDuplicate 已在本事务内完成 markSuperseded 回填，
@@ -585,6 +589,11 @@ public class ImportEngine {
         }
 
         batchMapper.updateById(batch);
+    }
+
+    /** 同月允许多批次并存、下游按业务键合并的来源类型（POINTS 按员工+日期合并） */
+    private boolean isMergeSource(ImportSourceType sourceType) {
+        return sourceType == ImportSourceType.POINTS;
     }
 
     /**

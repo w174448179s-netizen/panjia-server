@@ -152,8 +152,11 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     @Transactional(rollbackFor = Exception.class)
     public void archive(Long batchId) {
         ImportBatch batch = requireBatch(batchId);
-        // 先冲销同（类型,期间,部门）的旧生效批次，否则本批次转入 ARCHIVED 撞部分唯一索引
-        batchSupersedeService.supersedeOldArchivedBatch(batch);
+        // 先冲销同（类型,期间,部门）的旧生效批次，否则本批次转入 ARCHIVED 撞部分唯一索引；
+        // 积分同月允许多批次并存（二手/租赁/简版各一份），按日期合并，故不做整批替换
+        if (batch.getSourceType() != ImportSourceType.POINTS) {
+            batchSupersedeService.supersedeOldArchivedBatch(batch);
+        }
         batch.archive();
         batchMapper.updateById(batch);
         // 归档完成后发事件（考勤汇总随 payload 投递，supersededBatchIds 由 EventPort 内部解析）

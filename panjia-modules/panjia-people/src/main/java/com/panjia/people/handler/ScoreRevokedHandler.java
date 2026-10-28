@@ -2,7 +2,6 @@ package com.panjia.people.handler;
 
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchRevokedEvent;
-import com.panjia.people.service.ScoreApprovalService;
 import com.panjia.people.service.ScoreService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -22,7 +21,6 @@ import tools.jackson.databind.ObjectMapper;
 @RequiredArgsConstructor
 public class ScoreRevokedHandler implements DomainEventHandler {
 
-    private final ScoreApprovalService approvalService;
     private final ScoreService scoreService;
     private final ObjectMapper objectMapper;
 
@@ -51,7 +49,9 @@ public class ScoreRevokedHandler implements DomainEventHandler {
         if (!"POINTS".equals(event.getSourceType())) {
             return;
         }
-        approvalService.invalidateOnDataChange(event.getPeriod());
-        log.info("[积分消费] 批次撤销，积分审批单失效：batchId={}, period={}", event.getBatchId(), event.getPeriod());
+        // 按批次删除本批写入的明细，并由剩余明细重算受影响员工当月的汇总
+        scoreService.revokeScoreBatch(event.getPeriod(), event.getBatchId());
+        log.info("[积分消费] 批次撤销，明细与汇总已回收：batchId={}, period={}",
+            event.getBatchId(), event.getPeriod());
     }
 }

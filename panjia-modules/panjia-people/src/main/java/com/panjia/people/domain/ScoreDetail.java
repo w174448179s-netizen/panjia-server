@@ -15,7 +15,8 @@ import java.time.LocalDateTime;
  * 积分每日明细（一员工一天一行）。
  * <p>
  * 来源：积分日报导入同步（ScoreArchiveHandler 消费归档事件时，
- * ScoreService.syncScoreDetails 先删后插写入），无人工编辑入口。
+ * ScoreService.syncScoreDetails 按 (员工, 日期) 覆盖写入），无人工编辑入口。
+ * 跨批次（如二手 + 租赁同月）按日期合并，同一天后导入者覆盖。
  */
 @Data
 @TableName("pj_people_score_detail")
@@ -46,6 +47,9 @@ public class ScoreDetail implements Serializable {
 
     /** 是否晚提交（晚于 23:00 为 true） */
     private Boolean isLateSubmit;
+
+    /** 写入该行的导入批次 ID（整批替换/撤销时按此精确清理） */
+    private Long sourceBatchId;
 
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

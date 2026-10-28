@@ -202,6 +202,7 @@ public class ScoreSummaryAggregator {
             dto.setPointDate(pointDay);
             dto.setSubmitTime(submitTime);
             dto.setScore(raw.getScore());
+            dto.setSourceBatchId(batchId);
             boolean inWindow = submitTime == null
                 || (!submitTime.toLocalTime().isBefore(WINDOW_START)
                     && !submitTime.toLocalTime().isAfter(WINDOW_END));
