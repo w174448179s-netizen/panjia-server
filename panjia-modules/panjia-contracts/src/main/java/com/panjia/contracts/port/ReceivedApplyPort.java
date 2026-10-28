@@ -1,6 +1,7 @@
 package com.panjia.contracts.port;
 
 import com.panjia.contracts.dto.ManualReceivedSubmitResultDTO;
+import com.panjia.contracts.dto.ReceivedContractInfoDTO;
 
 import java.util.Collection;
 
@@ -125,4 +126,15 @@ public interface ReceivedApplyPort {
      * @param commissionApplyNo   自动生成的结佣申请单号（CAPP 前缀）
      */
     void markAutoCommissionApply(Long applyId, String commissionApplyNo);
+
+    /**
+     * 按合同号/订单号查实收合同信息（pj_received_contract），
+     * 供业绩域在「实收 DRAFT、pj_perf_fact 尚无 ACTIVE 事实」场景补全合同展示信息。
+     * <p>只读查询；合同号优先（非空时按合同号查），否则按订单号查；取最新一条。
+     *
+     * @param contractNo 合同号（可空，空时按 orderNo 匹配）
+     * @param orderNo    订单号（contractNo 为空时必传）
+     * @return 合同信息；无匹配返回 null
+     */
+    ReceivedContractInfoDTO findContractInfo(String contractNo, String orderNo);
 }

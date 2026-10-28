@@ -7,6 +7,7 @@ import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.AdjustType;
 import com.panjia.performance.domain.FactStatus;
+import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.IllegalStateTransitionException;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
@@ -16,6 +17,8 @@ import com.panjia.performance.domain.bo.AdjustDetailTargetBo;
 import com.panjia.performance.domain.bo.AdjustDeductionBo;
 import com.panjia.performance.domain.bo.AddMemberItemBo;
 import com.panjia.performance.domain.bo.AddMemberPayload;
+import com.panjia.performance.domain.bo.ExpectSupplementBo;
+import com.panjia.performance.domain.bo.ExpectSupplementItem;
 import com.panjia.performance.domain.bo.ManualOffsetItem;
 import com.panjia.performance.domain.bo.PerformanceAdjustCreateBo;
 import com.panjia.performance.domain.vo.AdjustDetailVo;
@@ -375,8 +378,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         java.util.Map<String, Object> contractInfo = null;
         if (isContractScope && StringUtils.isNotBlank(contractNo)) {
             // 业绩冲正单的 period 是冲正目标月：发起审批时该月可能还没有事实行，
-            // 必须跨期（period=null）查合同信息，否则订单号/房源地址/签约时间全空
-            String contractInfoPeriod = adjust.getAdjustType() == AdjustType.MANUAL_OFFSET ? null : period;
+            // 必须跨期（period=null）查合同信息，否则订单号/房源地址/签约时间全空；
+            // 新签补录同理（补录前合同可能只有 PERF_REAL 事实，新签期间无 PERF_EXPECT 行）
+            String contractInfoPeriod = (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET
+                || adjust.getAdjustType() == AdjustType.SUPPLEMENT) ? null : period;
             contractInfo = factMapper.selectContractInfoByContractNo(contractInfoPeriod, adjust.getOrderNo(), contractNo);
         } else if (factId != null) {
             contractInfo = factMapper.selectContractInfoByFactId(factId);
@@ -401,6 +406,52 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 不修改既有明细——直接解析 payload 转明细行返回，无需查合同既有事实
         if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
             dto.setDetails(buildOffsetDetailRows(adjust));
+            dto.setDetailCount(dto.getDetails().size());
+            dto.setExpectedTotal(adjust.getOriginalAmount());
+            dto.setReceivedTotal(adjust.getTargetAmount());
+            return dto;
+        }
+        // 新签补录（SUPPLEMENT）：补录参数整体存 payloadJson（ExpectSupplementBo），
+        // 合同信息查不到时（新签期间尚无事实行）从 payload 回填，明细行直接由补录明细生成
+        if (adjust.getAdjustType() == AdjustType.SUPPLEMENT) {
+            ExpectSupplementBo bo = JsonUtils.parseObject(adjust.getPayloadJson(), ExpectSupplementBo.class);
+            if (StringUtils.isBlank(dto.getReason())) {
+                dto.setReason("新签补录"); // 兼容存量空原因单据
+            }
+            if (bo != null) {
+                if (StringUtils.isBlank(dto.getOrderNo())) {
+                    dto.setOrderNo(bo.getOrderNo());
+                }
+                if (StringUtils.isBlank(dto.getPropertyAddress())) {
+                    dto.setPropertyAddress(bo.getPropertyAddress());
+                }
+                if (StringUtils.isBlank(dto.getBusinessDate()) && bo.getBusinessDate() != null) {
+                    dto.setBusinessDate(bo.getBusinessDate().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                }
+            }
+            // 第三级兜底：实收 DRAFT 场景 pj_perf_fact 无 ACTIVE 事实、payload 快照缺字段时，
+            // 从实收合同主表（pj_received_contract）补全订单号/房源地址/签约时间
+            if (StringUtils.isBlank(dto.getOrderNo()) || StringUtils.isBlank(dto.getPropertyAddress())
+                || StringUtils.isBlank(dto.getBusinessDate())) {
+                ReceivedApplyPort applyPort = receivedApplyPort();
+                if (applyPort != null) {
+                    com.panjia.contracts.dto.ReceivedContractInfoDTO rcInfo =
+                        applyPort.findContractInfo(adjust.getContractNo(), adjust.getOrderNo());
+                    if (rcInfo != null) {
+                        if (StringUtils.isBlank(dto.getOrderNo())) {
+                            dto.setOrderNo(rcInfo.getOrderNo());
+                        }
+                        if (StringUtils.isBlank(dto.getPropertyAddress())) {
+                            dto.setPropertyAddress(rcInfo.getPropertyAddress());
+                        }
+                        if (StringUtils.isBlank(dto.getBusinessDate()) && rcInfo.getBusinessDate() != null) {
+                            dto.setBusinessDate(rcInfo.getBusinessDate()
+                                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+                        }
+                    }
+                }
+            }
+            dto.setDetails(buildSupplementDetailRows(adjust, bo));
             dto.setDetailCount(dto.getDetails().size());
             dto.setExpectedTotal(adjust.getOriginalAmount());
             dto.setReceivedTotal(adjust.getTargetAmount());
@@ -830,6 +881,288 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         return adjust;
     }
 
+    // ==================== 新签补录（SUPPLEMENT，2026-10-28） ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public PerformanceAdjust createSupplement(ExpectSupplementBo bo, Long applicantId) {
+        // 1. 基础校验
+        if (bo == null) {
+            throw new ServiceException("补录参数不能为空");
+        }
+        if (StringUtils.isBlank(bo.getPeriod())) {
+            throw new ServiceException("新签结算月不能为空");
+        }
+        if (bo.getItems() == null || bo.getItems().isEmpty()) {
+            throw new ServiceException("补录明细不能为空");
+        }
+        // 金额合计：全零拒绝
+        BigDecimal targetAmount = BigDecimal.ZERO;
+        for (ExpectSupplementItem item : bo.getItems()) {
+            if (item.getAmount() != null && item.getAmount().signum() > 0) {
+                targetAmount = targetAmount.add(item.getAmount());
+            }
+        }
+        if (targetAmount.signum() <= 0) {
+            throw new ServiceException("未录入有效新签金额（全部为零）");
+        }
+
+        // 2. 归一化：前端 JS Number 会把雪花 Long 取整（精度丢失），
+        //    employeeId 不可信，统一按工号反查 pj_people_employee 修正
+        normalizeSupplementItems(bo);
+
+        // 3. 在途互斥：同合同同期间不能有审批中的 PERF_EXPECT 调整单
+        assertNoInFlightAdjust(SCOPE_CONTRACT, bo.getContractNo(), bo.getPeriod(),
+            null, FACT_TYPE_EXPECT, null);
+
+        // 3.1 防重复补录：同合同已存在补录单（审批中/已通过/已执行）时禁止再次补录；
+        //     已拒绝/已取消的补录单不拦截，允许修正后重新发起；
+        //     合同号为空（一手房/家装荐客等无合同号业务）时按订单号判定
+        boolean hasContractNo = StringUtils.isNotBlank(bo.getContractNo());
+        Long dupCount = adjustMapper.selectCount(new LambdaQueryWrapper<PerformanceAdjust>()
+            .eq(PerformanceAdjust::getAdjustType, AdjustType.SUPPLEMENT)
+            .eq(hasContractNo, PerformanceAdjust::getContractNo, bo.getContractNo())
+            .eq(!hasContractNo, PerformanceAdjust::getOrderNo, bo.getOrderNo())
+            .in(PerformanceAdjust::getStatus,
+                AdjustStatus.SUBMITTED, AdjustStatus.APPROVED, AdjustStatus.EXECUTED));
+        if (dupCount != null && dupCount > 0) {
+            log.warn("[调整单] 重复补录拦截：contractNo={}, period={}, 已有补录单数={}",
+                bo.getContractNo(), bo.getPeriod(), dupCount);
+            throw new ServiceException("该合同已存在新签补录单（含审批中/已生效），不允许重复补录；"
+                + "如需调整请先撤回在途单据，或对已生效业绩走业绩冲正");
+        }
+
+        // 4. 构建调整单
+        PerformanceAdjust adjust = new PerformanceAdjust();
+        adjust.setAdjustNo(generateAdjustNo());
+        adjust.setPeriod(bo.getPeriod());
+        adjust.setAdjustType(AdjustType.SUPPLEMENT);
+        adjust.setAdjustScope(SCOPE_CONTRACT);
+        adjust.setContractNo(bo.getContractNo());
+        adjust.setOrderNo(bo.getOrderNo());
+        adjust.setFactType(FACT_TYPE_EXPECT);
+        adjust.setTargetAmount(MoneyUtil.round2(targetAmount));
+        adjust.setPayloadJson(JsonUtils.toJsonString(bo));
+        // 补录无手工录入原因入口，默认填「新签补录」供审批详情/列表展示
+        adjust.setReason("新签补录");
+        adjust.setStatus(AdjustStatus.SUBMITTED);
+        adjust.setApplicantId(applicantId);
+        // 合同级 employee_id / dept_id 占位：dept_id 列 NOT NULL，
+        // 回填链路 bo.deptId → 明细行 deptId → 员工主数据 deptId
+        Long resolvedDeptId = bo.getDeptId();
+        Long placeholderEmpId = null;
+        for (ExpectSupplementItem item : bo.getItems()) {
+            if (item.getAmount() != null && item.getAmount().signum() > 0 && item.getEmployeeId() != null) {
+                placeholderEmpId = item.getEmployeeId();
+                if (resolvedDeptId == null) {
+                    resolvedDeptId = item.getDeptId();
+                }
+                break;
+            }
+        }
+        adjust.setEmployeeId(placeholderEmpId);
+        if (resolvedDeptId == null && placeholderEmpId != null) {
+            List<Map<String, Object>> empRows = adjustMapper.employeeNames(List.of(placeholderEmpId));
+            if (!empRows.isEmpty() && empRows.get(0).get("deptId") != null) {
+                resolvedDeptId = ((Number) empRows.get(0).get("deptId")).longValue();
+            }
+        }
+        if (resolvedDeptId == null) {
+            throw new ServiceException("无法确定补录归属门店：请检查补录明细员工的部门档案");
+        }
+        adjust.setDeptId(resolvedDeptId);
+
+        adjustMapper.insert(adjust);
+
+        // 5. 发起审批流程（bizId=调整单ID），失败则整体回滚
+        ApprovalStartCmd cmd = buildStartCmd(adjust);
+        boolean started;
+        try {
+            started = approvalPort.startAndCompleteFirst(BizType.PERF_ADJUST, adjust.getId(), cmd);
+        } catch (Exception e) {
+            log.error("[新签补录] 审批流程发起异常：adjustId={}", adjust.getId(), e);
+            throw new ServiceException("新签补录审批流程发起失败：{}", e.getMessage());
+        }
+        if (!started) {
+            throw new ServiceException("新签补录审批流程发起失败");
+        }
+
+        // 6. 回填流程实例 ID
+        try {
+            Long instanceId = approvalPort.instanceId(BizType.PERF_ADJUST, adjust.getId());
+            if (instanceId != null) {
+                adjust.setProcessInstanceId(String.valueOf(instanceId));
+                adjustMapper.updateById(adjust);
+            }
+        } catch (Exception e) {
+            log.warn("[新签补录] 流程实例ID回填失败：adjustId={}", adjust.getId(), e);
+        }
+
+        log.info("[新签补录] 创建并提交审批成功：adjustId={}, adjustNo={}, contractNo={}, orderNo={}, targetAmount={}, applicantId={}",
+            adjust.getId(), adjust.getAdjustNo(), bo.getContractNo(), bo.getOrderNo(), targetAmount, applicantId);
+        return adjust;
+    }
+
+    /**
+     * 新签补录明细归一化：前端 JS Number 会把雪花 Long 取整（如 2108395694695890946 → 2108395694695891000），
+     * employeeId 不可信。统一按工号反查 pj_people_employee 修正：
+     * <ul>
+     *   <li>先按 employeeId 精确命中，未命中按 employeeExternalCode（工号）反查；</li>
+     *   <li>员工不存在直接拒绝发起；</li>
+     *   <li>修正后写回 item.employeeId，保证审批执行端 id 可信。</li>
+     * </ul>
+     */
+    private void normalizeSupplementItems(ExpectSupplementBo bo) {
+        List<ExpectSupplementItem> items = bo.getItems();
+        // 收集所有工号
+        List<String> codes = items.stream()
+            .map(ExpectSupplementItem::getEmployeeExternalCode)
+            .filter(StringUtils::isNotBlank).map(String::trim).distinct().toList();
+        // 批量查员工（按工号）
+        Map<String, Map<String, Object>> empByCode = codes.isEmpty() ? Map.of()
+            : adjustMapper.employeesByCodes(codes).stream()
+                .collect(Collectors.toMap(
+                    m -> String.valueOf(m.get("employeeCode")),
+                    m -> m, (a, b) -> a));
+        // 批量查员工（按 id，兜底）
+        List<Long> empIds = items.stream()
+            .map(ExpectSupplementItem::getEmployeeId).filter(Objects::nonNull).distinct().toList();
+        Map<Long, Map<String, Object>> empById = empIds.isEmpty() ? Map.of()
+            : adjustMapper.employeeNames(empIds).stream()
+                .collect(Collectors.toMap(
+                    m -> ((Number) m.get("employeeId")).longValue(),
+                    m -> m, (a, b) -> a));
+
+        for (ExpectSupplementItem item : items) {
+            Long resolvedId = null;
+            // 1) employeeId 精确命中
+            if (item.getEmployeeId() != null && empById.containsKey(item.getEmployeeId())) {
+                resolvedId = item.getEmployeeId();
+            }
+            // 2) 工号反查命中
+            if (resolvedId == null && StringUtils.isNotBlank(item.getEmployeeExternalCode())) {
+                Map<String, Object> emp = empByCode.get(item.getEmployeeExternalCode().trim());
+                if (emp != null && emp.get("employeeId") != null) {
+                    resolvedId = ((Number) emp.get("employeeId")).longValue();
+                }
+            }
+            if (resolvedId == null) {
+                throw new ServiceException("补录明细存在无法识别的员工：employeeId={}, employeeCode={}",
+                    item.getEmployeeId(), item.getEmployeeExternalCode());
+            }
+            item.setEmployeeId(resolvedId);
+            // 补写工号（如果前端没传或传了被修正后 id 对应的工号）
+            if (StringUtils.isBlank(item.getEmployeeExternalCode())) {
+                Map<String, Object> emp = empById.get(resolvedId);
+                if (emp == null && StringUtils.isNotBlank(item.getEmployeeExternalCode())) {
+                    emp = empByCode.get(item.getEmployeeExternalCode().trim());
+                }
+                if (emp != null) {
+                    Object code = emp.get("employeeCode");
+                    if (code != null) {
+                        item.setEmployeeExternalCode(String.valueOf(code));
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 新签补录审批通过后执行：创建 PERF_EXPECT ACTIVE MANUAL 事实并触发实收 DRAFT 重评。
+     * <p>
+     * 执行端从 adjust.payload_json 反序列化回 ExpectSupplementBo，
+     * 员工 ID 已在 createSupplement 的归一化阶段修正，可直接使用。
+     */
+    private void executeSupplementAdjust(PerformanceAdjust adjust, Long operatorId) {
+        ExpectSupplementBo bo = JsonUtils.parseObject(adjust.getPayloadJson(), ExpectSupplementBo.class);
+        if (bo == null) {
+            throw new ServiceException("补录参数为空，无法执行：adjustId={}", adjust.getId());
+        }
+
+        String orderNo = bo.getOrderNo();
+        String contractNo = bo.getContractNo();
+        java.time.LocalDate periodStart = YearMonth.parse(bo.getPeriod()).atDay(1);
+        java.time.LocalDateTime businessDateTime = bo.getBusinessDate() != null
+            ? bo.getBusinessDate() : periodStart.atStartOfDay();
+        // 生成唯一 sourceKey 前缀：orderNo|contractNo|MANUAL-SUPPLEMENT|ts
+        String keyBase = (orderNo != null ? orderNo : contractNo) + "|MANUAL-SUPPLEMENT|" + System.currentTimeMillis();
+
+        // 批量预加载员工主数据（归一化已修正 id，这里主要取 deptId）
+        java.util.List<Long> empIds = bo.getItems().stream()
+            .map(ExpectSupplementItem::getEmployeeId)
+            .filter(Objects::nonNull)
+            .distinct()
+            .toList();
+        Map<Long, Map<String, Object>> empMap = empIds.isEmpty() ? Map.of()
+            : adjustMapper.employeeNames(empIds).stream()
+                .collect(Collectors.toMap(
+                    m -> ((Number) m.get("employeeId")).longValue(),
+                    m -> m, (a, b) -> a));
+
+        int count = 0;
+        for (ExpectSupplementItem item : bo.getItems()) {
+            if (item.getAmount() == null || item.getAmount().signum() == 0) {
+                continue;
+            }
+            PerformanceFact fact = new PerformanceFact();
+            fact.setFactType(FactType.PERF_EXPECT);
+            fact.setFactStatus(FactStatus.ACTIVE);
+            fact.setSource(PerformanceSource.MANUAL);
+            fact.setSourceKey(keyBase + "-" + count);
+            fact.setPeriod(bo.getPeriod());
+            fact.setBusinessDate(businessDateTime);
+            fact.setEffectiveDate(periodStart);
+            fact.setPerformanceAmount(item.getAmount());
+            fact.setOrderNo(orderNo);
+            fact.setContractNo(contractNo);
+            fact.setBizType(bo.getBizType());
+            fact.setPropertyAddress(bo.getPropertyAddress());
+            fact.setFeeItem(bo.getFeeItem());
+            fact.setEmployeeId(item.getEmployeeId());
+            // 工号：补录明细快照有就用快照，没有从员工主数据取
+            String empCode = item.getEmployeeExternalCode();
+            if (StringUtils.isBlank(empCode)) {
+                Map<String, Object> emp = empMap.get(item.getEmployeeId());
+                if (emp != null && emp.get("employeeCode") != null) {
+                    empCode = String.valueOf(emp.get("employeeCode"));
+                }
+            }
+            fact.setEmployeeExternalCode(empCode);
+            fact.setRoleType(item.getRoleType());
+            fact.setRoleName(item.getRoleName());
+            // 部门：明细有就用，没有从 bo.deptId 或员工主数据取
+            Long deptId = item.getDeptId();
+            if (deptId == null) {
+                deptId = bo.getDeptId();
+            }
+            if (deptId == null) {
+                Map<String, Object> emp = empMap.get(item.getEmployeeId());
+                if (emp != null && emp.get("deptId") != null) {
+                    deptId = ((Number) emp.get("deptId")).longValue();
+                }
+            }
+            fact.setDeptId(deptId);
+            fact.setShareRatio(item.getShareRatio());
+            fact.setOperatorId(operatorId);
+            factMapper.insert(fact);
+            count++;
+        }
+        if (count == 0) {
+            throw new ServiceException("补录明细全部为零，未生成任何新签事实");
+        }
+
+        // 触发实收 DRAFT 单重评
+        try {
+            receivedApplyPort().resolveDraftAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId);
+        } catch (Exception e) {
+            log.warn("[新签补录执行] 触发 DRAFT 实收单重评失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
+                bo.getReceivedPeriod(), bo.getPeriod(), orderNo, contractNo, e.getMessage());
+        }
+
+        log.info("[新签补录执行] 完成：adjustId={}, adjustNo={}, period={}, contractNo={}, orderNo={}, 新增事实={}, operator={}",
+            adjust.getId(), adjust.getAdjustNo(), bo.getPeriod(), contractNo, orderNo, count, operatorId);
+    }
+
     /**
      * 调整链路统一装载 ACTIVE 事实：订单号+合同号双键精确优先；双键未命中时经
      * {@link BizKeyMatchGuard} 闸门判定（目标事实订单维度唯一才退化，兼容贝壳新签
@@ -1144,7 +1477,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         assertPeriodNotClosed(adjust.getPeriod(), "调整生效月");
         // 结佣已审批锁定则禁止执行新签调整（兜底：防发起后结佣变锁定）。
         // 事实级口径：只拦本次将被 supersede 且已被锁定明细绑定的事实。
-        if (adjust.getAdjustType() != AdjustType.MANUAL_OFFSET) {
+        // MANUAL_OFFSET 和 SUPPLEMENT 均不 supersede 已有事实（前者冲正/补录、后者全新创建），跳过校验。
+        if (adjust.getAdjustType() != AdjustType.MANUAL_OFFSET
+            && adjust.getAdjustType() != AdjustType.SUPPLEMENT) {
             assertFactsNotLocked(loadActiveFactsForAdjust(originalPeriod, adjust.getFactType(),
                 adjust.getOrderNo(), adjust.getContractNo()), adjust.getContractNo());
         }
@@ -1157,6 +1492,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             // originalPeriod 已在封账校验前解析
             if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
                 executeManualOffsetAdjust(adjust, operatorId);
+            } else if (adjust.getAdjustType() == AdjustType.SUPPLEMENT) {
+                executeSupplementAdjust(adjust, operatorId);
             } else if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
                 executeAddMemberAdjust(adjust, operatorId);
             } else if (adjust.getAdjustType() == AdjustType.DEDUCT
@@ -1357,6 +1694,74 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             row.setTarget(true);
             BigDecimal factor = item.getFactId() != null && factorMap.containsKey(item.getFactId())
                 ? factorMap.get(item.getFactId()) : fallbackFactor;
+            row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
+            row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), factor));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * 新签补录详情·补录明细行：解析 payloadJson（ExpectSupplementBo）→ AdjustFactDetailVo。
+     * 语义：调整前业绩=0（补录前无新签事实）、变动=补录金额（正数）、调整后=补录金额。
+     * 员工信息按 id 批量查主数据（id 已在创建时归一化），工号取快照兜底；
+     * 折算因子取合同级因子（与详情头部 fillConvertedAmounts 同口径），缺省 1。
+     */
+    private List<AdjustFactDetailVo> buildSupplementDetailRows(PerformanceAdjust adjust, ExpectSupplementBo bo) {
+        List<AdjustFactDetailVo> rows = new ArrayList<>();
+        if (bo == null || bo.getItems() == null || bo.getItems().isEmpty()) {
+            return rows;
+        }
+        List<ExpectSupplementItem> items = bo.getItems();
+        // 批量查员工（姓名/工号/部门）+ 部门名
+        List<Long> employeeIds = items.stream()
+            .map(ExpectSupplementItem::getEmployeeId).filter(Objects::nonNull).distinct().toList();
+        Map<Long, Map<String, Object>> empMap = employeeIds.isEmpty() ? Map.of()
+            : adjustMapper.employeeNames(employeeIds).stream()
+                .collect(Collectors.toMap(m -> ((Number) m.get("employeeId")).longValue(), m -> m, (a, b) -> a));
+        List<Long> deptIds = empMap.values().stream()
+            .map(m -> m.get("deptId")).filter(Objects::nonNull)
+            .map(v -> ((Number) v).longValue()).distinct().toList();
+        Map<Long, String> deptNameMap = deptIds.isEmpty() ? Map.of()
+            : adjustMapper.deptNames(deptIds).stream()
+                .collect(Collectors.toMap(m -> ((Number) m.get("deptId")).longValue(),
+                    m -> String.valueOf(m.get("deptName")), (a, b) -> a));
+        // 折算因子：与详情头部同口径（合同级），无因子时缺省 1
+        BigDecimal factor = factConversionResolver.factorByContract(adjust.getPeriod(), adjust.getContractNo(), FACT_TYPE_EXPECT);
+        if (factor == null) {
+            factor = BigDecimal.ONE;
+        }
+        for (ExpectSupplementItem item : items) {
+            if (item.getAmount() == null || item.getAmount().signum() == 0) {
+                continue;
+            }
+            AdjustFactDetailVo row = new AdjustFactDetailVo();
+            Map<String, Object> emp = item.getEmployeeId() == null ? null : empMap.get(item.getEmployeeId());
+            if (emp != null) {
+                row.setEmployeeId(((Number) emp.get("employeeId")).longValue());
+                row.setEmployeeName(toStringOrNull(emp.get("employeeName")));
+                row.setEmployeeCode(StringUtils.isNotBlank(item.getEmployeeExternalCode())
+                    ? item.getEmployeeExternalCode().trim() : toStringOrNull(emp.get("employeeCode")));
+                Object deptId = emp.get("deptId");
+                if (deptId != null) {
+                    String deptName = deptNameMap.get(((Number) deptId).longValue());
+                    if (StringUtils.isNotBlank(deptName)) {
+                        row.setDeptPath(deptName);
+                    }
+                }
+            } else {
+                row.setEmployeeId(item.getEmployeeId());
+                row.setEmployeeCode(item.getEmployeeExternalCode());
+                row.setEmployeeName(item.getRoleName());
+            }
+            row.setRoleType(item.getRoleType());
+            row.setRoleName(item.getRoleName());
+            row.setShareRatio(item.getShareRatio());
+            BigDecimal amt = MoneyUtil.round2(item.getAmount());
+            row.setAmount(BigDecimal.ZERO);        // 补录前无新签事实
+            row.setDeltaAmount(amt);               // 变动 = 补录金额
+            row.setAfterAmount(amt);               // 调整后 = 补录金额
+            row.setTarget(true);
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), factor));
             rows.add(row);

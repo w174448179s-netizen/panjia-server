@@ -500,7 +500,7 @@ public class PerformanceEngine {
 
         // ========== 2. 计算业绩金额 ==========
         // ★ 金额口径由 factType 决定（业绩域仅落 PERF_EXPECT 新签金额；PERF_REAL 实收已拆至实收域）：
-        //  PERF_EXPECT → 一手房取当月实收 receivedAmount；其余业务取当月应收 receivableAmount
+        //  PERF_EXPECT → 一手房、家装荐客取当月实收 receivedAmount；其余业务取当月应收 receivableAmount
         //  （贝壳导入的金额就是折后金额，直接使用，不再乘以分摊比例；分摊比例仅展示用）
         BigDecimal performanceAmount = MoneyUtil.round2(currentAmount);
 
@@ -802,6 +802,14 @@ public class PerformanceEngine {
     public static final String BIZ_TYPE_NEW_HOUSE = "一手房";
 
     /**
+     * 业务类型·家装荐客（贝壳 Excel「业务类型」列原值）。
+     * <p>
+     * 该业务类型贝壳导出的「当月应收业绩」恒为 0，业绩全在「当月实收业绩」列；
+     * PERF_EXPECT（新签金额）因此与一手房同口径，改取当月实收 {@code receivedAmount}。
+     */
+    public static final String BIZ_TYPE_HOME_DECOR_REFERRAL = "家装荐客";
+
+    /**
      * 按归一化记录类型决定本条记录要生成的事实口径集合（纯函数）。
      * <p>
      * <ul>
@@ -840,7 +848,7 @@ public class PerformanceEngine {
      * <p>
      * <b>PERF_EXPECT（新签业绩）</b>：
      * <ul>
-     *   <li>一手房：取当月实收 {@code receivedAmount}（贝壳「当月实收业绩」列）；</li>
+     *   <li>一手房、家装荐客：取当月实收 {@code receivedAmount}（贝壳「当月实收业绩」列）；</li>
      *   <li>其他业务类型：取当月应收 {@code receivableAmount}（贝壳「当月应收业绩」列）。</li>
      * </ul>
      * 实收业绩（PERF_REAL）已拆表至实收域（理房通到账 KE_RECEIVED 导入），业绩域不再处理。
@@ -864,8 +872,8 @@ public class PerformanceEngine {
             || RECORD_TYPE_HIST_EXPECT.equals(record.getRecordType())
             || RECORD_TYPE_HIST_REAL.equals(record.getRecordType());
         if (factType == FactType.PERF_EXPECT) {
-            // 新签金额：一手房取当月实收（贝壳「当月实收业绩」列），其余取当月应收
-            BigDecimal newSignAmount = BIZ_TYPE_NEW_HOUSE.equals(record.getBizType())
+            // 新签金额：一手房、家装荐客取当月实收（贝壳「当月实收业绩」列），其余取当月应收
+            BigDecimal newSignAmount = isReceivedCaliberBizType(record.getBizType())
                 ? record.getReceivedAmount()
                 : record.getReceivableAmount();
             if (newSignAmount != null) {
@@ -881,6 +889,11 @@ public class PerformanceEngine {
             return record.getReceivedAmount();
         }
         return dualCaliber ? BigDecimal.ZERO : record.getOriginAmount();
+    }
+
+    /** 新签金额是否按「当月实收」口径取数：一手房、家装荐客（家装荐客当月应收恒为 0） */
+    private static boolean isReceivedCaliberBizType(String bizType) {
+        return BIZ_TYPE_NEW_HOUSE.equals(bizType) || BIZ_TYPE_HOME_DECOR_REFERRAL.equals(bizType);
     }
 
     /** 跨月应收重复认列尾差容忍：当月值与已认值差 ≤ 1 分视为全额重复 */

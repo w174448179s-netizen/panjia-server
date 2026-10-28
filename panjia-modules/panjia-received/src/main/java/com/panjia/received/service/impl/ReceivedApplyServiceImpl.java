@@ -800,6 +800,31 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .set(ReceivedApply::getAutoCommissionApplyNo, commissionApplyNo));
     }
 
+    @Override
+    public com.panjia.contracts.dto.ReceivedContractInfoDTO findContractInfo(String contractNo, String orderNo) {
+        if (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo)) {
+            return null;
+        }
+        // 合同号优先（同合同多订单时逐单信息可能有差异，取最新一条）；
+        // 合同号为空（一手房/家装荐客等）按订单号查
+        com.panjia.received.domain.ReceivedContract rc = contractMapper.selectOne(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .eq(StringUtils.isNotBlank(contractNo), com.panjia.received.domain.ReceivedContract::getContractNo, contractNo)
+                .eq(StringUtils.isBlank(contractNo) && StringUtils.isNotBlank(orderNo),
+                    com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo)
+                .orderByDesc(com.panjia.received.domain.ReceivedContract::getUpdateTime)
+                .last("LIMIT 1"));
+        if (rc == null) {
+            return null;
+        }
+        com.panjia.contracts.dto.ReceivedContractInfoDTO dto = new com.panjia.contracts.dto.ReceivedContractInfoDTO();
+        dto.setOrderNo(rc.getOrderNo());
+        dto.setContractNo(rc.getContractNo());
+        dto.setBusinessDate(rc.getBusinessDate());
+        dto.setPropertyAddress(rc.getPropertyAddress());
+        return dto;
+    }
+
     private static BigDecimal nvlAmount(BigDecimal v) {
         return v == null ? BigDecimal.ZERO : v;
     }

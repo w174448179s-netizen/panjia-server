@@ -21,6 +21,7 @@ import com.panjia.performance.domain.vo.PerformanceManagePageVo;
 import com.panjia.performance.domain.vo.PerformanceRankVo;
 import com.panjia.performance.domain.vo.PerformanceSearchDetailVo;
 import com.panjia.performance.domain.vo.PerformanceSummaryVo;
+import com.panjia.performance.service.IPerformanceAdjustService;
 import com.panjia.performance.service.PerformanceFactVoidService;
 import com.panjia.performance.service.IPerformanceQueryService;
 import lombok.RequiredArgsConstructor;
@@ -55,6 +56,7 @@ public class PerformanceFactController extends BaseController {
 
     private final IPerformanceQueryService queryService;
     private final PerformanceFactVoidService voidService;
+    private final IPerformanceAdjustService adjustService;
 
     /**
      * 分页查询业绩事实列表。
@@ -124,13 +126,13 @@ public class PerformanceFactController extends BaseController {
     }
 
     /**
-     * 新签补录：为「待补新签」实收单手工创建 PERF_EXPECT 事实并触发 DRAFT 单重评。
+     * 新签补录：提交总监审批。审批通过后自动创建 PERF_EXPECT 事实并触发 DRAFT 实收单重评。
      */
     @SaCheckPermission("perf:fact:supplement")
     @Log(title = "新签补录", businessType = BusinessType.INSERT)
     @PostMapping("/supplement-expect")
-    public R<Integer> supplementExpect(@Validated @RequestBody com.panjia.performance.domain.bo.ExpectSupplementBo bo) {
-        return R.ok(queryService.createExpectSupplement(bo, LoginHelper.getUserId()));
+    public R<Long> supplementExpect(@Validated @RequestBody com.panjia.performance.domain.bo.ExpectSupplementBo bo) {
+        return R.ok(adjustService.createSupplement(bo, LoginHelper.getUserId()).getId());
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.panjia.performance.service;
 
 import com.panjia.performance.domain.PerformanceAdjust;
+import com.panjia.performance.domain.bo.ExpectSupplementBo;
 import com.panjia.performance.domain.bo.PerformanceAdjustCreateBo;
 import com.panjia.performance.domain.vo.AdjustDetailVo;
 import com.panjia.performance.domain.bo.PerformanceAdjustBo;
@@ -141,4 +142,17 @@ public interface IPerformanceAdjustService {
      * 认领当前节点待办（业绩调整总监节点：事后补赋总监角色）。
      */
     boolean claim(Long id);
+
+    /**
+     * 发起新签补录申请并提交审批（走 perf_adjust 总监审批流程）。
+     * <p>
+     * 补录本身不直接落库 PERF_EXPECT 事实，而是创建一张 SUPPLEMENT 类型的 pj_perf_adjust 调整单，
+     * 存入完整补录参数（items、businessDate、contractNo 等）。总监审批通过后由 AdjustWorkflowListener
+     * 回调 executeAdjust，在 SUPPLEMENT 分支中创建 PERF_EXPECT ACTIVE MANUAL 事实并触发实收 DRAFT 重评。
+     *
+     * @param bo          补录参数（含 items 明细、period、contractNo 等）
+     * @param applicantId 申请人 ID
+     * @return 创建的调整单
+     */
+    PerformanceAdjust createSupplement(ExpectSupplementBo bo, Long applicantId);
 }

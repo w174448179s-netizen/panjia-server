@@ -110,7 +110,7 @@ class PerformanceDualFactTest {
     }
 
     @Test
-    void newHouseExpectTakesMonthlyReceivedWhileOthersTakeReceivable() {
+    void expectTakesMonthlyReceivedForNewHouseAndHomeDecorReferral() {
         // 一手房：新签金额（PERF_EXPECT）取当月实收，即使当月应收有值也不取
         NormalizedRecordDTO newHouse = new NormalizedRecordDTO();
         newHouse.setRecordType("SIGNED");
@@ -122,6 +122,17 @@ class PerformanceDualFactTest {
             PerformanceEngine.resolveFactCurrentAmount(newHouse, FactType.PERF_EXPECT),
             "一手房新签金额必须取当月实收，不得取当月应收");
 
+        // 家装荐客：当月应收恒为 0，新签金额取当月实收
+        NormalizedRecordDTO homeDecor = new NormalizedRecordDTO();
+        homeDecor.setRecordType("SIGNED");
+        homeDecor.setBizType("家装荐客");
+        homeDecor.setReceivableAmount(BigDecimal.ZERO);
+        homeDecor.setReceivedAmount(new BigDecimal("58000.00"));
+
+        assertEquals(new BigDecimal("58000.00"),
+            PerformanceEngine.resolveFactCurrentAmount(homeDecor, FactType.PERF_EXPECT),
+            "家装荐客新签金额必须取当月实收，不得取当月应收（恒为 0）");
+
         // 其他业务类型：新签金额仍取当月应收
         NormalizedRecordDTO secondHand = new NormalizedRecordDTO();
         secondHand.setRecordType("SIGNED");
@@ -130,7 +141,7 @@ class PerformanceDualFactTest {
         secondHand.setReceivedAmount(new BigDecimal("100000.00"));
         assertEquals(new BigDecimal("200000.00"),
             PerformanceEngine.resolveFactCurrentAmount(secondHand, FactType.PERF_EXPECT),
-            "非一手房新签金额仍取当月应收");
+            "非一手房/家装荐客新签金额仍取当月应收");
 
         // 一手房当月实收列为空（null）：dualCaliber 空列按 0，禁止回退应收/origin
         NormalizedRecordDTO blank = new NormalizedRecordDTO();

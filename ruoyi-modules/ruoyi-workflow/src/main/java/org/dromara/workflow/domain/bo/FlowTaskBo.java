@@ -57,8 +57,11 @@ public class FlowTaskBo implements Serializable {
 
     /**
      * 申请人Ids
+     * <p>
+     * flow_instance.create_by 为 varchar 类型，此处保持字符串，避免 PostgreSQL 下
+     * varchar = bigint 类型不匹配报错
      */
-    private List<Long> createByIds;
+    private List<String> createByIds;
 
     /**
      * 业务标题关键字（模糊匹配 flow_instance_biz_ext.business_title，

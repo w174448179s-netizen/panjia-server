@@ -31,7 +31,10 @@ public enum AdjustType {
     MANUAL_OFFSET("业绩冲正"),
 
     /** 实收调整（合同级）：对合同实收业绩（PERF_REAL）做合同级金额调整，走审批流程（2026-10-10） */
-    RECEIVED_AMOUNT("实收调整");
+    RECEIVED_AMOUNT("实收调整"),
+
+    /** 新签补录（合同级）：为 DRAFT 实收单手工补录 PERF_EXPECT 事实，走总监审批流程（2026-10-28） */
+    SUPPLEMENT("新签补录");
 
     /** 调整类型码（DB / JSON 存储值，与枚举名一致） */
     private final String code;
