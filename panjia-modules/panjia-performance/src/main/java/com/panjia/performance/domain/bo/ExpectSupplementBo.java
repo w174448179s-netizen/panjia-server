@@ -6,6 +6,7 @@ import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -31,8 +32,8 @@ public class ExpectSupplementBo {
     /** 订单号（从实收继承，部分业务无订单号则传 null） */
     private String orderNo;
 
-    /** 签约日期（从实收行继承，可空时回退为新签结算月 1 号） */
-    private LocalDate businessDate;
+    /** 签约时间（从实收行继承，含时分秒；可空时回退为新签结算月 1 号 00:00:00） */
+    private LocalDateTime businessDate;
 
     /** 业务类型（从实收继承） */
     private String bizType;
