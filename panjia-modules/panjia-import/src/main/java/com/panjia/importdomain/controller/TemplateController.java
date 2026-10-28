@@ -33,8 +33,9 @@ import java.util.Objects;
 /**
  * 导入模板管理控制器。
  * <p>
- * 功能：模板列表、新增版本（复制已有模板）、激活切换、下载 Excel。
- * 同 source_type 仅 1 套激活模板，切换激活时先停用同 source_type 的旧激活模板。
+ * 功能：模板列表、新增版本（复制已有模板）、启用/停用、下载 Excel。
+ * 同一 template_code 仅 1 套启用模板，启用时自动停用同 code 的其他版本；
+ * 不同 code（如 POINTS 与 POINTS_SIMPLE）可同时启用，上传时按文件表头自动匹配。
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -158,11 +159,10 @@ public class TemplateController {
     }
 
     /**
-     * 激活模板。
+     * 启用模板（同 template_code 互斥）。
      * <p>
-     * 同 source_type 允许多套激活模板（如钉钉原始文件模板 + 手工简版模板），
-     * 上传时引擎按文件表头自动匹配（{@code ImportTemplateBridge#resolveByHeaders}），
-     * 本操作仅激活指定模板，不互斥停用同类型其他模板。
+     * 启用时先把同 template_code 的其他版本置为未启用，保证一个模板编码下只有 1 套启用；
+     * 不同 template_code（如 POINTS / POINTS_SIMPLE）互不影响，可同时启用。
      */
     @SaCheckPermission("import:template:activate")
     @PostMapping("/{id}/activate")
@@ -176,13 +176,61 @@ public class TemplateController {
 
         templateMapper.update(null,
                 new LambdaUpdateWrapper<ImportTemplate>()
+                        .eq(ImportTemplate::getTemplateCode, template.getTemplateCode())
+                        .eq(ImportTemplate::getIsActive, true)
+                        .ne(ImportTemplate::getId, id)
+                        .set(ImportTemplate::getIsActive, false)
+                        .set(ImportTemplate::getUpdatedBy, operator)
+                        .set(ImportTemplate::getUpdatedAt, LocalDateTime.now()));
+
+        templateMapper.update(null,
+                new LambdaUpdateWrapper<ImportTemplate>()
                         .eq(ImportTemplate::getId, id)
                         .set(ImportTemplate::getIsActive, true)
                         .set(ImportTemplate::getUpdatedBy, operator)
                         .set(ImportTemplate::getUpdatedAt, LocalDateTime.now()));
 
-        log.info("激活模板: id={}, sourceType={}, version={}, operator={}（不互斥，同类型多模板共存）",
-                id, template.getSourceType(), template.getTemplateVersion(), operator);
+        log.info("启用模板: id={}, code={}, version={}, operator={}（同 code 其他版本已停用）",
+                id, template.getTemplateCode(), template.getTemplateVersion(), operator);
+        return R.ok();
+    }
+
+    /**
+     * 停用模板。
+     * <p>
+     * 同一 source_type 至少保留 1 套启用模板，否则上传时会因「未找到激活模板」失败；
+     * 停用前需先启用该数据类型的其他版本。
+     */
+    @SaCheckPermission("import:template:activate")
+    @PostMapping("/{id}/deactivate")
+    @Transactional(rollbackFor = Exception.class)
+    public R<Void> deactivate(@PathVariable Long id) {
+        ImportTemplate template = templateMapper.selectById(id);
+        if (template == null) {
+            return R.fail("模板不存在: id=" + id);
+        }
+        if (!Boolean.TRUE.equals(template.getIsActive())) {
+            return R.ok();
+        }
+        Long otherActive = templateMapper.selectCount(
+                new LambdaQueryWrapper<ImportTemplate>()
+                        .eq(ImportTemplate::getSourceType, template.getSourceType())
+                        .eq(ImportTemplate::getIsActive, true)
+                        .ne(ImportTemplate::getId, id));
+        if (otherActive == null || otherActive == 0) {
+            return R.fail("数据类型 " + template.getSourceType()
+                    + " 至少需保留 1 套启用模板，请先启用其他版本");
+        }
+        String operator = LoginHelper.getUsername();
+        templateMapper.update(null,
+                new LambdaUpdateWrapper<ImportTemplate>()
+                        .eq(ImportTemplate::getId, id)
+                        .set(ImportTemplate::getIsActive, false)
+                        .set(ImportTemplate::getUpdatedBy, operator)
+                        .set(ImportTemplate::getUpdatedAt, LocalDateTime.now()));
+
+        log.info("停用模板: id={}, code={}, version={}, operator={}",
+                id, template.getTemplateCode(), template.getTemplateVersion(), operator);
         return R.ok();
     }
 

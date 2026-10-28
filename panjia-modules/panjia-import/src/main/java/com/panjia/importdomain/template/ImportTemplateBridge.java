@@ -30,6 +30,9 @@ public class ImportTemplateBridge implements TemplateResolver {
     private final ImportTemplateMapper templateMapper;
     private static final JsonMapper OBJECT_MAPPER = new JsonMapper();
 
+    /** 数据起始行校正：最多向下探测的行数（0-based，覆盖 1~2 行子表头） */
+    private static final int DATA_START_PROBE_ROWS = 3;
+
     @Override
     public com.panjia.importutil.template.model.ImportTemplate resolve(String templateCode) {
         return resolve(templateCode, null);
@@ -149,7 +152,9 @@ public class ImportTemplateBridge implements TemplateResolver {
             throw new IllegalStateException("未找到激活模板: sourceType=" + sourceType);
         }
         if (actives.size() == 1) {
-            return toToolTemplate(actives.get(0));
+            com.panjia.importutil.template.model.ImportTemplate tool = toToolTemplate(actives.get(0));
+            adjustDataStartRow(tool, parseMappings(actives.get(0).getColumnMapping()), headerRows);
+            return tool;
         }
 
         ImportTemplate best = null;
@@ -225,7 +230,71 @@ public class ImportTemplateBridge implements TemplateResolver {
         }
         log.info("多模板表头匹配: sourceType={}, 选中={}/{}", sourceType,
             best.getTemplateCode(), best.getTemplateVersion());
-        return toToolTemplate(best);
+        com.panjia.importutil.template.model.ImportTemplate tool = toToolTemplate(best);
+        adjustDataStartRow(tool, parseMappings(best.getColumnMapping()), headerRows);
+        return tool;
+    }
+
+    /**
+     * 校正数据起始行：模板声明「数据紧邻表头下一行」时，若该行在映射列上全为空，
+     * 说明文件实际还带一行子表头（旧版积分导出：第 2 行只有 J 列往后有子表头，A-I 为空），
+     * 逐行下移，避免把子表头当成数据导入。
+     * <p>
+     * 新导出（单行表头，第 2 行即数据）映射列上非空，起始行不变。
+     */
+    private void adjustDataStartRow(
+            com.panjia.importutil.template.model.ImportTemplate tool,
+            List<ColumnMapping> mappings, List<List<String>> headerRows) {
+        if (mappings.isEmpty()) {
+            return;
+        }
+        int headerIdx = tool.getHeaderRow();
+        int declared = tool.getDataStartRow() == null
+            ? headerIdx + 1
+            : Math.max(tool.getDataStartRow(), headerIdx + 1);
+        int start = declared;
+        int limit = Math.min(headerIdx + 1 + DATA_START_PROBE_ROWS, headerRows.size());
+        while (start < limit && mappedCellsBlank(headerRows.get(start), mappings)) {
+            start++;
+        }
+        if (start != declared) {
+            tool.setDataStartRow(start);
+            log.info("数据起始行校正: {}/{}, 第{}行 → 第{}行（映射列上为子表头行）",
+                tool.getTemplateCode(), tool.getTemplateVersion(), declared + 1, start + 1);
+        }
+    }
+
+    /** 该行在映射列上是否全部为空（空行 / 子表头行） */
+    private boolean mappedCellsBlank(List<String> row, List<ColumnMapping> mappings) {
+        if (row == null || row.isEmpty()) {
+            return true;
+        }
+        for (ColumnMapping m : mappings) {
+            int idx = columnIndex(m.getSourceColumn());
+            if (idx < 0 || idx >= row.size()) {
+                continue;
+            }
+            String v = row.get(idx);
+            if (v != null && !v.isBlank()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Excel 列号 → 0-based 下标（A→0，Z→25，AA→26） */
+    private int columnIndex(String column) {
+        if (column == null || column.isBlank()) {
+            return -1;
+        }
+        int idx = 0;
+        for (char c : column.trim().toUpperCase().toCharArray()) {
+            if (c < 'A' || c > 'Z') {
+                return -1;
+            }
+            idx = idx * 26 + (c - 'A' + 1);
+        }
+        return idx - 1;
     }
 
     private List<ColumnMapping> parseMappings(String columnMappingJson) {
