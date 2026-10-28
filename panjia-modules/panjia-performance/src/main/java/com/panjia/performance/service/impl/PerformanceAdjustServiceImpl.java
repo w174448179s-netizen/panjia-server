@@ -1783,51 +1783,44 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 新签补录详情·对应实收明细行：经端口查 pj_received_detail ACTIVE 行（实收期间=bo.receivedPeriod）。
-     * 语义：amount=实收金额（角色人到账），不填变动/调整后；target=false（非调整标的）。
-     * 端口实现缺失或无实收数据时返回空列表，前端不渲染该区块。
+     * 新签补录详情·补录行回填「对应实收金额」：经端口查 pj_received_detail ACTIVE 行
+     * （实收期间=bo.receivedPeriod），按 工号+角色类型 精确匹配，匹配不到再按工号合计兜底，
+     * 均无匹配记 0（如新增角色人本就不在实收明细中）。端口缺失/无数据时全部记 0。
      */
-    private List<AdjustFactDetailVo> buildSupplementReceivedRows(PerformanceAdjust adjust, ExpectSupplementBo bo) {
-        List<AdjustFactDetailVo> rows = new ArrayList<>();
-        if (bo == null || StringUtils.isBlank(bo.getReceivedPeriod())) {
-            return rows;
+    private void fillSupplementReceivedAmounts(PerformanceAdjust adjust, ExpectSupplementBo bo,
+                                               List<AdjustFactDetailVo> rows) {
+        if (bo == null || StringUtils.isBlank(bo.getReceivedPeriod()) || rows == null || rows.isEmpty()) {
+            return;
         }
         ReceivedApplyPort applyPort = receivedApplyPort();
         if (applyPort == null) {
-            return rows;
+            return;
         }
         List<com.panjia.contracts.dto.ReceivedFactInfoDTO> facts =
             applyPort.findReceivedFacts(adjust.getContractNo(), adjust.getOrderNo(), bo.getReceivedPeriod());
         if (facts == null || facts.isEmpty()) {
-            return rows;
+            return;
         }
-        // 门店名称批量回填
-        List<Long> deptIds = facts.stream()
-            .map(com.panjia.contracts.dto.ReceivedFactInfoDTO::getDeptId)
-            .filter(Objects::nonNull).distinct().toList();
-        Map<Long, String> deptNameMap = deptIds.isEmpty() ? Map.of()
-            : adjustMapper.deptNames(deptIds).stream()
-                .collect(Collectors.toMap(m -> ((Number) m.get("deptId")).longValue(),
-                    m -> String.valueOf(m.get("deptName")), (a, b) -> a));
+        // 两级匹配键：工号+角色 → 金额合计；工号 → 金额合计
+        Map<String, BigDecimal> byEmpRole = new HashMap<>();
+        Map<String, BigDecimal> byEmp = new HashMap<>();
         for (com.panjia.contracts.dto.ReceivedFactInfoDTO f : facts) {
-            AdjustFactDetailVo row = new AdjustFactDetailVo();
-            row.setEmployeeId(f.getEmployeeId());
-            row.setEmployeeCode(f.getEmployeeExternalCode());
-            row.setEmployeeName(f.getRoleName()); // 实收明细的角色姓名即展示名
-            row.setRoleType(f.getRoleType());
-            row.setRoleName(f.getRoleName());
-            row.setShareRatio(f.getShareRatio());
-            row.setAmount(f.getAmount());         // 实收金额
-            row.setTarget(false);
-            if (f.getDeptId() != null) {
-                String deptName = deptNameMap.get(f.getDeptId());
-                if (StringUtils.isNotBlank(deptName)) {
-                    row.setDeptPath(deptName);
-                }
+            String code = StringUtils.trimToEmpty(f.getEmployeeExternalCode());
+            if (code.isEmpty()) {
+                continue;
             }
-            rows.add(row);
+            BigDecimal amt = f.getAmount() == null ? BigDecimal.ZERO : f.getAmount();
+            byEmpRole.merge(code + "|" + StringUtils.trimToEmpty(f.getRoleType()), amt, BigDecimal::add);
+            byEmp.merge(code, amt, BigDecimal::add);
         }
-        return rows;
+        for (AdjustFactDetailVo row : rows) {
+            String code = StringUtils.trimToEmpty(row.getEmployeeCode());
+            BigDecimal received = byEmpRole.get(code + "|" + StringUtils.trimToEmpty(row.getRoleType()));
+            if (received == null) {
+                received = byEmp.get(code);
+            }
+            row.setReceivedAmount(received == null ? BigDecimal.ZERO : MoneyUtil.round2(received));
+        }
     }
 
     private static String text(Object value) {

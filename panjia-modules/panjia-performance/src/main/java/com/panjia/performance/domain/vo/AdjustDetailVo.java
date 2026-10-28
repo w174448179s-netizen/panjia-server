@@ -45,9 +45,6 @@ public class AdjustDetailVo extends PerformanceAdjust implements Serializable {
     /** 受影响的明细列表 */
     private List<AdjustFactDetailVo> details;
 
-    /** 对应实收明细（仅新签补录单 SUPPLEMENT 返回：补录来源的实收明细，amount=实收金额） */
-    private List<AdjustFactDetailVo> receivedDetails;
-
     /** 调整后目标总金额（= 原合计 + deltaAmount） */
     private java.math.BigDecimal targetAmount;
 }
