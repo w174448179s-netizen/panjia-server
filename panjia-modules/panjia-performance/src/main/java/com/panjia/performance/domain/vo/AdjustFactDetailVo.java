@@ -68,4 +68,7 @@ public class AdjustFactDetailVo implements Serializable {
 
     /** 折算后调整后金额（afterAmount × conversionFactor） */
     private BigDecimal convertedAfterAmount;
+
+    /** 对应实收金额（仅新签补录单：同实收期间同工号+角色的实收到账合计，无匹配为 0） */
+    private BigDecimal receivedAmount;
 }

@@ -453,6 +453,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
             dto.setDetails(buildSupplementDetailRows(adjust, bo));
             dto.setDetailCount(dto.getDetails().size());
+            // 对应实收金额按行回填到补录明细（同工号+角色匹配），审批人逐行对照实收 vs 补录新签
+            fillSupplementReceivedAmounts(adjust, bo, dto.getDetails());
             dto.setExpectedTotal(adjust.getOriginalAmount());
             dto.setReceivedTotal(adjust.getTargetAmount());
             return dto;
@@ -905,6 +907,17 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         if (targetAmount.signum() <= 0) {
             throw new ServiceException("未录入有效新签金额（全部为零）");
+        }
+
+        // 1.1 金额上限校验：新签补录合计不得超过该实收单的实收合计（前端同口径校验，此处兜底）
+        ReceivedApplyPort amountPort = receivedApplyPort();
+        if (amountPort != null && StringUtils.isNotBlank(bo.getReceivedPeriod())) {
+            BigDecimal receivedCap = amountPort.findReceivedAmount(
+                bo.getContractNo(), bo.getOrderNo(), bo.getReceivedPeriod());
+            if (receivedCap != null && targetAmount.compareTo(receivedCap) > 0) {
+                throw new ServiceException("新签补录合计 {} 元超过实收合计 {} 元，请调整后再提交",
+                    MoneyUtil.round2(targetAmount).toPlainString(), MoneyUtil.round2(receivedCap).toPlainString());
+            }
         }
 
         // 2. 归一化：前端 JS Number 会把雪花 Long 取整（精度丢失），
@@ -1764,6 +1777,54 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             row.setTarget(true);
             row.setConvertedAmount(conversionFactorPort.convert(row.getAmount(), factor));
             row.setConvertedAfterAmount(conversionFactorPort.convert(row.getAfterAmount(), factor));
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * 新签补录详情·对应实收明细行：经端口查 pj_received_detail ACTIVE 行（实收期间=bo.receivedPeriod）。
+     * 语义：amount=实收金额（角色人到账），不填变动/调整后；target=false（非调整标的）。
+     * 端口实现缺失或无实收数据时返回空列表，前端不渲染该区块。
+     */
+    private List<AdjustFactDetailVo> buildSupplementReceivedRows(PerformanceAdjust adjust, ExpectSupplementBo bo) {
+        List<AdjustFactDetailVo> rows = new ArrayList<>();
+        if (bo == null || StringUtils.isBlank(bo.getReceivedPeriod())) {
+            return rows;
+        }
+        ReceivedApplyPort applyPort = receivedApplyPort();
+        if (applyPort == null) {
+            return rows;
+        }
+        List<com.panjia.contracts.dto.ReceivedFactInfoDTO> facts =
+            applyPort.findReceivedFacts(adjust.getContractNo(), adjust.getOrderNo(), bo.getReceivedPeriod());
+        if (facts == null || facts.isEmpty()) {
+            return rows;
+        }
+        // 门店名称批量回填
+        List<Long> deptIds = facts.stream()
+            .map(com.panjia.contracts.dto.ReceivedFactInfoDTO::getDeptId)
+            .filter(Objects::nonNull).distinct().toList();
+        Map<Long, String> deptNameMap = deptIds.isEmpty() ? Map.of()
+            : adjustMapper.deptNames(deptIds).stream()
+                .collect(Collectors.toMap(m -> ((Number) m.get("deptId")).longValue(),
+                    m -> String.valueOf(m.get("deptName")), (a, b) -> a));
+        for (com.panjia.contracts.dto.ReceivedFactInfoDTO f : facts) {
+            AdjustFactDetailVo row = new AdjustFactDetailVo();
+            row.setEmployeeId(f.getEmployeeId());
+            row.setEmployeeCode(f.getEmployeeExternalCode());
+            row.setEmployeeName(f.getRoleName()); // 实收明细的角色姓名即展示名
+            row.setRoleType(f.getRoleType());
+            row.setRoleName(f.getRoleName());
+            row.setShareRatio(f.getShareRatio());
+            row.setAmount(f.getAmount());         // 实收金额
+            row.setTarget(false);
+            if (f.getDeptId() != null) {
+                String deptName = deptNameMap.get(f.getDeptId());
+                if (StringUtils.isNotBlank(deptName)) {
+                    row.setDeptPath(deptName);
+                }
+            }
             rows.add(row);
         }
         return rows;

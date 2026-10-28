@@ -137,4 +137,29 @@ public interface ReceivedApplyPort {
      * @return 合同信息；无匹配返回 null
      */
     ReceivedContractInfoDTO findContractInfo(String contractNo, String orderNo);
+
+    /**
+     * 查询某合同/订单在指定实收期间的实收金额上限（新签补录校验用）。
+     * <p>口径：pj_received_apply 中同合同号（或订单号）+ 同期间、
+     * 状态为 DRAFT/SUBMITTED/APPROVED 的审批单 received_amount 合计；
+     * 已拒绝/已取消的单据不计。
+     *
+     * @param contractNo 合同号（可空，空时按 orderNo 匹配）
+     * @param orderNo    订单号（contractNo 为空时必传）
+     * @param period     实收归属期间 YYYY-MM（必传）
+     * @return 实收金额上限；无匹配单返回 null（调用方自行决定是否放行）
+     */
+    java.math.BigDecimal findReceivedAmount(String contractNo, String orderNo, String period);
+
+    /**
+     * 查询某合同/订单在指定实收期间的 ACTIVE 实收明细（角色人级），
+     * 供新签补录审批详情页展示「对应实收」。
+     *
+     * @param contractNo 合同号（可空，空时按 orderNo 匹配）
+     * @param orderNo    订单号（contractNo 为空时必传）
+     * @param period     实收归属期间 YYYY-MM（必传）
+     * @return 实收明细列表；无匹配返回空列表
+     */
+    java.util.List<com.panjia.contracts.dto.ReceivedFactInfoDTO> findReceivedFacts(
+        String contractNo, String orderNo, String period);
 }

@@ -825,6 +825,66 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return dto;
     }
 
+    @Override
+    public java.math.BigDecimal findReceivedAmount(String contractNo, String orderNo, String period) {
+        if (StringUtils.isBlank(period) || (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo))) {
+            return null;
+        }
+        // 口径：同合同（无合同号按订单号）+ 同实收期间，DRAFT/SUBMITTED/APPROVED 审批单合计；
+        // 已驳回/已作废不计（驳回后实收金额可修正重提）
+        List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+            .eq(ReceivedApply::getPeriod, period)
+            .eq(StringUtils.isNotBlank(contractNo), ReceivedApply::getContractNo, contractNo)
+            .eq(StringUtils.isBlank(contractNo) && StringUtils.isNotBlank(orderNo),
+                ReceivedApply::getOrderNo, orderNo)
+            .in(ReceivedApply::getStatus,
+                ReceivedApplyStatus.DRAFT, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED));
+        if (applies.isEmpty()) {
+            return null;
+        }
+        return applies.stream()
+            .map(ReceivedApply::getReceivedAmount)
+            .filter(java.util.Objects::nonNull)
+            .reduce(java.math.BigDecimal.ZERO, java.math.BigDecimal::add);
+    }
+
+    @Override
+    public java.util.List<com.panjia.contracts.dto.ReceivedFactInfoDTO> findReceivedFacts(
+            String contractNo, String orderNo, String period) {
+        if (StringUtils.isBlank(period) || (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo))) {
+            return java.util.Collections.emptyList();
+        }
+        // ① 合同号/订单号 → 实收合同主表 ID（同合同多期可能多条，全取）
+        List<com.panjia.received.domain.ReceivedContract> contracts = contractMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .eq(StringUtils.isNotBlank(contractNo), com.panjia.received.domain.ReceivedContract::getContractNo, contractNo)
+                .eq(StringUtils.isBlank(contractNo) && StringUtils.isNotBlank(orderNo),
+                    com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo));
+        if (contracts.isEmpty()) {
+            return java.util.Collections.emptyList();
+        }
+        List<Long> contractIds = contracts.stream()
+            .map(com.panjia.received.domain.ReceivedContract::getId).distinct().toList();
+        // ② 指定实收期间的 ACTIVE 明细（已红冲 REVERSED 行不展示）
+        List<com.panjia.received.domain.ReceivedDetail> details = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .in(com.panjia.received.domain.ReceivedDetail::getContractId, contractIds)
+                .eq(com.panjia.received.domain.ReceivedDetail::getPeriod, period)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE")
+                .orderByAsc(com.panjia.received.domain.ReceivedDetail::getId));
+        return details.stream().map(d -> {
+            com.panjia.contracts.dto.ReceivedFactInfoDTO dto = new com.panjia.contracts.dto.ReceivedFactInfoDTO();
+            dto.setEmployeeId(d.getEmployeeId());
+            dto.setEmployeeExternalCode(d.getEmployeeExternalCode());
+            dto.setRoleType(d.getRoleType());
+            dto.setRoleName(d.getRoleName());
+            dto.setShareRatio(d.getShareRatio());
+            dto.setAmount(d.getPerformanceAmount());
+            dto.setDeptId(d.getDeptId());
+            return dto;
+        }).toList();
+    }
+
     private static BigDecimal nvlAmount(BigDecimal v) {
         return v == null ? BigDecimal.ZERO : v;
     }
