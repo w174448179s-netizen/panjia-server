@@ -1105,36 +1105,97 @@ public class CommissionApplicationService {
             && application.getStatus() != ApplicationStatus.REJECTED) {
             throw new ServiceException("仅草稿/已驳回状态可提交（当前：" + application.getStatus().getDesc() + "）");
         }
-        application.setStatus(ApplicationStatus.SUBMITTED);
-        applicationMapper.updateById(application);
-        // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
-        itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, application.getId())
-            .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
-            .set(CommissionItem::getStatus, ItemStatus.PENDING));
+        // 在改状态之前先记住原状态——DRAFT vs REJECTED 决定后续走「新建流程」还是「重提」
+        ApplicationStatus originalStatus = application.getStatus();
 
-        if (StringUtils.isBlank(application.getProcessInstanceId())) {
-            // 系统自动发起无登录上下文，显式指定办理人，避免流程发起人变量为空
-            startWorkflow(application, systemInitiated ? operatorId : null);
-        } else {
-            // 驳回后流程停在申请人节点：办理申请人任务重新提交
-            Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, application.getId());
-            if (taskId == null) {
-                throw new ServiceException("审批流程任务不存在，请联系管理员");
+        // ===== 第一阶段：流程侧操作（先于 application 改状态）=====
+        // 顺序：先跑流程，再改 application.status。原因：
+        //
+        // 测试环境实锤（2026-10-25 18:10~18:18）：同一分钟同一段批量触发代码，
+        // 部分单变成 SUBMITTED，部分变成 DRAFT + 有 processInstanceId（flow_instance 已在
+        // waiting 状态但 application 被回滚）。根因推测是 Warm-Flow + LiteFlow +
+        // dynamic-datasource 某处事务边界被割裂——流程侧的 save 先提交了，但 application 的
+        // update 被回滚了。
+        //
+        // 重排顺序后，无论事务边界在哪个方向割裂，都不会留下 DRAFT + 流程已存在 的脏数据：
+        //   1. startWorkflow 抛异常 → 直接 throw，application 还没改，不会脏
+        //   2. startWorkflow 成功了但后续 application update 抛异常 → catch 里 cancel 已创建
+        //      的流程实例，保证流程侧也被清理
+        boolean workflowCreated = false;
+        String workflowIdBefore = application.getProcessInstanceId();
+        try {
+            if (originalStatus == ApplicationStatus.DRAFT) {
+                // DRAFT → 新建流程
+                // 脏数据兼容：DRAFT 状态但残留了旧 processInstanceId（Warm-Flow 引擎独立事务提交了
+                // 流程实例，但应用侧事务因后置异常回滚了状态 → 状态 DRAFT + 流程已存在 不一致），
+                // 先清理旧流程实例再走新建，避免走错「重提」分支
+                if (StringUtils.isNotBlank(workflowIdBefore)) {
+                    try {
+                        approvalPort.cancel(BizType.COMMISSION, application.getId());
+                    } catch (Exception e) {
+                        log.warn("[结佣-提交] 清理 DRAFT 单残留旧流程失败，忽略继续新建：applyNo={}, reason={}",
+                            application.getApplyNo(), e.getMessage());
+                    }
+                    application.setProcessInstanceId(null);
+                }
+                // 系统自动发起无登录上下文，显式指定办理人，避免流程发起人变量为空
+                startWorkflow(application, systemInitiated ? operatorId : null);
+                workflowCreated = true;
+            } else {
+                // REJECTED → 重提：驳回后流程停在申请人节点，办理该节点任务继续推进
+                if (StringUtils.isBlank(application.getProcessInstanceId())) {
+                    throw new ServiceException("驳回单缺少流程实例，无法重提，请联系管理员");
+                }
+                Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, application.getId());
+                if (taskId == null) {
+                    throw new ServiceException("审批流程任务不存在，请联系管理员");
+                }
+                approvalPort.completeAsSys(BizType.COMMISSION, application.getId(), ApprovalAction.PASS, "重新提交");
             }
-            approvalPort.completeAsSys(BizType.COMMISSION, application.getId(), ApprovalAction.PASS, "重新提交");
-        }
 
-        // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
-        // 系统自动发起不适用（后台无登录上下文，总监节点保留人工审批）
-        if (!systemInitiated && currentRoles().contains(ROLE_DIRECTOR)) {
-            Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
-            if (directorTask == null) {
-                throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
+            // ===== 第二阶段：application 侧改状态 =====
+            application.setStatus(ApplicationStatus.SUBMITTED);
+            int updated = applicationMapper.updateById(application);
+            // @Version 乐观锁：并发场景下可能被 revertSubmittedToDraftIfNeeded 先 updateById 抢走版本号
+            // 此时 WHERE id=? AND version=? 匹配不到 → 影响行数=0 → 必须显式抛出异常让事务回滚
+            // （第一阶段 startWorkflow 已在同事务里 INSERT 的 flow_instance 也一起回滚），
+            // 否则会静默退出留下 DRAFT + 有 flow_instance 的脏数据
+            if (updated == 0) {
+                throw new ServiceException("申请单已被并发修改（version 不匹配），请刷新页面后重试。contractNo="
+                    + application.getContractNo() + ", applyNo=" + application.getApplyNo());
             }
-            completeTaskAsLoginUser(application.getId(), ApprovalAction.PASS, "总监发起，系统自动审批");
+            // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
+            itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+                .eq(CommissionItem::getApplicationId, application.getId())
+                .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
+                .set(CommissionItem::getStatus, ItemStatus.PENDING));
+
+            // 发起人=总监（或超管）→ 以登录人身份办理总监节点（§3.1 总监发起）；
+            // 系统自动发起不适用（后台无登录上下文，总监节点保留人工审批）
+            if (!systemInitiated && currentRoles().contains(ROLE_DIRECTOR)) {
+                Long directorTask = taskAtNode(application.getId(), NODE_DIRECTOR);
+                if (directorTask == null) {
+                    throw new ServiceException("总监发起后未停留在总监审批节点，请联系管理员");
+                }
+                completeTaskAsLoginUser(application.getId(), ApprovalAction.PASS, "总监发起，系统自动审批");
+            }
+            refreshCurrentNode(application);
+        } catch (Exception e) {
+            // 如果第一阶段新建了流程，但 application 侧后续操作抛异常，
+            // 手动 cancel 已创建的流程实例，避免留下 DRAFT + 流程已存在 的脏数据
+            if (workflowCreated && StringUtils.isNotBlank(application.getProcessInstanceId())
+                && !application.getProcessInstanceId().equals(workflowIdBefore)) {
+                try {
+                    approvalPort.cancel(BizType.COMMISSION, application.getId());
+                    log.warn("[结佣-提交] application 侧操作抛异常，已清理已创建的流程：applyNo={}, reason={}",
+                        application.getApplyNo(), e.getMessage());
+                } catch (Exception cancelEx) {
+                    log.error("[结佣-提交] 清理流程实例也失败！！可能残留 DRAFT + 流程脏数据：applyNo={}, cleanupReason={}, originalReason={}",
+                        application.getApplyNo(), cancelEx.getMessage(), e.getMessage());
+                }
+            }
+            throw e;
         }
-        refreshCurrentNode(application);
         log.info("[结佣-提交] 合同申请单已提交：applyNo={}, contractNo={}, operator={}, node={}",
             application.getApplyNo(), application.getContractNo(), operatorId, application.getCurrentNode());
     }

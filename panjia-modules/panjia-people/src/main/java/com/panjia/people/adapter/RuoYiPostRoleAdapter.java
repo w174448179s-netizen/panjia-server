@@ -12,6 +12,7 @@ import org.dromara.system.mapper.SysPostMapper;
 import org.dromara.system.mapper.SysRoleMapper;
 import org.springframework.stereotype.Component;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -87,10 +88,22 @@ public class RuoYiPostRoleAdapter implements PostRolePort {
     public Long resolveRole(String postName) {
         // 角色查不到返回 null：不缓存 null（角色可能随后在后台被创建），下次仍走查询
         return cachedResolve(roleCache, postName, () -> {
-            SysRole role = sysRoleMapper.selectOne(
+            // 1. 精确匹配：role_name = postName（店长→店长、总监→总监）
+            SysRole exact = sysRoleMapper.selectOne(
                 new LambdaQueryWrapper<SysRole>().eq(SysRole::getRoleName, postName).last("LIMIT 1"));
-            // 查不到同名角色：不绑、不报错、不抛异常——尊重后台手动赋权
-            return role == null ? null : role.getRoleId();
+            if (exact != null) {
+                return exact.getRoleId();
+            }
+            // 2. 模糊兜底：岗位名包含角色名（买卖经纪人→经纪人、租赁经纪人→经纪人）
+            List<SysRole> allRoles = sysRoleMapper.selectList(
+                new LambdaQueryWrapper<SysRole>()
+                    .eq(SysRole::getStatus, UserStatus.OK.getCode())
+                    .eq(SysRole::getDelFlag, "0"));
+            return allRoles.stream()
+                .filter(r -> r.getRoleName() != null && postName.contains(r.getRoleName()))
+                .max(Comparator.comparingInt(r -> r.getRoleName().length())) // 最长匹配优先
+                .map(SysRole::getRoleId)
+                .orElse(null);
         });
     }
 
