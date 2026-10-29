@@ -67,7 +67,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         SELECT COUNT(*) AS "detailCount",
-               COUNT(DISTINCT COALESCE(f.order_no, f.contract_no)) AS "contractCount",
+               COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
         FROM pj_perf_fact f
@@ -234,27 +234,31 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     // ==================== 合同维度 ====================
 
     /*
-     * 业务键（订单号 / 合同号）口径——贝壳原始行中 order_no 与 contract_no 严格 1:1
-     * （实测双向 0 冲突、按订单号分组与按业务类型 CASE 分组组数完全相等：238 = 238、order_no 无 NULL），
-     * 故二者互为等价业务键，`CASE WHEN biz_type IN ('一手房','房产金融','家装荐客')` 的分派是冗余的。
+     * 业务键（订单号 / 合同号）统一口径（2026-10-29 定稿）：
      *
-     * 【已统一】实收建单链路（2026-09-22 改动）：
-     * - 实收建单已物理拆分至 pj_received_detail / pj_received_contract，PERF_REAL 不再落 pj_perf_fact；
-     * - 期望侧批量匹配 selectExpectSumsByBizKeys：纯 `f.order_no = 键`，
-     *   不再 OR contract_no（订单号与合同号 1:1，简化为单一键）。
+     *   CASE WHEN biz_type IN ('一手房','房产金融','家装荐客')
+     *        THEN COALESCE(NULLIF(order_no,''),    NULLIF(contract_no,''))
+     *        ELSE COALESCE(NULLIF(contract_no,''), NULLIF(order_no,''))
+     *   END
      *
-     * 【未统一】本文件其余 21 处 CASE 分派（业绩管理列表 / 作废恢复 / 调整 / 结佣 / 业绩查询，见
-     * line 318 起至 1741）保持原样：它们的调用方可能回传「按业务类型决定的展示键」（前端
-     * src/utils/panjiaBiz.ts 的 resolveBizNo），单改 SQL 一侧会漏匹配，须前后端一起动。
-     * 统一时：分组维度可用 `COALESCE(rs.order_no, rs.contract_no)`；对传入键做匹配必须用
-     * `键 = contract_no OR 键 = order_no`（不能用单一列的 COALESCE，否则按展示键回传时漏命中）。
+     * 即一手房/房产金融/家装荐客以订单号为准（空回退合同号），其余业务以合同号为准（空回退订单号）；
+     * 与前端 src/utils/panjiaBiz.ts 的 resolveBizNo 完全一致（前端按此口径决定展示/传参用哪个号）。
+     *
+     * 为什么不能用 COALESCE(order_no, contract_no)（订单号优先）：
+     * 贝壳新签源与实收源的 order_no 不一定一致（实测单 100015671805：新签 order_no=合同号，
+     * 实收 order_no=14567723），订单号优先会让同一笔业务在新签侧/实收侧算出两个业务键，
+     * 业绩查询（两侧 UNION）因此把同一单拆成两行。
+     *
+     * 使用约束：
+     * - 【聚合/分组/去重维度】必须用上面的 CASE 表达式（本文件已全量统一）；
+     * - 【匹配传入键】不要用该表达式做等值比较，仍须 `键 = contract_no OR 键 = order_no` 双列兜底
+     *   （调用方回传的可能是合同号也可能是订单号，且历史单据 contract_no 里可能存的是订单号）。
      */
 
     /**
-     * 业绩管理合同维度分页（以 COALESCE(order_no, contract_no) 为分页维度）。
+     * 业绩管理合同维度分页（以统一业务键为分页维度，口径见上方注释）。
      * <p>
      * 每业务键一行：合同号/订单号/业务类型/房源地址/签约日期/合同金额合计/涉及人数/明细数/未结算数。
-     * 订单号与合同号 1:1，统一用 COALESCE(order_no, contract_no) 分组。
      * 合同下的签约人明细由 {@link #selectManageListByContractNos} 懒加载。
      * <p>
      * originalAmount 已移除（如需调整前金额，另查）；pj_people_employee JOIN 已移除
@@ -336,8 +340,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
-        GROUP BY COALESCE(f.order_no, f.contract_no)
-        ORDER BY "businessDate" DESC, COALESCE(MAX(f.order_no), MAX(f.contract_no))
+        GROUP BY CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END
+        ORDER BY "businessDate" DESC,
+                 MAX(CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END)
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
         """)
@@ -354,12 +359,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                             @Param("pageSize") int pageSize);
 
     /**
-     * 统计符合条件的合同数（分页 total，按 COALESCE(order_no, contract_no) 去重）。
+     * 统计符合条件的合同数（分页 total，按统一业务键去重，口径同 {@link #selectManagePageContracts}）。
      * 参数语义同 {@link #selectManagePageContracts}。
      */
     @Select("""
         <script>
-        SELECT COUNT(DISTINCT COALESCE(f.order_no, f.contract_no))
+        SELECT COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END)
         FROM pj_perf_fact f
         WHERE
         <choose>
@@ -428,9 +433,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 由 Service 层批量补充查询填充，避免 CTE + 5 个 JOIN 的复杂执行计划。
      * <p>
      * 匹配口径：传入键命中 {@code order_no} 或 {@code contract_no} 任一即可（二者在贝壳原始行中 1:1）。
-     * 列表分组维度 {@link #selectManagePageContracts} 用 COALESCE(order_no, contract_no)，
-     * 但本处传入的展示键可能是合同号也可能是订单号（取决于前端 resolveBizNo），故必须用 OR 双列匹配，
-     * 不能用 COALESCE IN ——否则传入合同号而该行 order_no 非空时 COALESCE 取 order_no 导致漏命中。
+     * 列表分组维度 {@link #selectManagePageContracts} 用统一业务键，但本处传入的展示键可能是
+     * 合同号也可能是订单号（取决于前端 resolveBizNo），故必须用 OR 双列匹配，
+     * 不能用业务键表达式 IN ——否则传入合同号而该行按业务键取 order_no 时导致漏命中。
      *
      * @param contractNos 业务键集合（不能为空；列表行展示的合同号/订单号）
      * @param orderNos    订单号集合（可空；非空时按 order_no 精确限定单订单，
@@ -726,7 +731,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE vf.fact_status = 'VOIDED'
           AND vf.period = mf.period
           AND vf.fact_type = mf.fact_type
-          AND COALESCE(vf.order_no, vf.contract_no) = COALESCE(mf.order_no, mf.contract_no)
+          AND (CASE WHEN vf.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(vf.order_no,''), NULLIF(vf.contract_no,'')) ELSE COALESCE(NULLIF(vf.contract_no,''), NULLIF(vf.order_no,'')) END)
+            = (CASE WHEN mf.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(mf.order_no,''), NULLIF(mf.contract_no,'')) ELSE COALESCE(NULLIF(mf.contract_no,''), NULLIF(mf.order_no,'')) END)
         """)
     long countVoidedSiblingsByFactId(@Param("factId") Long factId);
 
@@ -1433,7 +1439,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    FROM pj_perf_fact e
                    WHERE e.fact_status = 'ACTIVE' AND e.fact_type = 'PERF_EXPECT'
                      <if test="period != null and period != ''">AND e.period = #{period}</if>
-                     AND (COALESCE(e.order_no, e.contract_no)) = s.biz_key
+                     AND (CASE WHEN e.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(e.order_no,''), NULLIF(e.contract_no,'')) ELSE COALESCE(NULLIF(e.contract_no,''), NULLIF(e.order_no,'')) END) = s.biz_key
                ), 0) AS "expectedAmount",
                CASE
                    WHEN bool_or(s.ra_status = 'SUBMITTED') THEN 'SUBMITTED'
@@ -1444,7 +1450,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                COUNT(DISTINCT s.employee_id) AS "employeeCount",
                COUNT(*) AS "detailCount"
         FROM (
-            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END AS biz_key,
                    f.order_no,
                    f.biz_type,
                    f.property_address,
@@ -1699,7 +1705,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         <script>
         WITH all_rows AS (
             -- 应收侧（ACTIVE PERF_EXPECT）
-            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END AS biz_key,
                    f.period AS period,
                    f.dept_id AS dept_id,
                    f.employee_id AS employee_id,
@@ -1720,7 +1726,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
             UNION ALL
             -- 实收侧（拆表后 ACTIVE rd + rc；rd.employee_id 暂留空，按工号关联员工主数据）
-            SELECT COALESCE(rc.order_no, rc.contract_no),
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END,
                    rd.period,
                    COALESCE(rd.dept_id, rc.dept_id),
                    e.employee_id,
@@ -1928,7 +1934,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     @Select("""
         <script>
         WITH all_rows AS (
-            SELECT COALESCE(f.order_no, f.contract_no) AS biz_key,
+            SELECT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END AS biz_key,
                    f.period AS period,
                    f.dept_id AS dept_id,
                    f.employee_id AS employee_id,
@@ -1941,7 +1947,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
               AND f.fact_type = 'PERF_EXPECT'
               AND COALESCE(f.order_no, f.contract_no) IS NOT NULL
             UNION ALL
-            SELECT COALESCE(rc.order_no, rc.contract_no),
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END,
                    rd.period,
                    COALESCE(rd.dept_id, rc.dept_id),
                    e.employee_id,
@@ -2445,7 +2451,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                     WHEN #{periodType} = 'QUARTER' THEN SUBSTRING(f.period, 1, 4) || '-Q' || CAST((CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 AS VARCHAR)
                     ELSE SUBSTRING(f.period, 1, 4)
                 END AS period_label,
-                f.employee_id, f.dept_id, f.contract_no, f.order_no, f.performance_amount
+                f.employee_id, f.dept_id, f.biz_type, f.contract_no, f.order_no, f.performance_amount
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
               AND f.fact_type = 'PERF_EXPECT'
@@ -2471,7 +2477,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                e.employee_code AS "employeeCode",
                d.dept_name AS "deptName",
                l.dept_id AS "deptId",
-               COUNT(DISTINCT COALESCE(l.contract_no, l.order_no)) AS "contractCount",
+               COUNT(DISTINCT CASE WHEN l.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(l.order_no,''), NULLIF(l.contract_no,'')) ELSE COALESCE(NULLIF(l.contract_no,''), NULLIF(l.order_no,'')) END) AS "contractCount",
                COALESCE(SUM(l.performance_amount), 0) AS "totalAmount"
         FROM labeled l
         LEFT JOIN pj_people_employee e ON e.employee_id = l.employee_id
@@ -2558,7 +2564,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                e.employee_code AS "employeeCode",
                d.dept_name AS "deptName",
                f.dept_id AS "deptId",
-               COUNT(DISTINCT COALESCE(f.contract_no, f.order_no)) AS "contractCount",
+               COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END) AS "contractCount",
                COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id

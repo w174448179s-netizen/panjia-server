@@ -74,6 +74,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private static final String FACT_TYPE_EXPECT = FactType.PERF_EXPECT.getCode();
 
     private static final String CONFIG_SKIP_FINANCE = "panjia.flow.skip_finance";
+
+    /** 以订单号为业务键的业务类型；其余以合同号为准（与前端 resolveBizNo、SQL 聚合口径一致） */
+    private static final Set<String> BIZ_TYPE_ORDER_FIRST = Set.of("一手房", "房产金融", "家装荐客");
     /** 导入问题类型：实收转人工审批（回写导入批次问题清单，非阻塞） */
     private static final String ISSUE_TYPE_MANUAL_APPROVAL = "RECEIVED_MANUAL_APPROVAL";
     /** 问题清单类型：实收到账无新签，明细已入库、未建单（与 ImportIssueType.RECEIVED_NO_EXPECT_PENDING 同码） */
@@ -1276,8 +1279,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 if (c == null) {
                     continue;
                 }
-                // 去重键：订单号优先、无订单号按合同号（纯合同号场景同月多合同不能互相顶掉）
-                String bizKey = StringUtils.isNotBlank(c.getOrderNo()) ? c.getOrderNo() : c.getContractNo();
+                // 去重键：统一业务键（一手房/房产金融/家装荐客订单号优先，其余合同号优先），同月多合同不能互相顶掉
+                String bizKey = resolveBizKey(c.getBizType(), c.getOrderNo(), c.getContractNo());
                 String dedupKey = (bizKey == null ? "" : bizKey) + "|" + c.getPeriod();
                 if (seen.add(dedupKey)) {
                     result.add(new com.panjia.contracts.port.ReceivedApplyPort.PendingReceipt(
@@ -2232,11 +2235,12 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (pendingOnly) {
             return pageRows(pendingRows, pageQuery, summaryOf(pendingRows));
         }
-        // 分页查询：三个业绩列表统一排序（签约/认购时间倒序 → 订单号(空取合同号)次序 → id 倒序兜底），
+        // 分页查询：三个业绩列表统一排序（签约/认购时间倒序 → 业务键次序 → id 倒序兜底），
+        // 业务键口径：一手房/房产金融/家装荐客订单号优先，其余合同号优先（与列表聚合口径一致）；
         // 不再按建单时间排（批量导入时建单时间集中且与业务发生顺序无关）
         QueryWrapper<ReceivedApply> wrapper = buildListCondition(query, effectiveDeptId);
         wrapper.orderByDesc("business_date")
-            .last(", COALESCE(order_no, contract_no), id DESC");
+            .last(", CASE WHEN biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(order_no,''), NULLIF(contract_no,'')) ELSE COALESCE(NULLIF(contract_no,''), NULLIF(order_no,'')) END, id DESC");
         // 未选期间：同一合同/订单的 8、9 月单据合并为一行（详情按期间展开）；
         // 选定期：保持单据维度，退单月展示 TD 冲减单
         if (StringUtils.isBlank(query.getPeriod())) {
@@ -2504,7 +2508,20 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         return summary;
     }
 
-    /** 列表统一排序：签约/认购时间倒序 → 订单号(空取合同号) → 期间倒序 → id 倒序兜底。 */
+    /**
+     * 统一业务键：一手房/房产金融/家装荐客订单号优先，其余合同号优先（各自为空回退另一列）。
+     * 与前端 resolveBizNo、SQL 聚合口径一致。
+     */
+    private static String resolveBizKey(String bizType, String orderNo, String contractNo) {
+        String order = StringUtils.trimToEmpty(orderNo);
+        String contract = StringUtils.trimToEmpty(contractNo);
+        if (BIZ_TYPE_ORDER_FIRST.contains(StringUtils.trimToEmpty(bizType))) {
+            return order.isEmpty() ? contract : order;
+        }
+        return contract.isEmpty() ? order : contract;
+    }
+
+    /** 列表统一排序：签约/认购时间倒序 → 业务键次序 → 期间倒序 → id 倒序兜底。 */
     private static int compareRow(ReceivedApply a, ReceivedApply b) {
         LocalDateTime da = a.getBusinessDate();
         LocalDateTime db = b.getBusinessDate();
@@ -2518,8 +2535,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         } else if (db != null) {
             return 1;
         }
-        String ka = StringUtils.isNotBlank(a.getOrderNo()) ? a.getOrderNo() : StringUtils.trimToEmpty(a.getContractNo());
-        String kb = StringUtils.isNotBlank(b.getOrderNo()) ? b.getOrderNo() : StringUtils.trimToEmpty(b.getContractNo());
+        String ka = resolveBizKey(a.getBizType(), a.getOrderNo(), a.getContractNo());
+        String kb = resolveBizKey(b.getBizType(), b.getOrderNo(), b.getContractNo());
         int c = ka.compareTo(kb);
         if (c != 0) {
             return c;
@@ -2582,7 +2599,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     }
 
     /**
-     * 同一合同/订单的多期审批单合并为一行（订单号优先；合同号/订单号都为空时各自成行）。
+     * 同一合同/订单的多期审批单合并为一行（统一业务键；合同号/订单号都为空时各自成行）。
      * <p>
      * 实收取各期净额（跨期正负相抵，全额退单后归零）；新签（应收）为全部期间 ACTIVE 净额口径，
      * 由 {@link #fillMergedExpect} 批量覆盖（退单负数与历史正数相抵，全额退单后归零）。
@@ -2590,8 +2607,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private List<ReceivedApply> mergeByContractKey(List<ReceivedApply> all) {
         Map<String, List<ReceivedApply>> groups = new LinkedHashMap<>();
         for (ReceivedApply a : all) {
-            String key = StringUtils.isNotBlank(a.getOrderNo()) ? "O|" + a.getOrderNo()
-                : (StringUtils.isNotBlank(a.getContractNo()) ? "C|" + a.getContractNo() : "I|" + a.getId());
+            String bizKey = resolveBizKey(a.getBizType(), a.getOrderNo(), a.getContractNo());
+            String key = StringUtils.isBlank(bizKey) ? "I|" + a.getId() : "K|" + bizKey;
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(a);
         }
         List<ReceivedApply> merged = new ArrayList<>(groups.size());

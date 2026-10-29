@@ -2014,11 +2014,18 @@ public class CommissionApplicationService {
                 continue;
             }
             BigDecimal amt = f.getAmount() == null ? BigDecimal.ZERO : f.getAmount();
-            if (StringUtils.isNotBlank(f.getOrderNo()) && expectKeys.contains(f.getOrderNo())) {
-                unsettledExpectMap.merge(f.getOrderNo(), amt, BigDecimal::add);
+            // 两键分别累加（订单键只计本订单、合同键计全合同），取值时订单键优先、合同键兜底。
+            // 订单号与合同号同值时同一事实会落到同一个 map 键上，必须只加一次，
+            // 否则二手房（新签 order_no 即合同号）的结佣金额会被算成两倍（2026-10-29 修复）。
+            String orderKey = StringUtils.isNotBlank(f.getOrderNo()) && expectKeys.contains(f.getOrderNo())
+                ? f.getOrderNo() : null;
+            String contractKey = StringUtils.isNotBlank(f.getContractNo()) && expectKeys.contains(f.getContractNo())
+                ? f.getContractNo() : null;
+            if (orderKey != null) {
+                unsettledExpectMap.merge(orderKey, amt, BigDecimal::add);
             }
-            if (StringUtils.isNotBlank(f.getContractNo()) && expectKeys.contains(f.getContractNo())) {
-                unsettledExpectMap.merge(f.getContractNo(), amt, BigDecimal::add);
+            if (contractKey != null && !contractKey.equals(orderKey)) {
+                unsettledExpectMap.merge(contractKey, amt, BigDecimal::add);
             }
         }
 

@@ -135,7 +135,8 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
     List<Long> selectActiveContractIdsByBatchIds(@Param("batchIds") Collection<Long> batchIds);
 
     /**
-     * 「待匹配新签」到账组：未绑定审批单的 ACTIVE 实收明细，按业务键(订单号优先/合同号) + 归属月聚合。
+     * 「待匹配新签」到账组：未绑定审批单的 ACTIVE 实收明细，按统一业务键（一手房/房产金融/家装荐客
+     * 订单号优先，其余合同号优先）+ 归属月聚合。
      * <p>
      * 去草稿（2026-10-29）后无新签的到账只落库、不建单，审批单列表里看不到；
      * 列表据此拼出「待匹配新签」行，用户在该行补录新签，审批通过后走自动补建单链路。
@@ -145,7 +146,7 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
     @Select("""
         <script>
         WITH grp AS (
-            SELECT COALESCE(rc.order_no, rc.contract_no) AS biz_key,
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
                    MAX(rc.contract_no) AS contract_no,
                    MAX(rc.order_no) AS order_no,
                    MAX(rc.biz_type) AS biz_type,
@@ -173,7 +174,7 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
                     AND (ra.order_no = rc.order_no
                          OR (rc.order_no IS NULL AND ra.contract_no = rc.contract_no))
               )
-            GROUP BY COALESCE(rc.order_no, rc.contract_no), rc.period
+            GROUP BY CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END, rc.period
         )
         SELECT grp.contract_no AS "contractNo",
                grp.order_no AS "orderNo",
@@ -202,7 +203,7 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
                      ON (e2.employee_id = d2.employee_id
                          OR (d2.employee_id IS NULL AND e2.employee_code = d2.employee_external_code))
               LEFT JOIN sys_dept sd ON sd.dept_id = COALESCE(d2.dept_id, c2.dept_id, e2.dept_id)
-              WHERE COALESCE(c2.order_no, c2.contract_no) = grp.biz_key
+              WHERE (CASE WHEN c2.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(c2.order_no,''), NULLIF(c2.contract_no,'')) ELSE COALESCE(NULLIF(c2.contract_no,''), NULLIF(c2.order_no,'')) END) = grp.biz_key
                 AND c2.period = grp.period
                 AND d2.detail_status = 'ACTIVE'
                 AND d2.received_apply_id IS NULL

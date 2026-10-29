@@ -187,7 +187,7 @@ public interface ReceivedRealFactMapper {
 
     /**
      * 按期间查实收「合同」维度汇总（结佣申请列表合并展示用）。
-     * 按 COALESCE(rc.order_no,rc.contract_no) 聚合；deptId 非空含下级部门。
+     * 按统一业务键聚合（一手房/房产金融/家装荐客订单号优先，其余合同号优先）；deptId 非空含下级部门。
      * <p>period 非空：expectedAmount 取该合同实收月及之前全部期间 ACTIVE PERF_EXPECT 合计
      * （当月+历史合并，冲正镜像不排斥历史正数）；period 可空：空时跨全部期间聚合
      * （仅录合同号不选期间场景），expectedAmount 对应取该合同全部期间 ACTIVE PERF_EXPECT 合计。
@@ -236,7 +236,7 @@ public interface ReceivedRealFactMapper {
             </otherwise>
         </choose>
         , s AS (
-            SELECT COALESCE(rc.order_no, rc.contract_no) AS biz_key,
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
                    rc.contract_no,
                    rc.order_no,
                    rc.biz_type,
