@@ -76,6 +76,16 @@ public class ReceivedDetail {
     /** 关联调整单 ID（实收/新签调整；仅 supersede 新行有值） */
     private Long adjustId;
 
+    /** 被哪个导入批次替换而置为 SUPERSEDED；撤销该批次时按此恢复 ACTIVE（历史数据为空） */
+    private Long supersededByBatchId;
+
+    /**
+     * 触发补录的新签导入批次 ID（新签到达补行/压缩写入）。
+     * <p>撤销该新签批次时按此删除补录行、还原被压缩的原行；
+     * 实收导入替换时这类派生行一并视为可替换。
+     */
+    private Long supplementOriginBatchId;
+
     /** 本行被冲销原因（ReversedReason code；仅 REVERSED 行有值） */
     private String reversalType;
 

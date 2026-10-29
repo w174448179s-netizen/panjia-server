@@ -15,4 +15,14 @@ public interface ImportBatchWritePort {
      * @param errorMessage 错误描述（取异常 message，截断 1000 字符）
      */
     void recordBatchError(Long batchId, String errorMessage);
+
+    /**
+     * 记录批次级提示（非阻塞，不阻塞归档、不影响批次状态），供前端问题清单展示
+     * 归档消费阶段需要人工关注的单据（如实收转人工审批的订单）。
+     *
+     * @param batchId       批次 ID
+     * @param issueTypeCode 问题类型编码，取 import 域 {@code ImportIssueType} 枚举名
+     * @param message       提示描述（截断 1000 字符）
+     */
+    void recordBatchIssue(Long batchId, String issueTypeCode, String message);
 }

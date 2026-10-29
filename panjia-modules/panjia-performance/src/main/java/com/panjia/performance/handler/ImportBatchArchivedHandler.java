@@ -117,9 +117,11 @@ public class ImportBatchArchivedHandler implements DomainEventHandler {
         importToReceivedPort.supersedeBatches(convertSupersededIds(event.getSupersededBatchIds()));
         ImportToReceivedPort.ImportToReceivedResult result = importToReceivedPort
             .consumeBatch(event.getBatchId(), period, event.getSourceType(), event.getOperatorId());
-        log.info("[导入归档] 实收表写入完成：batchId={}, sourceType={}, contracts={}, details={}, skippedRefundRows={}, supplementedDetails={}",
+        log.info("[导入归档] 实收表写入完成：batchId={}, sourceType={}, contracts={}, details={}, skippedRefundRows={}, "
+                + "supplementedDetails={}, skippedUnchangedGroups={}, skippedConsumedGroups={}",
             event.getBatchId(), event.getSourceType(), result.newContracts(), result.newDetails(),
-            result.skippedRefundRows(), result.supplementedDetails());
+            result.skippedRefundRows(), result.supplementedDetails(),
+            result.skippedUnchangedGroups(), result.skippedConsumedGroups());
 
         // 实收审批单
         int created;

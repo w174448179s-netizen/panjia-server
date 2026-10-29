@@ -12,13 +12,13 @@ import java.util.List;
 /**
  * 新签业绩补录参数。
  * <p>
- * 场景：实收审批单 DRAFT（待补新签）状态——有实收无新签，需手工补录 PERF_EXPECT 事实。
+ * 场景：实收已入库但无新签（明细未绑定审批单，待新签匹配），需手工补录 PERF_EXPECT 事实。
  * 合同号、订单号、bizType、propertyAddress 等字段从实收继承；签约日期与新签金额手工录入。
- * 补录后自动触发实收 DRAFT 单重评（resolveDraftAfterNewSign）。
+ * 补录后自动触发实收补建单（resolvePendingAfterNewSign）。
  */
 @Data
 public class ExpectSupplementBo {
-    /** 实收月（用于查 DRAFT 单触发重评，从实收行继承） */
+    /** 实收月（用于按订单/月补建审批单，从实收行继承） */
     @NotNull(message = "实收月不能为空")
     private String receivedPeriod;
 

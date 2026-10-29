@@ -2,6 +2,7 @@ package com.panjia.received.service;
 
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.domain.vo.BatchApproveResultVo;
+import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import com.panjia.performance.domain.bo.ReceivedApplyBo;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -45,7 +46,7 @@ public interface IReceivedApplyService {
      * <p>比较（同期间、同人 employeeId、同订单号）：到账合计（本批 PERF_REAL 汇总）
      * vs 新签应收合计（PERF_EXPECT ACTIVE 同键汇总）。
      * <ul>
-     *   <li>到账合计 ≥ 0：≥ 应收合计 → APPROVED 直建（自动通过）；&lt; 应收合计 → 人工审批（DRAFT+startWorkflow）；</li>
+     *   <li>到账合计 ≥ 0：≥ 应收合计 → APPROVED 直建（自动通过）；&lt; 应收合计 → 人工审批（SUBMITTED+startWorkflow）；</li>
      *   <li>到账合计 &lt; 0：找同人同订单新签负应收（&lt;0 部分合计），到账更负（&lt;）→ 负实收 APPROVED 直建；
      *       找不起新签负应收或到账不更负 → 人工审批。</li>
      * </ul>
@@ -73,7 +74,7 @@ public interface IReceivedApplyService {
     int autoCreateApprovedForBatch(Long batchId, String period, Long operatorId);
 
     /**
-     * 已驳回/草稿单重新提交。
+     * 已驳回单重新提交（去草稿后不再有 DRAFT 单）。
      *
      * @param id 审批单 ID
      * @return 审批单
@@ -81,7 +82,7 @@ public interface IReceivedApplyService {
     ReceivedApply resubmit(Long id);
 
     /**
-     * 作废审批单（DRAFT/SUBMITTED；SUBMITTED 同步终止流程）。
+     * 作废审批单（仅 SUBMITTED；同步终止流程）。
      *
      * @param id 审批单 ID
      */
@@ -138,6 +139,16 @@ public interface IReceivedApplyService {
      * @return 合并视图
      */
     ReceivedApplyDetail getContractDetail(String contractNo, String orderNo);
+
+    /**
+     * 「待匹配新签」组的每人实收明细（未绑定审批单的 ACTIVE 明细）。
+     * <p>去草稿后无新签到账不建单，补录弹窗据此装载角色人清单与实收金额上限。
+     *
+     * @param bizKey 业务键（订单号必填优先；空订单号的老数据传合同号）
+     * @param period 归属月（YYYY-MM，可空=全部期间）
+     * @return 每人明细（列口径对齐审批单详情）
+     */
+    List<ReceivedFactDetailVo> listPendingDetails(String bizKey, String period);
 
     /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
     Long getInstanceId(Long id);

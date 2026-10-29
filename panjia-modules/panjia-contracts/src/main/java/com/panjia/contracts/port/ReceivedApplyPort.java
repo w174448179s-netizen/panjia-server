@@ -75,26 +75,63 @@ public interface ReceivedApplyPort {
     ManualReceivedSubmitResultDTO manualSubmitReceived(Collection<String> bizKeys, String period, Long operatorId);
 
     /**
-     * 新签导入后重新评估该合同当月 DRAFT 实收审批单（2026-09-30 定稿）。
-     * <p>评估口径同 autoCreateForReceivedBatch：新签=该订单跨月 PERF_EXPECT ACTIVE 合计，
-     * 实收=审批单 receivedAmount（含历史合并入 DRAFT 的全部到账）。
+     * 新签导入后为「已到账、未建单」的实收补建审批单（2026-10-29 去草稿）。
+     * <p>先导实收、后到新签的场景不再落草稿单：实收明细已入库且 received_apply_id 为空。
+     * 本方法按订单（合同号兜底）取该订单全部未绑定 ACTIVE 明细作为累计到账，
+     * 评估口径同 autoCreateForReceivedBatch：
      * <ul>
-     *   <li>实收 ≥ 新签 → 自动通过(APPROVED) + emit ReceivedApprovedEvent；</li>
-     *   <li>实收 &lt; 新签 → 启动人工审批工作流(SUBMITTED)，与导入时"有新签但不足"路径一致；</li>
-     *   <li>仍无新签 → 保持 DRAFT（不应发生，新签刚导入；兜底不处理）。</li>
+     *   <li>实收 ≥ 新签 且人员一致 → 自动通过(APPROVED) + emit ReceivedApprovedEvent；</li>
+     *   <li>实收 &lt; 新签 或人员不一致 → 启动人工审批工作流(SUBMITTED)；</li>
+     *   <li>仍无新签 → 不建单，明细保持未绑定等下次触发。</li>
      * </ul>
-     * 仅处理 DRAFT 单；SUBMITTED(人工流中)/APPROVED(已通过) 不打扰。
-     * <p>匹配维度：合同号非空时按合同号查当月全部 DRAFT 逐单按各自订单号评估
-     * （同合同多订单互不干扰）；合同号为空（一手房/家装荐客等无合同号业务，
-     * 以 order_no 为锚点）时按订单号查 DRAFT。
+     * 该订单该期间已有任一审批单时直接跳过，不重复出单。
      *
      * @param period     实收归属期间 YYYY-MM
      * @param contractNo 合同号（可空，空时按 orderNo 匹配）
      * @param orderNo    订单号（contractNo 为空时必传）
      * @param operatorId 操作人 ID（事件场景无登录上下文，null 走兜底）
-     * @return true=已自动通过；false=未通过（启动人工或保持 DRAFT）
+     * @param signBatchId 触发的新签导入批次 ID（用于补录溯源与撤销还原；手工补录场景传 null）
+     * @return true=已建单（自动通过或转人工）；false=未建单
      */
-    boolean resolveDraftAfterNewSign(String period, String contractNo, String orderNo, Long operatorId);
+    boolean resolvePendingAfterNewSign(String period, String contractNo, String orderNo,
+                                       Long operatorId, Long signBatchId);
+
+    /**
+     * 新签批次撤销：把因该批新签自动通过（APPROVED 且无流程实例）的实收单解绑明细后删除。
+     * <p>去草稿后不再回退 DRAFT：明细回到「未绑定审批单」状态，即待新签匹配，
+     * 下次正确新签导入后由 {@link #resolvePendingAfterNewSign} 重新建单。
+     * <p>人工终审单（有流程实例）不会被前置校验放过，不在此处理范围。
+     *
+     * @param period     实收归属期间 YYYY-MM
+     * @param bizKeys    新签批次合同号/订单号集合
+     * @return 删除的审批单数量
+     */
+    int revokeAutoApprovedApplies(String period, java.util.Collection<String> bizKeys);
+
+    /**
+     * 新签批次撤销：清掉由该批新签触发的实收补录（补行 + 压缩）。
+     * <p>先删 {@code supplement_origin_batch_id=signBatchId} 的补录行，
+     * 再把被该批压缩而置为 SUPERSEDED 的原行恢复 ACTIVE（原金额完整保留）。
+     * 若补录行已被并入审批单，则跳过删除（避免单据金额与明细不符），由人工调整。
+     *
+     * @param signBatchId 新签导入批次 ID
+     * @return 清理的明细行数（删除 + 还原）
+     */
+    int revokeSupplements(Long signBatchId);
+
+    /**
+     * 待新签匹配的实收到账（明细已入库、未绑定审批单）。
+     * <p>用于新签导入后定位「哪些订单/归属月需要补建实收审批单」；去草稿后不再有 DRAFT 单可查。
+     */
+    record PendingReceipt(String orderNo, String contractNo, String period) {}
+
+    /**
+     * 按业务键（订单号优先，合同号兜底）查待新签匹配的实收到账，按 (订单号, 合同号, 归属月) 去重。
+     *
+     * @param bizKeys 业务键集合（订单号或合同号）
+     * @return 待匹配到账列表；无则空
+     */
+    java.util.List<PendingReceipt> findPendingReceipts(java.util.Collection<String> bizKeys);
 
     /**
      * 业绩调整联动：合同「有新签、无实收」时，把联动建出的虚拟实收明细归入一张
@@ -103,7 +140,7 @@ public interface ReceivedApplyPort {
      * 新签调整执行后，实收侧无 ACTIVE 明细 → 联动按逐人 delta 建虚拟实收明细
      * （source_type=MANUAL、received_apply_id 为空）。这些明细必须挂到一张审批单上，
      * 否则实收审批单列表查不到该笔实收；本方法即“直建 APPROVED 单 + 绑定明细”。
-     * <p>幂等：同订单号当月已有活跃审批单（DRAFT/SUBMITTED/APPROVED）时跳过。
+     * <p>幂等：同订单号当月已有活跃审批单（SUBMITTED/APPROVED，去草稿后无 DRAFT）时跳过。
      *
      * @param period     实收归属期间 YYYY-MM
      * @param orderNo    订单号（可空，空时按合同号匹配）

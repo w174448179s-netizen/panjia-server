@@ -147,15 +147,52 @@ public class ReceivedRevokedHandler implements DomainEventHandler {
             }
         }
 
-        // 2. 硬删实收明细
+        // 0.2 本次撤销会影响到的合同：本批创建的 + 本批替换过明细的（增量合并下合同可能被多批复用）
+        Set<Long> touchedContractIds = new LinkedHashSet<>();
+        for (ReceivedContract c : contractMapper.selectList(
+                new LambdaQueryWrapper<ReceivedContract>()
+                    .select(ReceivedContract::getId)
+                    .eq(ReceivedContract::getBatchId, batchId))) {
+            touchedContractIds.add(c.getId());
+        }
+        for (ReceivedDetail d : detailMapper.selectList(
+                new LambdaQueryWrapper<ReceivedDetail>()
+                    .select(ReceivedDetail::getContractId)
+                    .eq(ReceivedDetail::getSupersededByBatchId, batchId))) {
+            if (d.getContractId() != null) {
+                touchedContractIds.add(d.getContractId());
+            }
+        }
+
+        // 2. 硬删实收明细（本批新增行）
+        //    被新签补录压缩后置为 SUPERSEDED 的快照行不删：撤销新签批次时要靠它还原原金额
         int details = detailMapper.delete(new LambdaQueryWrapper<ReceivedDetail>()
-            .eq(ReceivedDetail::getSourceBatchId, batchId));
+            .eq(ReceivedDetail::getSourceBatchId, batchId)
+            .isNull(ReceivedDetail::getSupersededByBatchId));
         log.info("[实收撤销] 明细已删：batchId={}, count={}", batchId, details);
 
-        // 3. 硬删实收合同
-        int contracts = contractMapper.delete(new LambdaQueryWrapper<ReceivedContract>()
-            .eq(ReceivedContract::getBatchId, batchId));
-        log.info("[实收撤销] 合同已删：batchId={}, count={}", batchId, contracts);
+        // 2.1 恢复被本批替换的旧明细（增量合并语义）：superseded_by_batch_id=batchId → ACTIVE。
+        //     与旧批冲销语义（restoredBatchIds）互补：前者按"被谁替换"精确回滚，后者按批次整体恢复。
+        int reverted = detailMapper.update(null, new LambdaUpdateWrapper<ReceivedDetail>()
+            .eq(ReceivedDetail::getSupersededByBatchId, batchId)
+            .set(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE)
+            .set(ReceivedDetail::getSupersededByBatchId, null));
+        if (reverted > 0) {
+            log.info("[实收撤销] 被本批替换的明细已恢复：batchId={}, count={}", batchId, reverted);
+        }
+
+        // 3. 硬删实收合同：只删「已无任何明细」的合同。增量合并下合同可能由前序批次创建、
+        //    本批仅替换其明细，直接按 batch_id 删会把其它批次的存活明细打成孤儿。
+        int contracts = 0;
+        for (Long contractId : touchedContractIds) {
+            long remaining = detailMapper.selectCount(new LambdaQueryWrapper<ReceivedDetail>()
+                .eq(ReceivedDetail::getContractId, contractId));
+            if (remaining == 0) {
+                contractMapper.deleteById(contractId);
+                contracts++;
+            }
+        }
+        log.info("[实收撤销] 空合同已删：batchId={}, count={}", batchId, contracts);
 
         // 4. 审批单处置
         if (!pureBatchApplyIds.isEmpty()) {
@@ -169,24 +206,66 @@ public class ReceivedRevokedHandler implements DomainEventHandler {
         }
 
         // 5. 保底恢复：旧批次明细翻回 ACTIVE，重算沿用单并重放实收通过事件
+        Set<Long> restoredApplyIds = new LinkedHashSet<>();
         if (!restoredBatchIds.isEmpty()) {
             int restored = detailMapper.update(null, new LambdaUpdateWrapper<ReceivedDetail>()
                 .in(ReceivedDetail::getSourceBatchId, restoredBatchIds)
                 .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_SUPERSEDED)
                 .set(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE));
             log.info("[实收撤销] 旧批次明细已恢复：restoredBatchIds={}, count={}", restoredBatchIds, restored);
-
-            Set<Long> restoredApplyIds = detailMapper.selectList(
-                    new LambdaQueryWrapper<ReceivedDetail>()
-                        .select(ReceivedDetail::getReceivedApplyId)
-                        .in(ReceivedDetail::getSourceBatchId, restoredBatchIds)
-                        .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE)
-                        .isNotNull(ReceivedDetail::getReceivedApplyId))
-                .stream().map(ReceivedDetail::getReceivedApplyId)
-                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        }
+        // 汇总全部被恢复的行（含 2.1 精确回滚的行），这些行的审批单需按存活明细重算
+        List<Long> restoredSources = new ArrayList<>(restoredBatchIds);
+        restoredSources.add(batchId);
+        restoredApplyIds.addAll(detailMapper.selectList(
+                new LambdaQueryWrapper<ReceivedDetail>()
+                    .select(ReceivedDetail::getReceivedApplyId)
+                    .in(ReceivedDetail::getSourceBatchId, restoredSources)
+                    .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE)
+                    .isNull(ReceivedDetail::getSupersededByBatchId)
+                    .isNotNull(ReceivedDetail::getReceivedApplyId))
+            .stream().map(ReceivedDetail::getReceivedApplyId)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new)));
+        if (!restoredApplyIds.isEmpty()) {
             // 已在合并分流中删除的纯本批单不参与（其 ID 不会出现在存活单中，重算内部会跳过空单）
             List<ReceivedApply> recalculated = recalculateApplies(new ArrayList<>(restoredApplyIds));
             replayApprovedApplies(recalculated, event.getOperatorId());
+        }
+        // 6. 合同聚合收口：删明细/恢复明细后必须按存活 ACTIVE 明细重算，否则合计与明细不一致
+        refreshContractAggregates(touchedContractIds);
+    }
+
+    /**
+     * 按存活 ACTIVE 明细重算合同级聚合（period_total_received / item_count）。
+     * <p>与 {@code ImportToReceivedServiceImpl.refreshContractAggregates} 同口径：一次 GROUP BY
+     * 取聚合后回写，已删除的合同自动跳过。
+     */
+    private void refreshContractAggregates(java.util.Collection<Long> contractIds) {
+        if (contractIds == null || contractIds.isEmpty()) {
+            return;
+        }
+        List<Long> alive = contractMapper.selectList(new LambdaQueryWrapper<ReceivedContract>()
+                .select(ReceivedContract::getId)
+                .in(ReceivedContract::getId, contractIds))
+            .stream().map(ReceivedContract::getId).toList();
+        if (alive.isEmpty()) {
+            return;
+        }
+        Map<Long, Map<String, Object>> aggregateByContract = new LinkedHashMap<>();
+        for (Map<String, Object> row : detailMapper.selectActiveAggregatesByContractIds(alive)) {
+            aggregateByContract.put(((Number) row.get("contractId")).longValue(), row);
+        }
+        for (Long contractId : alive) {
+            ReceivedContract contract = contractMapper.selectById(contractId);
+            if (contract == null) {
+                continue;
+            }
+            Map<String, Object> agg = aggregateByContract.get(contractId);
+            Object total = agg == null ? null : agg.get("totalAmount");
+            Object count = agg == null ? null : agg.get("itemCount");
+            contract.setPeriodTotalReceived(total == null ? BigDecimal.ZERO : new BigDecimal(total.toString()));
+            contract.setItemCount(count == null ? 0 : ((Number) count).intValue());
+            contractMapper.updateById(contract);
         }
     }
 
@@ -273,8 +352,8 @@ public class ReceivedRevokedHandler implements DomainEventHandler {
 
     /**
      * 对重算后仍为 APPROVED 的实收单重放实收通过事件（outbox 留痕，供结佣域消费方接入后重建）。
-     * <p>DRAFT 单（旧批次时期就在等新签）不重放——结佣发起会因实收未通过拒绝建单，
-     * 等新签导入触发 resolveDraftAfterNewSign 自然流转。
+     * <p>非 APPROVED 单不重放——结佣发起会因实收未通过拒绝建单；
+     * 去草稿后待新签匹配由未绑定明细承载，等新签导入触发 resolvePendingAfterNewSign 自然流转。
      */
     private void replayApprovedApplies(List<ReceivedApply> applies, Long operatorId) {
         int replayed = 0;

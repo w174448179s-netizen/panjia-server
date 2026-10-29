@@ -20,6 +20,15 @@ import java.util.List;
  * 重复批次冲销服务：同（来源类型, 归属月, 部门）仅允许一份生效（ARCHIVED）批次。
  * <p>
  * 设计依据：V2.0 §5.5 / §6.1 / ADR-IMP-004（单据逻辑失效）。
+ * <p>
+ * <b>维度口径（2026-10-29 收敛）</b>：新签/历史工资类来源（KE_SIGNED、HISTORY_PAYROLL）下游锚点
+ * 全部是全局口径（业绩事实 source_key、实收审批单 period+order_no 均不含 dept），因此这类来源的
+ * 重复批次判定<b>忽略 deptId</b>，全公司同期间只允许一份生效批次；否则两个部门分别归档同月批次会
+ * 重复累加，且新签第二批会因 source_key 全局唯一被整批幂等跳过。
+ * 考勤/积分等按部门组织且下游按部门消费的来源仍按 dept 维度判定。
+ * KE_RECEIVED 自 2026-10-29 起改为「订单 + 归属月」粒度增量合并（见 ImportEngine.isMergeSource），
+ * 不再经过本服务整批冲销，批次仅作留痕。
+ * <p>
  * 部分唯一索引 uk_import_batch_type_period_dept 仅约束
  * status=ARCHIVED 且 superseded_by_batch_id IS NULL 的行；
  * 因此新批次转入 ARCHIVED 前，必须先把同组合的旧生效批次标记 SUPERSEDED，
@@ -59,13 +68,26 @@ public class BatchSupersedeService {
         LambdaQueryWrapper<ImportBatch> wrapper = new LambdaQueryWrapper<ImportBatch>()
             .eq(ImportBatch::getSourceType, sourceType)
             .eq(ImportBatch::getPeriod, period)
-            .eq(ImportBatch::getDeptId, deptId)
             .eq(ImportBatch::getStatus, com.panjia.importdomain.domain.ImportBatchStatus.ARCHIVED)
             .isNull(ImportBatch::getSupersededByBatchId);
+        // 业绩类来源下游锚点为全局口径，重复批次判定忽略部门（详见类注释）
+        if (!isCompanyScoped(sourceType)) {
+            wrapper.eq(ImportBatch::getDeptId, deptId);
+        }
         if (selfId != null) {
             wrapper.ne(ImportBatch::getId, selfId);
         }
         return batchMapper.selectOne(wrapper.last("LIMIT 1"));
+    }
+
+    /**
+     * 是否为「全公司一份」来源：下游事实/单据锚点不含 dept，重复导入必须在公司范围内冲销。
+     * <p>KE_RECEIVED 自 2026-10-29 改为订单/月粒度增量合并，不再走整批冲销，故不在此列；
+     * POINTS 允许同月多份并存；ATTENDANCE/OTHERS 按部门各自归档。
+     */
+    public static boolean isCompanyScoped(ImportSourceType sourceType) {
+        return sourceType == ImportSourceType.KE_SIGNED
+            || sourceType == ImportSourceType.HISTORY_PAYROLL;
     }
 
     /**

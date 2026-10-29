@@ -35,11 +35,14 @@ public interface ImportToReceivedPort {
     void supersedeBatches(List<Long> oldBatchIds);
 
     /**
-     * @param newContracts         新建合同数
-     * @param newDetails           新建明细数（不含补行）
-     * @param skippedRefundRows    因合同已手工退单而跳过的负数到账行数（避免重复冲减）
-     * @param supplementedDetails  新签-实收人员对齐补行生成的明细数（KE_RECEIVED 专用）
+     * @param newContracts            新建合同数
+     * @param newDetails              新建明细数（不含补行）
+     * @param skippedRefundRows       因合同已手工退单而跳过的负数到账行数（避免重复冲减）
+     * @param supplementedDetails     新签-实收人员对齐补行生成的明细数（KE_RECEIVED 专用）
+     * @param skippedUnchangedGroups  订单/月组明细与本批完全一致、整组跳过未写库的组数
+     * @param skippedConsumedGroups   订单/月组明细有变化但已审批/已结佣、整组跳过未写库的组数
      */
     record ImportToReceivedResult(int newContracts, int newDetails, int skippedRefundRows,
-                                  int supplementedDetails) {}
+                                  int supplementedDetails,
+                                  int skippedUnchangedGroups, int skippedConsumedGroups) {}
 }

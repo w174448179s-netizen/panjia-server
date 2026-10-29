@@ -20,6 +20,12 @@ public enum ImportIssueType {
 
     /** 员工未匹配（行有效但富化失败，下游跳过该行；非阻塞） */
     EMPLOYEE_NOT_MATCH("员工未匹配", false),
+    /** 实收转人工审批（归档消费阶段实收单未满足自动通过条件，需人工审批；非阻塞） */
+    RECEIVED_MANUAL_APPROVAL("实收转人工审批", false),
+    /** 实收订单已审批/已结佣，本批新增或变更明细未导入（增量导入按订单跳过，需人工走业绩调整；非阻塞） */
+    RECEIVED_CONSUMED_SKIPPED("实收已结佣跳过", false),
+    /** 实收到账但订单无新签：实收明细已入库，未生成审批单，待新签导入后自动匹配（非阻塞） */
+    RECEIVED_NO_EXPECT_PENDING("实收待新签匹配", false),
     /** 列类型错误（格式/模板契约破坏，阻塞） */
     COLUMN_TYPE_ERR("列类型错误", true),
     /** 必填缺失（模板 required=true 但值为空，阻塞） */

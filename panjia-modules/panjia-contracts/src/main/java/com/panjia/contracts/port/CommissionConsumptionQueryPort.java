@@ -39,6 +39,19 @@ public interface CommissionConsumptionQueryPort {
                                      Collection<String> orderNos);
 
     /**
+     * 按业务键返回已消费明细（增量导入用，粒度到合同/订单，避免整批拒绝）。
+     * <p>
+     * 判定口径与 {@link #checkRevocable} 完全一致，只是把「整体是否可撤」拆成
+     * 「哪些合同/订单已被结佣占用」。键格式：{@code C|合同号}、{@code O|订单号}。
+     *
+     * @param contractNos 合同号集合（可空）
+     * @param orderNos    订单号集合（可空）
+     * @return 业务键 → 不可变更原因；无消费返回空 Map
+     */
+    java.util.Map<String, String> findConsumedBizKeys(Collection<String> contractNos,
+                                                      Collection<String> orderNos);
+
+    /**
      * 撤销检查结果。
      */
     @Data

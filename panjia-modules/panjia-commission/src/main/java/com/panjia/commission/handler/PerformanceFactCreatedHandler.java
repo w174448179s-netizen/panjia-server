@@ -14,32 +14,26 @@ import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
-import java.math.BigDecimal;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * 业绩事实创建事件处理器（DomainEventHandler，消费 panjia-performance 事件）。
  * <p>
- * 双向联动实收自动审批（2026-09-30 定稿）：
+ * 双向联动实收自动审批（2026-10-29 去草稿定稿）：
  * <ul>
  *   <li>{@code PERF_REAL}（实收导入产生事实）：仅留痕，<b>不建单</b>——实收导入时尚未审批，
  *       结佣须待实收审批通过（APPROVED）；系统自动通过时由实收审批通过事件自动发起结佣；</li>
- *   <li>{@code PERF_EXPECT}（新签导入产生事实）：<b>触发实收审批通过</b>——查同业务键跨月 DRAFT
- *       实收事实（实收月 ≥ 新签月），对每个业务键/实收月调
- *       {@link ReceivedApplyPort#resolveDraftAfterNewSign} 重新评估：实收 ≥ 新签→实收单自动通过；
- *       实收 &lt; 新签→启动人工审批。覆盖「实收先导入（无新签→DRAFT）、新签后导入」场景。
+ *   <li>{@code PERF_EXPECT}（新签导入产生事实）：<b>触发实收审批补建单</b>——按业务键查
+ *       「明细已入库、未绑定审批单」的到账（实收月 ≥ 新签月），逐条调
+ *       {@link ReceivedApplyPort#resolvePendingAfterNewSign}：实收 ≥ 新签且人员一致→自动通过；
+ *       否则启动人工审批。覆盖「先导实收（无新签→仅落库）、后导新签」场景。
  *       实收自动通过后由 {@link ReceivedApplyApprovedHandler} 自动发起结佣；本处理器不建结佣单。</li>
  * </ul>
- * 幂等：resolveDraftAfterNewSign 仅处理 DRAFT 单（SUBMITTED/APPROVED 不打扰），
- * 重复事件无副作用；此处 catch ServiceException 跳过不重试。
- * <p>
- * 硬约束：无新签不自动通过——实收导入时无新签即建 DRAFT 不启动工作流，等新签导入后才评估。
+ * 幂等：待匹配到账在补建单后即被绑定，重复事件不会重复出单；
+ * 此处 catch ServiceException 跳过不重试。
  */
 @Slf4j
 @Component
@@ -50,8 +44,6 @@ public class PerformanceFactCreatedHandler implements DomainEventHandler {
     private static final String FACT_TYPE_REAL = "PERF_REAL";
     /** 新签业绩事实口径 */
     private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
-    /** 实收审批单 DRAFT 状态：未启动工作流，等待新签触发评估 */
-    private static final String RECEIVED_STATUS_DRAFT = "DRAFT";
 
     private final CommissionReverseService reverseService;
     private final ReceivedApplyPort receivedApplyPort;
@@ -84,7 +76,7 @@ public class PerformanceFactCreatedHandler implements DomainEventHandler {
         }
 
         if (FACT_TYPE_EXPECT.equals(event.getFactType())) {
-            // 新签导入：触发同合同 DRAFT 实收审批单重新评估（覆盖则自动通过→建结佣单）
+            // 新签导入：触发同业务键「待匹配实收」补建审批单（覆盖则自动通过→建结佣单）
             resolveReceivedAfterNewSign(event, eventId);
             return;
         }
@@ -93,12 +85,12 @@ public class PerformanceFactCreatedHandler implements DomainEventHandler {
     }
 
     /**
-     * 新签导入触发：查同业务键跨月 DRAFT 实收事实，对每个匹配实收月触发 received 域重新评估。
+     * 新签导入触发：查同业务键「已到账、未绑定审批单」的实收，对每个匹配实收月触发补建单。
      * <p>
-     * 匹配规则：实收月 >= 新签月（新签月之前的实收不属于此新签）+ receivedStatus=DRAFT
-     * + amount!=0。对每个业务键/实收月调
-     * {@link ReceivedApplyPort#resolveDraftAfterNewSign}：实收 ≥ 新签→实收单自动通过；
-     * 实收 &lt; 新签→启动人工审批。ServiceException 跳过不重试（重复事件无副作用）。
+     * 匹配规则：实收月 >= 新签月（新签月之前的实收不属于此新签）。
+     * 对每个（业务键, 实收月）调 {@link ReceivedApplyPort#resolvePendingAfterNewSign}：
+     * 实收 ≥ 新签且人员一致→实收单自动通过；否则启动人工审批。
+     * ServiceException 跳过不重试（重复事件无副作用）。
      * 业务键口径：订单号优先（唯一业务锚点）；无订单号的按合同号。
      */
     private void resolveReceivedAfterNewSign(PerformanceFactCreatedEvent event, String eventId) {
@@ -125,81 +117,41 @@ public class PerformanceFactCreatedHandler implements DomainEventHandler {
             return;
         }
 
-        // 2. 跨月查同业务键所有 PERF_REAL 事实
-        List<PerformanceFactSummaryDTO> realFacts = performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_REAL);
-        if (realFacts.isEmpty()) {
-            log.info("[结佣-新签触发] 同业务键无实收事实，跳过：eventId={}, period={}, bizKeys={}",
+        // 2. 跨月查同业务键「已到账、未建单」的实收到账（2026-10-29 去草稿：
+        //    待匹配状态以「实收明细 received_apply_id 为空」承载，不再依赖 DRAFT 单/PERE_REAL 事实）
+        List<com.panjia.contracts.port.ReceivedApplyPort.PendingReceipt> pendings =
+            receivedApplyPort.findPendingReceipts(bizKeys);
+        if (pendings.isEmpty()) {
+            log.info("[结佣-新签触发] 同业务键无待匹配实收到账，跳过：eventId={}, period={}, bizKeys={}",
                 eventId, newSignPeriod, bizKeys);
             return;
         }
 
-        // 3. 按 (订单号, 实收月) 分组，过滤 DRAFT + amount!=0 + 实收月>=新签月。
-        //    订单号为唯一业务锚点：按订单号分组逐单评估，同合同多订单互不串单；
-        //    组内合同号取首个非空快照（可空），仅供 received 域历史单据（order_no 空）回退查询用。
-        //    防御：实收表 order_no 为空的行按合同号回退分组（实收表 order_no 非空，理论不达）。
-        Map<String, Set<String>> orderToRealPeriods = new LinkedHashMap<>();
-        Map<String, String> contractNoByOrder = new HashMap<>();
-        Map<String, Set<String>> contractFallbackToRealPeriods = new LinkedHashMap<>();
-        for (PerformanceFactSummaryDTO f : realFacts) {
-            if (f.getAmount() == null || f.getAmount().compareTo(BigDecimal.ZERO) == 0) {
-                continue;
-            }
-            if (!RECEIVED_STATUS_DRAFT.equals(f.getReceivedStatus())) {
-                continue;
-            }
-            if (f.getPeriod() == null || f.getPeriod().compareTo(newSignPeriod) < 0) {
-                continue;
-            }
-            if (StringUtils.isNotBlank(f.getOrderNo())) {
-                orderToRealPeriods.computeIfAbsent(f.getOrderNo(), k -> new LinkedHashSet<>()).add(f.getPeriod());
-                contractNoByOrder.putIfAbsent(f.getOrderNo(), StringUtils.isNotBlank(f.getContractNo())
-                    ? f.getContractNo() : null);
-            } else if (StringUtils.isNotBlank(f.getContractNo())) {
-                contractFallbackToRealPeriods.computeIfAbsent(f.getContractNo(), k -> new LinkedHashSet<>())
-                    .add(f.getPeriod());
-            }
-        }
-        if (orderToRealPeriods.isEmpty() && contractFallbackToRealPeriods.isEmpty()) {
-            log.info("[结佣-新签触发] 同业务键无 DRAFT 实收，跳过：eventId={}, period={}, bizKeys={}",
-                eventId, newSignPeriod, bizKeys);
-            return;
-        }
-
-        // 4. 对每个 (订单号, 实收月) 触发 received 域重新评估（通过→自动通过实收单）
+        // 3. 按「实收月 ≥ 新签月」过滤；订单号为唯一业务锚点，无订单号的按合同号评估
         int approved = 0;
-        for (Map.Entry<String, Set<String>> entry : orderToRealPeriods.entrySet()) {
-            String orderNo = entry.getKey();
-            String contractNo = contractNoByOrder.get(orderNo);
-            for (String realPeriod : entry.getValue()) {
-                try {
-                    boolean pass = receivedApplyPort.resolveDraftAfterNewSign(
-                        realPeriod, contractNo, orderNo, null);
-                    if (pass) {
-                        approved++;
-                    }
-                    log.info("[结佣-新签触发] 评估完成：period={}, orderNo={}, contractNo={}, approved={}, eventId={}",
-                        realPeriod, orderNo, contractNo, pass, eventId);
-                } catch (ServiceException e) {
-                    log.info("[结佣-新签触发] 跳过：period={}, orderNo={}, contractNo={}, 原因={}, eventId={}",
-                        realPeriod, orderNo, contractNo, e.getMessage(), eventId);
+        for (com.panjia.contracts.port.ReceivedApplyPort.PendingReceipt p : pendings) {
+            if (p.period() == null || p.period().compareTo(newSignPeriod) < 0) {
+                continue;
+            }
+            try {
+                boolean pass = receivedApplyPort.resolvePendingAfterNewSign(
+                    p.period(), p.contractNo(), p.orderNo(), null, event.getBatchId());
+                if (pass) {
+                    approved++;
                 }
+                log.info("[结佣-新签触发] 补建完成：period={}, orderNo={}, contractNo={}, built={}, eventId={}",
+                    p.period(), p.orderNo(), p.contractNo(), pass, eventId);
+            } catch (ServiceException e) {
+                log.info("[结佣-新签触发] 跳过：period={}, orderNo={}, contractNo={}, 原因={}, eventId={}",
+                    p.period(), p.orderNo(), p.contractNo(), e.getMessage(), eventId);
+            } catch (Exception e) {
+                // 唯一索引冲突等非业务异常：跳过不重试（该订单等下次触发或人工处理），
+                // 不能让单条订单的异常把整个事件打成 FAILED 而反复重放
+                log.warn("[结佣-新签触发] 补建单异常跳过：period={}, orderNo={}, contractNo={}, eventId={}, cause={}",
+                    p.period(), p.orderNo(), p.contractNo(), eventId, e.getMessage());
             }
         }
-        // 防御回退：无订单号的实收行按合同号评估（received 域 order_no 空才按合同号查 DRAFT）
-        for (Map.Entry<String, Set<String>> entry : contractFallbackToRealPeriods.entrySet()) {
-            for (String realPeriod : entry.getValue()) {
-                try {
-                    boolean pass = receivedApplyPort.resolveDraftAfterNewSign(realPeriod, entry.getKey(), null, null);
-                    if (pass) {
-                        approved++;
-                    }
-                } catch (ServiceException e) {
-                    log.info("[结佣-新签触发] 跳过：period={}, contractNo={}, 原因={}, eventId={}",
-                        realPeriod, entry.getKey(), e.getMessage(), eventId);
-                }
-            }
-        }
-        log.info("[结佣-新签触发] 完成：approved={}, eventId={}, period={}, bizKeys={}",
+        log.info("[结佣-新签触发] 完成：built={}, eventId={}, period={}, bizKeys={}",
             approved, eventId, newSignPeriod, bizKeys);
     }
 }

@@ -107,21 +107,23 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     }
 
     /**
-     * 批量填充批次级错误数量（BATCH_ERROR 类型 issue）。
+     * 批量填充批次级问题数量（BATCH_ERROR 与归档提示类 issue，如实收转人工审批）。
      * <p>
-     * 归一化/归档阶段整批失败时，failed_rows 保持 0 但有批次级错误，
-     * 前端据此显示"问题清单"按钮。一次 IN 查询按 batchId 分组统计，避免 N+1。
+     * 归一化/归档阶段整批失败时，failed_rows 保持 0 但有批次级错误；
+     * 归档消费阶段转人工的实收单也只是提示、不影响成功行数。前端据 batchErrorCount
+     * 显示"问题清单"按钮。一次 IN 查询按 batchId 分组统计，避免 N+1。
      */
     private void fillBatchErrorCount(List<ImportBatch> batches) {
         if (batches == null || batches.isEmpty()) {
             return;
         }
         List<Long> batchIds = batches.stream().map(ImportBatch::getId).toList();
-        // 按批次分组统计 BATCH_ERROR 数量
+        // 按批次分组统计批次级问题数量（批次级错误 + 归档消费阶段提示）
         List<ImportIssue> batchErrors = issueMapper.selectList(new LambdaQueryWrapper<ImportIssue>()
             .select(ImportIssue::getBatchId)
             .in(ImportIssue::getBatchId, batchIds)
-            .eq(ImportIssue::getIssueType, com.panjia.importdomain.domain.ImportIssueType.BATCH_ERROR));
+            .in(ImportIssue::getIssueType, com.panjia.importdomain.domain.ImportIssueType.BATCH_ERROR,
+                com.panjia.importdomain.domain.ImportIssueType.RECEIVED_MANUAL_APPROVAL));
         java.util.Map<Long, Long> countByBatch = batchErrors.stream()
             .collect(java.util.stream.Collectors.groupingBy(ImportIssue::getBatchId,
                 java.util.stream.Collectors.counting()));
@@ -153,8 +155,10 @@ public class ImportBatchServiceImpl implements ImportBatchService {
     public void archive(Long batchId) {
         ImportBatch batch = requireBatch(batchId);
         // 先冲销同（类型,期间,部门）的旧生效批次，否则本批次转入 ARCHIVED 撞部分唯一索引；
-        // 积分同月允许多批次并存（二手/租赁/简版各一份），按日期合并，故不做整批替换
-        if (batch.getSourceType() != ImportSourceType.POINTS) {
+        // 积分同月允许多批次并存（二手/租赁/简版各一份），按日期合并；
+        // 实收同月允许多批次并存，按「订单/月」增量合并（明细级替换由实收域负责），故均不做整批替换
+        if (batch.getSourceType() != ImportSourceType.POINTS
+            && batch.getSourceType() != ImportSourceType.KE_RECEIVED) {
             batchSupersedeService.supersedeOldArchivedBatch(batch);
         }
         batch.archive();

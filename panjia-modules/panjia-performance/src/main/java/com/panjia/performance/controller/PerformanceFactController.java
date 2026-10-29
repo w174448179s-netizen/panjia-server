@@ -126,7 +126,9 @@ public class PerformanceFactController extends BaseController {
     }
 
     /**
-     * 新签补录：提交总监审批。审批通过后自动创建 PERF_EXPECT 事实并触发 DRAFT 实收单重评。
+     * 新签补录：提交总监审批（入口为「待匹配新签」的实收到账行，即该订单当期无新签）。
+     * 审批通过后创建 PERF_EXPECT 事实，并触发 {@code resolvePendingAfterNewSign}
+     * 补建/补录实收单（待匹配到账按自动审批口径重评）。
      */
     @SaCheckPermission("perf:fact:supplement")
     @Log(title = "新签补录", businessType = BusinessType.INSERT)

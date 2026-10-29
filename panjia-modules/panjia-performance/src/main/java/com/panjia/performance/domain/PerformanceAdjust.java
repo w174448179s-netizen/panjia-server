@@ -60,6 +60,9 @@ public class PerformanceAdjust implements Serializable {
     /** 订单号（可空；同合同号多订单时订单号优先精确匹配事实，执行端同口径定位） */
     private String orderNo;
 
+    /** 实收月 YYYY-MM（新签补录关联实收单的期间，与订单号共同构成判重键） */
+    private String receivedPeriod;
+
     /** 事实口径（§4.1 只允许 PERF_EXPECT 应收） */
     private String factType;
 

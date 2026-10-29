@@ -41,6 +41,30 @@ public class ImportBatchWriteAdapter implements ImportBatchWritePort {
         log.info("[导入批次] 记录批次级错误：batchId={}, issueId={}", batchId, issue.getId());
     }
 
+    @Override
+    public void recordBatchIssue(Long batchId, String issueTypeCode, String message) {
+        if (batchId == null) {
+            return;
+        }
+        ImportIssueType issueType = ImportIssueType.fromCode(issueTypeCode);
+        if (issueType == null) {
+            log.warn("[导入批次] 忽略未知问题类型：batchId={}, issueType={}", batchId, issueTypeCode);
+            return;
+        }
+        ImportIssue issue = new ImportIssue();
+        issue.setBatchId(batchId);
+        issue.setRowNo(null);
+        issue.setIssueType(issueType);
+        issue.setFieldName(null);
+        issue.setRawValue(null);
+        issue.setMessage(truncate(message, 1000));
+        issue.setStatus(ImportIssueStatus.OPEN);
+        issue.setPhase(ImportIssuePhase.ARCHIVE);
+        issueMapper.insert(issue);
+        log.info("[导入批次] 记录批次提示：batchId={}, issueType={}, issueId={}",
+            batchId, issueTypeCode, issue.getId());
+    }
+
     private static String truncate(String s, int maxLen) {
         if (s == null) {
             return null;

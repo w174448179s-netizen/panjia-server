@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.performance.domain.ReceivedApply;
 import com.panjia.performance.domain.bo.ReceivedBatchApproveBo;
 import com.panjia.performance.domain.vo.BatchApproveResultVo;
+import com.panjia.performance.domain.vo.ReceivedFactDetailVo;
 import com.panjia.performance.domain.bo.ReceivedApplyBo;
 import com.panjia.received.service.IReceivedApplyService;
 import com.panjia.performance.service.PerformanceEngine;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -69,6 +71,17 @@ public class ReceivedApplyController extends BaseController {
         @org.springframework.web.bind.annotation.RequestParam(required = false) String contractNo,
         @org.springframework.web.bind.annotation.RequestParam(required = false) String orderNo) {
         return R.ok(receivedApplyService.getContractDetail(contractNo, orderNo));
+    }
+
+    /**
+     * 「待匹配新签」组的每人实收明细（无审批单）。
+     * <p>去草稿后无新签的到账只落库不建单，补录弹窗据此装载角色人与实收金额上限。
+     */
+    @SaCheckPermission("perf:received:query")
+    @GetMapping("/pending-detail")
+    public R<List<ReceivedFactDetailVo>> pendingDetail(
+        @RequestParam String bizKey, @RequestParam(required = false) String period) {
+        return R.ok(receivedApplyService.listPendingDetails(bizKey, period));
     }
 
     /** 详情（含合同下每人实收事实） */

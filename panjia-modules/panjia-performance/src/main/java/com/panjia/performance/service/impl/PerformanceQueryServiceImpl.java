@@ -793,12 +793,12 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (count == 0) {
             throw new ServiceException("未录入有效新签金额（全部为零）");
         }
-        // 触发实收 DRAFT 单重评：用实收月查 DRAFT 单，evaluateDraftAfterNewSign 内部按实收月汇总新签
-        // （新签结算月 ≤ 实收月时历史回退能查到；> 实收月时当月查不到，DRAFT 单保持不变，需手工处理）
+        // 触发实收补建单：按实收月取「未绑定审批单」的到账，有新签则建单（达标自动通过/否则人工审批）
+        // （新签结算月 ≤ 实收月时历史回退能查到；> 实收月时当月查不到，明细保持未绑定，需手工处理）
         try {
-            receivedApplyPort.resolveDraftAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId);
+            receivedApplyPort.resolvePendingAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId, null);
         } catch (Exception e) {
-            log.warn("[新签补录] 触发 DRAFT 单重评失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
+            log.warn("[新签补录] 触发实收补建单失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
                 bo.getReceivedPeriod(), bo.getPeriod(), orderNo, contractNo, e.getMessage());
         }
         log.info("[新签补录] 完成：period={}, receivedPeriod={}, orderNo={}, contractNo={}, 新增事实={}, operator={}",

@@ -147,8 +147,8 @@ public class ImportEngine {
         // 重复导入前置校验（解析/落库前即拦截）：同（类型, 归属月, 部门）已存在生效批次，
         // 且该批次已被下游消费（已封账/已审批业绩调整/已审批实收确认）→ 拒绝本次导入。
         // 与「撤销导入」的 checkRevocable 口径对称，避免整批冲销把已调整、已结佣的数据打回草稿。
-        // 条件与 doNormalizePhase 的 supersede 分支严格一致：POINTS 同月允许多批次并存、不做整批替换，
-        // 故不参与本校验，避免误拦积分导入。
+        // 条件与 doNormalizePhase 的 supersede 分支严格一致：POINTS / KE_RECEIVED 同月允许多批次
+        // 并存、不做整批替换，故不参与本校验（KE_RECEIVED 的"已消费"判定下沉到订单粒度）。
         if (!isMergeSource(sourceType)) {
             batchSupersedeService.assertReimportAllowed(sourceType, period, deptId);
         }
@@ -625,9 +625,15 @@ public class ImportEngine {
         batchMapper.updateById(batch);
     }
 
-    /** 同月允许多批次并存、下游按业务键合并的来源类型（POINTS 按员工+日期合并） */
+    /**
+     * 同月允许多批次并存、不做整批替换的来源类型。
+     * <p>
+     * POINTS：积分按（员工, 日期）合并，同月多份文件各自归档；
+     * KE_RECEIVED：实收按「订单 + 归属月」增量合并（2026-10-29），每次导入留痕一份批次，
+     * 明细级增量判定与替换由实收域（{@code ImportToReceivedPort.consumeBatch}）完成。
+     */
     private boolean isMergeSource(ImportSourceType sourceType) {
-        return sourceType == ImportSourceType.POINTS;
+        return sourceType == ImportSourceType.POINTS || sourceType == ImportSourceType.KE_RECEIVED;
     }
 
     /**

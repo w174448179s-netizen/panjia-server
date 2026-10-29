@@ -34,6 +34,10 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
 
     private final CommissionApplicationMapper applicationMapper;
 
+    /** 结佣消费业务键前缀：结佣单可能只记合同号或只记订单号，用前缀区分两个命名空间。 */
+    private static final String KEY_CONTRACT = "C|";
+    private static final String KEY_ORDER = "O|";
+
     @Override
     public RevokeCheckResult checkRevocable(String period,
                                             Collection<String> contractNos,
@@ -43,11 +47,45 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
         if (contracts.isEmpty() && orders.isEmpty()) {
             return RevokeCheckResult.ok();
         }
+        List<CommissionApplication> consumed = selectConsumedApplications(contracts, orders);
+        if (!consumed.isEmpty()) {
+            return RevokeCheckResult.reject(
+                "该批次涉及合同存在已提交/审批/锁定/驳回的结佣申请单（" + consumed.size()
+                    + " 张），禁止撤销，请先在结佣模块作废结佣单");
+        }
+        return RevokeCheckResult.ok();
+    }
 
-        // 校验：已进入正式审批链路的结佣单（有流程实例的提交/通过，或已锁定，或已驳回）。
-        // 不按期间过滤：结佣单挂实收月，明细可引用更早月份的新签事实，跨月也必须拦截。
-        // LOCKED 不判断 process_instance_id：实收审批通过后自动建 DRAFT → 提交 → 直落 LOCKED
-        // 的链路无流程实例，但业务上已审批通过并锁定，必须拦截。
+    @Override
+    public java.util.Map<String, String> findConsumedBizKeys(Collection<String> contractNos,
+                                                             Collection<String> orderNos) {
+        List<String> contracts = sanitize(contractNos);
+        List<String> orders = sanitize(orderNos);
+        if (contracts.isEmpty() && orders.isEmpty()) {
+            return java.util.Map.of();
+        }
+        List<CommissionApplication> consumed = selectConsumedApplications(contracts, orders);
+        java.util.Map<String, String> result = new java.util.LinkedHashMap<>();
+        for (CommissionApplication app : consumed) {
+            String reason = "结佣单" + app.getStatus() + "（" + app.getApplyNo() + "）";
+            if (app.getContractNo() != null && !app.getContractNo().isBlank()) {
+                result.putIfAbsent(KEY_CONTRACT + app.getContractNo().trim(), reason);
+            }
+            if (app.getOrderNo() != null && !app.getOrderNo().isBlank()) {
+                result.putIfAbsent(KEY_ORDER + app.getOrderNo().trim(), reason);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 查已进入正式审批链路（或已锁定/已驳回）的结佣单。
+     * <p>
+     * 不按期间过滤：结佣单挂实收月，明细可引用更早月份的新签事实，跨月也必须拦截。
+     * LOCKED 不判断 process_instance_id：实收审批通过后自动建 DRAFT → 提交 → 直落 LOCKED
+     * 的链路无流程实例，但业务上已审批通过并锁定，必须拦截。
+     */
+    private List<CommissionApplication> selectConsumedApplications(List<String> contracts, List<String> orders) {
         LambdaQueryWrapper<CommissionApplication> appQuery = new LambdaQueryWrapper<CommissionApplication>()
             .and(bizKey -> {
                 if (!contracts.isEmpty() && !orders.isEmpty()) {
@@ -66,14 +104,7 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
                     .isNotNull(CommissionApplication::getProcessInstanceId))
                 .or().eq(CommissionApplication::getStatus, ApplicationStatus.LOCKED)
                 .or().eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED));
-        Long activeAppCount = applicationMapper.selectCount(appQuery);
-        if (activeAppCount != null && activeAppCount > 0) {
-            return RevokeCheckResult.reject(
-                "该批次涉及合同存在已提交/审批/锁定/驳回的结佣申请单（" + activeAppCount
-                    + " 张），禁止撤销，请先在结佣模块作废结佣单");
-        }
-
-        return RevokeCheckResult.ok();
+        return applicationMapper.selectList(appQuery);
     }
 
     /** 去空白、去重；空入参返回空列表（避免 IN () 非法 SQL）。 */

@@ -16,7 +16,10 @@ public enum ImportIssuePhase {
     PARSE("解析/基础校验"),
 
     /** 归一化（员工匹配等）阶段产生 */
-    NORMALIZE("归一化");
+    NORMALIZE("归一化"),
+
+    /** 归档消费阶段产生（如实收转人工审批提示，非阻塞） */
+    ARCHIVE("归档消费");
 
     @EnumValue
     private final String code;

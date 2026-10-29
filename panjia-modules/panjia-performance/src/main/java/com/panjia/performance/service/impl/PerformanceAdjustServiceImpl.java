@@ -780,7 +780,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 2.6 在途互斥：同合同存在审批中（SUBMITTED/APPROVED）调整单时拒绝发起。
         // 调整单 payload 快照 factId，在途期间事实被先执行的单 supersede 后，
         // 后执行单会因指定行失效而卡死；同合同调整必须串行（撤回或等审批完结再发起）。
-        assertNoInFlightAdjust(scope, dto.getContractNo(), dto.getPeriod(),
+        assertNoInFlightAdjust(scope, dto.getContractNo(), null, dto.getPeriod(),
             dto.getOriginalPeriod(), dto.getFactType(), dto.getFactId());
 
         // 3. 构建调整单
@@ -924,25 +924,30 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         //    employeeId 不可信，统一按工号反查 pj_people_employee 修正
         normalizeSupplementItems(bo);
 
-        // 3. 在途互斥：同合同同期间不能有审批中的 PERF_EXPECT 调整单
-        assertNoInFlightAdjust(SCOPE_CONTRACT, bo.getContractNo(), bo.getPeriod(),
+        // 3. 在途互斥：同订单同期间不能有审批中的 PERF_EXPECT 调整单
+        //    （同合同多订单时按订单判定，避免 A 订单在途单挡住 B 订单补录）
+        assertNoInFlightAdjust(SCOPE_CONTRACT, bo.getContractNo(), bo.getOrderNo(), bo.getPeriod(),
             null, FACT_TYPE_EXPECT, null);
 
-        // 3.1 防重复补录：同合同已存在补录单（审批中/已通过/已执行）时禁止再次补录；
+        // 3.1 防重复补录：同一实收单（订单号 + 实收月）已存在补录单（审批中/已通过/已执行）时禁止再次补录；
         //     已拒绝/已取消的补录单不拦截，允许修正后重新发起；
-        //     合同号为空（一手房/家装荐客等无合同号业务）时按订单号判定
-        boolean hasContractNo = StringUtils.isNotBlank(bo.getContractNo());
+        //     订单号会跨实收月重复（同订单每月一张实收单），合同号会跨订单重复，
+        //     故判重键为「订单号 + 实收月」，订单号为空时回退「合同号 + 实收月」
+        boolean hasOrderNo = StringUtils.isNotBlank(bo.getOrderNo());
+        boolean hasReceivedPeriod = StringUtils.isNotBlank(bo.getReceivedPeriod());
         Long dupCount = adjustMapper.selectCount(new LambdaQueryWrapper<PerformanceAdjust>()
             .eq(PerformanceAdjust::getAdjustType, AdjustType.SUPPLEMENT)
-            .eq(hasContractNo, PerformanceAdjust::getContractNo, bo.getContractNo())
-            .eq(!hasContractNo, PerformanceAdjust::getOrderNo, bo.getOrderNo())
+            .eq(hasOrderNo, PerformanceAdjust::getOrderNo, bo.getOrderNo())
+            .eq(!hasOrderNo, PerformanceAdjust::getContractNo, bo.getContractNo())
+            .eq(hasReceivedPeriod, PerformanceAdjust::getReceivedPeriod, bo.getReceivedPeriod())
             .in(PerformanceAdjust::getStatus,
                 AdjustStatus.SUBMITTED, AdjustStatus.APPROVED, AdjustStatus.EXECUTED));
         if (dupCount != null && dupCount > 0) {
-            log.warn("[调整单] 重复补录拦截：contractNo={}, period={}, 已有补录单数={}",
-                bo.getContractNo(), bo.getPeriod(), dupCount);
-            throw new ServiceException("该合同已存在新签补录单（含审批中/已生效），不允许重复补录；"
-                + "如需调整请先撤回在途单据，或对已生效业绩走业绩冲正");
+            log.warn("[调整单] 重复补录拦截：orderNo={}, contractNo={}, receivedPeriod={}, period={}, 已有补录单数={}",
+                bo.getOrderNo(), bo.getContractNo(), bo.getReceivedPeriod(), bo.getPeriod(), dupCount);
+            throw new ServiceException("该实收单（订单号 {}，实收月 {}）已存在新签补录单（含审批中/已生效），不允许重复补录；"
+                + "如需调整请先撤回在途单据，或对已生效业绩走业绩冲正",
+                bo.getOrderNo(), bo.getReceivedPeriod());
         }
 
         // 4. 构建调整单
@@ -953,6 +958,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setAdjustScope(SCOPE_CONTRACT);
         adjust.setContractNo(bo.getContractNo());
         adjust.setOrderNo(bo.getOrderNo());
+        adjust.setReceivedPeriod(bo.getReceivedPeriod());
         adjust.setFactType(FACT_TYPE_EXPECT);
         adjust.setTargetAmount(MoneyUtil.round2(targetAmount));
         adjust.setPayloadJson(JsonUtils.toJsonString(bo));
@@ -1164,11 +1170,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             throw new ServiceException("补录明细全部为零，未生成任何新签事实");
         }
 
-        // 触发实收 DRAFT 单重评
+        // 触发实收补建单（无新签不建单，去草稿后由未绑定明细承载待匹配状态）
         try {
-            receivedApplyPort().resolveDraftAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId);
+            receivedApplyPort().resolvePendingAfterNewSign(bo.getReceivedPeriod(), contractNo, orderNo, operatorId, null);
         } catch (Exception e) {
-            log.warn("[新签补录执行] 触发 DRAFT 实收单重评失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
+            log.warn("[新签补录执行] 触发实收补建单失败（事实已落库）：receivedPeriod={}, period={}, orderNo={}, contractNo={}, 原因={}",
                 bo.getReceivedPeriod(), bo.getPeriod(), orderNo, contractNo, e.getMessage());
         }
 
@@ -1279,15 +1285,20 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 单据永久卡死）。跨月调整同时涉及原月与目标月，故期间按 period/originalPeriod 重叠判定。
      * <p>
      * 明细级发起时 dto 可能不带合同号，则按 factId 本身或该事实所属合同号判定互斥范围。
+     * <p>
+     * 新签补录（不 supersede 既有事实、只新增事实）按订单维度互斥：同合同多订单时，
+     * 一张补录单不应挡住同合同其他订单的补录；但历史无订单号的合同级在途单仍会作用于
+     * 本订单事实，必须一并拦截。
      *
      * @param scope          调整范围（CONTRACT/DETAIL）
      * @param contractNo     合同号（合同级已归一化为事实表真实合同号；明细级可能为空）
+     * @param orderNo        订单号（补录等按订单维度互斥时传；为空则按合同号/factId 判定）
      * @param period         调整生效月
      * @param originalPeriod 原业绩归属月（跨月调整）
      * @param factType       事实口径
      * @param factId         明细级调整关联事实 ID（合同级为空）
      */
-    private void assertNoInFlightAdjust(String scope, String contractNo, String period,
+    private void assertNoInFlightAdjust(String scope, String contractNo, String orderNo, String period,
                                         String originalPeriod, String factType, Long factId) {
         String originPeriod = StringUtils.isNotBlank(originalPeriod) ? originalPeriod : period;
         LambdaQueryWrapper<PerformanceAdjust> qw = new LambdaQueryWrapper<>();
@@ -1297,7 +1308,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 .or().eq(PerformanceAdjust::getOriginalPeriod, originPeriod)
                 .or().eq(PerformanceAdjust::getPeriod, period)
                 .or().eq(PerformanceAdjust::getOriginalPeriod, period));
-        if (StringUtils.isNotBlank(contractNo)) {
+        if (StringUtils.isNotBlank(orderNo)) {
+            // 订单维度互斥：本订单在途单，或历史无订单号的合同级在途单（后者同样作用于本订单事实）
+            if (StringUtils.isNotBlank(contractNo)) {
+                qw.eq(PerformanceAdjust::getContractNo, contractNo)
+                    .and(w -> w.eq(PerformanceAdjust::getOrderNo, orderNo)
+                        .or().isNull(PerformanceAdjust::getOrderNo));
+            } else {
+                qw.eq(PerformanceAdjust::getOrderNo, orderNo);
+            }
+        } else if (StringUtils.isNotBlank(contractNo)) {
             qw.eq(PerformanceAdjust::getContractNo, contractNo);
         } else if (factId != null) {
             PerformanceFact ref = factMapper.selectById(factId);
@@ -1312,8 +1332,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         Long count = adjustMapper.selectCount(qw);
         if (count != null && count > 0) {
-            log.warn("[调整单] 在途互斥拦截：scope={}, contractNo={}, period={}, originalPeriod={}, factId={}, 在途单数={}",
-                scope, contractNo, period, originalPeriod, factId, count);
+            log.warn("[调整单] 在途互斥拦截：scope={}, contractNo={}, orderNo={}, period={}, originalPeriod={}, factId={}, 在途单数={}",
+                scope, contractNo, orderNo, period, originalPeriod, factId, count);
             throw new ServiceException("该合同存在审批中的业绩调整单，请待其审批完成或撤回后再发起新调整");
         }
     }

@@ -11,7 +11,10 @@ public class ReceivedApplyBo {
     /** 结算月 YYYY-MM */
     private String period;
 
-    /** 状态（DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED） */
+    /**
+     * 状态（SUBMITTED/APPROVED/REJECTED/CANCELLED），另支持列表专用的 {@code PENDING}：
+     * 只查「待匹配新签」到账行（无审批单、仅有未绑定 ACTIVE 明细），不参与审批口径。
+     */
     private String status;
 
     /** 当前节点（FINANCE/DIRECTOR） */

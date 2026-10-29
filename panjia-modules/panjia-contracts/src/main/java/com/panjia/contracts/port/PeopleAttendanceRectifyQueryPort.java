@@ -5,7 +5,7 @@ package com.panjia.contracts.port;
  * <p>
  * 考勤导入前卡点：当月已存在有效修改申请（待审批/已通过）时禁止导入，
  * 避免导入覆盖经纪人已生效的考勤修改结果（月度汇总为同人同月覆盖写）。
- * 与「导入实收前须有新签事实」（{@code PerformanceExpectCheckPort}）同构。
+ * 与「导入前期间封账卡点」（{@link PeriodCloseQueryPort}）同构。
  */
 public interface PeopleAttendanceRectifyQueryPort {
 

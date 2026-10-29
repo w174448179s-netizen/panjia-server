@@ -3,11 +3,13 @@ package com.panjia.received.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
-import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.ImportToReceivedPort;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
+import com.panjia.contracts.port.CommissionConsumptionQueryPort;
+import com.panjia.contracts.port.ImportBatchWritePort;
 import com.panjia.contracts.port.PeopleQueryPort;
+import com.panjia.contracts.port.PeriodCloseQueryPort;
 import com.panjia.received.domain.ReceivedContract;
 import com.panjia.received.domain.ReceivedDetail;
 import com.panjia.received.mapper.ReceivedContractMapper;
@@ -19,9 +21,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -44,6 +46,9 @@ import java.util.Set;
 public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
 
     private static final String DETAIL_STATUS_ACTIVE = "ACTIVE";
+    private static final String DETAIL_STATUS_SUPERSEDED = "SUPERSEDED";
+    /** 问题清单类型：订单已审批/已结佣，本批变更未导入（与 ImportIssueType.RECEIVED_CONSUMED_SKIPPED 同码） */
+    private static final String ISSUE_TYPE_CONSUMED_SKIPPED = "RECEIVED_CONSUMED_SKIPPED";
 
     private static final int PAGE_SIZE = 500;
 
@@ -52,11 +57,40 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
     private final ReceivedDetailMapper detailMapper;
     private final PeopleQueryPort peopleQueryPort;
     private final CommissionPerformanceQueryPort commissionPerformanceQueryPort;
+    /** 期间封账查询（performance 域实现，pj_perf_period_close 为唯一封账事实源） */
+    private final PeriodCloseQueryPort periodCloseQueryPort;
+    /** 结佣消费判定（commission 域实现）：增量导入按订单粒度判定，避免整批拒绝 */
+    private final CommissionConsumptionQueryPort commissionConsumptionQueryPort;
+    /** 导入域问题清单回写（已结佣订单跳过的明细清单，前端可见） */
+    private final ImportBatchWritePort importBatchWritePort;
+    /** 实收审批单（临时依赖 performance 域，后续下沉到实收域） */
+    private final com.panjia.performance.mapper.ReceivedApplyMapper applyMapper;
+    /** 新签-实收人员对齐补行（与新签到达补建单链路共用同一实现） */
+    private final com.panjia.received.support.ReceivedSupplementSupport supplementSupport;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ImportToReceivedResult consumeBatch(Long batchId, String period, String sourceType, Long operatorId) {
         log.info("[实收写入] 开始：batchId={}, sourceType={}, period={}", batchId, sourceType, period);
+        // 封账校验：与新签侧 PerformanceEngine.buildFromBatch 口径一致，已封账期间禁止写实收事实；
+        // 历史工资为存量补录，豁免（历史期间早已封账）
+        if (period != null && !period.isBlank()
+                && !"HISTORY_PAYROLL".equals(sourceType)
+                && periodCloseQueryPort.isClosed(period)) {
+            throw new IllegalStateException("期间已封账，禁止写入实收：period=" + period);
+        }
+        if ("KE_RECEIVED".equals(sourceType)) {
+            return consumeKeReceivedMerge(batchId, period, sourceType, operatorId);
+        }
+        return consumeFullReplace(batchId, period, sourceType, operatorId);
+    }
+
+    /**
+     * 全量替换写入（HISTORY_PAYROLL 等非增量来源）。
+     * <p>
+     * 语义保持原样：旧批次已由 import 域冲销（明细置 SUPERSEDED），本批按行幂等插入。
+     */
+    private ImportToReceivedResult consumeFullReplace(Long batchId, String period, String sourceType, Long operatorId) {
         int newContracts = 0;
         int newDetails = 0;
         int skippedRefundRows = 0;
@@ -130,40 +164,423 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
                         contract.getId(), contract.getOrderNo(), period);
                 }
 
-                // 建明细
+                // 建明细（合同合计不在此增量累加，循环结束后按 ACTIVE 明细统一重算）
                 ReceivedDetail detail = buildDetail(record, contract.getId(), period, sourceKey, operatorId, emp);
                 detailMapper.insert(detail);
                 newDetails++;
-
-                // 更新合同合计
-                BigDecimal amount = detail.getPerformanceAmount();
-                if (contract.getPeriodTotalReceived() == null) {
-                    contract.setPeriodTotalReceived(BigDecimal.ZERO);
-                }
-                contract.setPeriodTotalReceived(
-                    contract.getPeriodTotalReceived().add(amount != null ? amount : BigDecimal.ZERO));
-                contract.setItemCount(contract.getItemCount() + 1);
             }
             pageNum++;
         } while (pageResult.getRows() != null && !pageResult.getRows().isEmpty());
 
-        // === 阶段 3：KE_RECEIVED 新签-实收人员对齐补行（2026-10-29）===
-        // 实收导入文件只有部分角色人的到账行，但新签（PERF_EXPECT）可能有更多人。
-        // 对新签有但实收缺失的人补生成实收明细（金额 = 该人新签应收合计），
-        // 对实收已有行的人等比例压缩金额，保证合同实收合计守恒。
-        int supplementedDetails = 0;
-        if ("KE_RECEIVED".equals(sourceType)) {
-            supplementedDetails = supplementMissingEmployees(batchId, period, contractCache, operatorId);
+        // 回写合同合计：按 ACTIVE 明细重算，不在旧值上累加——
+        // 重导时旧批次明细已置 SUPERSEDED，累加会把旧批金额重复计入
+        refreshContractAggregates(contractCache.values().stream()
+            .map(ReceivedContract::getId)
+            .filter(java.util.Objects::nonNull)
+            .toList());
+
+        log.info("[实收写入] 完成（全量替换）：batchId={}, newContracts={}, newDetails={}, skippedRefundRows={}",
+            batchId, newContracts, newDetails, skippedRefundRows);
+        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows, 0, 0, 0);
+    }
+
+    /**
+     * KE_RECEIVED 增量合并写入（2026-10-29）。
+     * <p>
+     * 业务方每几天导一次补充到账，不能按整批替换/整批拒绝。本方法按「订单 + 归属月」分组：
+     * <ol>
+     *   <li>组内明细与本批完全一致 → 整组跳过，不写任何行（避免每天重写同一批数据）；</li>
+     *   <li>有变化且该订单已审批/已结佣 → 整组跳过 + 写问题清单（不让一颗已结佣单拖死整批）；</li>
+     *   <li>有变化且未消费 → 该订单旧 ACTIVE 明细置 SUPERSEDED（记录被本批替换），再插入本批新行。</li>
+     * </ol>
+     * 指纹比对只看文件行（{@code normalizedRecordId} 非空）；补行（normalizedRecordId 为空）是
+     * 派生数据，不参与比对，替换时随旧行一起 SUPERSEDED 后重新生成。
+     */
+    private ImportToReceivedResult consumeKeReceivedMerge(Long batchId, String period, String sourceType, Long operatorId) {
+        // === 阶段 1：收集本批有效行（整批一次读入，后续全部内存分组，避免逐页重复查库）===
+        List<NormalizedRecordDTO> allRows = new ArrayList<>();
+        PageResult<NormalizedRecordDTO> pageResult;
+        int pageNum = 1;
+        do {
+            pageResult = importQueryPort.listByBatchId(batchId, pageNum, PAGE_SIZE);
+            if (pageResult == null || pageResult.getRows() == null) break;
+            for (NormalizedRecordDTO r : pageResult.getRows()) {
+                if (isReceivedRecord(r, sourceType)) allRows.add(r);
+            }
+            pageNum++;
+        } while (!pageResult.getRows().isEmpty());
+        if (allRows.isEmpty()) {
+            return new ImportToReceivedResult(0, 0, 0, 0, 0, 0);
         }
 
-        // 回写合同合计（补行阶段可能修改了 itemCount）
-        for (ReceivedContract c : contractCache.values()) {
-            contractMapper.updateById(c);
+        // 阶段 1.1：手工退单互斥（整批一次性预查）
+        Set<String> negativeKeys = new HashSet<>();
+        for (NormalizedRecordDTO r : allRows) {
+            BigDecimal amt = r.getReceivedAmount();
+            if (amt != null && amt.signum() < 0) {
+                if (r.getOrderNo() != null) negativeKeys.add(r.getOrderNo());
+                if (r.getContractNo() != null) negativeKeys.add(r.getContractNo());
+            }
+        }
+        Set<String> refundedKeys = negativeKeys.isEmpty()
+            ? Set.of() : commissionPerformanceQueryPort.findManualRefundedBizKeys(negativeKeys);
+
+        List<NormalizedRecordDTO> rows = new ArrayList<>(allRows.size());
+        int skippedRefundRows = 0;
+        for (NormalizedRecordDTO r : allRows) {
+            BigDecimal amt = r.getReceivedAmount();
+            if (amt != null && amt.signum() < 0
+                && (refundedKeys.contains(r.getOrderNo()) || refundedKeys.contains(r.getContractNo()))) {
+                log.warn("[实收写入] 合同已手工退单，跳过导入的负到账行：contractNo={}, orderNo={}, recordId={}",
+                    r.getContractNo(), r.getOrderNo(), r.getId());
+                skippedRefundRows++;
+                continue;
+            }
+            if (isBlank(r.getOrderNo()) && isBlank(r.getContractNo())) {
+                log.warn("[实收写入] 订单号与合同号均为空，跳过：recordId={}", r.getId());
+                continue;
+            }
+            rows.add(r);
+        }
+        if (rows.isEmpty()) {
+            return new ImportToReceivedResult(0, 0, skippedRefundRows, 0, 0, 0);
         }
 
-        log.info("[实收写入] 完成：batchId={}, newContracts={}, newDetails={}, skippedRefundRows={}, supplementedDetails={}",
-            batchId, newContracts, newDetails, skippedRefundRows, supplementedDetails);
-        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows, supplementedDetails);
+        // 阶段 1.2：员工主数据一次预查（dept_id 回填依赖，部门权限过滤）
+        Set<String> codes = new HashSet<>();
+        for (NormalizedRecordDTO r : rows) {
+            if (r.getEmployeeCode() != null) codes.add(r.getEmployeeCode());
+        }
+        Map<String, EmployeeMainDataDTO> empMap = codes.isEmpty()
+            ? Map.of() : peopleQueryPort.findEmployeeMainDataByCodes(codes);
+
+        // === 阶段 2：按 订单号（缺失退合同号）分组 ===
+        Map<String, List<NormalizedRecordDTO>> groups = new LinkedHashMap<>();
+        for (NormalizedRecordDTO r : rows) {
+            groups.computeIfAbsent(buildGroupKey(r), k -> new ArrayList<>()).add(r);
+        }
+
+        // 阶段 2.1：批量加载现状（合同 + ACTIVE 明细），一次性查询避免逐组查库
+        Set<String> orders = new LinkedHashSet<>();
+        Set<String> contractNos = new LinkedHashSet<>();
+        for (NormalizedRecordDTO r : rows) {
+            if (!isBlank(r.getOrderNo())) orders.add(r.getOrderNo().trim());
+            if (!isBlank(r.getContractNo())) contractNos.add(r.getContractNo().trim());
+        }
+        Map<String, ReceivedContract> contractByGroupKey = loadExistingContracts(period, sourceType, orders, contractNos);
+        Map<Long, List<ReceivedDetail>> activeDetailsByContract = loadActiveDetails(contractByGroupKey.values());
+
+        // 阶段 2.2：指纹比对，挑出「有变化」的组
+        Map<String, List<NormalizedRecordDTO>> changedGroups = new LinkedHashMap<>();
+        int skippedUnchangedGroups = 0;
+        for (Map.Entry<String, List<NormalizedRecordDTO>> entry : groups.entrySet()) {
+            ReceivedContract existing = contractByGroupKey.get(entry.getKey());
+            if (existing == null) {
+                changedGroups.put(entry.getKey(), entry.getValue());
+                continue;
+            }
+            List<ReceivedDetail> dbRows = activeDetailsByContract.getOrDefault(existing.getId(), List.of());
+            boolean hasFileDerivedRow = dbRows.stream().anyMatch(d -> d.getNormalizedRecordId() != null);
+            if (hasFileDerivedRow && importFingerprints(entry.getValue(), period)
+                .equals(dbFingerprints(dbRows))) {
+                skippedUnchangedGroups++;
+                continue;
+            }
+            changedGroups.put(entry.getKey(), entry.getValue());
+        }
+        if (changedGroups.isEmpty()) {
+            log.info("[实收写入] 完成（增量合并）：batchId={}, 全部 {} 组明细无变化，未写库",
+                batchId, skippedUnchangedGroups);
+            return new ImportToReceivedResult(0, 0, skippedRefundRows, 0, skippedUnchangedGroups, 0);
+        }
+
+        // 阶段 2.3：已消费判定（一次批量：结佣域 + 实收审批单 + 明细调整痕迹）
+        Map<Long, List<String>> bizKeysByContractId = new LinkedHashMap<>();
+        for (Map.Entry<String, ReceivedContract> entry : contractByGroupKey.entrySet()) {
+            if (entry.getValue().getId() == null) continue;
+            bizKeysByContractId.computeIfAbsent(entry.getValue().getId(), k -> new ArrayList<>())
+                .add(entry.getKey());
+        }
+        Map<String, String> consumedReasons = loadConsumedReasons(period, changedGroups,
+            activeDetailsByContract, bizKeysByContractId);
+
+        // === 阶段 3：逐组分流（跳过已消费 / 替换未消费） ===
+        int newContracts = 0;
+        int newDetails = 0;
+        int skippedConsumedGroups = 0;
+        Map<String, ReceivedContract> replacedContracts = new LinkedHashMap<>();
+        for (Map.Entry<String, List<NormalizedRecordDTO>> entry : changedGroups.entrySet()) {
+            List<NormalizedRecordDTO> groupRows = entry.getValue();
+            String reason = findConsumedReason(consumedReasons, groupRows);
+            if (reason != null) {
+                String orderNo = groupRows.get(0).getOrderNo() != null
+                    ? groupRows.get(0).getOrderNo() : groupRows.get(0).getContractNo();
+                String msg = "订单 " + orderNo + " 已审批/已结佣（" + reason + "），本次新增或变更 "
+                    + groupRows.size() + " 行未导入，请通过业绩调整处理";
+                log.info("[实收写入] 已消费跳过：batchId={}, {}", batchId, msg);
+                importBatchWritePort.recordBatchIssue(batchId, ISSUE_TYPE_CONSUMED_SKIPPED, msg);
+                skippedConsumedGroups++;
+                continue;
+            }
+
+            NormalizedRecordDTO first = groupRows.get(0);
+            ReceivedContract contract = contractByGroupKey.get(entry.getKey());
+            if (contract == null) {
+                EmployeeMainDataDTO emp = first.getEmployeeCode() == null ? null : empMap.get(first.getEmployeeCode());
+                contract = buildContract(first, period, sourceType, batchId, emp);
+                contractMapper.insert(contract);
+                newContracts++;
+                log.info("[实收写入] 新建合同：id={}, orderNo={}, period={}",
+                    contract.getId(), contract.getOrderNo(), period);
+            } else {
+                supersedeActiveDetails(activeDetailsByContract.getOrDefault(contract.getId(), List.of()), batchId);
+            }
+
+            // 插入本批新行：source_key 用业务键 + 组内同键序号（旧行已 SUPERSEDED，不占用 ACTIVE 锚点）
+            Map<String, Integer> seqByBase = new LinkedHashMap<>();
+            for (NormalizedRecordDTO r : groupRows) {
+                String base = buildDetailBaseKey(r, period);
+                int seq = seqByBase.merge(base, 1, Integer::sum);
+                String sourceKey = base + "|" + seq;
+                EmployeeMainDataDTO emp = r.getEmployeeCode() == null ? null : empMap.get(r.getEmployeeCode());
+                detailMapper.insert(buildDetail(r, contract.getId(), period, sourceKey, operatorId, emp));
+                newDetails++;
+            }
+            replacedContracts.put(entry.getKey(), contract);
+        }
+
+        // === 阶段 4：先重算聚合（补行依赖合同实收合计），再做人员对齐补行，最后再重算一次 ===
+        List<Long> touchedContractIds = replacedContracts.values().stream()
+            .map(ReceivedContract::getId)
+            .filter(java.util.Objects::nonNull)
+            .toList();
+        refreshContractAggregates(touchedContractIds);
+        int supplementedDetails = supplementMissingEmployees(batchId, period, replacedContracts, operatorId);
+        refreshContractAggregates(touchedContractIds);
+
+        log.info("[实收写入] 完成（增量合并）：batchId={}, newContracts={}, newDetails={}, "
+                + "skippedRefundRows={}, supplementedDetails={}, skippedUnchangedGroups={}, skippedConsumedGroups={}",
+            batchId, newContracts, newDetails, skippedRefundRows, supplementedDetails,
+            skippedUnchangedGroups, skippedConsumedGroups);
+        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows,
+            supplementedDetails, skippedUnchangedGroups, skippedConsumedGroups);
+    }
+
+    /** 组键：优先订单号，缺失退合同号；带前缀区分两个命名空间。 */
+    private String buildGroupKey(NormalizedRecordDTO r) {
+        return isBlank(r.getOrderNo()) ? "C|" + r.getContractNo().trim() : "O|" + r.getOrderNo().trim();
+    }
+
+    /** 批量加载同期间同来源的合同，按组键索引（订单号优先，合同号兜底）。 */
+    private Map<String, ReceivedContract> loadExistingContracts(String period, String sourceType,
+                                                                Set<String> orders, Set<String> contractNos) {
+        LambdaQueryWrapper<ReceivedContract> wrapper = new LambdaQueryWrapper<ReceivedContract>()
+            .eq(ReceivedContract::getPeriod, period)
+            .eq(ReceivedContract::getSourceType, sourceType);
+        if (!orders.isEmpty() && !contractNos.isEmpty()) {
+            wrapper.and(w -> w.in(ReceivedContract::getOrderNo, orders)
+                .or().in(ReceivedContract::getContractNo, contractNos));
+        } else if (!orders.isEmpty()) {
+            wrapper.in(ReceivedContract::getOrderNo, orders);
+        } else if (!contractNos.isEmpty()) {
+            wrapper.in(ReceivedContract::getContractNo, contractNos);
+        } else {
+            return Map.of();
+        }
+        Map<String, ReceivedContract> result = new LinkedHashMap<>();
+        for (ReceivedContract c : contractMapper.selectList(wrapper)) {
+            if (!isBlank(c.getOrderNo())) {
+                result.putIfAbsent("O|" + c.getOrderNo().trim(), c);
+            }
+            if (!isBlank(c.getContractNo())) {
+                result.putIfAbsent("C|" + c.getContractNo().trim(), c);
+            }
+        }
+        return result;
+    }
+
+    /** 一次查询取全部合同的 ACTIVE 明细，按合同 ID 分组。 */
+    private Map<Long, List<ReceivedDetail>> loadActiveDetails(java.util.Collection<ReceivedContract> contracts) {
+        List<Long> ids = contracts.stream().map(ReceivedContract::getId)
+            .filter(java.util.Objects::nonNull).distinct().toList();
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<ReceivedDetail>> result = new LinkedHashMap<>();
+        for (ReceivedDetail d : detailMapper.selectList(new LambdaQueryWrapper<ReceivedDetail>()
+            .in(ReceivedDetail::getContractId, ids)
+            .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE))) {
+            result.computeIfAbsent(d.getContractId(), k -> new ArrayList<>()).add(d);
+        }
+        return result;
+    }
+
+    /** 已消费原因：结佣域（跨域端口，一次批量）+ 实收审批单 SUBMITTED/APPROVED + 明细带调整痕迹。 */
+    private Map<String, String> loadConsumedReasons(String period,
+                                                    Map<String, List<NormalizedRecordDTO>> changedGroups,
+                                                    Map<Long, List<ReceivedDetail>> activeDetailsByContract,
+                                                    Map<Long, List<String>> bizKeysByContractId) {
+        Set<String> contractNos = new LinkedHashSet<>();
+        Set<String> orders = new LinkedHashSet<>();
+        for (List<NormalizedRecordDTO> groupRows : changedGroups.values()) {
+            for (NormalizedRecordDTO r : groupRows) {
+                if (!isBlank(r.getContractNo())) contractNos.add(r.getContractNo().trim());
+                if (!isBlank(r.getOrderNo())) orders.add(r.getOrderNo().trim());
+            }
+        }
+
+        Map<String, String> reasons = new LinkedHashMap<>(
+            commissionConsumptionQueryPort.findConsumedBizKeys(contractNos, orders));
+
+        // 实收审批单：已提交/已通过的单不再接受新明细（autoCreate 只会合并草稿/提交单），
+        // 故整单对应的订单视为已消费
+        LambdaQueryWrapper<com.panjia.performance.domain.ReceivedApply> applyQuery =
+            new LambdaQueryWrapper<com.panjia.performance.domain.ReceivedApply>()
+                .eq(com.panjia.performance.domain.ReceivedApply::getPeriod, period)
+                .in(com.panjia.performance.domain.ReceivedApply::getStatus,
+                    com.panjia.performance.domain.ReceivedApplyStatus.SUBMITTED,
+                    com.panjia.performance.domain.ReceivedApplyStatus.APPROVED);
+        if (!contractNos.isEmpty() && !orders.isEmpty()) {
+            applyQuery.and(w -> w.in(com.panjia.performance.domain.ReceivedApply::getContractNo, contractNos)
+                .or().in(com.panjia.performance.domain.ReceivedApply::getOrderNo, orders));
+        } else if (!contractNos.isEmpty()) {
+            applyQuery.in(com.panjia.performance.domain.ReceivedApply::getContractNo, contractNos);
+        } else if (!orders.isEmpty()) {
+            applyQuery.in(com.panjia.performance.domain.ReceivedApply::getOrderNo, orders);
+        }
+        for (com.panjia.performance.domain.ReceivedApply apply : applyMapper.selectList(applyQuery)) {
+            String reason = "实收审批单" + apply.getStatus();
+            if (!isBlank(apply.getContractNo())) {
+                reasons.putIfAbsent("C|" + apply.getContractNo().trim(), reason);
+            }
+            if (!isBlank(apply.getOrderNo())) {
+                reasons.putIfAbsent("O|" + apply.getOrderNo().trim(), reason);
+            }
+        }
+
+        // 明细带调整痕迹（adjustId 非空）：已被调整单引用，整组不允许替换
+        for (Map.Entry<Long, List<ReceivedDetail>> entry : activeDetailsByContract.entrySet()) {
+            boolean adjusted = entry.getValue().stream().anyMatch(d -> d.getAdjustId() != null);
+            if (!adjusted) continue;
+            for (String bizKey : bizKeysByContractId.getOrDefault(entry.getKey(), List.of())) {
+                reasons.putIfAbsent(bizKey, "明细已被调整单引用");
+            }
+        }
+
+        // 跨月已出单（2026-10-29）：新签到达后补建单会把同订单多个归属月的未绑定到账并进一张单，
+        // 那张单的归属月可能不是本批归属月。此时替换明细会改掉已出单的金额且不做回算 → 视为已消费。
+        Set<Long> boundApplyIds = new LinkedHashSet<>();
+        for (List<ReceivedDetail> details : activeDetailsByContract.values()) {
+            for (ReceivedDetail d : details) {
+                if (d.getReceivedApplyId() != null) {
+                    boundApplyIds.add(d.getReceivedApplyId());
+                }
+            }
+        }
+        if (!boundApplyIds.isEmpty()) {
+            Map<Long, com.panjia.performance.domain.ReceivedApplyStatus> statusByApplyId = new HashMap<>();
+            for (com.panjia.performance.domain.ReceivedApply a : applyMapper.selectList(
+                    new LambdaQueryWrapper<com.panjia.performance.domain.ReceivedApply>()
+                        .in(com.panjia.performance.domain.ReceivedApply::getId, boundApplyIds)
+                        .select(com.panjia.performance.domain.ReceivedApply::getId,
+                            com.panjia.performance.domain.ReceivedApply::getStatus))) {
+                statusByApplyId.put(a.getId(), a.getStatus());
+            }
+            for (Map.Entry<Long, List<ReceivedDetail>> entry : activeDetailsByContract.entrySet()) {
+                boolean boundToLiveApply = entry.getValue().stream()
+                    .map(ReceivedDetail::getReceivedApplyId)
+                    .filter(java.util.Objects::nonNull)
+                    .map(statusByApplyId::get)
+                    .anyMatch(s -> s == com.panjia.performance.domain.ReceivedApplyStatus.SUBMITTED
+                        || s == com.panjia.performance.domain.ReceivedApplyStatus.APPROVED);
+                if (!boundToLiveApply) continue;
+                for (String bizKey : bizKeysByContractId.getOrDefault(entry.getKey(), List.of())) {
+                    reasons.putIfAbsent(bizKey, "实收单已提交/已通过（跨月累计出单）");
+                }
+            }
+        }
+        return reasons;
+    }
+
+    /** 组内任一业务键已消费即返回原因；未消费返回 null。 */
+    private String findConsumedReason(Map<String, String> consumedReasons, List<NormalizedRecordDTO> groupRows) {
+        for (NormalizedRecordDTO r : groupRows) {
+            if (!isBlank(r.getOrderNo())) {
+                String reason = consumedReasons.get("O|" + r.getOrderNo().trim());
+                if (reason != null) return reason;
+            }
+            if (!isBlank(r.getContractNo())) {
+                String reason = consumedReasons.get("C|" + r.getContractNo().trim());
+                if (reason != null) return reason;
+            }
+        }
+        return null;
+    }
+
+    /** 旧 ACTIVE 明细置 SUPERSEDED，并记录「被本批替换」，撤销本批时据此精确恢复。 */
+    private void supersedeActiveDetails(List<ReceivedDetail> details, Long batchId) {
+        for (ReceivedDetail d : details) {
+            // 新签补录行（supplementOriginBatchId 非空）是派生数据：文件为权威，重导必须一并替换，
+            // 否则残留的补录行会让组实收合计虚增（它没有 sourceBatchId，不会被下面的来源判定命中）
+            boolean derivedSupplement = d.getSupplementOriginBatchId() != null;
+            // 只替换导入来源的行；手工调整/手工退单镜像行（sourceBatchId 为空）不属于任何批次，
+            // 替换它们会让撤销回滚失效，故保留为 ACTIVE（其存在已由 adjustId 判定拦截整组）
+            if (d.getSourceBatchId() == null && !derivedSupplement) {
+                continue;
+            }
+            d.setDetailStatus(DETAIL_STATUS_SUPERSEDED);
+            d.setSupersededByBatchId(batchId);
+            detailMapper.updateById(d);
+        }
+    }
+
+    /**
+     * 导入侧组指纹：人员/角色/费项多重集 + 组到账总额。
+     * <p>
+     * 不逐行比金额：补行会对已有行「等比例压缩」并把差额分摊给新签缺失人（组总额不变），
+     * 逐行比对会让"文件没变"被判成"有变化"从而每次重导都重写。用「人员集合 + 总额」比对，
+     * 文件未变时稳定命中跳过；行级金额在人员内部被重分配属既有补行语义，不视为变化。
+     */
+    private List<String> importFingerprints(List<NormalizedRecordDTO> rows, String period) {
+        List<String> fp = new ArrayList<>(rows.size());
+        BigDecimal total = BigDecimal.ZERO;
+        for (NormalizedRecordDTO r : rows) {
+            fp.add((r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
+                + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
+                + (r.getFeeItem() != null ? r.getFeeItem() : ""));
+            total = total.add(r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO);
+        }
+        java.util.Collections.sort(fp);
+        fp.add("T|" + normalizeAmount(total));
+        return fp;
+    }
+
+    /**
+     * 库内组指纹：文件派生行（{@code normalizedRecordId} 非空）的人员/角色/费项多重集 + 全部 ACTIVE 行总额。
+     * <p>
+     * 总额含补行（补行是把文件总额按人重新分配，不改组总额），因此与导入侧总额可直接比对。
+     */
+    private List<String> dbFingerprints(List<ReceivedDetail> details) {
+        List<String> fp = new ArrayList<>(details.size());
+        BigDecimal total = BigDecimal.ZERO;
+        for (ReceivedDetail d : details) {
+            total = total.add(d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO);
+            if (d.getNormalizedRecordId() == null) continue;
+            fp.add((d.getEmployeeExternalCode() != null ? d.getEmployeeExternalCode() : "") + "|"
+                + (d.getRoleType() != null ? d.getRoleType() : "") + "|"
+                + (d.getFeeItem() != null ? d.getFeeItem() : ""));
+        }
+        java.util.Collections.sort(fp);
+        fp.add("T|" + normalizeAmount(total));
+        return fp;
+    }
+
+    private String normalizeAmount(BigDecimal amount) {
+        return (amount == null ? BigDecimal.ZERO : amount).stripTrailingZeros().toPlainString();
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     @Override
@@ -172,11 +589,42 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         if (oldBatchIds == null || oldBatchIds.isEmpty()) {
             return;
         }
+        // 冲销前先快照受影响的合同（冲销后明细状态已变，查不到）
+        List<Long> affectedContractIds = detailMapper.selectActiveContractIdsByBatchIds(oldBatchIds);
         detailMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ReceivedDetail>()
             .in(ReceivedDetail::getSourceBatchId, oldBatchIds)
             .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE)
             .set(ReceivedDetail::getDetailStatus, "SUPERSEDED"));
-        log.info("[实收写入] 重复导入冲销旧批次实收明细：oldBatchIds={}", oldBatchIds);
+        // 重算受影响合同聚合：若新批次文件里不再含该合同，旧合计必须清零，不能残留
+        refreshContractAggregates(affectedContractIds);
+        log.info("[实收写入] 重复导入冲销旧批次实收明细：oldBatchIds={}, affectedContracts={}",
+            oldBatchIds, affectedContractIds.size());
+    }
+
+    /**
+     * 按 ACTIVE 明细重算合同级聚合（period_total_received / item_count）。
+     * <p>
+     * 一次 GROUP BY 取聚合后统一回写，避免逐合同查询；
+     * 重导/跨部门冲销时旧批次明细已置 SUPERSEDED，不会被计入。
+     */
+    private void refreshContractAggregates(java.util.Collection<Long> contractIds) {
+        if (contractIds == null || contractIds.isEmpty()) {
+            return;
+        }
+        Map<Long, Map<String, Object>> aggregateByContract = new LinkedHashMap<>();
+        for (Map<String, Object> row : detailMapper.selectActiveAggregatesByContractIds(contractIds)) {
+            aggregateByContract.put(((Number) row.get("contractId")).longValue(), row);
+        }
+        List<ReceivedContract> contracts = contractMapper.selectList(
+            new LambdaQueryWrapper<ReceivedContract>().in(ReceivedContract::getId, contractIds));
+        for (ReceivedContract c : contracts) {
+            Map<String, Object> agg = aggregateByContract.get(c.getId());
+            Object total = agg == null ? null : agg.get("totalAmount");
+            Object count = agg == null ? null : agg.get("itemCount");
+            c.setPeriodTotalReceived(total == null ? BigDecimal.ZERO : new BigDecimal(total.toString()));
+            c.setItemCount(count == null ? 0 : ((Number) count).intValue());
+            contractMapper.updateById(c);
+        }
     }
 
     private boolean isReceivedRecord(NormalizedRecordDTO record, String sourceType) {
@@ -208,17 +656,27 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
      * 重导时旧批次被 supersede（旧明细置 SUPERSEDED），故以归一化记录 ID 保证行级唯一。
      */
     private String buildDetailSourceKey(NormalizedRecordDTO r, String period) {
-        String base = (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
-            + (r.getContractNo() != null ? r.getContractNo() : "") + "|"
-            + (r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
-            + (r.getFeeItem() != null ? r.getFeeItem() : "") + "|"
-            + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
-            + period;
+        String base = buildDetailBaseKey(r, period);
         // 同一业务键可能有多笔到账，追加归一化记录 ID 保证行级幂等唯一
         if (r.getId() != null) {
             return base + "|" + r.getId();
         }
         return base;
+    }
+
+    /**
+     * 实收明细业务键（不含归一化记录 ID）。
+     * <p>
+     * 增量合并用：旧行先置 SUPERSEDED 再插入新行，{@code uk_received_detail_anchor} 只约束
+     * ACTIVE 行，故同组同一业务键的多笔到账用「组内同键序号」区分即可，不再依赖归一化记录 ID。
+     */
+    private String buildDetailBaseKey(NormalizedRecordDTO r, String period) {
+        return (r.getOrderNo() != null ? r.getOrderNo() : "") + "|"
+            + (r.getContractNo() != null ? r.getContractNo() : "") + "|"
+            + (r.getEmployeeCode() != null ? r.getEmployeeCode() : "") + "|"
+            + (r.getFeeItem() != null ? r.getFeeItem() : "") + "|"
+            + (r.getRoleType() != null ? r.getRoleType() : "") + "|"
+            + period;
     }
 
     private ReceivedContract buildContract(NormalizedRecordDTO r, String period, String sourceType, Long batchId, EmployeeMainDataDTO emp) {
@@ -273,212 +731,14 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
     // ==================== KE_RECEIVED 新签-实收人员对齐补行（2026-10-29） ====================
 
     /**
-     * 新签-实收人员对齐补行：KE_RECEIVED 专用。
-     * <p>
-     * 场景：贝壳实收导入文件只有部分角色人的到账行，但 PERF_EXPECT 新签事实里有更多人。
-     * 对新签有但实收缺失的人，补生成实收明细（金额 = 该人新签应收合计）；
-     * 对实收已有行的人，等比例压缩其实收金额，保证合同实收合计守恒。
-     * <p>
-     * 触发条件（全部满足才处理）：
-     * <ol>
-     *   <li>合同在 PERF_EXPECT 中有新签事实</li>
-     *   <li>实收侧去重员工集合 ⊂ 新签侧去重员工集合（真子集，即有人缺失）</li>
-     *   <li>实收侧恰好只有一个人有数据（多人场景保持现状不处理）</li>
-     * </ol>
+     * 新签-实收人员对齐补行（实现见 {@link com.panjia.received.support.ReceivedSupplementSupport}）。
+     * <p>与新签到达补建单链路共用同一实现，先导实收、后导新签时由实收审批侧再次调用。
      *
      * @return 补生成的实收明细条数
      */
     private int supplementMissingEmployees(Long batchId, String period,
                                            Map<String, ReceivedContract> contractCache,
                                            Long operatorId) {
-        // 1. 收集所有 orderNo + contractNo，查对应的 PERF_EXPECT 新签事实（跨期间，新签可能早于实收月）
-        Set<String> bizKeys = new HashSet<>();
-        for (ReceivedContract c : contractCache.values()) {
-            if (c.getOrderNo() != null && !c.getOrderNo().isBlank()) {
-                bizKeys.add(c.getOrderNo().trim());
-            }
-            if (c.getContractNo() != null && !c.getContractNo().isBlank()) {
-                bizKeys.add(c.getContractNo().trim());
-            }
-        }
-        if (bizKeys.isEmpty()) {
-            return 0;
-        }
-
-        List<PerformanceFactSummaryDTO> expectFacts = commissionPerformanceQueryPort
-            .findActiveByBizKeys(bizKeys, "PERF_EXPECT");
-        if (expectFacts == null || expectFacts.isEmpty()) {
-            return 0;
-        }
-
-        // 2. 按订单号归组新签事实 → 每人应收合计 + 代表性 fact（取字段用）
-        Map<String, Map<Long, BigDecimal>> expectAmountByEmp = new LinkedHashMap<>();
-        Map<String, Map<Long, PerformanceFactSummaryDTO>> expectRepByEmp = new LinkedHashMap<>();
-        for (PerformanceFactSummaryDTO fact : expectFacts) {
-            String targetOrderNo = fact.getOrderNo();
-            if (targetOrderNo == null || targetOrderNo.isBlank()) {
-                targetOrderNo = findOrderNoByContract(contractCache, fact.getContractNo());
-                if (targetOrderNo == null) continue;
-            }
-            Long empId = fact.getEmployeeId();
-            if (empId == null) continue;
-            BigDecimal amt = fact.getAmount() != null ? fact.getAmount() : BigDecimal.ZERO;
-            expectAmountByEmp.computeIfAbsent(targetOrderNo, k -> new LinkedHashMap<>())
-                .merge(empId, amt, BigDecimal::add);
-            expectRepByEmp.computeIfAbsent(targetOrderNo, k -> new LinkedHashMap<>())
-                .putIfAbsent(empId, fact);
-        }
-
-        // 3. 逐合同处理
-        int supplementCount = 0;
-        for (ReceivedContract contract : contractCache.values()) {
-            String orderNo = contract.getOrderNo();
-            if (orderNo == null || orderNo.isBlank()) continue;
-
-            Map<Long, BigDecimal> expectAmounts = expectAmountByEmp.get(orderNo);
-            if (expectAmounts == null || expectAmounts.isEmpty()) continue;
-
-            // 查合同下已有的 ACTIVE 实收明细
-            List<ReceivedDetail> existingDetails = detailMapper.selectList(
-                new LambdaQueryWrapper<ReceivedDetail>()
-                    .eq(ReceivedDetail::getContractId, contract.getId())
-                    .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE));
-            if (existingDetails.isEmpty()) continue;
-
-            // 实收侧去重员工 + 每人实收合计
-            Map<Long, BigDecimal> realByEmpId = new LinkedHashMap<>();
-            for (ReceivedDetail d : existingDetails) {
-                if (d.getEmployeeId() == null) continue;
-                realByEmpId.merge(d.getEmployeeId(),
-                    d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO,
-                    BigDecimal::add);
-            }
-
-            Set<Long> expectEmps = expectAmounts.keySet();
-            Set<Long> realEmps = realByEmpId.keySet();
-
-            // 真子集检查：实收 ⊂ 新签 → 有人缺失
-            LinkedHashSet<Long> missing = new LinkedHashSet<>(expectEmps);
-            missing.removeAll(realEmps);
-            if (missing.isEmpty()) continue;
-
-            // 实收侧多人场景 → 跳过（用户确认单人场景才触发）
-            if (realEmps.size() != 1) {
-                log.warn("[实收补行] 实收侧有多人({})，跳过：orderNo={}", realEmps.size(), orderNo);
-                continue;
-            }
-
-            log.info("[实收补行] 触发：orderNo={}, 新签人数={}, 实收人数={}, 缺失人数={}",
-                orderNo, expectEmps.size(), realEmps.size(), missing.size());
-
-            // 4. 计算缺失人应收合计
-            BigDecimal sumMissingExpect = BigDecimal.ZERO;
-            for (Long empId : missing) {
-                BigDecimal amt = expectAmounts.getOrDefault(empId, BigDecimal.ZERO);
-                sumMissingExpect = sumMissingExpect.add(amt);
-            }
-
-            // 5. 调整已有实收人的金额：等比例压缩
-            BigDecimal newExistingTotal = contract.getPeriodTotalReceived().subtract(sumMissingExpect);
-            Long existingEmpId = realEmps.iterator().next();
-            adjustExistingEmpRows(existingDetails, existingEmpId, newExistingTotal);
-
-            // 6. 为缺失人补生成实收明细（从 PERF_EXPECT 镜像字段）
-            Map<Long, PerformanceFactSummaryDTO> repMap = expectRepByEmp.get(orderNo);
-            for (Long empId : missing) {
-                PerformanceFactSummaryDTO fact = repMap != null ? repMap.get(empId) : null;
-                if (fact == null) continue;
-                BigDecimal expectAmt = expectAmounts.getOrDefault(empId, BigDecimal.ZERO);
-
-                ReceivedDetail newDetail = new ReceivedDetail();
-                newDetail.setContractId(contract.getId());
-                newDetail.setEmployeeId(empId);
-                newDetail.setDeptId(fact.getDeptId());
-                newDetail.setEmployeeExternalCode(fact.getEmployeeCode());
-                newDetail.setRoleType(fact.getRoleType());
-                newDetail.setRoleName(fact.getEmployeeName());
-                newDetail.setShareRatio(fact.getShareRatio() != null ? fact.getShareRatio() : BigDecimal.ONE);
-                newDetail.setPerformanceAmount(expectAmt);
-                newDetail.setFeeItem(fact.getFeeItem());
-                newDetail.setPeriod(period);
-                newDetail.setEffectiveDate(fact.getBusinessDate() != null
-                    ? fact.getBusinessDate().toLocalDate() : LocalDate.now());
-                newDetail.setSourceKey(buildSupplementSourceKey(orderNo, contract.getContractNo(),
-                    fact, period));
-                newDetail.setSourceBatchId(batchId);
-                newDetail.setNormalizedRecordId(null);
-                newDetail.setDetailStatus(DETAIL_STATUS_ACTIVE);
-                newDetail.setOperatorId(operatorId);
-                detailMapper.insert(newDetail);
-                supplementCount++;
-            }
-
-            // 7. 更新合同 itemCount（periodTotalReceived 不变：先减后加已抵消）
-            contract.setItemCount(contract.getItemCount() + missing.size());
-
-            log.info("[实收补行] 完成：orderNo={}, supplementCount={}, sumMissingExpect={}, newExistingTotal={}",
-                orderNo, supplementCount, sumMissingExpect, newExistingTotal);
-        }
-        return supplementCount;
-    }
-
-    /**
-     * 把指定员工的所有实收明细行按比例压缩，使合计 = targetAmount。
-     * <p>
-     * 等比例公式：每条行 new_amount = old_amount / old_total × target_amount（保留 2 位小数）。
-     * old_total = 0 时（极罕见）平均分配。
-     */
-    private void adjustExistingEmpRows(List<ReceivedDetail> allDetails, Long employeeId, BigDecimal targetAmount) {
-        List<ReceivedDetail> empRows = new ArrayList<>();
-        for (ReceivedDetail d : allDetails) {
-            if (employeeId.equals(d.getEmployeeId())) empRows.add(d);
-        }
-        if (empRows.isEmpty()) return;
-
-        BigDecimal oldTotal = BigDecimal.ZERO;
-        for (ReceivedDetail d : empRows) {
-            oldTotal = oldTotal.add(d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO);
-        }
-
-        if (oldTotal.compareTo(BigDecimal.ZERO) == 0) {
-            BigDecimal perRow = targetAmount.divide(BigDecimal.valueOf(empRows.size()), 2, RoundingMode.HALF_UP);
-            for (ReceivedDetail d : empRows) {
-                d.setPerformanceAmount(perRow);
-                detailMapper.updateById(d);
-            }
-        } else {
-            for (ReceivedDetail d : empRows) {
-                BigDecimal oldAmount = d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO;
-                BigDecimal newAmount = oldAmount.divide(oldTotal, 10, RoundingMode.HALF_UP)
-                    .multiply(targetAmount).setScale(2, RoundingMode.HALF_UP);
-                d.setPerformanceAmount(newAmount);
-                detailMapper.updateById(d);
-            }
-        }
-    }
-
-    /** 新签事实没有 orderNo 时，从 contractCache 里按 contractNo 反查 orderNo。 */
-    private String findOrderNoByContract(Map<String, ReceivedContract> contractCache, String contractNo) {
-        if (contractNo == null || contractNo.isBlank()) return null;
-        for (ReceivedContract c : contractCache.values()) {
-            if (contractNo.trim().equals(c.getContractNo()) && c.getOrderNo() != null) {
-                return c.getOrderNo();
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 补行专用 sourceKey。格式同 {@link #buildDetailSourceKey}，追加 SUPPLEMENT 标记 + 新签 factId，
-     * 避免和原始行冲突；重导时旧批次被 supersede，补行也随批次一起失效重建。
-     */
-    private String buildSupplementSourceKey(String orderNo, String contractNo,
-                                            PerformanceFactSummaryDTO fact, String period) {
-        return (orderNo != null ? orderNo : "") + "|"
-            + (contractNo != null ? contractNo : "") + "|"
-            + (fact.getEmployeeCode() != null ? fact.getEmployeeCode() : "") + "|"
-            + (fact.getFeeItem() != null ? fact.getFeeItem() : "") + "|"
-            + (fact.getRoleType() != null ? fact.getRoleType() : "") + "|"
-            + period + "|SUPPLEMENT|" + fact.getFactId();
+        return supplementSupport.supplement(contractCache.values(), period, batchId, null, operatorId);
     }
 }

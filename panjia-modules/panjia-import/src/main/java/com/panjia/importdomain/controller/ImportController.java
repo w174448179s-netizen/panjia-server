@@ -45,7 +45,8 @@ public class ImportController {
     private final ImportBatchService importBatchService;
     private final ImportTemplateBridge templateBridge;
     private final RawDataQueryService rawDataQueryService;
-    private final com.panjia.contracts.port.PerformanceExpectCheckPort expectCheckPort;
+    /** 期间封账卡点（performance 域实现）：新签/实收导入均受同一封账事实源约束 */
+    private final com.panjia.contracts.port.PeriodCloseQueryPort periodClosePort;
     /** 考勤导入卡点（people 域实现；模块未装配时为 null，不阻断导入） */
     private final ObjectProvider<com.panjia.contracts.port.PeopleAttendanceRectifyQueryPort> attendanceRectifyPortProvider;
 
@@ -88,12 +89,11 @@ public class ImportController {
         if (period == null || period.isBlank()) {
             return R.fail("归属月不能为空，请选择导入归属月后再上传");
         }
-        // 实收导入前置校验：无新签应收事实（PERF_EXPECT）时拒绝导入，
-        // 避免"先实收后新签"导致 expected_amount=0、分流误判全部 APPROVED 直建
-        if (type == ImportSourceType.KE_RECEIVED || type == ImportSourceType.HISTORY_PAYROLL) {
-            if (!expectCheckPort.hasAnyExpectFacts()) {
-                return R.fail("导入实收前请先导入当月（或之前月份）的新签业绩——当前系统中没有新签应收数据，实收无法匹配合同");
-            }
+        // 封账卡点：新签/实收写入业绩/实收事实，已封账期间一律拒绝。
+        // 与 performance 侧 PerformanceEngine.buildFromBatch 的口径一致；历史工资为存量补录，豁免。
+        if ((type == ImportSourceType.KE_SIGNED || type == ImportSourceType.KE_RECEIVED)
+            && periodClosePort.isClosed(period)) {
+            return R.fail("归属月 " + period + " 已封账，禁止导入新签/实收；请选择未封账的归属月");
         }
         // 考勤导入卡点：当月已有经纪人的有效修改申请（待审批/已通过）时禁止导入
         if (type == ImportSourceType.ATTENDANCE) {

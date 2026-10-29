@@ -46,6 +46,16 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private String periods;
 
+    /**
+     * 是否为「待匹配新签」到账行（非入库字段）。
+     * <p>
+     * 去草稿（2026-10-29）后无新签的实收到账只落库、不建单，列表以该标记拼出展示行：
+     * {@code id/applyNo/status} 均为空，{@link #receivedAmount} 为未绑定明细合计，
+     * {@link #expectedAmount} 为 0；前端据此展示「待匹配新签」并开放「补录」按钮。
+     */
+    @TableField(exist = false)
+    private Boolean pendingMatch;
+
     /** 合同号 */
     private String contractNo;
 
@@ -142,7 +152,7 @@ public class ReceivedApply implements Serializable {
     @TableField(exist = false)
     private String manualReviewReason;
 
-    /** 状态 DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED */
+    /** 状态 SUBMITTED/APPROVED/REJECTED/CANCELLED（DRAFT 已于 2026-10-29 废弃：无新签的到账只落库不建单） */
     private ReceivedApplyStatus status;
 
     /** 当前审批节点 FINANCE/DIRECTOR；终审/驳回/作废时需写回 null，故 ALWAYS 参与 update */

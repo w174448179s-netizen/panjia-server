@@ -1,12 +1,12 @@
 package com.panjia.performance.handler;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.EventPort;
 import com.panjia.contracts.event.ImportBatchRevokedEvent;
 import com.panjia.contracts.event.ReceivedApprovedEvent;
 import com.panjia.contracts.port.ApprovalPort;
+import com.panjia.contracts.port.ReceivedApplyPort;
 import com.panjia.performance.domain.FactStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
@@ -18,6 +18,7 @@ import com.panjia.performance.mapper.ReceivedApplyMapper;
 import com.panjia.performance.service.IPerfRefundService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.utils.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.JacksonException;
@@ -58,6 +59,7 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
     private final ReceivedApplyMapper receivedApplyMapper;
     private final PerformanceConsumeLogMapper consumeLogMapper;
     private final ApprovalPort approvalPort;
+    private final ReceivedApplyPort receivedApplyPort;
     private final EventPort eventPort;
     private final IPerfRefundService perfRefundService;
     private final ObjectMapper objectMapper;
@@ -133,9 +135,17 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
             // 5a. 有旧批次恢复：对恢复合同重放实收通过事件，结佣域重建 DRAFT 草稿单
             replayReceivedApproved(period, restoredContractKeys, event.getOperatorId());
         } else if (SOURCE_TYPE_KE_SIGNED.equals(event.getSourceType()) && !batchContractKeys.isEmpty()) {
-            // 5b. 新签整批撤销且无旧版本：自动通过的实收单失去新签依据，回退 DRAFT 等待新签重新触发
+            // 5b. 新签整批撤销且无旧版本：自动通过的实收单失去新签依据 → 解绑明细后删除单（去草稿，不回退 DRAFT），
+            //     明细回到「未绑定审批单」= 待新签匹配，下次新签导入由 resolvePendingAfterNewSign 重建
             int rolledBack = rollbackAutoApprovedApplies(period, batchContractKeys);
-            log.info("[批次撤销-业绩域] 自动通过实收单回退 DRAFT：batchId={}, count={}", batchId, rolledBack);
+            log.info("[批次撤销-业绩域] 自动通过实收单已解绑并删除：batchId={}, count={}", batchId, rolledBack);
+        }
+
+        // 5c. 新签批次撤销：清掉该批新签触发的实收补录（补行 + 压缩还原），
+        //     否则残留的补录行会在下次实收导入时与新文件叠加，导致实收业绩虚增
+        if (SOURCE_TYPE_KE_SIGNED.equals(event.getSourceType())) {
+            int cleaned = receivedApplyPort.revokeSupplements(batchId);
+            log.info("[批次撤销-业绩域] 实收补录已清理：batchId={}, count={}", batchId, cleaned);
         }
 
         log.info("[批次撤销-业绩域] 完成：batchId={}, 删除事实={}, 删除实收单={}, 删除消费日志={}, 恢复事实={}",
@@ -207,29 +217,17 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
     }
 
     /**
-     * 无旧批次恢复的新签撤销：自动通过直建（APPROVED 且无流程实例）的实收单回退为 DRAFT，
-     * 清空终审痕迹；明细绑定保留，待下次正确新签导入由 resolveDraftAfterNewSign 重新判定。
+     * 无旧批次恢复的新签撤销：把因该批新签自动通过（APPROVED 且无流程实例）的实收单
+     * 解绑明细后删除（委托 received 域 {@link ReceivedApplyPort#revokeAutoApprovedApplies}）。
+     * <p>去草稿后不再回退 DRAFT：明细回到「未绑定审批单」状态，即待新签匹配，
+     * 下次正确新签导入后由 resolvePendingAfterNewSign 重新建单。
      * <p>人工终审单（有流程实例）已被撤销前置校验拦截，不会到达此处。
      */
     private int rollbackAutoApprovedApplies(String period, Set<String> contractKeys) {
-        List<ReceivedApply> targets = receivedApplyMapper.selectList(
-            new LambdaQueryWrapper<ReceivedApply>()
-                .eq(ReceivedApply::getPeriod, period)
-                .eq(ReceivedApply::getStatus, ReceivedApplyStatus.APPROVED)
-                .isNull(ReceivedApply::getProcessInstanceId)
-                .and(w -> w.in(ReceivedApply::getContractNo, contractKeys)
-                    .or().in(ReceivedApply::getOrderNo, contractKeys)));
-        if (targets.isEmpty()) {
+        if (StringUtils.isBlank(period) || contractKeys.isEmpty()) {
             return 0;
         }
-        List<Long> ids = new ArrayList<>(targets.stream().map(ReceivedApply::getId).toList());
-        LambdaUpdateWrapper<ReceivedApply> update = new LambdaUpdateWrapper<ReceivedApply>()
-            .in(ReceivedApply::getId, ids)
-            .set(ReceivedApply::getStatus, ReceivedApplyStatus.DRAFT)
-            .set(ReceivedApply::getApproverId, null)
-            .set(ReceivedApply::getApproveTime, null)
-            .set(ReceivedApply::getCurrentNode, null);
-        return receivedApplyMapper.update(null, update);
+        return receivedApplyPort.revokeAutoApprovedApplies(period, contractKeys);
     }
 
     /** 事件中的字符串 ID 列表安全转 Long（跳过非法值）。 */
