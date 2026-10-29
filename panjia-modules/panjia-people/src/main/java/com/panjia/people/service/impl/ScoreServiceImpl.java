@@ -480,9 +480,6 @@ public class ScoreServiceImpl implements ScoreService {
             wrapper.eq(PerformanceScore::getEmployeeId, myEmployeeId);
         }
 
-        // 积分查询审批门：仅展示已 APPROVED 的期间
-        applyApprovedPeriodGate(wrapper);
-
         wrapper.orderByDesc(PerformanceScore::getScoreMonth)
             .orderByDesc(PerformanceScore::getId);
 
@@ -535,12 +532,6 @@ public class ScoreServiceImpl implements ScoreService {
         if (myEmployeeId == null) {
             return List.of();
         }
-        // 审批门：未 APPROVED 的期间明细不对外可见
-        Set<String> approved = approvalService.approvedPeriods(List.of(scoreMonth));
-        if (approved.isEmpty()) {
-            return List.of();
-        }
-
         LambdaQueryWrapper<ScoreDetail> wrapper = new LambdaQueryWrapper<ScoreDetail>()
             .eq(ScoreDetail::getScoreMonth, monthStart);
 
@@ -738,35 +729,6 @@ public class ScoreServiceImpl implements ScoreService {
         LocalDate end = parseMonth(query.getMonthEnd());
         wrapper.ge(start != null, PerformanceScore::getScoreMonth, start)
             .le(end != null, PerformanceScore::getScoreMonth, end);
-    }
-
-    /**
-     * 积分查询审批门：仅保留已 APPROVED 期间的积分记录。
-     * <p>
-     * 用当前 wrapper 条件查出候选 scoreMonth（distinct 概念：先按相同 wrapper 条件独立查一次月份），
-     * 转成 "yyyy-MM" 调审批服务拿到 approvedPeriods，再用 IN 约束到原 wrapper。
-     */
-    private void applyApprovedPeriodGate(LambdaQueryWrapper<PerformanceScore> wrapper) {
-        List<PerformanceScore> candidates = scoreMapper.selectList(wrapper.clone()
-            .select(PerformanceScore::getScoreMonth));
-        Set<String> candidatePeriods = candidates.stream()
-            .map(PerformanceScore::getScoreMonth)
-            .filter(java.util.Objects::nonNull)
-            .map(m -> m.toString().substring(0, 7)) // yyyy-MM
-            .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
-        if (candidatePeriods.isEmpty()) {
-            wrapper.apply("1 = 0");
-            return;
-        }
-        Set<String> approved = approvalService.approvedPeriods(candidatePeriods);
-        if (approved.isEmpty()) {
-            wrapper.apply("1 = 0");
-            return;
-        }
-        List<LocalDate> approvedMonths = approved.stream()
-            .map(p -> LocalDate.parse(p + "-01"))
-            .toList();
-        wrapper.in(PerformanceScore::getScoreMonth, approvedMonths);
     }
 
     private List<Long> findEmployeeIds(String employeeName, String employeeCode) {
