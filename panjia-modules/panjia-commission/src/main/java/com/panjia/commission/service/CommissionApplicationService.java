@@ -863,9 +863,9 @@ public class CommissionApplicationService {
      * 未联动实收的合同、或整合同无实收导致跳过联动的合同，仍需人工发起实收调整补齐后
      * 再结佣，否则按旧实收口径结出的佣金与新签不一致。
      * <p>
-     * 判定口径（与「原值 → 调整后值」展示一致）：业务键（合同号/订单号）ACTIVE 事实的
-     * source_key 链存在 REVERSED 行即「已调整」。新签（PERF_EXPECT）已调整
-     * 且实收（PERF_REAL）未调整 → 拦截。
+     * 判定口径（与「原值 → 调整后值」展示一致）：业务键（合同号/订单号）的调整前金额合计
+     * ≠ 当前 ACTIVE 合计即「实质调整」。新签（PERF_EXPECT）实质调整且实收（PERF_REAL）
+     * 未调整 → 拦截。仅同额重复导入（贝壳重推同版本新签）不算调整，直接放行。
      *
      * @param realFacts  本单 ACTIVE 实收事实（非零）
      * @param contractNo 用户输入的合同号/订单号（提示文案用）
@@ -895,7 +895,10 @@ public class CommissionApplicationService {
             throw new ServiceException("合同 " + contractNo
                 + " 存在审批中的新签调整单，请先完成调整审批（并联动实收）后再发起结佣");
         }
-        boolean expectAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_EXPECT);
+        // 新签「实质调整」判定：调整前金额合计 ≠ 当前 ACTIVE 合计才算已调整。
+        // 贝壳重复导入同额新签时旧事实 supersede 为 REVERSED 但金额不变，属假调整，
+        // 若按「链上有 REVERSED 即已调整」会要求实收做无意义调整并永久拦截（2026-10-29 修复）
+        boolean expectAdjusted = performanceQueryPort.hasSubstantiveAdjust(keys, FACT_TYPE_EXPECT);
         if (!expectAdjusted) {
             return;
         }
@@ -1161,8 +1164,14 @@ public class CommissionApplicationService {
             // （第一阶段 startWorkflow 已在同事务里 INSERT 的 flow_instance 也一起回滚），
             // 否则会静默退出留下 DRAFT + 有 flow_instance 的脏数据
             if (updated == 0) {
-                throw new ServiceException("申请单已被并发修改（version 不匹配），请刷新页面后重试。contractNo="
-                    + application.getContractNo() + ", applyNo=" + application.getApplyNo());
+                // 乐观锁冲突是典型的「临时错误」：并发下 revertSubmittedToDraftIfNeeded 抢走了版本号。
+                // 必须抛 RuntimeException（而非 ServiceException），让上层调用方：
+                //   · 批量发起 apply() catch ServiceException 时不会误伤 → 这张单被计入"失败"而非"跳过"
+                //   · Outbox Dispatcher 捕获后会走指数退避重试（30s→60s→120s... 最多 10 次）
+                //     并发窗口过后重试即可成功，不会永远卡死
+                throw new RuntimeException("申请单已被并发修改（version 不匹配），重试即可成功。contractNo="
+                    + application.getContractNo() + ", applyNo=" + application.getApplyNo()
+                    + ", version=" + application.getVersion());
             }
             // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
             itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()

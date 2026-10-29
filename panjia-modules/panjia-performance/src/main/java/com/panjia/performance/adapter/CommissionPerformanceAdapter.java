@@ -473,6 +473,36 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     /**
+     * 「是否实质调整」判定（2026-10-29 结佣发起闸门用）：调整前金额合计 ≠ 当前 ACTIVE 合计。
+     * 仅同额重复导入（贝壳重推同版本新签，supersede 出 REVERSED 但金额不变）不算调整。
+     */
+    @Override
+    public boolean hasSubstantiveAdjust(java.util.Collection<String> bizKeys, String factType) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return false;
+        }
+        if (isReal(factType)) {
+            // 实收域暂无金额对比口径，沿用「链上存在 REVERSED 即已调整」
+            ReceivedRealFactPort port = realPort();
+            return port != null && port.hasReversedChain(bizKeys);
+        }
+        Map<String, Object> totals = factMapper.selectAdjustAmountTotals(factType, bizKeys);
+        if (totals == null || totals.isEmpty()) {
+            return false;
+        }
+        BigDecimal original = toAmount(totals.get("originalTotal"));
+        BigDecimal active = toAmount(totals.get("activeTotal"));
+        return original.compareTo(active) != 0;
+    }
+
+    private static BigDecimal toAmount(Object value) {
+        if (value instanceof BigDecimal bd) {
+            return bd;
+        }
+        return value == null ? BigDecimal.ZERO : new BigDecimal(String.valueOf(value));
+    }
+
+    /**
      * 「是否有在途新签调整单」判定（2026-10-17 结佣发起闸门补强用）：
      * pj_perf_adjust 状态 SUBMITTED/APPROVED（进行中未执行）且业务键命中合同号/订单号即 true。
      */

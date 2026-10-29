@@ -1350,6 +1350,64 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                    @Param("keys") Collection<String> keys);
 
     /**
+     * 判断业务键的调整是否为「实质调整」（调整前金额合计 ≠ 当前 ACTIVE 合计）。
+     * <p>
+     * 背景（2026-10-29）：贝壳重复导入同额新签时，旧事实被 supersede 为 REVERSED、新事实
+     * ACTIVE 但金额一分不差；若仅按 {@link #existsReversedChainByKeys} 判定「已调整」，
+     * 会要求实收也做一次无意义的调整，导致同额重复导入的合同永久无法发起结佣
+     * （测试环境 7 月 215 个 supersede 订单中 212 个金额完全相同）。
+     * <p>
+     * 口径：以各业务键当前 ACTIVE 事实的 source_key 链为准，链上最早一条事实金额为「调整前」，
+     * 当前 ACTIVE 金额合计为「调整后」；两者不等即实质调整。新增角色人链（MANUAL-ADJ /
+     * MANUAL-CADJ）调整前按 0 计（与 {@link #selectOriginalFactAmountsByKeys} 口径一致）。
+     *
+     * @param factType 事实口径
+     * @param keys     合同号/订单号业务键集合（不可为空，空集合由调用方拦截不发起 SQL）
+     * @return originalTotal = 调整前合计，activeTotal = 当前合计；两者不等即实质调整
+     */
+    @Select("""
+        <script>
+        WITH sk AS (
+            SELECT DISTINCT f.source_key
+            FROM (VALUES
+              <foreach collection="keys" item="bk" separator=",">(#{bk})</foreach>
+            ) AS k(key)
+            JOIN pj_perf_fact f ON f.fact_status = 'ACTIVE'
+                               AND f.fact_type = #{factType}
+                               AND (f.contract_no = k.key OR f.order_no = k.key)
+            WHERE f.source_key IS NOT NULL
+        ),
+        orig AS (
+            SELECT DISTINCT ON (sk.source_key) sk.source_key,
+                   CASE
+                       WHEN sk.source_key LIKE '%MANUAL-ADJ%'
+                         OR sk.source_key LIKE '%MANUAL-CADJ%' THEN 0
+                       ELSE x.performance_amount
+                   END AS amt
+            FROM sk
+            JOIN pj_perf_fact x ON x.source_key = sk.source_key
+                               AND x.fact_type = #{factType}
+            ORDER BY sk.source_key, x.id ASC
+        ),
+        act AS (
+            SELECT sk.source_key, SUM(f.performance_amount) AS amt
+            FROM sk
+            JOIN pj_perf_fact f ON f.source_key = sk.source_key
+                               AND f.fact_status = 'ACTIVE'
+                               AND f.fact_type = #{factType}
+            GROUP BY sk.source_key
+        )
+        SELECT COALESCE(SUM(o.amt), 0) AS "originalTotal",
+               COALESCE(SUM(a.amt), 0) AS "activeTotal"
+        FROM sk
+        LEFT JOIN orig o ON o.source_key = sk.source_key
+        LEFT JOIN act a ON a.source_key = sk.source_key
+        </script>
+        """)
+    Map<String, Object> selectAdjustAmountTotals(@Param("factType") String factType,
+                                                 @Param("keys") Collection<String> keys);
+
+    /**
      * 按期间查询「合同」维度业绩汇总（结佣申请列表合并展示用）。
      * <p>
      * 按业务键聚合：一手房/房产金融/家装荐客以订单号为准（空回退合同号），

@@ -180,6 +180,22 @@ public interface CommissionPerformanceQueryPort {
     boolean hasReversedChain(Collection<String> bizKeys, String factType);
 
     /**
+     * 判断业务键的调整是否为<b>实质调整</b>（调整前金额合计 ≠ 当前 ACTIVE 合计）。
+     * <p>
+     * 与 {@link #hasReversedChain} 的差异：贝壳重复导入同额新签会 supersede 出 REVERSED 行，
+     * 但金额一分不差；此时若按「链上有 REVERSED 即已调整」处理，会要求实收做一次无意义调整，
+     * 导致同额重复导入的合同永久无法发起结佣（2026-10-29 测试环境 7 月 212/215 属于此类）。
+     * <p>
+     * 口径：链上最早一条事实金额为「调整前」，当前 ACTIVE 合计为「调整后」，两者不等即实质调整。
+     * PERF_REAL 委托实收域，其余口径查 {@code pj_perf_fact}。
+     *
+     * @param bizKeys  合同号/订单号业务键集合（空集合返回 false，不发起 SQL）
+     * @param factType 事实口径（FactType code：PERF_REAL / PERF_EXPECT）
+     * @return true = 存在实质金额变化；false = 无调整或仅同额重复导入
+     */
+    boolean hasSubstantiveAdjust(Collection<String> bizKeys, String factType);
+
+    /**
      * 判断业务键下是否存在<b>进行中</b>的新签业绩调整单（SUBMITTED/APPROVED，未执行）。
      * <p>
      * 2026-10-17 结佣发起闸门补强：在途新签调整尚未 supersede 事实（无 REVERSED 链），
