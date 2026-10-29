@@ -4,6 +4,7 @@ import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.importdomain.domain.ImportBatch;
 import com.panjia.importdomain.domain.ImportIssue;
 import com.panjia.importdomain.domain.ImportSourceType;
+import com.panjia.importdomain.domain.ReimportSkippedException;
 import com.panjia.importdomain.domain.raw.RawData;
 import com.panjia.importdomain.service.ImportBatchService;
 import com.panjia.importdomain.service.RawDataQueryService;
@@ -105,6 +106,10 @@ public class ImportController {
             Long batchId = importBatchService.importFromFile(type, file.getBytes(),
                 file.getOriginalFilename(), period, LoginHelper.getUserId(), LoginHelper.getDeptId());
             return R.ok(batchId);
+        } catch (ReimportSkippedException e) {
+            // 重复导入跳过（非失败）：内容与已生效批次完全一致，批次已置 SKIPPED
+            log.info("重复导入已跳过 (sourceType={}, period={}): {}", sourceType, period, e.getMessage());
+            return R.ok(e.getMessage());
         } catch (DataIntegrityViolationException e) {
             // 精准区分约束类型，避免所有 DataIntegrityViolation 都报"归档批次"
             String causeMsg = e.getMostSpecificCause() != null ? e.getMostSpecificCause().getMessage() : "";

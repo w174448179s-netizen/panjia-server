@@ -98,6 +98,11 @@ public class ImportBatch implements Serializable {
         transitTo(ImportBatchStatus.CANCELLED);
     }
 
+    /** 跳过：NORMALIZING → SKIPPED（终态，重复导入且内容与生效批次完全一致） */
+    public void skip() {
+        transitTo(ImportBatchStatus.SKIPPED);
+    }
+
     private void transitTo(ImportBatchStatus target) {
         if (!status.canTransitTo(target)) {
             throw new IllegalStateTransitionException(status, target);

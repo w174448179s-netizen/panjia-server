@@ -3,6 +3,7 @@ package com.panjia.received.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
+import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
 import com.panjia.contracts.port.ImportToReceivedPort;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -18,9 +19,13 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -142,14 +147,23 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             pageNum++;
         } while (pageResult.getRows() != null && !pageResult.getRows().isEmpty());
 
-        // 回写合同合计
+        // === 阶段 3：KE_RECEIVED 新签-实收人员对齐补行（2026-10-29）===
+        // 实收导入文件只有部分角色人的到账行，但新签（PERF_EXPECT）可能有更多人。
+        // 对新签有但实收缺失的人补生成实收明细（金额 = 该人新签应收合计），
+        // 对实收已有行的人等比例压缩金额，保证合同实收合计守恒。
+        int supplementedDetails = 0;
+        if ("KE_RECEIVED".equals(sourceType)) {
+            supplementedDetails = supplementMissingEmployees(batchId, period, contractCache, operatorId);
+        }
+
+        // 回写合同合计（补行阶段可能修改了 itemCount）
         for (ReceivedContract c : contractCache.values()) {
             contractMapper.updateById(c);
         }
 
-        log.info("[实收写入] 完成：batchId={}, newContracts={}, newDetails={}, skippedRefundRows={}",
-            batchId, newContracts, newDetails, skippedRefundRows);
-        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows);
+        log.info("[实收写入] 完成：batchId={}, newContracts={}, newDetails={}, skippedRefundRows={}, supplementedDetails={}",
+            batchId, newContracts, newDetails, skippedRefundRows, supplementedDetails);
+        return new ImportToReceivedResult(newContracts, newDetails, skippedRefundRows, supplementedDetails);
     }
 
     @Override
@@ -254,5 +268,217 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         d.setDetailStatus("ACTIVE");
         d.setOperatorId(operatorId);
         return d;
+    }
+
+    // ==================== KE_RECEIVED 新签-实收人员对齐补行（2026-10-29） ====================
+
+    /**
+     * 新签-实收人员对齐补行：KE_RECEIVED 专用。
+     * <p>
+     * 场景：贝壳实收导入文件只有部分角色人的到账行，但 PERF_EXPECT 新签事实里有更多人。
+     * 对新签有但实收缺失的人，补生成实收明细（金额 = 该人新签应收合计）；
+     * 对实收已有行的人，等比例压缩其实收金额，保证合同实收合计守恒。
+     * <p>
+     * 触发条件（全部满足才处理）：
+     * <ol>
+     *   <li>合同在 PERF_EXPECT 中有新签事实</li>
+     *   <li>实收侧去重员工集合 ⊂ 新签侧去重员工集合（真子集，即有人缺失）</li>
+     *   <li>实收侧恰好只有一个人有数据（多人场景保持现状不处理）</li>
+     * </ol>
+     *
+     * @return 补生成的实收明细条数
+     */
+    private int supplementMissingEmployees(Long batchId, String period,
+                                           Map<String, ReceivedContract> contractCache,
+                                           Long operatorId) {
+        // 1. 收集所有 orderNo + contractNo，查对应的 PERF_EXPECT 新签事实（跨期间，新签可能早于实收月）
+        Set<String> bizKeys = new HashSet<>();
+        for (ReceivedContract c : contractCache.values()) {
+            if (c.getOrderNo() != null && !c.getOrderNo().isBlank()) {
+                bizKeys.add(c.getOrderNo().trim());
+            }
+            if (c.getContractNo() != null && !c.getContractNo().isBlank()) {
+                bizKeys.add(c.getContractNo().trim());
+            }
+        }
+        if (bizKeys.isEmpty()) {
+            return 0;
+        }
+
+        List<PerformanceFactSummaryDTO> expectFacts = commissionPerformanceQueryPort
+            .findActiveByBizKeys(bizKeys, "PERF_EXPECT");
+        if (expectFacts == null || expectFacts.isEmpty()) {
+            return 0;
+        }
+
+        // 2. 按订单号归组新签事实 → 每人应收合计 + 代表性 fact（取字段用）
+        Map<String, Map<Long, BigDecimal>> expectAmountByEmp = new LinkedHashMap<>();
+        Map<String, Map<Long, PerformanceFactSummaryDTO>> expectRepByEmp = new LinkedHashMap<>();
+        for (PerformanceFactSummaryDTO fact : expectFacts) {
+            String targetOrderNo = fact.getOrderNo();
+            if (targetOrderNo == null || targetOrderNo.isBlank()) {
+                targetOrderNo = findOrderNoByContract(contractCache, fact.getContractNo());
+                if (targetOrderNo == null) continue;
+            }
+            Long empId = fact.getEmployeeId();
+            if (empId == null) continue;
+            BigDecimal amt = fact.getAmount() != null ? fact.getAmount() : BigDecimal.ZERO;
+            expectAmountByEmp.computeIfAbsent(targetOrderNo, k -> new LinkedHashMap<>())
+                .merge(empId, amt, BigDecimal::add);
+            expectRepByEmp.computeIfAbsent(targetOrderNo, k -> new LinkedHashMap<>())
+                .putIfAbsent(empId, fact);
+        }
+
+        // 3. 逐合同处理
+        int supplementCount = 0;
+        for (ReceivedContract contract : contractCache.values()) {
+            String orderNo = contract.getOrderNo();
+            if (orderNo == null || orderNo.isBlank()) continue;
+
+            Map<Long, BigDecimal> expectAmounts = expectAmountByEmp.get(orderNo);
+            if (expectAmounts == null || expectAmounts.isEmpty()) continue;
+
+            // 查合同下已有的 ACTIVE 实收明细
+            List<ReceivedDetail> existingDetails = detailMapper.selectList(
+                new LambdaQueryWrapper<ReceivedDetail>()
+                    .eq(ReceivedDetail::getContractId, contract.getId())
+                    .eq(ReceivedDetail::getDetailStatus, DETAIL_STATUS_ACTIVE));
+            if (existingDetails.isEmpty()) continue;
+
+            // 实收侧去重员工 + 每人实收合计
+            Map<Long, BigDecimal> realByEmpId = new LinkedHashMap<>();
+            for (ReceivedDetail d : existingDetails) {
+                if (d.getEmployeeId() == null) continue;
+                realByEmpId.merge(d.getEmployeeId(),
+                    d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO,
+                    BigDecimal::add);
+            }
+
+            Set<Long> expectEmps = expectAmounts.keySet();
+            Set<Long> realEmps = realByEmpId.keySet();
+
+            // 真子集检查：实收 ⊂ 新签 → 有人缺失
+            LinkedHashSet<Long> missing = new LinkedHashSet<>(expectEmps);
+            missing.removeAll(realEmps);
+            if (missing.isEmpty()) continue;
+
+            // 实收侧多人场景 → 跳过（用户确认单人场景才触发）
+            if (realEmps.size() != 1) {
+                log.warn("[实收补行] 实收侧有多人({})，跳过：orderNo={}", realEmps.size(), orderNo);
+                continue;
+            }
+
+            log.info("[实收补行] 触发：orderNo={}, 新签人数={}, 实收人数={}, 缺失人数={}",
+                orderNo, expectEmps.size(), realEmps.size(), missing.size());
+
+            // 4. 计算缺失人应收合计
+            BigDecimal sumMissingExpect = BigDecimal.ZERO;
+            for (Long empId : missing) {
+                BigDecimal amt = expectAmounts.getOrDefault(empId, BigDecimal.ZERO);
+                sumMissingExpect = sumMissingExpect.add(amt);
+            }
+
+            // 5. 调整已有实收人的金额：等比例压缩
+            BigDecimal newExistingTotal = contract.getPeriodTotalReceived().subtract(sumMissingExpect);
+            Long existingEmpId = realEmps.iterator().next();
+            adjustExistingEmpRows(existingDetails, existingEmpId, newExistingTotal);
+
+            // 6. 为缺失人补生成实收明细（从 PERF_EXPECT 镜像字段）
+            Map<Long, PerformanceFactSummaryDTO> repMap = expectRepByEmp.get(orderNo);
+            for (Long empId : missing) {
+                PerformanceFactSummaryDTO fact = repMap != null ? repMap.get(empId) : null;
+                if (fact == null) continue;
+                BigDecimal expectAmt = expectAmounts.getOrDefault(empId, BigDecimal.ZERO);
+
+                ReceivedDetail newDetail = new ReceivedDetail();
+                newDetail.setContractId(contract.getId());
+                newDetail.setEmployeeId(empId);
+                newDetail.setDeptId(fact.getDeptId());
+                newDetail.setEmployeeExternalCode(fact.getEmployeeCode());
+                newDetail.setRoleType(fact.getRoleType());
+                newDetail.setRoleName(fact.getEmployeeName());
+                newDetail.setShareRatio(fact.getShareRatio() != null ? fact.getShareRatio() : BigDecimal.ONE);
+                newDetail.setPerformanceAmount(expectAmt);
+                newDetail.setFeeItem(fact.getFeeItem());
+                newDetail.setPeriod(period);
+                newDetail.setEffectiveDate(fact.getBusinessDate() != null
+                    ? fact.getBusinessDate().toLocalDate() : LocalDate.now());
+                newDetail.setSourceKey(buildSupplementSourceKey(orderNo, contract.getContractNo(),
+                    fact, period));
+                newDetail.setSourceBatchId(batchId);
+                newDetail.setNormalizedRecordId(null);
+                newDetail.setDetailStatus(DETAIL_STATUS_ACTIVE);
+                newDetail.setOperatorId(operatorId);
+                detailMapper.insert(newDetail);
+                supplementCount++;
+            }
+
+            // 7. 更新合同 itemCount（periodTotalReceived 不变：先减后加已抵消）
+            contract.setItemCount(contract.getItemCount() + missing.size());
+
+            log.info("[实收补行] 完成：orderNo={}, supplementCount={}, sumMissingExpect={}, newExistingTotal={}",
+                orderNo, supplementCount, sumMissingExpect, newExistingTotal);
+        }
+        return supplementCount;
+    }
+
+    /**
+     * 把指定员工的所有实收明细行按比例压缩，使合计 = targetAmount。
+     * <p>
+     * 等比例公式：每条行 new_amount = old_amount / old_total × target_amount（保留 2 位小数）。
+     * old_total = 0 时（极罕见）平均分配。
+     */
+    private void adjustExistingEmpRows(List<ReceivedDetail> allDetails, Long employeeId, BigDecimal targetAmount) {
+        List<ReceivedDetail> empRows = new ArrayList<>();
+        for (ReceivedDetail d : allDetails) {
+            if (employeeId.equals(d.getEmployeeId())) empRows.add(d);
+        }
+        if (empRows.isEmpty()) return;
+
+        BigDecimal oldTotal = BigDecimal.ZERO;
+        for (ReceivedDetail d : empRows) {
+            oldTotal = oldTotal.add(d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO);
+        }
+
+        if (oldTotal.compareTo(BigDecimal.ZERO) == 0) {
+            BigDecimal perRow = targetAmount.divide(BigDecimal.valueOf(empRows.size()), 2, RoundingMode.HALF_UP);
+            for (ReceivedDetail d : empRows) {
+                d.setPerformanceAmount(perRow);
+                detailMapper.updateById(d);
+            }
+        } else {
+            for (ReceivedDetail d : empRows) {
+                BigDecimal oldAmount = d.getPerformanceAmount() != null ? d.getPerformanceAmount() : BigDecimal.ZERO;
+                BigDecimal newAmount = oldAmount.divide(oldTotal, 10, RoundingMode.HALF_UP)
+                    .multiply(targetAmount).setScale(2, RoundingMode.HALF_UP);
+                d.setPerformanceAmount(newAmount);
+                detailMapper.updateById(d);
+            }
+        }
+    }
+
+    /** 新签事实没有 orderNo 时，从 contractCache 里按 contractNo 反查 orderNo。 */
+    private String findOrderNoByContract(Map<String, ReceivedContract> contractCache, String contractNo) {
+        if (contractNo == null || contractNo.isBlank()) return null;
+        for (ReceivedContract c : contractCache.values()) {
+            if (contractNo.trim().equals(c.getContractNo()) && c.getOrderNo() != null) {
+                return c.getOrderNo();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 补行专用 sourceKey。格式同 {@link #buildDetailSourceKey}，追加 SUPPLEMENT 标记 + 新签 factId，
+     * 避免和原始行冲突；重导时旧批次被 supersede，补行也随批次一起失效重建。
+     */
+    private String buildSupplementSourceKey(String orderNo, String contractNo,
+                                            PerformanceFactSummaryDTO fact, String period) {
+        return (orderNo != null ? orderNo : "") + "|"
+            + (contractNo != null ? contractNo : "") + "|"
+            + (fact.getEmployeeCode() != null ? fact.getEmployeeCode() : "") + "|"
+            + (fact.getFeeItem() != null ? fact.getFeeItem() : "") + "|"
+            + (fact.getRoleType() != null ? fact.getRoleType() : "") + "|"
+            + period + "|SUPPLEMENT|" + fact.getFactId();
     }
 }

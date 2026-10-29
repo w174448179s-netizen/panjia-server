@@ -17,7 +17,7 @@ public enum ImportBatchStatus {
     PARSING(0, "解析中", Set.of("NORMALIZING", "FAILED"), false, true),
 
     /** 归一化中（列映射 + 校验 → NormalizedRecord / Sink） */
-    NORMALIZING(1, "归一化中", Set.of("PENDING_CONFIRM", "ARCHIVED", "FAILED"), false, true),
+    NORMALIZING(1, "归一化中", Set.of("PENDING_CONFIRM", "ARCHIVED", "FAILED", "SKIPPED"), false, true),
 
     /** 待确认（有 ImportIssue，需人工处理） */
     PENDING_CONFIRM(2, "待确认", Set.of("NORMALIZING", "ARCHIVED", "FAILED"), false, false),
@@ -29,7 +29,13 @@ public enum ImportBatchStatus {
     FAILED(4, "失败", Set.of(), true, false),
 
     /** 已撤销（终态：用户主动撤销导入，业绩事实已冲销） */
-    CANCELLED(5, "已撤销", Set.of(), true, false);
+    CANCELLED(5, "已撤销", Set.of(), true, false),
+
+    /**
+     * 已跳过（终态：重复导入且归一化内容与现有生效批次完全一致）。
+     * 不冲销旧批次、不归档、不发事件，仅保留本次导入痕迹供追溯。
+     */
+    SKIPPED(6, "已跳过", Set.of(), true, false);
 
     @EnumValue
     private final int code;

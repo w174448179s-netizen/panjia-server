@@ -13,6 +13,7 @@ import com.panjia.importdomain.domain.ImportIssuePhase;
 import com.panjia.importdomain.domain.ImportIssueStatus;
 import com.panjia.importdomain.domain.ImportIssueType;
 import com.panjia.importdomain.domain.ImportSourceType;
+import com.panjia.importdomain.domain.ReimportSkippedException;
 import com.panjia.importdomain.domain.NormalizedRecord;
 import com.panjia.importdomain.domain.NormalizedRecordType;
 import com.panjia.importdomain.domain.raw.RawAttendance;
@@ -143,6 +144,14 @@ public class ImportEngine {
      */
     public Long importFromFile(ImportSourceType sourceType, byte[] content,
                                String fileName, String period, Long operatorId, Long deptId) {
+        // 重复导入前置校验（解析/落库前即拦截）：同（类型, 归属月, 部门）已存在生效批次，
+        // 且该批次已被下游消费（已封账/已审批业绩调整/已审批实收确认）→ 拒绝本次导入。
+        // 与「撤销导入」的 checkRevocable 口径对称，避免整批冲销把已调整、已结佣的数据打回草稿。
+        // 条件与 doNormalizePhase 的 supersede 分支严格一致：POINTS 同月允许多批次并存、不做整批替换，
+        // 故不参与本校验，避免误拦积分导入。
+        if (!isMergeSource(sourceType)) {
+            batchSupersedeService.assertReimportAllowed(sourceType, period, deptId);
+        }
         // 历史工资：多模板管线（同 source_type 10 套激活模板逐 sheet 解析，建一个批次）
         if (sourceType == ImportSourceType.HISTORY_PAYROLL) {
             return self.importHistoryPayroll(sourceType, content, fileName, period, operatorId, deptId);
@@ -186,6 +195,10 @@ public class ImportEngine {
         // 6. 事务 B：归一化
         try {
             self.doNormalizePhase(batch.getId(), sourceType, period);
+        } catch (ReimportSkippedException e) {
+            // 重复导入跳过（非失败）：批次已在事务内提交为 SKIPPED，不再标记失败
+            log.info("重复导入已跳过 batchId={}: {}", batch.getId(), e.getMessage());
+            throw e;
         } catch (Exception e) {
             log.error("归一化失败 batchId={}", batch.getId(), e);
             markFailed(batch.getId(), e);
@@ -263,6 +276,10 @@ public class ImportEngine {
         // 事务 B：归一化（姓名匹配 + 口径分流 + 反折算）
         try {
             self.doNormalizePhase(batch.getId(), sourceType, period);
+        } catch (ReimportSkippedException e) {
+            // 重复导入跳过（非失败）：批次已在事务内提交为 SKIPPED，不再标记失败
+            log.info("重复导入已跳过 batchId={}: {}", batch.getId(), e.getMessage());
+            throw e;
         } catch (Exception e) {
             log.error("归一化失败 batchId={}", batch.getId(), e);
             markFailed(batch.getId(), e);
@@ -521,7 +538,7 @@ public class ImportEngine {
 
     // ==================== 事务 B：归一化 ====================
 
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class, noRollbackFor = ReimportSkippedException.class)
     public void doNormalizePhase(Long batchId, ImportSourceType sourceType, String period) {
         ImportBatch batch = batchMapper.selectById(batchId);
         if (batch == null) {
@@ -558,6 +575,23 @@ public class ImportEngine {
         for (ImportIssue issue : issues) {
             issue.setBatchId(batchId);
             issueMapper.insert(issue);
+        }
+
+        // 重复导入幂等（2026-10-29）：归一化已完成，与现有生效批次逐行比对内容；
+        // 完全一致 → 批次转 SKIPPED 并抛 ReimportSkippedException（noRollbackFor 保证状态提交），
+        // 不冲销旧批次、不归档、不发事件，仅留痕供追溯。
+        // 内容有差异（金额修正/行增删）继续走正常替换，保证修正版能生效。
+        if (!isMergeSource(batch.getSourceType())) {
+            ImportBatch activeBatch = batchSupersedeService.findActiveArchivedBatch(
+                batch.getSourceType(), batch.getPeriod(), batch.getDeptId(), batch.getId());
+            if (activeBatch != null
+                && batchSupersedeService.isContentIdentical(batch.getId(), activeBatch.getId())) {
+                batch.skip();
+                batch.setRemark("与已生效批次 " + activeBatch.getBatchNo() + " 内容完全一致，本次导入已跳过");
+                batchMapper.updateById(batch);
+                throw new ReimportSkippedException("导入内容与已生效批次（" + activeBatch.getBatchNo()
+                    + "）完全一致，本次导入已跳过，无需重复导入");
+            }
         }
 
         // 更新批次状态：仅 blocking issue（格式/结构错误）→ PENDING_CONFIRM 人工处理；
