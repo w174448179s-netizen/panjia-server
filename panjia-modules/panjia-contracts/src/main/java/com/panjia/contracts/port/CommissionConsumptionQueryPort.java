@@ -41,14 +41,20 @@ public interface CommissionConsumptionQueryPort {
     /**
      * 按业务键返回已消费明细（增量导入用，粒度到合同/订单，避免整批拒绝）。
      * <p>
-     * 判定口径与 {@link #checkRevocable} 完全一致，只是把「整体是否可撤」拆成
+     * 判定口径与 {@link #checkRevocable} 一致，只是把「整体是否可撤」拆成
      * 「哪些合同/订单已被结佣占用」。键格式：{@code C|合同号}、{@code O|订单号}。
+     * <p>
+     * 与 {@link #checkRevocable} 的差异：本方法按<b>归属月</b>过滤。增量导入是逐月补到账，
+     * 8 月实收已出结佣单不代表该订单 7 月的实收也能被吞掉——不按归属月过滤会把整个订单
+     * 后续月份的实收全部拦死（2026-10-29 案例：TGCF2607601156 / 9013490）。
      *
+     * @param period      本批归属期间（YYYY-MM）；为空则不过滤期间（撤销场景语义）
      * @param contractNos 合同号集合（可空）
      * @param orderNos    订单号集合（可空）
      * @return 业务键 → 不可变更原因；无消费返回空 Map
      */
-    java.util.Map<String, String> findConsumedBizKeys(Collection<String> contractNos,
+    java.util.Map<String, String> findConsumedBizKeys(String period,
+                                                      Collection<String> contractNos,
                                                       Collection<String> orderNos);
 
     /**

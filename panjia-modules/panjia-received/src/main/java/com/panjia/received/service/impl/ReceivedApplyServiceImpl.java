@@ -1106,7 +1106,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         event.setContractNo(apply.getContractNo());
         event.setBizType(apply.getBizType());
         event.setOperatorId(operatorId);
-        // 仅系统自动通过（导入分流/新签触发）才允许结佣域自动发起，人工审批通过不自动发起
+        // 审批通过（系统自动/人工终审）均触发结佣域自动发起（二手买卖由消费方跳过）
         event.setAutoApproved(autoApproved);
         eventPort.emit(event);
     }
@@ -2160,7 +2160,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.setApproverId(handlerId);
                 apply.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(apply);
-                // 人工审批通过：发布事件仅作审批留痕，结佣域不自动发起（由业务人员手工发起）
+                // 人工审批通过：发布事件，结佣域除二手买卖外自动发起结佣（2026-10-29 改定）
                 emitApprovedEvent(apply, handlerId, false);
                 log.info("[实收审批工作流] 审批通过：applyId={}, handler={}", applyId, handler);
             }

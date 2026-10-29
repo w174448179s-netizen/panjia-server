@@ -156,8 +156,8 @@ public interface ReceivedApplyPort {
      * 实收审批自动发起结佣留痕：把结佣域自动生成的结佣申请单号回填到实收审批单，
      * 供实收审批列表/详情提示「已自动发起结佣」。
      * <p>
-     * 仅系统自动审批通过（非人工审批）路径调用；幂等：按 applyId 直接 UPDATE，
-     * 审批单不存在时静默忽略。
+     * 仅审批通过的非「二手买卖」单据（系统自动通过/人工终审通过）调用；
+     * 幂等：按 applyId 直接 UPDATE，审批单不存在时静默忽略。
      *
      * @param applyId             实收审批单 ID
      * @param commissionApplyNo   自动生成的结佣申请单号（CAPP 前缀）

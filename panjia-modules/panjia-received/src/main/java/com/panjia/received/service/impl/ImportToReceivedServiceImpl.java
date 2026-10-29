@@ -429,8 +429,9 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             }
         }
 
+        // 按本批归属月过滤：同一订单其他月份已出结佣单，不构成本月实收不可导入的理由
         Map<String, String> reasons = new LinkedHashMap<>(
-            commissionConsumptionQueryPort.findConsumedBizKeys(contractNos, orders));
+            commissionConsumptionQueryPort.findConsumedBizKeys(period, contractNos, orders));
 
         // 实收审批单：已提交/已通过的单不再接受新明细（autoCreate 只会合并草稿/提交单），
         // 故整单对应的订单视为已消费

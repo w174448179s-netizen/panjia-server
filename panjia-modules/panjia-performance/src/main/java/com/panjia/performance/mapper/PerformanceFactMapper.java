@@ -2449,7 +2449,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
               AND f.fact_type = 'PERF_EXPECT'
-              AND f.period LIKE #{year} || '-%'
+              AND f.period LIKE #{year}::text || '-%'
               <if test="quarter != null">
                 AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
               </if>
@@ -2503,7 +2503,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             FROM pj_perf_fact f
             WHERE f.fact_status = 'ACTIVE'
               AND f.fact_type = 'PERF_EXPECT'
-              AND f.period LIKE #{year} || '-%'
+              AND f.period LIKE #{year}::text || '-%'
               <if test="quarter != null">
                 AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
               </if>
@@ -2565,7 +2565,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
-          AND f.period LIKE #{year} || '-%'
+          AND f.period LIKE #{year}::text || '-%'
           <if test="quarter != null">
             AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
           </if>
@@ -2609,7 +2609,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         FROM pj_perf_fact f
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
-          AND f.period LIKE #{year} || '-%'
+          AND f.period LIKE #{year}::text || '-%'
           <if test="quarter != null">
             AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
           </if>

@@ -370,6 +370,7 @@ public class ReceivedRevokedHandler implements DomainEventHandler {
             replay.setOperatorId(operatorId);
             // 撤销重放属于补偿动作，不触发结佣自动发起（避免批次撤销后重复建结佣单）
             replay.setAutoApproved(false);
+            replay.setReplay(true);
             eventPort.emit(replay);
             replayed++;
         }

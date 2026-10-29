@@ -13,15 +13,14 @@ import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * 实收审批通过事件处理器（结佣域，2026-10-21 定稿）。
+ * 实收审批通过事件处理器（结佣域，2026-10-29 改定）。
  * <p>
- * 触发：实收审批单变为 APPROVED。仅处理<b>系统自动审批通过</b>的单据
- * （{@link ReceivedApprovedEvent#isAutoApproved()}=true，即贝壳实收导入分流/新签触发自动通过）：
+ * 触发：实收审批单变为 APPROVED（系统自动审批通过、人工审批工作流终审通过均触发）：
  * <ul>
  *   <li>业务类型为「二手买卖」→ 跳过，不自动发起结佣；</li>
  *   <li>其余类型 → 按<b>实收月</b>（事件 period，即发起月）自动发起并直提审批流。</li>
  * </ul>
- * 人工审批通过（autoApproved=false）与批次撤销重放均不自动发起，由业务人员手工发起。
+ * 批次撤销/恢复的补偿性重放（{@link ReceivedApprovedEvent#isReplay()}=true）不自动发起，避免重复建单。
  * <p>
  * 留痕：发起成功后在实收审批单回填结佣申请单号（同一事务），
  * 实收审批列表/详情提示「已自动发起结佣」。
@@ -54,9 +53,9 @@ public class ReceivedApplyApprovedHandler implements DomainEventHandler {
             log.error("[结佣-实收通过] 事件反序列化失败：eventId={}", eventId, e);
             return;
         }
-        if (!event.isAutoApproved()) {
-            // 人工审批通过不自动发起结佣
-            log.info("[结佣-实收通过] 人工审批通过，不自动发起结佣：eventId={}, applyId={}",
+        if (event.isReplay()) {
+            // 批次撤销/恢复的事件重放：仅留痕，不自动建结佣单
+            log.info("[结佣-实收通过] 撤销重放事件，不自动发起结佣：eventId={}, applyId={}",
                 eventId, event.getApplyId());
             return;
         }

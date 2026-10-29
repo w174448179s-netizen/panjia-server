@@ -189,9 +189,9 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
         <if test="period != null and period != ''">AND grp.period = #{period}</if>
         <if test="bizType != null and bizType != ''">AND grp.biz_type = #{bizType}</if>
         <if test="keyword != null and keyword != ''">
-          AND (grp.contract_no LIKE CONCAT('%', #{keyword}, '%')
-               OR grp.order_no LIKE CONCAT('%', #{keyword}, '%')
-               OR grp.property_address LIKE CONCAT('%', #{keyword}, '%'))
+          AND (grp.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
+               OR grp.order_no LIKE CONCAT('%', #{keyword}::text, '%')
+               OR grp.property_address LIKE CONCAT('%', #{keyword}::text, '%'))
         </if>
         <if test="deptId != null">
           AND EXISTS (

@@ -75,10 +75,12 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     @Override
     public List<PerformanceFactSummaryDTO> findActiveByContract(String period, String orderNo, String contractNo) {
         // period 可空：空时查该合同全部期间（结佣发起月与实收月解耦）
-        if (contractNo == null || contractNo.isBlank()) {
+        // 无合同号业务（家装荐客等）以订单号为业务锚点：合同号为空时退用订单号作匹配键
+        String matchKey = (contractNo == null || contractNo.isBlank()) ? orderNo : contractNo;
+        if (matchKey == null || matchKey.isBlank()) {
             return Collections.emptyList();
         }
-        return realMapper.selectActiveByContract(period, orderNo, contractNo);
+        return realMapper.selectActiveByContract(period, orderNo, matchKey);
     }
 
     @Override
