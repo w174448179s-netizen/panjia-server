@@ -6,7 +6,6 @@ import cn.hutool.core.lang.Dict;
 import cn.hutool.core.lang.TypeReference;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.core.util.ObjectUtil;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -43,6 +42,8 @@ import org.dromara.workflow.service.IFlwInstanceService;
 import org.dromara.workflow.service.IFlwNodeExtService;
 import org.dromara.workflow.service.IFlwTaskService;
 import org.dromara.warm.flow.orm.entity.FlowNode;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Component;
 
@@ -113,15 +114,19 @@ public class WorkflowGlobalListener implements GlobalListener {
     /**
      * 启动重扫补偿（替代原 DirectorTimeoutJob 兜底）。
      * <p>
-     * 应用启动时一次性扫描所有未办理任务，对带 {@code AutoApproval} ext 的节点重新注册定时器：
+     * 应用启动完成（{@link ApplicationReadyEvent}）时一次性扫描所有未办理任务，
+     * 对带 {@code AutoApproval} ext 的节点重新注册定时器：
      * <ul>
      *   <li>剩余时长 = {@code ext.hours * 3600 - (now - task.createTime) / 1000} 秒；</li>
      *   <li>剩余 > 0：按剩余时长重新注册 TaskScheduler 定时器；</li>
      *   <li>剩余 ≤ 0（已超时）：立即触发自动审批。</li>
      * </ul>
      * 多节点部署时所有节点都会扫描，重复办理由 Warm-Flow 引擎拒绝（completeTask 失败仅 log warn）。
+     * <p>
+     * 注意：不能在 Bean 初始化回调阶段执行——此时 MyBatis-Plus-Join 的 MPJInterceptor 尚未注册到
+     * SqlSessionFactory，连表查询会退回主表实体类型（FlowTask），导致包装 VO 时类型转换失败。
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent.class)
     public void rescheduleAutoApprovalOnStartup() {
         try {
             FlowTaskBo bo = new FlowTaskBo();

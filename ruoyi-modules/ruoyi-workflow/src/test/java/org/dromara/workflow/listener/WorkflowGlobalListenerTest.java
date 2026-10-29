@@ -95,18 +95,20 @@ class WorkflowGlobalListenerTest {
 
     /**
      * S16-6 / S16-7 共同前置：启动重扫补偿（替代原 DirectorTimeoutJob 兜底）。
-     * <p>用户决策（2026-09-16）：删除 DirectorTimeoutJob 每 10 分钟轮询兜底，
-     * 改用 WorkflowGlobalListener.rescheduleAutoApprovalOnStartup @PostConstruct
-     * 启动时一次性扫描所有未办理任务，按剩余时长重新注册 TaskScheduler 定时器，
+     * 用户决策（2026-09-16）：删除 DirectorTimeoutJob 每 10 分钟轮询兜底，
+     * 改用 WorkflowGlobalListener.rescheduleAutoApprovalOnStartup（ApplicationReadyEvent 启动时）
+     * 一次性扫描所有未办理任务，按剩余时长重新注册 TaskScheduler 定时器，
      * 已超时的立即触发。解决应用重启丢定时器问题。
      */
     @Test
     void S16_6_startupRescheduleCompensatesLostTimers() throws IOException {
         String content = read();
 
-        // 必须有 @PostConstruct 启动重扫方法
-        assertTrue(content.contains("@PostConstruct"),
-            "S16-6 违规：缺少 @PostConstruct，无启动重扫补偿入口");
+        // 必须在应用启动完成后触发（不能用 @PostConstruct，此时 MPJ 拦截器尚未注册）
+        assertTrue(content.contains("@EventListener(ApplicationReadyEvent.class)"),
+            "S16-6 违规：启动重扫未挂 ApplicationReadyEvent，启动早期查询会拿到实体类型而崩溃");
+        assertFalse(content.contains("@PostConstruct"),
+            "S16-6 违规：启动重扫不能用 @PostConstruct，MPJ 拦截器未注册时连表查询类型错误");
         assertTrue(content.contains("rescheduleAutoApprovalOnStartup("),
             "S16-6 违规：缺少 rescheduleAutoApprovalOnStartup 方法");
 
