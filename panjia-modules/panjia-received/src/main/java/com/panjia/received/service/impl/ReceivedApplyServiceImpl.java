@@ -2246,7 +2246,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (StringUtils.isBlank(query.getPeriod())) {
             return listMergedByContract(query, pageQuery, wrapper, pendingRows);
         }
-        // 有待匹配展示行时需与单据行统一排序分页，改为全量内存分页；无展示行时保持 DB 分页（老路径不变）
+        // 有待匹配展示行时需与单据行统一排序分页；为避免全量加载，只取排序后前「页码 × 页大小」条单据行，
+        // 与待匹配行合并排序后切当前页（待匹配行只会把后续单据行后移，切页所需单据行数不超过该窗口）
+        int pageNum = pageQuery.getPageNum() != null && pageQuery.getPageNum() > 0 ? pageQuery.getPageNum() : 1;
+        int pageSize = pageQuery.getPageSize() != null && pageQuery.getPageSize() > 0 ? pageQuery.getPageSize() : 20;
         List<ReceivedApply> records;
         long applyTotal;
         if (pendingRows.isEmpty()) {
@@ -2254,8 +2257,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             records = page.getRecords();
             applyTotal = page.getTotal();
         } else {
-            records = applyMapper.selectList(wrapper);
-            applyTotal = records.size();
+            Page<ReceivedApply> page = applyMapper.selectPage(new Page<>(1, (long) pageNum * pageSize, true), wrapper);
+            records = page.getRecords();
+            applyTotal = page.getTotal();
         }
         fillContractMetrics(records);
         fillManualReviewReason(records);
@@ -2377,7 +2381,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         summary.put("totalReceivedAmount", totalReceivedAmount);
         summary.put("totalExpectedAmount", totalExpectedAmount);
         summary.put("totalExpectedConvertedAmount", totalExpectedConvertedAmount);
-        return pageRows(rows, pageQuery, summary);
+        return pageRows(rows, pageQuery, summary, applyTotal + pendingRows.size());
     }
 
     /**
@@ -2553,11 +2557,19 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     /** 内存分页（列表行由单据行 + 待匹配展示行合并而来，无法下推 DB 分页）。 */
     private PageResult<ReceivedApply> pageRows(List<ReceivedApply> rows, PageQuery pageQuery,
                                                Map<String, Object> summary) {
-        int total = rows.size();
+        return pageRows(rows, pageQuery, summary, rows.size());
+    }
+
+    /**
+     * 内存分页（显式总数）：行集只取了排序窗口内的单据行，总数需由调用方按
+     * 「单据总数 + 待匹配展示行数」传入，不能用 rows.size()。
+     */
+    private PageResult<ReceivedApply> pageRows(List<ReceivedApply> rows, PageQuery pageQuery,
+                                               Map<String, Object> summary, long total) {
         int pageNum = pageQuery.getPageNum() != null ? pageQuery.getPageNum() : 1;
         int pageSize = pageQuery.getPageSize() != null ? pageQuery.getPageSize() : 20;
-        int from = Math.max(0, Math.min((pageNum - 1) * pageSize, total));
-        int to = Math.min(from + pageSize, total);
+        int from = (int) Math.max(0, Math.min((long) (pageNum - 1) * pageSize, total));
+        int to = (int) Math.min((long) from + pageSize, total);
         PageResult<ReceivedApply> result = PageResult.build(new ArrayList<>(rows.subList(from, to)), total);
         result.setSummary(summary);
         return result;

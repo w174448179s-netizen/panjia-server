@@ -406,6 +406,42 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
+    public Map<String, BigDecimal> sumUnsettledExpectAmountsByKeys(java.util.Collection<String> bizKeys, Long employeeId) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
+        Map<String, BigDecimal> result = new HashMap<>();
+        // 按 (order_no, contract_no) 聚合行回写：与旧实现「逐事实累加两键」口径完全一致
+        for (PerformanceFactSummaryDTO f
+            : factMapper.selectUnsettledExpectSumsByKeys(bizKeys, bizKeys, employeeId)) {
+            BigDecimal amt = f.getAmount() == null ? BigDecimal.ZERO : f.getAmount();
+            String orderKey = StringUtils.isNotBlank(f.getOrderNo()) && wanted.contains(f.getOrderNo())
+                ? f.getOrderNo() : null;
+            String contractKey = StringUtils.isNotBlank(f.getContractNo()) && wanted.contains(f.getContractNo())
+                ? f.getContractNo() : null;
+            if (orderKey != null) {
+                result.merge(orderKey, amt, BigDecimal::add);
+            }
+            if (contractKey != null && !contractKey.equals(orderKey)) {
+                result.merge(contractKey, amt, BigDecimal::add);
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public List<PerformanceContractSummaryDTO> listUnsettledExpectGroupsByKeys(java.util.Collection<String> bizKeys,
+                                                                              Long employeeId) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        // 按 (订单号, 合同号, 归属期) 聚合行原样回传；键的归属（订单号键优先、合同号键兜底）
+        // 由调用方按输入键集合判定，与 sumUnsettledExpectAmountsByKeys 同一口径
+        return factMapper.selectUnsettledExpectGroupsByKeys(bizKeys, bizKeys, employeeId);
+    }
+
+    @Override
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId, String keyword) {
         if (isReal(factType)) {
             ReceivedRealFactPort port = realPort();

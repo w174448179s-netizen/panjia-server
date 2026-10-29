@@ -227,8 +227,13 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         vo.setRows(contracts);
         vo.setBizTypes(factMapper.selectManageBizTypes(period, factType));
 
-        Map<String, Object> stat = factMapper.selectManageSummary(
+        // 全局汇总 + 按业务类型分组一次取回（GROUPING SETS 单条 SQL，只扫一遍事实表）
+        List<Map<String, Object>> summaryGroups = factMapper.selectManageSummaryWithGroups(
             period, factType, deptId, employeeId, bizType, kw, factStatus, query.getRefundFilter(), selfEmployeeId);
+        Map<String, Object> stat = summaryGroups.stream()
+            .filter(g -> toLong(g.get("isTotal")) == 1L)
+            .findFirst()
+            .orElse(Map.of());
         PerformanceManagePageVo.Summary summary = new PerformanceManagePageVo.Summary();
         summary.setEmployeeCount(toLong(stat.get("employeeCount")));
         summary.setContractCount(toLong(stat.get("contractCount")));
@@ -236,8 +241,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         Object sum = stat.get("totalAmount");
         summary.setTotalAmount(sum == null ? BigDecimal.ZERO : new BigDecimal(sum.toString()));
         // 折算后合计：按业务类型分组金额 × 该类型系数累加（口径与列表行 convertedAmount 一致）
-        List<Map<String, Object>> bizGroups = factMapper.selectManageSummaryByBizType(
-            period, factType, deptId, employeeId, bizType, kw, factStatus, query.getRefundFilter(), selfEmployeeId);
+        List<Map<String, Object>> bizGroups = summaryGroups.stream()
+            .filter(g -> toLong(g.get("isTotal")) == 0L)
+            .toList();
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(bizGroups.stream()
             .map(g -> (String) g.get("bizType"))
             .filter(Objects::nonNull)

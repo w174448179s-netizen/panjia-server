@@ -62,11 +62,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     int restoreSupersededFacts(@Param("batchIds") List<Long> batchIds);
 
     /**
-     * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、金额合计。
+     * 全局汇总（与过滤条件一致，跨所有页）：明细数、合同数、涉及人数、金额合计，
+     * 同时按业务类型分组返回各组金额（供服务层按类型系数累加出「折算后合计」）。
+     * <p>
+     * 一次聚合出两种粒度（GROUPING SETS）：{@code isTotal=1} 的行为全局汇总行
+     * （{@code bizType} 为空但由 {@code GROUPING()} 区分，避免与 biz_type 为空的真实分组混淆），
+     * 其余行为各业务类型分组行。相比「全局汇总 + 按类型汇总」两条同条件 SQL，只扫一遍事实表
+     * （2026-10-29 优化）。
      */
     @Select("""
         <script>
-        SELECT COUNT(*) AS "detailCount",
+        SELECT GROUPING(f.biz_type) AS "isTotal",
+               f.biz_type AS "bizType",
+               COUNT(*) AS "detailCount",
                COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END) AS "contractCount",
                COUNT(DISTINCT f.employee_id) AS "employeeCount",
                COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
@@ -118,78 +126,10 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="selfEmployeeId != null">
             AND f.employee_id = #{selfEmployeeId}
           </if>
+        GROUP BY GROUPING SETS ((f.biz_type), ())
         </script>
         """)
-    java.util.Map<String, Object> selectManageSummary(@Param("period") String period,
-                                                      @Param("factType") String factType,
-                                                      @Param("deptId") Long deptId,
-                                                      @Param("employeeId") Long employeeId,
-                                                      @Param("bizType") String bizType,
-                                                      @Param("keyword") String keyword,
-                                                      @Param("factStatus") String factStatus,
-                                                      @Param("refundFilter") String refundFilter,
-                                                      @Param("selfEmployeeId") Long selfEmployeeId);
-
-    /**
-     * 全局汇总·按业务类型分组（与 selectManageSummary 同过滤条件）：
-     * 返回每组 bizType 与金额合计，供服务层按类型折算系数累加出「折算后合计」。
-     */
-    @Select("""
-        <script>
-        SELECT f.biz_type AS "bizType",
-               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
-        FROM pj_perf_fact f
-        WHERE
-        <choose>
-          <when test="factStatus == 'ALL'">f.fact_status IN ('ACTIVE', 'VOIDED')</when>
-          <!-- 已退单：合同存在已执行退单（退单表即合同退单状态源），业绩事实本身仍为 ACTIVE -->
-          <when test="factStatus == 'REFUNDED'">f.fact_status = 'ACTIVE'</when>
-          <when test="factStatus != null and factStatus != ''">f.fact_status = #{factStatus}</when>
-          <otherwise>f.fact_status = 'ACTIVE'</otherwise>
-        </choose>
-        <if test="factStatus == 'REFUNDED'">
-          AND EXISTS (
-            SELECT 1 FROM pj_perf_refund r
-            WHERE r.status = 'EXECUTED'
-              AND (r.contract_no = f.contract_no
-                   OR (r.order_no IS NOT NULL AND r.order_no = f.order_no))
-          )
-        </if>
-        <!-- 退单三态筛选（行级红冲行口径）：REFUND=仅红冲行，NORMAL=排除红冲行，空=全部 -->
-        <if test="refundFilter == 'REFUND'">
-          AND f.reversal_type = 'REDINK_REFUND'
-        </if>
-        <if test="refundFilter == 'NORMAL'">
-          AND (f.reversal_type IS NULL OR f.reversal_type != 'REDINK_REFUND')
-        </if>
-          <if test="period != null and period != ''">AND f.period = #{period}</if>
-          AND f.fact_type = #{factType}
-          <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
-                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
-          </if>
-          <if test="bizType != null and bizType != ''">
-            AND f.biz_type = #{bizType}
-          </if>
-          <if test="keyword != null and keyword != ''">
-            AND (
-              f.contract_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.order_no ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.property_address ILIKE CONCAT('%', #{keyword}::text, '%')
-              OR f.role_type ILIKE CONCAT('%', #{keyword}::text, '%')
-            )
-          </if>
-          <if test="employeeId != null">
-            AND f.employee_id = #{employeeId}
-          </if>
-          <if test="selfEmployeeId != null">
-            AND f.employee_id = #{selfEmployeeId}
-          </if>
-        GROUP BY f.biz_type
-        </script>
-        """)
-    java.util.List<java.util.Map<String, Object>> selectManageSummaryByBizType(@Param("period") String period,
+    java.util.List<java.util.Map<String, Object>> selectManageSummaryWithGroups(@Param("period") String period,
                                                       @Param("factType") String factType,
                                                       @Param("deptId") Long deptId,
                                                       @Param("employeeId") Long employeeId,
@@ -828,6 +768,73 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         </script>
         """)
     List<PerformanceFactSummaryDTO> selectFactSummariesByIds(@Param("factIds") Collection<Long> factIds);
+
+    /**
+     * 按业务键汇总「未被结佣明细占用」的 ACTIVE PERF_EXPECT 金额（结佣发起页可结佣净额）。
+     * <p>
+     * 与旧口径（全量事实行拉回应用层 + 按事实 ID 分块查 pj_commission_item）等价：
+     * 存在 status &lt;&gt; 'REVERSED' 的结佣明细即视为已结佣，该事实不计入。改为 SQL 侧按
+     * (order_no, contract_no) 聚合，只回传键对合计行；已结佣判定走部分唯一索引
+     * uk_citem_fact_active(performance_fact_id) WHERE status &lt;&gt; 'REVERSED'，避免全量事实搬运。
+     */
+    @Select("""
+        <script>
+        SELECT pe.order_no AS "orderNo",
+               pe.contract_no AS "contractNo",
+               SUM(pe.performance_amount) AS "amount"
+        FROM pj_perf_fact pe
+        WHERE pe.fact_status = 'ACTIVE'
+          AND pe.fact_type = 'PERF_EXPECT'
+          <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+          AND (pe.order_no IN
+              <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
+               OR pe.contract_no IN
+              <foreach collection="bizKeys2" item="k" open="(" separator="," close=")">#{k}</foreach>)
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_commission_item ci
+              WHERE ci.performance_fact_id = pe.id
+                AND ci.status &lt;&gt; 'REVERSED'
+          )
+        GROUP BY pe.order_no, pe.contract_no
+        </script>
+        """)
+    List<PerformanceFactSummaryDTO> selectUnsettledExpectSumsByKeys(@Param("bizKeys") Collection<String> bizKeys,
+                                                                    @Param("bizKeys2") Collection<String> bizKeys2,
+                                                                    @Param("employeeId") Long employeeId);
+
+    /**
+     * 按业务键 + 新签归属期汇总「未被结佣明细占用」的 ACTIVE PERF_EXPECT（结佣发起页逐期成行）。
+     * <p>
+     * 与 {@link #selectUnsettledExpectSumsByKeys} 同口径，多带 period 维度与条数/人数，
+     * 便于发起页按「新签归属月」分开展示（7 月已结佣、8 月退单待结佣时只出 8 月一行）。
+     */
+    @Select("""
+        <script>
+        SELECT pe.order_no AS "orderNo",
+               pe.contract_no AS "contractNo",
+               pe.period AS "period",
+               SUM(pe.performance_amount) AS "expectedAmount",
+               COUNT(*) AS "detailCount",
+               COUNT(DISTINCT pe.employee_id) AS "employeeCount"
+        FROM pj_perf_fact pe
+        WHERE pe.fact_status = 'ACTIVE'
+          AND pe.fact_type = 'PERF_EXPECT'
+          <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+          AND (pe.order_no IN
+              <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
+               OR pe.contract_no IN
+              <foreach collection="bizKeys2" item="k" open="(" separator="," close=")">#{k}</foreach>)
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_commission_item ci
+              WHERE ci.performance_fact_id = pe.id
+                AND ci.status &lt;&gt; 'REVERSED'
+          )
+        GROUP BY pe.order_no, pe.contract_no, pe.period
+        </script>
+        """)
+    List<PerformanceContractSummaryDTO> selectUnsettledExpectGroupsByKeys(@Param("bizKeys") Collection<String> bizKeys,
+                                                                          @Param("bizKeys2") Collection<String> bizKeys2,
+                                                                          @Param("employeeId") Long employeeId);
 
     /**
      * 按期间 + 合同号查询 ACTIVE 事实摘要（含合同号/订单号/房源地址，结佣按合同发起用）。

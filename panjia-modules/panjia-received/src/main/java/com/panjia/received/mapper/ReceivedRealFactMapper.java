@@ -194,48 +194,7 @@ public interface ReceivedRealFactMapper {
      */
     @Select("""
         <script>
-        <choose>
-            <when test="period != null and period != ''">
-        WITH expect_sum AS (
-            -- 新签金额口径 = 实收月及之前全部 ACTIVE PERF_EXPECT 合计（当月+历史合并，
-            -- 与 loadExpectItemFacts 2026-09-30 定稿一致）：冲正/红冲负数镜像落在当月，
-            -- 旧「当月优先排斥历史」会把新签金额算成负数（2026-10-11 修复）
-            -- 按员工筛选时仅取该员工的新签明细（员工口径，与实收 amount 同口径）
-            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
-                   SUM(pe.performance_amount) AS amt
-            FROM pj_perf_fact pe
-            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-              AND pe.period &lt;= #{period}
-              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
-            GROUP BY COALESCE(pe.order_no, pe.contract_no)
-        ), expect_period_sum AS (
-            -- 当期新签口径：仅当期 ACTIVE PERF_EXPECT 合计（含退单负事实）。
-            -- 退单负实收行（amount &lt; 0）用该口径展示「本次冲减对应的新签」，
-            -- 累计口径在退单月会与历史正数抵消为 0，看不出冲减
-            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
-                   SUM(pe.performance_amount) AS amt
-            FROM pj_perf_fact pe
-            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-              AND pe.period = #{period}
-              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
-            GROUP BY COALESCE(pe.order_no, pe.contract_no)
-        )
-            </when>
-            <otherwise>
-        WITH expect_sum AS (
-            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
-                   SUM(pe.performance_amount) AS amt
-            FROM pj_perf_fact pe
-            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
-              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
-            GROUP BY COALESCE(pe.order_no, pe.contract_no)
-        ), expect_period_sum AS (
-            -- 跨期间查询（不选月份）无「当期」概念，负行沿用累计口径
-            SELECT NULL::text AS biz_key, 0::numeric AS amt WHERE FALSE
-        )
-            </otherwise>
-        </choose>
-        , s AS (
+        WITH s AS (
             SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,'')) ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
                    rc.contract_no,
                    rc.order_no,
@@ -272,7 +231,61 @@ public interface ReceivedRealFactMapper {
             <if test="employeeId != null">
               AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
             </if>
+        ),
+        -- 本次结果集涉及的合同键（合同号/订单号各取一列去重）：
+        -- 新签期望只按这些键过滤，避免每次请求对 pj_perf_fact 全表聚合
+        -- （2026-10-29 优化：该聚合从「全表」降到「结果集同阶」）
+        keys AS (
+            SELECT DISTINCT k FROM (
+                SELECT contract_no AS k FROM s WHERE contract_no IS NOT NULL
+                UNION ALL
+                SELECT order_no AS k FROM s WHERE order_no IS NOT NULL
+            ) kk
         )
+        <choose>
+            <when test="period != null and period != ''">
+        , expect_sum AS (
+            -- 新签金额口径 = 实收月及之前全部 ACTIVE PERF_EXPECT 合计（当月+历史合并，
+            -- 与 loadExpectItemFacts 2026-09-30 定稿一致）：冲正/红冲负数镜像落在当月，
+            -- 旧「当月优先排斥历史」会把新签金额算成负数（2026-10-11 修复）
+            -- 按员工筛选时仅取该员工的新签明细（员工口径，与实收 amount 同口径）
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period &lt;= #{period}
+              AND (pe.contract_no IN (SELECT k FROM keys) OR pe.order_no IN (SELECT k FROM keys))
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        ), expect_period_sum AS (
+            -- 当期新签口径：仅当期 ACTIVE PERF_EXPECT 合计（含退单负事实）。
+            -- 退单负实收行（amount &lt; 0）用该口径展示「本次冲减对应的新签」，
+            -- 累计口径在退单月会与历史正数抵消为 0，看不出冲减
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND pe.period = #{period}
+              AND (pe.contract_no IN (SELECT k FROM keys) OR pe.order_no IN (SELECT k FROM keys))
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        )
+            </when>
+            <otherwise>
+        , expect_sum AS (
+            SELECT COALESCE(pe.order_no, pe.contract_no) AS biz_key,
+                   SUM(pe.performance_amount) AS amt
+            FROM pj_perf_fact pe
+            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+              AND (pe.contract_no IN (SELECT k FROM keys) OR pe.order_no IN (SELECT k FROM keys))
+              <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+            GROUP BY COALESCE(pe.order_no, pe.contract_no)
+        ), expect_period_sum AS (
+            -- 跨期间查询（不选月份）无「当期」概念，负行沿用累计口径
+            SELECT NULL::text AS biz_key, 0::numeric AS amt WHERE FALSE
+        )
+            </otherwise>
+        </choose>
         , s_with_expect AS (
             -- PERF_EXPECT 双侧匹配：order_no 优先精确命中，未命中退化 contract_no；
             -- 修复 order_no 脏数据（PERF_EXPECT.order_no 被误填成 contract_no）导致实收侧
@@ -398,18 +411,32 @@ public interface ReceivedRealFactMapper {
                agg.detail_count AS "detailCount",
                agg.employee_count AS "employeeCount"
         FROM pj_perf_received_apply ra
-        LEFT JOIN (
-            SELECT dd.received_apply_id,
-                   COUNT(*) AS detail_count,
+        -- 明细数/员工数按单据逐个聚合（走 idx_rd_apply），避免每次请求对
+        -- pj_received_detail 全表 GROUP BY（2026-10-29 优化）
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS detail_count,
                    COUNT(DISTINCT COALESCE(dd.employee_id::text, dd.employee_external_code)) AS employee_count
             FROM pj_received_detail dd
-            WHERE dd.detail_status = 'ACTIVE'
-            GROUP BY dd.received_apply_id
-        ) agg ON agg.received_apply_id = ra.id
+            WHERE dd.received_apply_id = ra.id
+              AND dd.detail_status = 'ACTIVE'
+        ) agg ON TRUE
         WHERE ra.status = 'APPROVED'
           <!-- 退单负实收单（单号沿用 TD 退单号）不进结佣发起候选：
                负部分已由结佣冲减明细/负新签事实处理，避免与新签负事实重复冲减 -->
           AND ra.apply_no NOT LIKE 'TD%'
+          <!-- 同一订单（无订单号退合同号）仍有待审批实收单时整单不进发起候选（§3.2）：
+               实收未审批通过前本就不可结佣（人工发起也会被 §3.2 拦截），
+               审批通过后由实收单驱动自动生成结佣单；
+               否则发起页会残留一行「已结佣 7 月 + 待结 8 月退单」的合同，
+               与审批页同合同的结佣单看起来重复 -->
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_perf_received_apply pa
+              WHERE pa.status IN ('DRAFT', 'SUBMITTED')
+                AND CASE WHEN ra.order_no IS NOT NULL AND ra.order_no &lt;&gt; ''
+                         THEN pa.order_no = ra.order_no
+                         ELSE (pa.contract_no = ra.contract_no OR pa.order_no = ra.contract_no)
+                    END
+          )
         <if test="keyword != null and keyword != ''">
           AND (ra.contract_no LIKE CONCAT('%', #{keyword}::text, '%')
                OR ra.order_no LIKE CONCAT('%', #{keyword}::text, '%')

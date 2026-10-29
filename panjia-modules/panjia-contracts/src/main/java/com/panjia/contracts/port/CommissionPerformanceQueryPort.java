@@ -267,6 +267,36 @@ public interface CommissionPerformanceQueryPort {
     Map<String, BigDecimal> sumExpectAmountsByKeysCrossPeriodForEmployee(Collection<String> bizKeys, Long employeeId);
 
     /**
+     * 按业务键集合（订单号/合同号）<b>跨期间</b>汇总「未被结佣明细占用」的 ACTIVE PERF_EXPECT 金额。
+     * <p>
+     * 用途：结佣发起页的可结佣净额（正负均可发起）。判定口径与旧实现
+     * （{@code findActiveByBizKeys(PERF_EXPECT)} + 按事实 ID 分块查 pj_commission_item）一致：
+     * 存在 status &lt;&gt; REVERSED 的结佣明细即视为已结佣、该事实不计入。
+     * 差异仅在实现层：改为 SQL 侧按 (order_no, contract_no) 聚合，只回传键对合计行，
+     * 不再把全部事实行拉回应用层（事实行数可达成千上万）。
+     * 同一键对同时计入订单号键与合同号键（均非空且不相等时），调用方按输入键取值。
+     *
+     * @param bizKeys   订单号或合同号集合（不可为空）
+     * @param employeeId 员工 ID（可空；非空时只统计该员工事实）
+     * @return bizKey → 未结佣应收合计；无事实的键不在结果中
+     */
+    Map<String, BigDecimal> sumUnsettledExpectAmountsByKeys(Collection<String> bizKeys, Long employeeId);
+
+    /**
+     * 按业务键 + 新签归属期汇总「未被结佣明细占用」的 ACTIVE PERF_EXPECT（结佣发起页按期间分行）。
+     * <p>
+     * 与 {@link #sumUnsettledExpectAmountsByKeys} 同口径（排除已被结佣明细占用的事实），
+     * 但多带归属期维度：同一合同 7 月签约已结佣、8 月退单未结佣时，
+     * 只回传 8 月一行，发起页据此逐期成行，不再把跨期正负合并成一行展示。
+     *
+     * @param bizKeys    订单号或合同号集合（不可为空）
+     * @param employeeId 员工 ID（可空；非空时只统计该员工事实）
+     * @return 每行一个 (订单号, 合同号, 归属期) 组合：expectedAmount = 该期未结佣合计，
+     *         detailCount = 事实条数，employeeCount = 涉及人数
+     */
+    List<PerformanceContractSummaryDTO> listUnsettledExpectGroupsByKeys(Collection<String> bizKeys, Long employeeId);
+
+    /**
      * 按业务键集合（订单号/合同号）查存在「已执行退单」（pj_perf_refund status=EXECUTED）的业务键。
      * <p>
      * 合同全额退单后业绩已全部冲销、无可结佣内容，结佣发起列表据此排除、发起接口据此拦截；

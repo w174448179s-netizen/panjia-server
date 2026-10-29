@@ -75,13 +75,21 @@ public class ReceivedApplyApprovedHandler implements DomainEventHandler {
         }
         Long operatorId = event.getOperatorId() != null ? event.getOperatorId() : 1L;
         try {
-            // 发起月 = 实收月：6 月实收 6 月发起结佣
-            CommissionApplication application = applicationService.applyAutoOnReceivedApproved(
-                period, contractNo, orderNo, event.getApplyId(), operatorId);
-            log.info("[结佣-实收通过] 已自动发起结佣：applyNo={}, period={}, contractNo={}, orderNo={}, "
-                    + "itemCount={}, amount={}, receivedApplyId={}",
-                application.getApplyNo(), period, application.getContractNo(), application.getOrderNo(),
-                application.getItemCount(), application.getTotalAmount(), event.getApplyId());
+            // 实收单驱动：一张实收审批单 → 一张结佣单（期间 = 实收月，金额取同号未结佣新签）
+            java.util.List<CommissionApplication> applications =
+                applicationService.applyAutoOnReceivedApproved(
+                    period, contractNo, orderNo, event.getApplyId(), operatorId);
+            for (CommissionApplication application : applications) {
+                log.info("[结佣-实收通过] 已自动发起结佣：applyNo={}, period={}, contractNo={}, orderNo={}, "
+                        + "itemCount={}, amount={}, receivedApplyId={}",
+                    application.getApplyNo(), application.getPeriod(), application.getContractNo(),
+                    application.getOrderNo(), application.getItemCount(), application.getTotalAmount(),
+                    event.getApplyId());
+            }
+            if (applications.isEmpty()) {
+                log.info("[结佣-实收通过] 无待结佣新签，跳过：eventId={}, period={}, contractNo={}",
+                    eventId, period, contractNo);
+            }
         } catch (ServiceException e) {
             // 业务拒绝（已有活跃单/封账/无新签/实收未通过等）：跳过不重试，人工发起兜底
             log.info("[结佣-实收通过] 自动发起跳过：eventId={}, period={}, contractNo={}, 原因={}",

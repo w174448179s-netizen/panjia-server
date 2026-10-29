@@ -135,15 +135,18 @@ public class CommissionApplyController extends BaseController {
      * 已审批/锁定拒绝，不再支持变更。
      *
      * @param dto 发起条件（期间 + 合同号 + 可选订单号）
-     * @return 申请单 ID
+     * @return 本次生成的结佣申请单（该合同/订单未结佣新签合并成一张；全部退单净额为 0 时为空）
      */
     @SaCheckPermission("commission:apply:add")
     @Log(title = "结佣申请单", businessType = BusinessType.INSERT)
     @PostMapping
-    public R<Long> add(@Validated @RequestBody CommissionApplyCreateBo dto) {
-        CommissionApplication application = applicationService.apply(
+    public R<List<CommissionApplication>> add(@Validated @RequestBody CommissionApplyCreateBo dto) {
+        List<CommissionApplication> applications = applicationService.applyMerged(
             dto.getPeriod(), dto.getContractNo(), dto.getOrderNo(), LoginHelper.getUserId());
-        return R.ok("发起成功", application.getId());
+        if (applications.isEmpty()) {
+            return R.ok("该合同/订单新签已全额退单（净额为 0），无需结佣", applications);
+        }
+        return R.ok("发起成功", applications);
     }
 
     /**
@@ -160,7 +163,8 @@ public class CommissionApplyController extends BaseController {
         return applicationService.batchApplyByContract(
                 request.getPeriod(), request.getContractNos(), LoginHelper.getUserId())
             .thenApply(result -> R.ok(
-                "批量发起完成：成功 " + result.getSuccess() + " 个，跳过 " + result.getSkipped()
+                "批量发起完成：成功 " + result.getSuccess() + " 个合同（共生成 "
+                    + result.getGeneratedApplications() + " 张结佣单），跳过 " + result.getSkipped()
                     + " 个，失败 " + result.getFailed() + " 个",
                 result))
             .exceptionally(ex -> {
