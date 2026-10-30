@@ -1363,6 +1363,10 @@ public class CommissionApplicationService {
             }
 
             // ===== 第二阶段：application 侧改状态 =====
+            // 系统自动发起标记：供导入批次撤销时精确识别「导入连锁产生」的结佣单
+            if (systemInitiated) {
+                application.setAutoInitiated(Boolean.TRUE);
+            }
             application.setStatus(ApplicationStatus.SUBMITTED);
             int updated = applicationMapper.updateById(application);
             // @Version 乐观锁：并发场景下可能被 revertSubmittedToDraftIfNeeded 先 updateById 抢走版本号

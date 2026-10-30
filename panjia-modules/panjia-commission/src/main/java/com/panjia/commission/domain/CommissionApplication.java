@@ -72,6 +72,13 @@ public class CommissionApplication implements Serializable {
     /** 状态 DRAFT/SUBMITTED/APPROVED/LOCKED/REJECTED/CANCELLED */
     private ApplicationStatus status;
 
+    /**
+     * 是否由实收审批通过事件自动发起。
+     * <p>true = 系统自动发起（导入连锁产物），导入批次撤销时在「无审批人办理」前提下可随批硬删；
+     * false/null = 人工发起，不随批删除。
+     */
+    private Boolean autoInitiated;
+
     /** 当前审批节点 DIRECTOR=总监审批 FINANCE=财务审批；终审/驳回/作废需写回 null */
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String currentNode;

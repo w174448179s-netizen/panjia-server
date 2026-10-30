@@ -159,7 +159,8 @@ public class ReceivedApply implements Serializable {
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String currentNode;
 
-    /** 工作流实例 ID */
+    /** 工作流实例 ID；跨月自动通过撤销流程后需写回 null，故 ALWAYS 参与 update */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String processInstanceId;
 
     /** 发起人 ID（系统自动发起为空） */

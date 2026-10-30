@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.commission.domain.ApplicationStatus;
 import com.panjia.commission.domain.CommissionApplication;
 import com.panjia.commission.mapper.CommissionApplicationMapper;
+import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.CommissionConsumptionQueryPort;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -11,6 +12,7 @@ import org.springframework.util.CollectionUtils;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -21,7 +23,9 @@ import java.util.stream.Collectors;
  * <ol>
  *   <li>已提交/已通过/已锁定且<b>持有流程实例</b>的结佣单（正式审批链路）→ 禁止；</li>
  *   <li>已驳回结佣单（流程产物，可能重新提交）→ 禁止；</li>
- *   <li>DRAFT 草稿单、历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截。</li>
+ *   <li>DRAFT 草稿单、历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截；</li>
+ *   <li><b>自动发起豁免</b>：{@code auto_initiated=true} 且尚无审批人办理的 SUBMITTED 单不拦截
+ *       （导入连锁产物，批次撤销时随批硬删）；审批人办理过则照常拦截。</li>
  * </ol>
  * <p>
  * 注意：匹配只按合同/订单业务键，<b>不按批次期间过滤</b>——结佣单 period 落的是
@@ -33,6 +37,11 @@ import java.util.stream.Collectors;
 public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQueryPort {
 
     private final CommissionApplicationMapper applicationMapper;
+    /**
+     * 审批端口：查 SUBMITTED 的自动发起单是否已被审批人办理。
+     * 自动发起且无人办理的单不算已消费（导入批次撤销时可随批硬删）。
+     */
+    private final ApprovalPort approvalPort;
 
     /** 结佣消费业务键前缀：结佣单可能只记合同号或只记订单号，用前缀区分两个命名空间。 */
     private static final String KEY_CONTRACT = "C|";
@@ -86,6 +95,10 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
      * 结佣单，另保留 period 为空的历史 LOCKED 单（保守拦截）。
      * LOCKED 不判断 process_instance_id：实收审批通过后自动建 DRAFT → 提交 → 直落 LOCKED
      * 的链路无流程实例，但业务上已审批通过并锁定，必须拦截。
+     * <p>
+     * <b>自动发起豁免</b>：{@code auto_initiated=true} 且尚无审批人办理的 SUBMITTED 单，
+     * 是导入连锁产物，批次撤销时会随批硬删，故不计为已消费；
+     * 一旦审批人办理过，仍按已消费拦截（人工处理过就不能撤，符合预期）。
      */
     private List<CommissionApplication> selectConsumedApplications(String period,
                                                                    List<String> contracts,
@@ -112,7 +125,34 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
             appQuery.and(w -> w.eq(CommissionApplication::getPeriod, period.trim())
                 .or().isNull(CommissionApplication::getPeriod));
         }
-        return applicationMapper.selectList(appQuery);
+        List<CommissionApplication> consumed = applicationMapper.selectList(appQuery);
+        return filterAutoSubmittedUntouched(consumed);
+    }
+
+    /**
+     * 剔除「自动发起且尚无审批人办理」的 SUBMITTED 单（导入批次撤销可随批硬删，不算已消费）。
+     * <p>审批痕迹查询异常时保守处理：原样返回（按已消费拦截，宁可不撤也不误撤）。
+     */
+    private List<CommissionApplication> filterAutoSubmittedUntouched(List<CommissionApplication> consumed) {
+        List<Long> autoSubmittedIds = consumed.stream()
+            .filter(a -> a.getStatus() == ApplicationStatus.SUBMITTED
+                && Boolean.TRUE.equals(a.getAutoInitiated()))
+            .map(CommissionApplication::getId)
+            .toList();
+        if (autoSubmittedIds.isEmpty()) {
+            return consumed;
+        }
+        Set<Long> touched;
+        try {
+            touched = approvalPort.findApproverTouchedBizIds(autoSubmittedIds);
+        } catch (Exception e) {
+            return consumed;
+        }
+        return consumed.stream()
+            .filter(a -> !(a.getStatus() == ApplicationStatus.SUBMITTED
+                && Boolean.TRUE.equals(a.getAutoInitiated())
+                && !touched.contains(a.getId())))
+            .toList();
     }
 
     /** 去空白、去重；空入参返回空列表（避免 IN () 非法 SQL）。 */

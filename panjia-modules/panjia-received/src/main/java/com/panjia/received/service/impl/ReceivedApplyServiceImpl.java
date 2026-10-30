@@ -1086,6 +1086,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 }
                 latest.setStatus(ReceivedApplyStatus.APPROVED);
                 latest.setCurrentNode(null);
+                // 流程实例已软删（cancel 仅标记 del_flag），必须清空指针，
+                // 否则批次撤销预检会把「APPROVED + 有流程实例」误判为人工审批通过而拦截
+                latest.setProcessInstanceId(null);
                 latest.setApproverId(operatorId);
                 latest.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(latest);
