@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # ============================================================
-# panjia 本地库业务数据清理脚本（应收 / 实收 / 结佣，含导入数据）
+# panjia 本地库业务数据清理脚本（应收 / 实收 / 结佣 / 积分 / 考勤，含导入数据）
 #
 # 清理范围:
 #   结佣  pj_commission_application / pj_commission_item / pj_commission_consume_log
 #   实收  pj_received_contract / pj_received_detail / pj_perf_received_apply / pj_perf_received_adjust
 #   应收  pj_perf_fact / pj_perf_adjust / pj_perf_refund / pj_perf_consume_log
 #         pj_perf_view_log / pj_perf_period_close
-#   导入  仅业绩/实收相关批次（KE_SIGNED / KE_RECEIVED / HISTORY_PAYROLL）
+#   积分  pj_people_performance_score / pj_people_score_detail / pj_people_score_approval
+#   考勤  pj_people_attendance / pj_people_attendance_detail
+#         pj_people_attendance_approval / pj_people_attendance_rectify
+#   导入  仅业务批次（KE_SIGNED / KE_RECEIVED / HISTORY_PAYROLL / POINTS / ATTENDANCE）
 #         pj_import_raw_signed / pj_import_raw_received / pj_import_raw_payroll
+#         pj_import_raw_points / pj_import_raw_attendance
 #         pj_import_issue / pj_normalized_record / pj_import_batch
 #   事件  相关 Outbox 事件及其幂等记录
 #   流程  perf_adjust / perf_received / perf_received_adjust / perf_refund / commission_apply
+#         attendance_approval / attendance_rectify / score_approval
 #
 # 不清理（基础信息 / 规则 / 其它域）:
-#   人员、组织、合同、绩效方案与各项规则、导入模板、薪资、考勤、积分等
+#   人员、组织、合同、绩效方案与各项规则、导入模板、薪资等
 #
 # 用法:
 #   ./clean_business_data.sh        # 先打印待清理数量，交互确认后执行
@@ -68,17 +73,26 @@ print_counts() {
     UNION ALL SELECT 'pj_perf_consume_log', count(*) FROM pj_perf_consume_log
     UNION ALL SELECT 'pj_perf_view_log', count(*) FROM pj_perf_view_log
     UNION ALL SELECT 'pj_perf_period_close', count(*) FROM pj_perf_period_close
-    UNION ALL SELECT 'pj_import_batch(业绩相关)', count(*) FROM pj_import_batch
-      WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL')
+    UNION ALL SELECT 'pj_people_performance_score', count(*) FROM pj_people_performance_score
+    UNION ALL SELECT 'pj_people_score_detail', count(*) FROM pj_people_score_detail
+    UNION ALL SELECT 'pj_people_score_approval', count(*) FROM pj_people_score_approval
+    UNION ALL SELECT 'pj_people_attendance', count(*) FROM pj_people_attendance
+    UNION ALL SELECT 'pj_people_attendance_detail', count(*) FROM pj_people_attendance_detail
+    UNION ALL SELECT 'pj_people_attendance_approval', count(*) FROM pj_people_attendance_approval
+    UNION ALL SELECT 'pj_people_attendance_rectify', count(*) FROM pj_people_attendance_rectify
+    UNION ALL SELECT 'pj_import_batch(业务相关)', count(*) FROM pj_import_batch
+      WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE')
     UNION ALL SELECT 'pj_import_raw_signed', count(*) FROM pj_import_raw_signed
     UNION ALL SELECT 'pj_import_raw_received', count(*) FROM pj_import_raw_received
     UNION ALL SELECT 'pj_import_raw_payroll', count(*) FROM pj_import_raw_payroll
-    UNION ALL SELECT 'pj_import_issue(业绩相关)', count(*) FROM pj_import_issue
+    UNION ALL SELECT 'pj_import_raw_points', count(*) FROM pj_import_raw_points
+    UNION ALL SELECT 'pj_import_raw_attendance', count(*) FROM pj_import_raw_attendance
+    UNION ALL SELECT 'pj_import_issue(业务相关)', count(*) FROM pj_import_issue
       WHERE batch_id IN (SELECT id FROM pj_import_batch
-                         WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'))
-    UNION ALL SELECT 'pj_normalized_record(业绩相关)', count(*) FROM pj_normalized_record
+                         WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'))
+    UNION ALL SELECT 'pj_normalized_record(业务相关)', count(*) FROM pj_normalized_record
       WHERE batch_id IN (SELECT id FROM pj_import_batch
-                         WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'))
+                         WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'))
     UNION ALL SELECT 'pj_event_outbox(业务事件)', count(*) FROM pj_event_outbox
       WHERE event_type IN ('import.batch.archived','import.batch.revoked','import.batch.renormalized',
                            'performance.fact.created','performance.fact.reversed',
@@ -86,7 +100,8 @@ print_counts() {
     UNION ALL SELECT 'flow_instance(业务流程)', count(*) FROM flow_instance
       WHERE definition_id IN (SELECT id FROM flow_definition
                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust',
-                                                  'perf_refund','commission_apply'))
+                                                  'perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval'))
   " | awk -F'|' '{printf "  %-32s %s\n", $1, $2}'
 }
 
@@ -102,7 +117,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 if [ "$ASSUME_YES" -ne 1 ]; then
-  read -r -p "确认清理上述应收/实收/结佣数据? 输入 y 继续: " CONFIRM
+  read -r -p "确认清理上述应收/实收/结佣/积分/考勤数据? 输入 y 继续: " CONFIRM
   if [ "$CONFIRM" != "y" ]; then
     echo "[取消] 未做任何修改"
     exit 0
@@ -133,26 +148,43 @@ DELETE FROM pj_perf_consume_log;
 DELETE FROM pj_perf_view_log;
 DELETE FROM pj_perf_period_close;
 
--- ---------------- 四、导入（仅业绩/实收相关批次） ----------------
+-- ---------------- 四、积分 ----------------
+DELETE FROM pj_people_score_detail;
+DELETE FROM pj_people_performance_score;
+DELETE FROM pj_people_score_approval;
+
+-- ---------------- 五、考勤 ----------------
+DELETE FROM pj_people_attendance_detail;
+DELETE FROM pj_people_attendance;
+DELETE FROM pj_people_attendance_approval;
+DELETE FROM pj_people_attendance_rectify;
+
+-- ---------------- 六、导入（仅业务相关批次） ----------------
 DELETE FROM pj_import_raw_signed
  WHERE batch_id IN (SELECT id FROM pj_import_batch
-                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'));
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
 DELETE FROM pj_import_raw_received
  WHERE batch_id IN (SELECT id FROM pj_import_batch
-                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'));
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
 DELETE FROM pj_import_raw_payroll
  WHERE batch_id IN (SELECT id FROM pj_import_batch
-                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'));
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
+DELETE FROM pj_import_raw_points
+ WHERE batch_id IN (SELECT id FROM pj_import_batch
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
+DELETE FROM pj_import_raw_attendance
+ WHERE batch_id IN (SELECT id FROM pj_import_batch
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
 DELETE FROM pj_import_issue
  WHERE batch_id IN (SELECT id FROM pj_import_batch
-                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'));
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
 DELETE FROM pj_normalized_record
  WHERE batch_id IN (SELECT id FROM pj_import_batch
-                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL'));
+                    WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
 DELETE FROM pj_import_batch
- WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL');
+ WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE');
 
--- ---------------- 五、相关 Outbox 事件 ----------------
+-- ---------------- 七、相关 Outbox 事件 ----------------
 DELETE FROM pj_outbox_idempotent
  WHERE event_id IN (SELECT event_id FROM pj_event_outbox
                     WHERE event_type IN ('import.batch.archived','import.batch.revoked','import.batch.renormalized',
@@ -163,27 +195,32 @@ DELETE FROM pj_event_outbox
                       'performance.fact.created','performance.fact.reversed',
                       'received.apply.approved','commission.approved','period.reopened');
 
--- ---------------- 六、相关审批流程实例 ----------------
+-- ---------------- 八、相关审批流程实例 ----------------
 DELETE FROM flow_user
  WHERE associated IN (SELECT id FROM flow_task
                       WHERE instance_id IN (SELECT id FROM flow_instance
                                             WHERE definition_id IN (SELECT id FROM flow_definition
-                                                                    WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply'))));
+                                                                    WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval'))));
 DELETE FROM flow_his_task
  WHERE instance_id IN (SELECT id FROM flow_instance
                        WHERE definition_id IN (SELECT id FROM flow_definition
-                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply')));
+                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval')));
 DELETE FROM flow_task
  WHERE instance_id IN (SELECT id FROM flow_instance
                        WHERE definition_id IN (SELECT id FROM flow_definition
-                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply')));
+                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval')));
 DELETE FROM flow_instance_biz_ext
  WHERE instance_id IN (SELECT id FROM flow_instance
                        WHERE definition_id IN (SELECT id FROM flow_definition
-                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply')));
+                                               WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval')));
 DELETE FROM flow_instance
  WHERE definition_id IN (SELECT id FROM flow_definition
-                         WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply'));
+                         WHERE flow_code IN ('perf_adjust','perf_received','perf_received_adjust','perf_refund','commission_apply',
+                                                  'attendance_approval','attendance_rectify','score_approval'));
 
 COMMIT;
 SQL
