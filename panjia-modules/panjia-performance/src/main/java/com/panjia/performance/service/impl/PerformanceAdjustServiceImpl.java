@@ -79,12 +79,11 @@ import java.util.stream.Collectors;
  *       {@link #handleWorkflowEvent}：finish → 自动执行调整并置 EXECUTED；
  *       invalid/termination → REJECTED；cancel → CANCELLED。</li>
  * </ol>
- * 调整范围：
+ * 调整范围（均为合同级）：
  * <ul>
- *   <li>CONTRACT（合同级）：金额调整（按各明细 performance_amount 占比分摊，
- *       尾差补到金额最大的一条，逐条 supersede）；
- *       或增加角色人 ADD_MEMBER（手工多一人分业绩，合同总额不变，2026-09-28）；</li>
- *   <li>DETAIL（明细级）：金额调整 / 业绩冲销 / 部门划转，作用于单条事实。</li>
+ *   <li>金额调整：按各明细 performance_amount 占比分摊，
+ *       尾差补到金额最大的一条，逐条 supersede；</li>
+ *   <li>增加角色人 ADD_MEMBER（手工多一人分业绩，合同总额不变，2026-09-28）。</li>
  * </ul>
  */
 @Slf4j
@@ -96,11 +95,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     private static final String ADJUST_NO_PREFIX = "ADJ";
     /** 调整单号日期格式 */
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd");
-
-    /** 调整范围：合同级 */
-    private static final String SCOPE_CONTRACT = "CONTRACT";
-    /** 调整范围：明细级 */
-    private static final String SCOPE_DETAIL = "DETAIL";
 
     /** §4.1 业绩调整只允许改应收口径 */
     private static final String FACT_TYPE_EXPECT = "PERF_EXPECT";
@@ -184,8 +178,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
         // 合同级调整不回填员工（含新角色人的单例外：employeeId=第一个新角色人，列表需显示新人姓名）
         Set<Long> employeeIds = records.stream()
-            .filter(r -> r.getEmployeeId() != null
-                && (!SCOPE_CONTRACT.equals(r.getAdjustScope()) || hasNewMembers(r)))
+            .filter(r -> r.getEmployeeId() != null && hasNewMembers(r))
             .map(PerformanceAdjust::getEmployeeId)
             .collect(Collectors.toSet());
         Set<Long> deptIds = new HashSet<>();
@@ -209,7 +202,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         for (PerformanceAdjust r : records) {
             // 合同级：清空员工信息，避免误导（含新角色人的单例外：显示新角色人）
-            if (SCOPE_CONTRACT.equals(r.getAdjustScope()) && !hasNewMembers(r)) {
+            if (!hasNewMembers(r)) {
                 r.setEmployeeId(null);
                 r.setEmployeeName(null);
             } else if (r.getEmployeeId() != null) {
@@ -265,9 +258,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             return;
         }
         for (PerformanceAdjust r : records) {
-            if (!SCOPE_CONTRACT.equals(r.getAdjustScope())) {
-                continue;
-            }
             BigDecimal afterTotal = null;
             AddMemberPayload payload = parseAddMemberPayload(r.getPayloadJson());
             if (payload != null) {
@@ -369,25 +359,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 .ifPresent(row -> dto.setDeptName(String.valueOf(row.get("deptName"))));
         }
 
-        boolean isContractScope = SCOPE_CONTRACT.equals(adjust.getAdjustScope());
         String contractNo = adjust.getContractNo();
-        Long factId = adjust.getFactId();
         String period = adjust.getPeriod();
 
         // 1. 查合同信息
         java.util.Map<String, Object> contractInfo = null;
-        if (isContractScope && StringUtils.isNotBlank(contractNo)) {
+        if (StringUtils.isNotBlank(contractNo)) {
             // 业绩冲正单的 period 是冲正目标月：发起审批时该月可能还没有事实行，
             // 必须跨期（period=null）查合同信息，否则订单号/房源地址/签约时间全空；
             // 新签补录同理（补录前合同可能只有 PERF_REAL 事实，新签期间无 PERF_EXPECT 行）
             String contractInfoPeriod = (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET
                 || adjust.getAdjustType() == AdjustType.SUPPLEMENT) ? null : period;
             contractInfo = factMapper.selectContractInfoByContractNo(contractInfoPeriod, adjust.getOrderNo(), contractNo);
-        } else if (factId != null) {
-            contractInfo = factMapper.selectContractInfoByFactId(factId);
-            if (contractInfo != null) {
-                dto.setContractNo((String) contractInfo.get("contractNo"));
-            }
         }
 
         if (contractInfo != null) {
@@ -397,7 +380,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         }
 
         // 2. 查明细列表
-        String targetContractNo = isContractScope ? contractNo : dto.getContractNo();
+        String targetContractNo = contractNo;
         String factType = adjust.getFactType();
         if (StringUtils.isBlank(factType)) {
             factType = "PERF_EXPECT"; // 默认应收口径
@@ -489,33 +472,32 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 }
             }
 
-            if (isContractScope) {
-                // 合同级：优先按 payload 预演快照逐行精确回填（指定值模式，2026-09-28 可编辑表格）；
-                // 无快照时按金额占比分摊 delta（与执行逻辑共用同一分摊方法）
-                Map<Long, BigDecimal> deltaByFact = contractAdjustDeltaByFact(adjust);
-                if (alreadyExecuted && deltaByFact != null) {
-                    // 执行后旧事实行 REVERSED、同 source_key 生成新 ACTIVE 行（新 factId），
-                    // payload 快照记的是旧 factId，需按稳定业务键（员工+角色+source_key）重映，
-                    // 否则每行 delta 全部 miss 为 0，表现为「合同金额变了、明细没变」
-                    deltaByFact = remapExecutedDeltaByFact(deltaByFact, details);
-                }
-                if (deltaByFact != null) {
-                    for (AdjustFactDetailVo d : details) {
-                        BigDecimal rowDelta = d.getFactId() != null
-                            ? deltaByFact.getOrDefault(d.getFactId(), BigDecimal.ZERO) : BigDecimal.ZERO;
-                        BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
-                        d.setDeltaAmount(rowDelta);
-                        if (alreadyExecuted) {
-                            // 已执行：amount = afterAmount - delta（反推原始金额）
-                            d.setAmount(MoneyUtil.round2(afterAmt.subtract(rowDelta)));
-                        } else {
-                            // 未执行：afterAmount = amount + delta（推算调整后）
-                            BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
-                            d.setAfterAmount(MoneyUtil.round2(amt.add(rowDelta)));
-                        }
-                        d.setTarget(rowDelta.signum() != 0);
+            // 合同级：优先按 payload 预演快照逐行精确回填（指定值模式，2026-09-28 可编辑表格）；
+            // 无快照时按金额占比分摊 delta（与执行逻辑共用同一分摊方法）
+            Map<Long, BigDecimal> deltaByFact = contractAdjustDeltaByFact(adjust);
+            if (alreadyExecuted && deltaByFact != null) {
+                // 执行后旧事实行 REVERSED、同 source_key 生成新 ACTIVE 行（新 factId），
+                // payload 快照记的是旧 factId，需按稳定业务键（员工+角色+source_key）重映，
+                // 否则每行 delta 全部 miss 为 0，表现为「合同金额变了、明细没变」
+                deltaByFact = remapExecutedDeltaByFact(deltaByFact, details);
+            }
+            if (deltaByFact != null) {
+                for (AdjustFactDetailVo d : details) {
+                    BigDecimal rowDelta = d.getFactId() != null
+                        ? deltaByFact.getOrDefault(d.getFactId(), BigDecimal.ZERO) : BigDecimal.ZERO;
+                    BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
+                    d.setDeltaAmount(rowDelta);
+                    if (alreadyExecuted) {
+                        // 已执行：amount = afterAmount - delta（反推原始金额）
+                        d.setAmount(MoneyUtil.round2(afterAmt.subtract(rowDelta)));
+                    } else {
+                        // 未执行：afterAmount = amount + delta（推算调整后）
+                        BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
+                        d.setAfterAmount(MoneyUtil.round2(amt.add(rowDelta)));
                     }
-                } else {
+                    d.setTarget(rowDelta.signum() != 0);
+                }
+            } else {
                 // 合同级：按金额占比分摊 delta（与执行逻辑共用同一分摊方法）
                 // 分摊基准：未执行用当前 amount，已执行用 afterAmount（即调整后金额）反推
                 List<BigDecimal> amounts = details.stream()
@@ -542,48 +524,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                         d.setAfterAmount(MoneyUtil.round2(amt.add(parts[i])));
                     }
                     d.setTarget(true);
-                }
-                }
-            } else {
-                // 明细级：执行后 adjust.factId 指向 REVERSED 旧行，先按业务键解析当前 ACTIVE 后继行，
-                // 否则目标行匹配不上，表现为明细 delta 全部为 0
-                Long targetFactId = factId;
-                if (alreadyExecuted && factId != null) {
-                    PerformanceFact oldTargetFact = factMapper.selectById(factId);
-                    if (oldTargetFact != null) {
-                        String oldKey = factBizKey(oldTargetFact.getEmployeeId(),
-                            oldTargetFact.getRoleType(), oldTargetFact.getSourceKey());
-                        targetFactId = details.stream()
-                            .filter(d -> oldKey.equals(factBizKey(d.getEmployeeId(), d.getRoleType(), d.getSourceKey())))
-                            .map(AdjustFactDetailVo::getFactId)
-                            .findFirst()
-                            .orElse(factId);
-                    }
-                }
-                // 明细级：只标记目标行
-                for (AdjustFactDetailVo d : details) {
-                    if (d.getFactId() != null && d.getFactId().equals(targetFactId)) {
-                        d.setDeltaAmount(delta);
-                        if (alreadyExecuted) {
-                            BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
-                            d.setAmount(MoneyUtil.round2(afterAmt.subtract(delta)));
-                        } else {
-                            BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
-                            d.setAfterAmount(MoneyUtil.round2(amt.add(delta)));
-                        }
-                        d.setTarget(true);
-                    } else {
-                        d.setDeltaAmount(BigDecimal.ZERO);
-                        if (alreadyExecuted) {
-                            // 非目标行：amount 和 afterAmount 相同
-                            BigDecimal afterAmt = d.getAfterAmount() != null ? d.getAfterAmount() : BigDecimal.ZERO;
-                            d.setAmount(afterAmt);
-                        } else {
-                            BigDecimal amt = d.getAmount() != null ? d.getAmount() : BigDecimal.ZERO;
-                            d.setAfterAmount(amt);
-                        }
-                        d.setTarget(false);
-                    }
                 }
             }
             // 补充折算后金额：按 factId 批量取折算因子
@@ -638,48 +578,34 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (adjustType == null) {
             throw new ServiceException("非法调整类型：{}", dto.getAdjustType());
         }
-        String scope = StringUtils.isBlank(dto.getAdjustScope()) ? SCOPE_DETAIL : dto.getAdjustScope();
-        // 业绩冲正固定合同级 + 应收口径
+        // 业绩冲正固定应收口径
         if (adjustType == AdjustType.MANUAL_OFFSET) {
-            scope = SCOPE_CONTRACT;
-            dto.setAdjustScope(SCOPE_CONTRACT);
             dto.setFactType(FACT_TYPE_EXPECT);
         }
-        // §4.1 业绩调整只改应收（PERF_EXPECT）：合同级 / 明细级均拦截
+        // §4.1 业绩调整只改应收（PERF_EXPECT）
         // （实收调整 RECEIVED_AMOUNT 已于 2026-10-12 拆至实收调整表/服务，独立走 PERF_REAL）
         if (!FACT_TYPE_EXPECT.equals(dto.getFactType())) {
             throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
         }
-        if (SCOPE_CONTRACT.equals(scope)) {
-            // 合同级（2026-10-14 重构）：业绩调整/业绩扣减/业绩增加（三类型均可增加角色人）、业绩冲正；
-            // 增加角色人（ADD_MEMBER）已并入三类型，禁止新建（历史单保留展示）
-            if (adjustType == AdjustType.ADD_MEMBER) {
-                throw new ServiceException("「增加角色人」已并入业绩调整/业绩扣减/业绩增加，请重新选择调整类型");
-            }
-            if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.DEDUCT
-                && adjustType != AdjustType.INCREASE && adjustType != AdjustType.MANUAL_OFFSET) {
-                throw new ServiceException("合同级调整仅支持业绩调整、业绩扣减、业绩增加或业绩冲正");
-            }
-            if (StringUtils.isBlank(dto.getContractNo()) || StringUtils.isBlank(dto.getFactType())) {
-                throw new ServiceException("合同级调整缺少合同号或事实口径");
-            }
-        } else if (dto.getFactId() == null) {
-            throw new ServiceException("明细级调整缺少关联业绩事实");
+        // 合同级（2026-10-14 重构）：业绩调整/业绩扣减/业绩增加（三类型均可增加角色人）、业绩冲正；
+        // 增加角色人（ADD_MEMBER）已并入三类型，禁止新建（历史单保留展示）
+        if (adjustType == AdjustType.ADD_MEMBER) {
+            throw new ServiceException("「增加角色人」已并入业绩调整/业绩扣减/业绩增加，请重新选择调整类型");
+        }
+        if (adjustType != AdjustType.AMOUNT && adjustType != AdjustType.DEDUCT
+            && adjustType != AdjustType.INCREASE && adjustType != AdjustType.MANUAL_OFFSET) {
+            throw new ServiceException("合同级调整仅支持业绩调整、业绩扣减、业绩增加或业绩冲正");
+        }
+        if (StringUtils.isBlank(dto.getContractNo()) || StringUtils.isBlank(dto.getFactType())) {
+            throw new ServiceException("合同级调整缺少合同号或事实口径");
         }
 
         // period 为空时从原事实取期间（同新签期间），避免调整单期间为空
         if (StringUtils.isBlank(dto.getPeriod())) {
-            if (SCOPE_CONTRACT.equals(scope)) {
-                List<PerformanceFact> templateFacts = loadActiveFactsForAdjust(
-                    null, dto.getFactType(), dto.getOrderNo(), dto.getContractNo());
-                if (templateFacts != null && !templateFacts.isEmpty()) {
-                    dto.setPeriod(templateFacts.get(0).getPeriod());
-                }
-            } else {
-                PerformanceFact fact = factMapper.selectById(dto.getFactId());
-                if (fact != null) {
-                    dto.setPeriod(fact.getPeriod());
-                }
+            List<PerformanceFact> templateFacts = loadActiveFactsForAdjust(
+                null, dto.getFactType(), dto.getOrderNo(), dto.getContractNo());
+            if (templateFacts != null && !templateFacts.isEmpty()) {
+                dto.setPeriod(templateFacts.get(0).getPeriod());
             }
             if (StringUtils.isBlank(dto.getPeriod())) {
                 throw new ServiceException("无法确定调整期间，请录入目标月份");
@@ -692,23 +618,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         assertPeriodNotClosed(originalPeriodForCloseCheck, "原业绩归属月");
         assertPeriodNotClosed(dto.getPeriod(), "调整生效月");
 
-        // 明细级：校验该事实是否已被锁定结佣明细绑定
-        if (!SCOPE_CONTRACT.equals(scope) && dto.getFactId() != null) {
-            PerformanceFact fact = factMapper.selectById(dto.getFactId());
-            if (fact != null && StringUtils.isNotBlank(fact.getContractNo())) {
-                assertFactsNotLocked(List.of(fact), fact.getContractNo());
-            }
-        }
-
         // 1.5 合同存在已作废明细时禁止调整（作废为合同级操作，口径一致：先恢复合同业绩再调整）
         // 业绩冲正跨期查作废明细（冲正期间可能无事实，但原月有）
-        if (SCOPE_CONTRACT.equals(scope)) {
-            String voidedPeriod = adjustType == AdjustType.MANUAL_OFFSET ? null : dto.getPeriod();
-            // 同合同号挂多订单时按订单号+合同号双键校验，避免跨订单误拦
-            if (!loadVoidedFactsForAdjust(voidedPeriod, dto.getFactType(), dto.getOrderNo(), dto.getContractNo()).isEmpty()) {
-                throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
-            }
-        } else if (factMapper.countVoidedSiblingsByFactId(dto.getFactId()) > 0) {
+        String voidedPeriod = adjustType == AdjustType.MANUAL_OFFSET ? null : dto.getPeriod();
+        // 同合同号挂多订单时按订单号+合同号双键校验，避免跨订单误拦
+        if (!loadVoidedFactsForAdjust(voidedPeriod, dto.getFactType(), dto.getOrderNo(), dto.getContractNo()).isEmpty()) {
             throw new ServiceException("该合同存在已作废的业绩明细，禁止调整；如需调整请先恢复合同业绩");
         }
 
@@ -724,13 +638,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 三类型统一走「明细指定值 + 可选新角色人」prepare：总额规则（调整=总额不变/扣减=须减少/增加=
         // 须增加）与扣减实收不足拦截见 prepareContractTargets；明细指定值为空时 AMOUNT 保持旧等比分摊模式
         if ((adjustType == AdjustType.AMOUNT || adjustType == AdjustType.DEDUCT
-            || adjustType == AdjustType.INCREASE) && SCOPE_CONTRACT.equals(scope)
+            || adjustType == AdjustType.INCREASE)
             && dto.getDetailTargets() != null && !dto.getDetailTargets().isEmpty()) {
             dto.setPayloadJson(prepareContractTargets(dto, adjustType));
         }
 
         // 2. 计算原始金额 + 验证目标金额
-        BigDecimal originalAmt = calculateCurrentAmount(dto, scope);
+        BigDecimal originalAmt = calculateCurrentAmount(dto);
         // 金额调整：优先取目标金额（用户录入的就是调整后金额）
         BigDecimal targetAmt = dto.getTargetAmount();
         if (adjustType == AdjustType.AMOUNT) {
@@ -764,34 +678,30 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 2.5 合同级调整：dto.contractNo 是前端业务键（订单号优先、合同号兜底），
         // 落库前归一化为事实表的真实合同号——否则调整单/详情把订单号当合同号展示，
         // 而事实表 contract_no / order_no 两列本就分开存储
-        if (SCOPE_CONTRACT.equals(scope)) {
-            normalizeContractBizKeys(dto);
-            // 结佣已审批锁定则禁止发起新签调整（保护已审批结佣数据）。
-            // 事实级口径：只拦本次将被 supersede 且已被锁定明细绑定的事实，同合同其他月份
-            // 未结佣的新签仍可调整；业绩冲正不 supersede 老事实，跳过校验。
-            if (adjustType != AdjustType.MANUAL_OFFSET) {
-                String gatePeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
-                    ? dto.getOriginalPeriod() : dto.getPeriod();
-                assertFactsNotLocked(loadActiveFactsForAdjust(gatePeriod, dto.getFactType(),
-                    dto.getOrderNo(), dto.getContractNo()), dto.getContractNo());
-            }
+        normalizeContractBizKeys(dto);
+        // 结佣已审批锁定则禁止发起新签调整（保护已审批结佣数据）。
+        // 事实级口径：只拦本次将被 supersede 且已被锁定明细绑定的事实，同合同其他月份
+        // 未结佣的新签仍可调整；业绩冲正不 supersede 老事实，跳过校验。
+        if (adjustType != AdjustType.MANUAL_OFFSET) {
+            String gatePeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+                ? dto.getOriginalPeriod() : dto.getPeriod();
+            assertFactsNotLocked(loadActiveFactsForAdjust(gatePeriod, dto.getFactType(),
+                dto.getOrderNo(), dto.getContractNo()), dto.getContractNo());
         }
 
         // 2.6 在途互斥：同合同存在审批中（SUBMITTED/APPROVED）调整单时拒绝发起。
         // 调整单 payload 快照 factId，在途期间事实被先执行的单 supersede 后，
         // 后执行单会因指定行失效而卡死；同合同调整必须串行（撤回或等审批完结再发起）。
-        assertNoInFlightAdjust(scope, dto.getContractNo(), null, dto.getPeriod(),
-            dto.getOriginalPeriod(), dto.getFactType(), dto.getFactId());
+        assertNoInFlightAdjust(dto.getContractNo(), null, dto.getPeriod(),
+            dto.getOriginalPeriod(), dto.getFactType());
 
         // 3. 构建调整单
         PerformanceAdjust adjust = new PerformanceAdjust();
         adjust.setAdjustNo(generateAdjustNo());
-        adjust.setFactId(dto.getFactId());
         adjust.setPeriod(dto.getPeriod());
         adjust.setEmployeeId(dto.getEmployeeId());
         adjust.setDeptId(dto.getDeptId());
         adjust.setAdjustType(adjustType);
-        adjust.setAdjustScope(scope);
         adjust.setContractNo(dto.getContractNo());
         adjust.setOrderNo(dto.getOrderNo());
         adjust.setFactType(dto.getFactType());
@@ -805,8 +715,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         // 合同级调整前端可能未传员工/部门（合同聚合行无此信息），从该合同首条 ACTIVE 事实回填
         // 跨月调整时事实在 originalPeriod（原业绩归属月）；业绩冲正跨期查模板
-        if (SCOPE_CONTRACT.equals(scope)
-            && (dto.getDeptId() == null || dto.getDeptId() <= 0 || dto.getEmployeeId() == null)) {
+        if (dto.getDeptId() == null || dto.getDeptId() <= 0 || dto.getEmployeeId() == null) {
             String factLoadPeriod;
             if (adjustType == AdjustType.MANUAL_OFFSET) {
                 factLoadPeriod = null;
@@ -824,29 +733,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
             if (adjust.getEmployeeId() == null) {
                 adjust.setEmployeeId(facts.get(0).getEmployeeId());
-            }
-        }
-
-        // 明细级调整：员工/部门缺省从关联事实回填；同时前置校验事实存在、口径为应收、状态有效（§4.1）
-        if (SCOPE_DETAIL.equals(scope)
-            && (dto.getEmployeeId() == null || dto.getDeptId() == null || dto.getDeptId() <= 0)) {
-            PerformanceFact refFact = factMapper.selectById(dto.getFactId());
-            if (refFact == null) {
-                throw new ServiceException("关联业绩事实不存在：factId={}", dto.getFactId());
-            }
-            if (refFact.getFactType() == null
-                || !FACT_TYPE_EXPECT.equals(refFact.getFactType().getCode())) {
-                throw new ServiceException("业绩调整仅允许调整应收业绩（PERF_EXPECT），实收业绩请走实收审批/结佣对齐流程");
-            }
-            if (refFact.getFactStatus() != FactStatus.ACTIVE) {
-                throw new ServiceException("关联业绩事实非有效状态，无法调整：factId={}, status={}",
-                    dto.getFactId(), refFact.getFactStatus().getCode());
-            }
-            if (adjust.getEmployeeId() == null) {
-                adjust.setEmployeeId(refFact.getEmployeeId());
-            }
-            if (adjust.getDeptId() == null || adjust.getDeptId() <= 0) {
-                adjust.setDeptId(refFact.getDeptId());
             }
         }
 
@@ -878,8 +764,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             log.warn("[调整单] 流程实例ID回填失败：adjustId={}", adjust.getId(), e);
         }
 
-        log.info("[调整单] 创建并提交审批成功：adjustId={}, adjustNo={}, scope={}, type={}, applicantId={}",
-            adjust.getId(), adjust.getAdjustNo(), scope, adjustType.getCode(), applicantId);
+        log.info("[调整单] 创建并提交审批成功：adjustId={}, adjustNo={}, type={}, applicantId={}",
+            adjust.getId(), adjust.getAdjustNo(), adjustType.getCode(), applicantId);
         return adjust;
     }
 
@@ -926,8 +812,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         // 3. 在途互斥：同订单同期间不能有审批中的 PERF_EXPECT 调整单
         //    （同合同多订单时按订单判定，避免 A 订单在途单挡住 B 订单补录）
-        assertNoInFlightAdjust(SCOPE_CONTRACT, bo.getContractNo(), bo.getOrderNo(), bo.getPeriod(),
-            null, FACT_TYPE_EXPECT, null);
+        assertNoInFlightAdjust(bo.getContractNo(), bo.getOrderNo(), bo.getPeriod(),
+            null, FACT_TYPE_EXPECT);
 
         // 3.1 防重复补录：同一实收单（订单号 + 实收月）已存在补录单（审批中/已通过/已执行）时禁止再次补录；
         //     已拒绝/已取消的补录单不拦截，允许修正后重新发起；
@@ -955,7 +841,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setAdjustNo(generateAdjustNo());
         adjust.setPeriod(bo.getPeriod());
         adjust.setAdjustType(AdjustType.SUPPLEMENT);
-        adjust.setAdjustScope(SCOPE_CONTRACT);
         adjust.setContractNo(bo.getContractNo());
         adjust.setOrderNo(bo.getOrderNo());
         adjust.setReceivedPeriod(bo.getReceivedPeriod());
@@ -1284,22 +1169,18 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 两张在途单无论谁先执行，后执行单的快照 factId 都会失效（加人/合同金额指定值模式直接拒绝执行，
      * 单据永久卡死）。跨月调整同时涉及原月与目标月，故期间按 period/originalPeriod 重叠判定。
      * <p>
-     * 明细级发起时 dto 可能不带合同号，则按 factId 本身或该事实所属合同号判定互斥范围。
-     * <p>
      * 新签补录（不 supersede 既有事实、只新增事实）按订单维度互斥：同合同多订单时，
      * 一张补录单不应挡住同合同其他订单的补录；但历史无订单号的合同级在途单仍会作用于
      * 本订单事实，必须一并拦截。
      *
-     * @param scope          调整范围（CONTRACT/DETAIL）
-     * @param contractNo     合同号（合同级已归一化为事实表真实合同号；明细级可能为空）
-     * @param orderNo        订单号（补录等按订单维度互斥时传；为空则按合同号/factId 判定）
+     * @param contractNo     合同号（已归一化为事实表真实合同号）
+     * @param orderNo        订单号（补录等按订单维度互斥时传；为空则按合同号判定）
      * @param period         调整生效月
      * @param originalPeriod 原业绩归属月（跨月调整）
      * @param factType       事实口径
-     * @param factId         明细级调整关联事实 ID（合同级为空）
      */
-    private void assertNoInFlightAdjust(String scope, String contractNo, String orderNo, String period,
-                                        String originalPeriod, String factType, Long factId) {
+    private void assertNoInFlightAdjust(String contractNo, String orderNo, String period,
+                                        String originalPeriod, String factType) {
         String originPeriod = StringUtils.isNotBlank(originalPeriod) ? originalPeriod : period;
         LambdaQueryWrapper<PerformanceAdjust> qw = new LambdaQueryWrapper<>();
         qw.eq(PerformanceAdjust::getFactType, factType)
@@ -1319,21 +1200,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         } else if (StringUtils.isNotBlank(contractNo)) {
             qw.eq(PerformanceAdjust::getContractNo, contractNo);
-        } else if (factId != null) {
-            PerformanceFact ref = factMapper.selectById(factId);
-            String refContractNo = ref == null ? null : ref.getContractNo();
-            // 同 factId 的在途单，或同一事实上合同号下的在途单，均互斥
-            qw.and(w -> w.eq(PerformanceAdjust::getFactId, factId)
-                .or(StringUtils.isNotBlank(refContractNo),
-                    x -> x.eq(PerformanceAdjust::getContractNo, refContractNo)));
         } else {
-            // 无合同键也无 factId 无法判定互斥范围，后续必填校验会拦截，这里不阻断
+            // 无合同键无法判定互斥范围，后续必填校验会拦截，这里不阻断
             return;
         }
         Long count = adjustMapper.selectCount(qw);
         if (count != null && count > 0) {
-            log.warn("[调整单] 在途互斥拦截：scope={}, contractNo={}, orderNo={}, period={}, originalPeriod={}, factId={}, 在途单数={}",
-                scope, contractNo, orderNo, period, originalPeriod, factId, count);
+            log.warn("[调整单] 在途互斥拦截：contractNo={}, orderNo={}, period={}, originalPeriod={}, 在途单数={}",
+                contractNo, orderNo, period, originalPeriod, count);
             throw new ServiceException("该合同存在审批中的业绩调整单，请待其审批完成或撤回后再发起新调整");
         }
     }
@@ -1517,40 +1391,24 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 adjust.getOrderNo(), adjust.getContractNo()), adjust.getContractNo());
         }
 
-        // 根据调整范围 + 类型执行不同逻辑
-        if (SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            // 合同级：MANUAL_OFFSET 业绩冲正；ADD_MEMBER 增加角色人（历史单，当期生效）；
-            // AMOUNT/DEDUCT/INCREASE 三类型（2026-10-14）走「指定值 + 可选新人 + 实收联动」统一路径；
-            // AMOUNT 旧单（无 afterTotal 快照）原月=调整月走金额调整，跨月走业绩冲销（§4.6）
-            // originalPeriod 已在封账校验前解析
-            if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
-                executeManualOffsetAdjust(adjust, operatorId);
-            } else if (adjust.getAdjustType() == AdjustType.SUPPLEMENT) {
-                executeSupplementAdjust(adjust, operatorId);
-            } else if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
-                executeAddMemberAdjust(adjust, operatorId);
-            } else if (adjust.getAdjustType() == AdjustType.DEDUCT
-                || adjust.getAdjustType() == AdjustType.INCREASE
-                || (adjust.getAdjustType() == AdjustType.AMOUNT && isUnifiedContractTargets(adjust))) {
-                executeContractTargetsAdjust(adjust, operatorId);
-            } else if (originalPeriod.equals(adjust.getPeriod())) {
-                executeContractAmountAdjust(adjust, operatorId);
-            } else {
-                executeContractCrossMonthAdjust(adjust, originalPeriod, operatorId);
-            }
+        // MANUAL_OFFSET 业绩冲正；ADD_MEMBER 增加角色人（历史单，当期生效）；
+        // AMOUNT/DEDUCT/INCREASE 三类型（2026-10-14）走「指定值 + 可选新人 + 实收联动」统一路径；
+        // AMOUNT 旧单（无 afterTotal 快照）原月=调整月走金额调整，跨月走业绩冲销（§4.6）
+        // originalPeriod 已在封账校验前解析
+        if (adjust.getAdjustType() == AdjustType.MANUAL_OFFSET) {
+            executeManualOffsetAdjust(adjust, operatorId);
+        } else if (adjust.getAdjustType() == AdjustType.SUPPLEMENT) {
+            executeSupplementAdjust(adjust, operatorId);
+        } else if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
+            executeAddMemberAdjust(adjust, operatorId);
+        } else if (adjust.getAdjustType() == AdjustType.DEDUCT
+            || adjust.getAdjustType() == AdjustType.INCREASE
+            || (adjust.getAdjustType() == AdjustType.AMOUNT && isUnifiedContractTargets(adjust))) {
+            executeContractTargetsAdjust(adjust, operatorId);
+        } else if (originalPeriod.equals(adjust.getPeriod())) {
+            executeContractAmountAdjust(adjust, operatorId);
         } else {
-            PerformanceFact oldFact = getActiveFact(adjust);
-            boolean crossMonth = !oldFact.getPeriod().equals(adjust.getPeriod());
-            // 明细级仅支持金额调整（AMOUNT）；VOID/TRANSFER 已下线
-            if (adjust.getAdjustType() == AdjustType.AMOUNT) {
-                if (crossMonth) {
-                    executeDetailCrossMonthAmountAdjust(adjust, oldFact, operatorId);
-                } else {
-                    executeAmountAdjust(adjust, operatorId);
-                }
-            } else {
-                throw new ServiceException("不支持的调整类型：{}", adjust.getAdjustType());
-            }
+            executeContractCrossMonthAdjust(adjust, originalPeriod, operatorId);
         }
 
         // 更新状态为已执行
@@ -1559,8 +1417,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         adjust.setExecuteTime(LocalDateTime.now());
         adjustMapper.updateById(adjust);
 
-        log.info("[调整单] 执行完成：adjustId={}, scope={}, type={}, operatorId={}",
-            id, adjust.getAdjustScope(), adjust.getAdjustType().getCode(), operatorId);
+        log.info("[调整单] 执行完成：adjustId={}, type={}, operatorId={}",
+            id, adjust.getAdjustType().getCode(), operatorId);
     }
 
     // ==================== 内部方法 ====================
@@ -1606,10 +1464,10 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     /**
      * 构建审批启动命令（业务编码/标题 + 流程变量），供适配器转译为引擎原生 StartProcessDTO + bizExt。
-     * <p>合同级调整以合同号作为主标识；明细级调整（无合同号）以员工姓名作为主标识。
+     * <p>合同级调整以合同号作为主标识，无合同时以员工姓名作为主标识。
      */
     private ApprovalStartCmd buildStartCmd(PerformanceAdjust adjust) {
-        // 合同级有合同号 → 用合同号；否则用员工姓名作为主标识
+        // 有合同号 → 用合同号；否则用员工姓名作为主标识
         String subject;
         if (StringUtils.isNotBlank(adjust.getContractNo())) {
             subject = "合同" + adjust.getContractNo();
@@ -2222,30 +2080,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             adjust.getId(), adjust.getContractNo(), originalPeriod, adjust.getPeriod(), generated);
     }
 
-    /**
-     * 执行明细级跨月金额调整：在调整月生成一条净额调整事实
-     * （新应收-原应收的差额，正补负冲），原月事实不动。
-     * <p>
-     * 关键：delta = targetAmount - 执行时原事实金额，保证调整后两期合计 = targetAmount。
-     */
-    private void executeDetailCrossMonthAmountAdjust(PerformanceAdjust adjust, PerformanceFact oldFact,
-                                                     Long operatorId) {
-        if (adjust.getTargetAmount() == null) {
-            throw new ServiceException("金额调整缺少目标金额：adjustId={}", adjust.getId());
-        }
-        BigDecimal currentAmt = oldFact.getPerformanceAmount() == null ? BigDecimal.ZERO : oldFact.getPerformanceAmount();
-        BigDecimal performanceDelta = MoneyUtil.round2(adjust.getTargetAmount().subtract(currentAmt));
-        if (MoneyUtil.isZero(performanceDelta)) {
-            log.info("[调整单-跨月] 调整额为 0，无需生成冲销事实：adjustId={}, factId={}",
-                adjust.getId(), oldFact.getId());
-            return;
-        }
-        factMapper.insert(buildOffsetFact(oldFact, adjust.getPeriod(),
-            performanceDelta, adjust.getId()));
-        log.info("[调整单-跨月] 明细级跨月冲销事实已生成：adjustId={}, factId={}, {}→{}, deltaPerf={}",
-            adjust.getId(), oldFact.getId(), oldFact.getPeriod(), adjust.getPeriod(), performanceDelta);
-    }
-
     // ==================== 合同级三类型统一 prepare（2026-10-14） ====================
 
     /**
@@ -2542,9 +2376,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
      * 列表员工回填、审批标题、详情展示的「加人」特判统一走本方法。
      */
     private boolean hasNewMembers(PerformanceAdjust adjust) {
-        if (!SCOPE_CONTRACT.equals(adjust.getAdjustScope())) {
-            return false;
-        }
         if (adjust.getAdjustType() == AdjustType.ADD_MEMBER) {
             return true;
         }
@@ -3609,24 +3440,6 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 执行明细级金额调整：旧事实冲销 + 新事实生成（performance_amount = targetAmount）。
-     */
-    private void executeAmountAdjust(PerformanceAdjust adjust, Long operatorId) {
-        PerformanceFact oldFact = getActiveFact(adjust);
-        if (adjust.getTargetAmount() == null) {
-            throw new ServiceException("金额调整缺少目标金额：adjustId={}", adjust.getId());
-        }
-
-        BigDecimal newPerformance = MoneyUtil.round2(adjust.getTargetAmount());
-
-        PerformanceFact newFact = copyFactBase(oldFact);
-        newFact.setPerformanceAmount(newPerformance);
-        newFact.setAdjustId(adjust.getId());
-
-        reverseService.supersede(oldFact.getId(), newFact, operatorId);
-    }
-
-    /**
      * 计算调整变动额：targetAmount - originalAmount。
      * 调整单表存的是目标金额，变动额通过此方法推导。
      */
@@ -3639,12 +3452,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     // 按金额占比分摊方法已上移至 MoneyUtil.allocateByAmount（调整单详情展示与执行落库共用）
 
     /**
-     * 计算调整前的当前金额（performance_amount 口径）。
-     * <p>
-     * 合同级：汇总该合同下全部 ACTIVE 事实的 performance_amount；
-     * 明细级：取单条事实的 performance_amount。
+     * 计算调整前的当前金额（performance_amount 口径）：汇总该合同下全部 ACTIVE 事实的 performance_amount。
      */
-    private BigDecimal calculateCurrentAmount(PerformanceAdjustCreateBo dto, String scope) {
+    private BigDecimal calculateCurrentAmount(PerformanceAdjustCreateBo dto) {
         String factType = dto.getFactType();
         String period = StringUtils.isNotBlank(dto.getOriginalPeriod())
             ? dto.getOriginalPeriod() : dto.getPeriod();
@@ -3652,32 +3462,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         if (AdjustType.MANUAL_OFFSET.getCode().equals(dto.getAdjustType())) {
             period = null;
         }
-        if (SCOPE_CONTRACT.equals(scope)) {
-            // 同合同号挂多订单时按订单号+合同号双键汇总，避免跨订单混排虚增合同总额
-            BigDecimal total = adjustMapper.selectContractTotalAmount(period, factType, dto.getOrderNo(), dto.getContractNo());
-            return total != null ? total : BigDecimal.ZERO;
-        } else {
-            PerformanceFact fact = factMapper.selectById(dto.getFactId());
-            if (fact == null) {
-                throw new ServiceException("关联业绩事实不存在：factId={}", dto.getFactId());
-            }
-            return fact.getPerformanceAmount() != null ? fact.getPerformanceAmount() : BigDecimal.ZERO;
-        }
-    }
-
-    /**
-     * 读取调整单关联事实并校验为 ACTIVE。
-     */
-    private PerformanceFact getActiveFact(PerformanceAdjust adjust) {
-        PerformanceFact oldFact = factMapper.selectById(adjust.getFactId());
-        if (oldFact == null) {
-            throw new ServiceException("关联业绩事实不存在：factId={}", adjust.getFactId());
-        }
-        if (oldFact.getFactStatus() != FactStatus.ACTIVE) {
-            throw new ServiceException("关联业绩事实非有效状态，无法调整：factId={}, status={}",
-                adjust.getFactId(), oldFact.getFactStatus().getCode());
-        }
-        return oldFact;
+        // 同合同号挂多订单时按订单号+合同号双键汇总，避免跨订单混排虚增合同总额
+        BigDecimal total = adjustMapper.selectContractTotalAmount(period, factType, dto.getOrderNo(), dto.getContractNo());
+        return total != null ? total : BigDecimal.ZERO;
     }
 
     /**

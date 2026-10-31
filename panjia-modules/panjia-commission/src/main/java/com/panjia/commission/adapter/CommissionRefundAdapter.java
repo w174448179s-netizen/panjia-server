@@ -187,6 +187,10 @@ public class CommissionRefundAdapter implements CommissionRefundPort {
 
     /** 已结佣新签明细（APPROVED、PERF_EXPECT、正金额） */
     private List<CommissionItem> listSettledItems(String contractNo, String orderNo) {
+        if (StringUtils.isBlank(contractNo) && StringUtils.isBlank(orderNo)) {
+            // 双空不能放开全表：否则会命中所有合同的已结佣明细
+            return java.util.Collections.emptyList();
+        }
         LambdaQueryWrapper<CommissionItem> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(CommissionItem::getStatus, ItemStatus.APPROVED)
             .eq(CommissionItem::getFactType, FACT_TYPE_EXPECT)

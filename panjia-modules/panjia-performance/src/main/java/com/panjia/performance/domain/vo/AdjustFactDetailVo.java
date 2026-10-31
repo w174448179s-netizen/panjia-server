@@ -57,7 +57,7 @@ public class AdjustFactDetailVo implements Serializable {
     /** 变动金额 */
     private BigDecimal deltaAmount;
 
-    /** 是否是本次调整的直接目标行（明细级=是，合同级=全部都是） */
+    /** 是否是本次调整的目标行 */
     private Boolean target;
 
     /** 事实状态（ACTIVE / SUPERSEDED / REVERSED 等），用于过滤已冲销行 */

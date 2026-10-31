@@ -91,21 +91,32 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         List<PerformanceFactSummaryDTO> realFacts = performanceQueryPort
             .findActiveByDept(period, deptId, FACT_TYPE_REAL);
         if (realFacts.isEmpty()) return Collections.emptyList();
-        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
+        java.util.Set<String> orderKeys = new java.util.LinkedHashSet<>();
+        java.util.Set<String> contractKeys = new java.util.LinkedHashSet<>();
         for (PerformanceFactSummaryDTO f : realFacts) {
-            // 订单号与合同号同时作为业务键：贝壳新签 order_no 可能误填成合同号（两列都是合同号），
-            // 只收集实收订单号会漏掉该合同的新签行，导出兜底金额偏小
             if (f.getOrderNo() != null && !f.getOrderNo().isBlank()) {
-                bizKeys.add(f.getOrderNo());
+                orderKeys.add(f.getOrderNo().trim());
             }
             if (f.getContractNo() != null && !f.getContractNo().isBlank()) {
-                bizKeys.add(f.getContractNo());
+                contractKeys.add(f.getContractNo().trim());
             }
         }
+        java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>(orderKeys);
+        // 合同号作为附加查询键：覆盖新签 order_no 误填合同号的别名行（两列都是合同号）
+        bizKeys.addAll(contractKeys);
         List<PerformanceFactSummaryDTO> expects =
             performanceQueryPort.findActiveByBizKeys(bizKeys, FACT_TYPE_EXPECT);
         List<CommissionItemDTO> result = new ArrayList<>(expects.size());
         for (PerformanceFactSummaryDTO e : expects) {
+            // 防串单：合同号相同的多订单合同只取「本期实收订单号 ∪ 合同号」命中的行，
+            // 同合同其他订单（未在本期实收）的新签不展示
+            String eo = e.getOrderNo() == null ? null : e.getOrderNo().trim();
+            boolean matched = (eo != null && !eo.isEmpty())
+                ? bizKeys.contains(eo)
+                : (e.getContractNo() != null && contractKeys.contains(e.getContractNo().trim()));
+            if (!matched) {
+                continue;
+            }
             // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
             if (e.getEmployeeId() == null) {
                 continue;

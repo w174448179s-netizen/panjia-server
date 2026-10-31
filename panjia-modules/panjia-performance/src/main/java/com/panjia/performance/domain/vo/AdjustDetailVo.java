@@ -21,7 +21,7 @@ public class AdjustDetailVo extends PerformanceAdjust implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    /** 合同号（合同级=调整标的，明细级=所属合同） */
+    /** 合同号（调整标的） */
     private String contractNo;
 
     /** 订单号 */
@@ -33,7 +33,7 @@ public class AdjustDetailVo extends PerformanceAdjust implements Serializable {
     /** 签约时间 */
     private String businessDate;
 
-    /** 合同下明细行数（合同级=全部明细，明细级=1） */
+    /** 合同下明细行数（全部受影响明细） */
     private Integer detailCount;
 
     /** 合同应收合计 */

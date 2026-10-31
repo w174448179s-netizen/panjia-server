@@ -1020,14 +1020,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 合同管理明细：批量填充审批中的调整单（SUBMITTED/APPROVED，执行前金额未变）。
      * <p>
-     * 两种口径：
-     * <ul>
-     *   <li>明细级调整（factId 定位）：目标金额直接取调整单 target_amount；</li>
-     *   <li>合同级调整（contract_no 定位）：按各明细金额占比分摊总变动额
-     *       （{@link MoneyUtil#allocateByAmount}，与执行落库共用同一算法），
-     *       审批前即可看到每人分摊的调整金额与调整后业绩。</li>
-     * </ul>
-     * 明细级优先：已命中明细级调整单的行不再叠加合同级分摊。
+     * 合同级调整（contract_no 定位）：按各明细金额占比分摊总变动额
+     * （{@link MoneyUtil#allocateByAmount}，与执行落库共用同一算法），
+     * 审批前即可看到每人分摊的调整金额与调整后业绩。
      */
     private void fillManageDetailPendingAdjust(List<PerformanceManageVo> rows,
                                                String period, String factType,
@@ -1035,34 +1030,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (rows == null || rows.isEmpty()) {
             return;
         }
-        // 1. 明细级：按 factId 批量查
-        Set<Long> factIds = rows.stream()
-            .map(PerformanceManageVo::getId)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toSet());
-        if (!factIds.isEmpty()) {
-            Map<Long, Map<String, Object>> pendingMap = new HashMap<>();
-            for (Map<String, Object> pending : adjustMapper.doSelectPendingByFactIds(factIds)) {
-                Object key = pending.get("factId");
-                if (key != null) {
-                    pendingMap.put(((Number) key).longValue(), pending);
-                }
-            }
-            for (PerformanceManageVo row : rows) {
-                Map<String, Object> pending = pendingMap.get(row.getId());
-                if (pending != null) {
-                    row.setAdjustPending(true);
-                    Object type = pending.get("adjustType");
-                    row.setAdjustPendingType(type == null ? null : type.toString());
-                    Object target = pending.get("targetAmount");
-                    BigDecimal targetAmt = target == null ? null : new BigDecimal(target.toString());
-                    row.setAdjustPendingAmount(targetAmt);
-                    BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
-                    row.setAdjustPendingDelta(targetAmt == null ? null : MoneyUtil.round2(targetAmt.subtract(amt)));
-                }
-            }
-        }
-        // 2. 合同级：按业务键查，delta 按金额占比分摊到各明细行；
+        // 合同级：按业务键查，delta 按金额占比分摊到各明细行；
         //    同合同号多订单时按订单号过滤，只应用本订单的在途单（防跨订单串分摊）
         if (contractNos == null || contractNos.isEmpty()) {
             return;
@@ -1115,9 +1083,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
         for (int i = 0; i < rows.size(); i++) {
             PerformanceManageVo row = rows.get(i);
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             BigDecimal amt = amounts.get(i);
             row.setAdjustPending(true);
             row.setAdjustPendingType("AMOUNT");
@@ -1153,9 +1118,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         for (PerformanceManageVo row : rows) {
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
             if (alloc == null && row.getEmployeeId() != null) {
                 alloc = allocByEmployee.get(row.getEmployeeId());
@@ -1227,9 +1189,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         for (PerformanceManageVo row : rows) {
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
             if (alloc == null && row.getEmployeeId() != null) {
                 alloc = allocByEmployee.get(row.getEmployeeId());

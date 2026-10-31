@@ -1545,8 +1545,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
                     .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, cn));
         }
+        boolean aliasOnly = cn != null && !contracts.isEmpty()
+            && contracts.stream().allMatch(c -> cn.equals(StringUtils.trimToNull(c.getOrderNo())));
         if (cn == null || contractMapper.countDistinctOrderNos(cn) != 1L) {
-            return contracts;
+            // 多订单合同禁止按合同号/别名退化，避免串单；订单号精确命中的真实壳仍可用
+            return aliasOnly ? List.of() : contracts;
         }
         List<com.panjia.received.domain.ReceivedContract> byContract = contractMapper.selectList(
             new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
@@ -1554,11 +1557,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (contracts.isEmpty()) {
             return byContract;
         }
-        boolean onlyAlias = contracts.stream()
-            .allMatch(c -> cn.equals(StringUtils.trimToNull(c.getOrderNo())));
         boolean hasReal = byContract.stream()
             .anyMatch(c -> !cn.equals(StringUtils.trimToNull(c.getOrderNo())));
-        return onlyAlias && hasReal ? byContract : contracts;
+        return aliasOnly && hasReal ? byContract : contracts;
     }
 
     @Override

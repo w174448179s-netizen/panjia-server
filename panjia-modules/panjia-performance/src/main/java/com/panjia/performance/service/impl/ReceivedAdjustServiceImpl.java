@@ -72,7 +72,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
 
     /** 实收事实口径 */
     private static final String FACT_TYPE_REAL = "PERF_REAL";
-    private static final String SCOPE_CONTRACT = "CONTRACT";
 
     private static final String WF_STATUS_FINISH = "finish";
     private static final String WF_STATUS_BACK = "back";
@@ -604,9 +603,8 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
 
         AdjustDetailVo dto = new AdjustDetailVo();
         org.springframework.beans.BeanUtils.copyProperties(adjust, dto);
-        // 实收调整单固定口径：合同级 + PERF_REAL；调整类型取单据真实值（历史单 null 按 AMOUNT）
+        // 实收调整单固定口径：PERF_REAL；调整类型取单据真实值（历史单 null 按 AMOUNT）
         dto.setAdjustType(parseReceivedAdjustType(adjust.getAdjustType()));
-        dto.setAdjustScope(SCOPE_CONTRACT);
         dto.setFactType(FACT_TYPE_REAL);
 
         // 合同信息（房源地址/订单号/签约时间）：新签事实通常与实收合同同号，按实收期间查不到则跨期回退
