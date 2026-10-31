@@ -23,8 +23,10 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -111,9 +113,14 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
             List<DingTalkUserDTO> users = contactClient.listAllUsers();
             Map<String, String> userIdToJobNumber = new LinkedHashMap<>();
             int noJobNumber = 0;
+            Set<String> noJobNumberNames = new LinkedHashSet<>();
             for (DingTalkUserDTO user : users) {
                 if (StringUtils.isBlank(user.getJobNumber())) {
                     noJobNumber++;
+                    if (noJobNumberNames.size() < 20) {
+                        noJobNumberNames.add(StringUtils.isBlank(user.getName())
+                            ? user.getUserId() : user.getName());
+                    }
                     continue;
                 }
                 userIdToJobNumber.put(user.getUserId(), user.getJobNumber().trim());
@@ -174,6 +181,9 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
                 users.size(), summaries.size(), details.size(), noJobNumber, failedUsers,
                 firstError == null ? "" : "（首个错误：" + firstError + "）",
                 leaveNames.getPersonal(), leaveNames.getSick());
+            if (!noJobNumberNames.isEmpty()) {
+                message = message + "；无工号人员（最多列 20 个）：" + String.join("、", noJobNumberNames);
+            }
             String status = (noJobNumber > 0 || failedUsers > 0)
                 ? DingTalkSyncLogService.STATUS_PARTIAL : DingTalkSyncLogService.STATUS_SUCCESS;
             if (summaries.isEmpty() && failedUsers > 0) {

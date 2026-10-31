@@ -24,6 +24,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -110,10 +111,15 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
             // 同一员工同一天只保留提交时间最晚的一条日志（重报视为修正）
             Map<DailyKey, DailyScore> daily = new LinkedHashMap<>();
             int unmatched = 0;
+            Set<String> unmatchedNames = new LinkedHashSet<>();
             for (DingTalkScoreClient.ScoreLog log : logs) {
                 String code = userIdToJobNumber.get(log.userId());
                 if (code == null) {
                     unmatched++;
+                    if (unmatchedNames.size() < 20) {
+                        unmatchedNames.add(StringUtils.isBlank(log.creatorName())
+                            ? log.userId() : log.creatorName());
+                    }
                     continue;
                 }
                 LocalDateTime submitTime = log.submitTime();
@@ -169,6 +175,9 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
                     + "口径：日志模板 %s，同员工同日保留最晚提交的一条，月度汇总按明细重算",
                 logs.size(), employeeCodes.size(), details.size(), unmatched, invalid, late,
                 properties.getScoreTemplateNames());
+            if (!unmatchedNames.isEmpty()) {
+                message = message + "；未匹配填报人（最多列 20 个）：" + String.join("、", unmatchedNames);
+            }
             String status = unmatched > 0
                 ? DingTalkSyncLogService.STATUS_PARTIAL : DingTalkSyncLogService.STATUS_SUCCESS;
             syncLogService.finish(entity, status, logs.size(), details.size(), unmatched, 0, message);
