@@ -1,5 +1,6 @@
 package com.panjia.importdomain.service;
 
+import com.panjia.common.util.ScoreSubmitWindow;
 import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.importdomain.domain.NormalizedRecord;
@@ -17,7 +18,6 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -32,11 +32,12 @@ import java.util.Map;
  * 为一人一天一行的日报，按工号聚合为一人一月——总积分 = SUM(今日总积分)，
  * 出勤天数 = COUNT(DISTINCT 填报日期)（报了积分即视为出勤）。
  * <p>
- * 提交时间规则（业务需求 V4.6+）：
+ * 提交时间规则（业务需求）：
  * <ul>
- *   <li>有效提交窗口：每日 19:30 ~ 23:00</li>
- *   <li>早于 19:30 提交：视为无效，当日积分不计入总积分（但仍计出勤）</li>
- *   <li>晚于 23:00 提交：积分有效，但记 1 次晚提交（算薪时扣款 5 元/次）</li>
+ *   <li>有效提交窗口：积分日期当日 19:00 ~ 次日 09:00</li>
+ *   <li>其中当日 23:00 ~ 次日 09:00 提交：积分有效，但记 1 次晚提交（算薪时扣款 5 元/次）</li>
+ *   <li>09:00 ~ 18:59 及其他窗口外时间提交：视为无效，当日积分按 0 计（明细保留「不计入」标识）
+ *       {@link com.panjia.common.util.ScoreSubmitWindow}</li>
  *   <li>特殊情况（谈单到深夜）经总监同意可免处罚——免罚由人工在积分审批单中调整，
  *       聚合器不做判断，只统计原始晚提交次数</li>
  * </ul>
@@ -56,6 +57,7 @@ public class ScoreSummaryAggregator {
 
     private final RawPointsMapper rawPointsMapper;
     private final NormalizedRecordMapper normalizedRecordMapper;
+    private final com.panjia.common.config.ScoreSubmitWindowProvider scoreSubmitWindowProvider;
 
     /**
      * 聚合批次的积分月度汇总（非积分类型/无数据返回空列表）。
@@ -84,10 +86,11 @@ public class ScoreSummaryAggregator {
             return List.of();
         }
 
-        // 有效提交窗口：19:30 ~ 23:00
-        // 早于 19:30 → 无效（积分不计）；晚于 23:00 → 有效但计晚提交 1 次
-        final LocalTime WINDOW_START = LocalTime.of(19, 30);
-        final LocalTime WINDOW_END = LocalTime.of(23, 0);
+        // 有效提交窗口：积分日期当日 19:00 ~ 次日 09:00
+        // 其中当日 23:00 ~ 次日 09:00 → 有效但计晚提交 1 次
+        // 09:00 ~ 18:59 及其他窗口外时间 → 无效（积分按 0 计）
+        // 三个时间点由参数管理 panjia.score.submit_window 配置，聚合开始时读一次
+        ScoreSubmitWindow.Spec window = scoreSubmitWindowProvider.currentSpec();
 
         // 同工号聚合（日报一人一天一行；防御性处理同文件重复行：
         // 总积分累加，出勤天数按 DISTINCT 填报日期计数防同日重复行多算）
@@ -111,28 +114,23 @@ public class ScoreSummaryAggregator {
             });
             LocalDateTime submitTime = raw.getSubmitTime();
             LocalDate pointDay = raw.getPointDate() != null ? raw.getPointDate()
-                : (submitTime != null ? submitTime.toLocalDate() : null);
+                : ScoreSubmitWindow.resolvePointDate(window, submitTime);
 
             // 出勤天数：有填报记录即计出勤（无论时间是否在窗口内）
             if (pointDay != null) {
                 datesByCode.computeIfAbsent(code, k -> new java.util.HashSet<>()).add(pointDay);
             }
 
-            // 提交时间判定：早于 19:30 无效不计积分；晚于 23:00 计晚提交。
+            // 提交时间判定：窗口内计入；晚提交起点后另计晚提交；窗口外按 0 计。
             // 提交时间缺失/解析失败（submitTime == null）时防御性按有效计分：
             // 薪点数据宁多算不漏算，避免模板映射或格式问题静默清零整月积分
-            boolean inWindow = submitTime == null
-                || (!submitTime.toLocalTime().isBefore(WINDOW_START)
-                    && !submitTime.toLocalTime().isAfter(WINDOW_END));
-            boolean late = submitTime != null && submitTime.toLocalTime().isAfter(WINDOW_END);
+            ScoreSubmitWindow.SubmitResult result = ScoreSubmitWindow.evaluate(window, pointDay, submitTime);
+            boolean late = result.late();
 
-            if (inWindow || late) {
-                // 窗口内或晚提交：积分有效
-                if (raw.getScore() != null) {
-                    dto.setTotalPoints(dto.getTotalPoints().add(raw.getScore()));
-                }
+            if (result.counted() && raw.getScore() != null) {
+                dto.setTotalPoints(dto.getTotalPoints().add(raw.getScore()));
             }
-            // 早于 19:30：积分无效，不计入总积分
+            // 窗口外提交：积分无效，不计入总积分（按 0 计）
 
             if (late && pointDay != null) {
                 boolean isNewLate = lateDatesByCode
@@ -174,10 +172,9 @@ public class ScoreSummaryAggregator {
             return List.of();
         }
 
-        final LocalTime WINDOW_START = LocalTime.of(19, 30);
-        final LocalTime WINDOW_END = LocalTime.of(23, 0);
-
         // 同 (employeeCode, pointDate) 去重：保留 submitTime 最晚的行
+        // 提交窗口口径由参数管理配置，聚合开始时读一次
+        ScoreSubmitWindow.Spec window = scoreSubmitWindowProvider.currentSpec();
         Map<String, ScoreDetailSyncDTO> byKey = new LinkedHashMap<>();
         for (RawPoints raw : rows) {
             String code = raw.getEmployeeCode() == null ? null : raw.getEmployeeCode().trim();
@@ -186,7 +183,7 @@ public class ScoreSummaryAggregator {
             }
             LocalDateTime submitTime = raw.getSubmitTime();
             LocalDate pointDay = raw.getPointDate() != null ? raw.getPointDate()
-                : (submitTime != null ? submitTime.toLocalDate() : null);
+                : ScoreSubmitWindow.resolvePointDate(window, submitTime);
             if (pointDay == null) {
                 continue;
             }
@@ -197,18 +194,16 @@ public class ScoreSummaryAggregator {
                 && !submitTime.isAfter(existing.getSubmitTime())) {
                 continue; // 已有更新的记录，跳过
             }
+            ScoreSubmitWindow.SubmitResult result = ScoreSubmitWindow.evaluate(window, pointDay, submitTime);
             ScoreDetailSyncDTO dto = new ScoreDetailSyncDTO();
             dto.setEmployeeCode(code);
             dto.setPointDate(pointDay);
             dto.setSubmitTime(submitTime);
-            dto.setScore(raw.getScore());
+            // 窗口外不计入积分：按 0 计，保留 isValid/lateSubmit 标识供列表展示
+            dto.setScore(result.counted() ? raw.getScore() : BigDecimal.ZERO);
             dto.setSourceBatchId(batchId);
-            boolean inWindow = submitTime == null
-                || (!submitTime.toLocalTime().isBefore(WINDOW_START)
-                    && !submitTime.toLocalTime().isAfter(WINDOW_END));
-            boolean late = submitTime != null && submitTime.toLocalTime().isAfter(WINDOW_END);
-            dto.setValid(inWindow || late);
-            dto.setLateSubmit(late);
+            dto.setValid(result.counted());
+            dto.setLateSubmit(result.late());
             byKey.put(key, dto);
         }
         return new ArrayList<>(byKey.values());

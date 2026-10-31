@@ -2,7 +2,7 @@ package com.panjia.dingtalk.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.annotation.SaMode;
-import com.panjia.dingtalk.config.DingTalkProperties;
+import com.panjia.dingtalk.config.DingTalkConfigProvider;
 import com.panjia.dingtalk.domain.DingTalkSyncLog;
 import com.panjia.dingtalk.service.DingTalkAttendanceSyncService;
 import com.panjia.dingtalk.service.DingTalkScoreSyncService;
@@ -35,7 +35,7 @@ public class DingTalkSyncController extends BaseController {
     private final DingTalkAttendanceSyncService attendanceSyncService;
     private final DingTalkScoreSyncService scoreSyncService;
     private final DingTalkSyncLogService syncLogService;
-    private final DingTalkProperties properties;
+    private final DingTalkConfigProvider configProvider;
 
     /**
      * 手动同步考勤（月度汇总 + 每日明细，异步执行）。
@@ -82,8 +82,8 @@ public class DingTalkSyncController extends BaseController {
      * 总开关校验：未启用时给出明确提示，避免误以为接口不存在。
      */
     private void assertEnabled() {
-        if (!properties.isEnabled()) {
-            throw new ServiceException("钉钉同步未启用，请配置环境变量 PANJIA_DINGTALK_ENABLED=true");
+        if (!configProvider.enabled()) {
+            throw new ServiceException("钉钉同步未启用，请在「参数管理」开启 panjia.dingtalk.enabled");
         }
     }
 

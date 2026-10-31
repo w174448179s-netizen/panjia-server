@@ -3,7 +3,7 @@ package com.panjia.dingtalk.client;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
-import com.panjia.dingtalk.config.DingTalkProperties;
+import com.panjia.dingtalk.config.DingTalkConfigProvider;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -26,7 +26,7 @@ public class DingTalkAccessTokenClient {
     /** 提前过期时间：5 分钟 */
     private static final long ADVANCE_EXPIRE_MILLIS = 5 * 60 * 1000L;
 
-    private final DingTalkProperties properties;
+    private final DingTalkConfigProvider configProvider;
 
     /** 缓存的 access_token */
     private volatile String accessToken;
@@ -53,12 +53,14 @@ public class DingTalkAccessTokenClient {
      * 新版企业内部应用鉴权：POST /v1.0/oauth2/accessToken。
      */
     private String fetchToken() {
-        if (StringUtils.isBlank(properties.getClientId()) || StringUtils.isBlank(properties.getClientSecret())) {
+        String clientId = configProvider.clientId();
+        String clientSecret = configProvider.clientSecret();
+        if (StringUtils.isBlank(clientId) || StringUtils.isBlank(clientSecret)) {
             throw new ServiceException("钉钉未配置 client-id / client-secret，无法获取 access_token");
         }
         JSONObject req = new JSONObject();
-        req.set("appKey", properties.getClientId());
-        req.set("appSecret", properties.getClientSecret());
+        req.set("appKey", clientId);
+        req.set("appSecret", clientSecret);
         String body = HttpRequest.post(URL_TOKEN)
             .body(req.toString())
             .timeout(15000)

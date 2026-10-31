@@ -5,7 +5,7 @@ import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 import com.panjia.contracts.port.PeopleAttendanceSyncPort;
 import com.panjia.dingtalk.client.DingTalkAttendanceClient;
 import com.panjia.dingtalk.client.DingTalkContactClient;
-import com.panjia.dingtalk.config.DingTalkProperties;
+import com.panjia.dingtalk.config.DingTalkConfigProvider;
 import com.panjia.dingtalk.domain.DingTalkSyncLog;
 import com.panjia.dingtalk.dto.DingTalkUserDTO;
 import com.panjia.dingtalk.service.DingTalkAttendanceSyncService;
@@ -65,7 +65,7 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
     private final DingTalkAttendanceClient attendanceClient;
     private final PeopleAttendanceSyncPort attendanceSyncPort;
     private final DingTalkSyncLogService syncLogService;
-    private final DingTalkProperties properties;
+    private final DingTalkConfigProvider configProvider;
 
     /** 异步执行线程池（手动触发用，避免阻塞 HTTP 请求） */
     private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -131,6 +131,10 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
             int failedUsers = 0;
             String firstError = null;
 
+            // 假期名称一次读取后传入并发任务，避免每个线程重复读参数缓存
+            String leavePersonal = configProvider.leaveNamePersonal();
+            String leaveSick = configProvider.leaveNameSick();
+
             // 逐人取数要 2 次报表请求，串行在人多时会很慢；4 并发取数（规避钉钉限流）
             ExecutorService pool = Executors.newFixedThreadPool(4, r -> {
                 Thread thread = new Thread(r, "dingtalk-attendance-sync");
@@ -142,7 +146,7 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
                 for (Map.Entry<String, String> entry : userIdToJobNumber.entrySet()) {
                     String userId = entry.getKey();
                     String jobNumber = entry.getValue();
-                    futures.put(userId, pool.submit(() -> fetchUser(jobNumber, userId, month)));
+                    futures.put(userId, pool.submit(() -> fetchUser(jobNumber, userId, month, leavePersonal, leaveSick)));
                 }
                 int done = 0;
                 for (Map.Entry<String, Future<UserRow>> entry : futures.entrySet()) {
@@ -174,13 +178,12 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
                 attendanceSyncPort.syncAttendanceDetails(period, details);
             }
 
-            DingTalkProperties.LeaveNames leaveNames = properties.getLeaveNames();
             String message = String.format(
                 "钉钉人员 %d 人；月度汇总 %d 条；每日明细 %d 条；无工号跳过 %d 人；取数/同步失败 %d 人%s；"
                     + "口径：钉钉智能考勤报表（事假=%s，病假=%s 记入诊所类）",
                 users.size(), summaries.size(), details.size(), noJobNumber, failedUsers,
                 firstError == null ? "" : "（首个错误：" + firstError + "）",
-                leaveNames.getPersonal(), leaveNames.getSick());
+                leavePersonal, leaveSick);
             if (!noJobNumberNames.isEmpty()) {
                 message = message + "；无工号人员（最多列 20 个）：" + String.join("、", noJobNumberNames);
             }
@@ -214,16 +217,16 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
     /**
      * 单人数据：月度汇总 + 每日明细。
      */
-    private UserRow fetchUser(String employeeCode, String userId, YearMonth month) {
+    private UserRow fetchUser(String employeeCode, String userId, YearMonth month,
+                              String leavePersonal, String leaveSick) {
         DingTalkAttendanceClient.UserMonthData data =
             attendanceClient.fetchMonth(userId, SUMMARY_COLUMNS, month);
         Map<String, BigDecimal> columns = data.columnSums();
 
-        DingTalkProperties.LeaveNames leaveNames = properties.getLeaveNames();
         Map<String, BigDecimal> leaves = attendanceClient.leaveSums(userId, List.of(
-            leaveNames.getPersonal(), leaveNames.getSick()), month);
-        BigDecimal personalDays = nz(leaves.get(leaveNames.getPersonal()));
-        BigDecimal sickDays = nz(leaves.get(leaveNames.getSick()));
+            leavePersonal, leaveSick), month);
+        BigDecimal personalDays = nz(leaves.get(leavePersonal));
+        BigDecimal sickDays = nz(leaves.get(leaveSick));
 
         AttendanceSummarySyncDTO summary = new AttendanceSummarySyncDTO();
         summary.setEmployeeCode(employeeCode);

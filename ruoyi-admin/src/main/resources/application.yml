@@ -51,28 +51,6 @@ panjia:
   # 员工域：客户根部门 ID（岗位挂该节点下，导入自动建部门树的父节点）
   tenant:
     root-dept-id: ${PANJIA_TENANT_ROOT_DEPT_ID:1761000000000000100}
-  # 积分：平均积分的分母（考勤出勤天数）扣除不参与考核的假期
-  # 按考勤每日明细「考勤结果」原文包含匹配；休息/未排班日不扣
-  score:
-    deduct-leave-names: "${PANJIA_SCORE_DEDUCT_LEAVE_NAMES:随心假,年假,生日假,产假,陪产假,丧假,病假（二甲医院以上）}"
-  # 钉钉集成（人员/考勤同步）
-  # 凭证只从环境变量注入（部署机 .env，随打包下发，已 gitignore），禁止写进本文件
-  dingtalk:
-    enabled: ${PANJIA_DINGTALK_ENABLED:false}
-    # 新版企业内部应用凭证（开发者后台 → 应用信息 → 凭证与基础信息）
-    client-id: ${DINGTALK_CLIENT_ID:}
-    client-secret: ${DINGTALK_CLIENT_SECRET:}
-    agent-id: ${DINGTALK_AGENT_ID:5111097099}
-    # 每日同步（考勤）：默认每晚 23:30
-    sync-cron: "${DINGTALK_SYNC_CRON:0 30 23 * * ?}"
-    # 考勤报表假期名称（需与钉钉考勤后台「假种」名称一致，名称不符会取不到）
-    leave-names:
-      personal: "${DINGTALK_LEAVE_NAME_PERSONAL:事假}"
-      sick: "${DINGTALK_LEAVE_NAME_SICK:病假（诊所类证明）}"
-    # 积分同步：钉钉日志模板名（二手/租赁两套日报，名称需与钉钉日志完全一致）
-    score-template-names: ${DINGTALK_SCORE_TEMPLATES:二手积分日报5.0版,租赁积分日报3.0版}
-    # 日志正文中的积分字段名（按包含匹配，兼容「✨今日总积分」）
-    score-key: ${DINGTALK_SCORE_KEY:今日总积分}
   license:
     # 授权服务器地址（运维通过环境变量覆盖）
     server-url: ${PANJIA_LICENSE_SERVER_URL:https://panjia.online}

@@ -5,15 +5,16 @@ import com.panjia.people.domain.AttendanceDetail;
 import com.panjia.people.domain.AttendanceRecord;
 import com.panjia.people.mapper.AttendanceDetailMapper;
 import com.panjia.people.mapper.AttendanceRecordMapper;
+import com.panjia.people.port.ConfigPort;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.utils.StringUtils;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -30,7 +31,7 @@ import java.util.Set;
  * <p>
  * 钉钉报表的「出勤天数」含已批准的请假（应出勤口径），会拉低在休长假员工的平均积分。
  * 因此按考勤每日明细（{@code pj_people_attendance_detail.status} 原文）中的假期名称，
- * 扣除不参与积分考核的假期天数（{@link #deductLeaveNames} 可配置）；
+ * 扣除不参与积分考核的假期天数（名单见参数管理 {@link #CONFIG_KEY}）；
  * 休息/未排班日即使挂假也不扣，避免重复扣减非应出勤日。
  * <p>
  * 考勤数据缺失（未导入/未登记）时回退积分表存储的填报天数，保证历史期间结果不变。
@@ -41,15 +42,19 @@ public class ScoreAttendDaysResolver {
 
     private static final DateTimeFormatter MONTH_KEY = DateTimeFormatter.ofPattern("yyyy-MM");
 
+    /** 参数管理键名：平均积分分母需扣除的假期名单（逗号分隔） */
+    private static final String CONFIG_KEY = "panjia.score.deduct_leave_names";
+
+    /** 参数未配置时的兜底名单（与初始化脚本默认值一致） */
+    private static final List<String> DEFAULT_DEDUCT_LEAVE_NAMES =
+        List.of("随心假", "年假", "生日假", "产假", "陪产假", "丧假", "病假（二甲医院以上）");
+
     /** 非应出勤日标记：这些日期即使出现假期名称也不扣减出勤天数 */
     private static final Set<String> NON_WORK_MARKERS = Set.of("休息", "未排班");
 
-    /** 平均积分分母需扣除的假期名称（按每日考勤状态原文包含匹配，可配置） */
-    @Value("${panjia.score.deduct-leave-names:随心假,年假,生日假,产假,陪产假,丧假,病假（二甲医院以上）}")
-    private List<String> deductLeaveNames;
-
     private final AttendanceRecordMapper attendanceRecordMapper;
     private final AttendanceDetailMapper attendanceDetailMapper;
+    private final ConfigPort configPort;
 
     /**
      * 批量解析考勤出勤天数（已扣除不参与考核的假期天数）。
@@ -91,6 +96,7 @@ public class ScoreAttendDaysResolver {
      */
     private Map<String, Integer> resolveDeductLeaveDays(Collection<Long> employeeIds,
                                                         Collection<LocalDate> monthStarts) {
+        List<String> deductLeaveNames = loadDeductLeaveNames();
         List<AttendanceDetail> details = attendanceDetailMapper.selectList(new LambdaQueryWrapper<AttendanceDetail>()
             .in(AttendanceDetail::getEmployeeId, employeeIds)
             .in(AttendanceDetail::getAttendMonth, monthStarts)
@@ -99,7 +105,7 @@ public class ScoreAttendDaysResolver {
         Map<String, Set<LocalDate>> datesByEmployeeMonth = new HashMap<>();
         for (AttendanceDetail detail : details) {
             if (detail.getEmployeeId() == null || detail.getAttendMonth() == null
-                || detail.getAttendDate() == null || !isDeductLeave(detail.getStatus())) {
+                || detail.getAttendDate() == null || !isDeductLeave(detail.getStatus(), deductLeaveNames)) {
                 continue;
             }
             datesByEmployeeMonth
@@ -111,8 +117,25 @@ public class ScoreAttendDaysResolver {
         return result;
     }
 
+    /**
+     * 从参数管理读取需扣除的假期名单（逗号分隔，兼容中英文逗号）；未配置时用兜底名单。
+     */
+    private List<String> loadDeductLeaveNames() {
+        String value = configPort.findValue(CONFIG_KEY);
+        if (StringUtils.isBlank(value)) {
+            return DEFAULT_DEDUCT_LEAVE_NAMES;
+        }
+        List<String> names = new ArrayList<>();
+        for (String part : value.split("[,，]")) {
+            if (StringUtils.isNotBlank(part)) {
+                names.add(part.trim());
+            }
+        }
+        return names.isEmpty() ? DEFAULT_DEDUCT_LEAVE_NAMES : names;
+    }
+
     /** 状态原文是否属于需扣除的假期（休息/未排班日不计） */
-    private boolean isDeductLeave(String status) {
+    private boolean isDeductLeave(String status, List<String> deductLeaveNames) {
         if (StringUtils.isBlank(status)) {
             return false;
         }
@@ -121,9 +144,6 @@ public class ScoreAttendDaysResolver {
             if (text.contains(marker)) {
                 return false;
             }
-        }
-        if (deductLeaveNames == null) {
-            return false;
         }
         for (String name : deductLeaveNames) {
             String keyword = normalize(name);

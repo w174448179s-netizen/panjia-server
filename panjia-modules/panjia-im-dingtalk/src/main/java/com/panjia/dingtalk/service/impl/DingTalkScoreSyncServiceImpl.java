@@ -1,10 +1,12 @@
 package com.panjia.dingtalk.service.impl;
 
+import com.panjia.common.config.ScoreSubmitWindowProvider;
+import com.panjia.common.util.ScoreSubmitWindow;
 import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.port.PeopleScoreSyncPort;
 import com.panjia.dingtalk.client.DingTalkContactClient;
 import com.panjia.dingtalk.client.DingTalkScoreClient;
-import com.panjia.dingtalk.config.DingTalkProperties;
+import com.panjia.dingtalk.config.DingTalkConfigProvider;
 import com.panjia.dingtalk.domain.DingTalkSyncLog;
 import com.panjia.dingtalk.dto.DingTalkUserDTO;
 import com.panjia.dingtalk.service.DingTalkScoreSyncService;
@@ -18,7 +20,6 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -37,22 +38,20 @@ import java.util.concurrent.Executors;
  * 流程与考勤同步同构：异步执行 + 同步记录按月留痕。
  * 口径与积分导入一致：一次分页拉取各模板（二手/租赁）当月日志，按钉钉 userId
  * 匹配员工工号，同一员工同一天保留提交时间最晚的一条日志（重报视为修正）；
- * 19:30~23:00 为有效窗口，早于 19:30 不计积分，晚于 23:00 记 1 次晚提交。
+ * 提交窗口口径由参数管理 panjia.score.submit_window 配置（默认当日 19:00 ~ 次日 09:00 有效，
+ * 09:00 ~ 18:59 不计积分按 0 计，23:00 后另记 1 次晚提交，判定见 {@link ScoreSubmitWindow}）。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
 
-    /** 有效提交窗口 */
-    private static final LocalTime WINDOW_START = LocalTime.of(19, 30);
-    private static final LocalTime WINDOW_END = LocalTime.of(23, 0);
-
     private final DingTalkContactClient contactClient;
     private final DingTalkScoreClient scoreClient;
-    private final DingTalkProperties properties;
+    private final DingTalkConfigProvider configProvider;
     private final PeopleScoreSyncPort scoreSyncPort;
     private final DingTalkSyncLogService syncLogService;
+    private final ScoreSubmitWindowProvider scoreSubmitWindowProvider;
 
     /** 异步执行线程池（手动触发用，避免阻塞 HTTP 请求） */
     private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -97,8 +96,10 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
      */
     private void runSync(DingTalkSyncLog entity, String period, YearMonth month) {
         try {
+            List<String> templateNames = configProvider.scoreTemplateNames();
+            String scoreKey = configProvider.scoreKey();
             List<DingTalkScoreClient.ScoreLog> logs =
-                scoreClient.fetchMonth(properties.getScoreTemplateNames(), properties.getScoreKey(), month);
+                scoreClient.fetchMonth(templateNames, scoreKey, month);
 
             Map<String, String> userIdToJobNumber = new LinkedHashMap<>();
             for (DingTalkUserDTO user : contactClient.listAllUsers()) {
@@ -107,6 +108,9 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
                 }
                 userIdToJobNumber.put(user.getUserId(), user.getJobNumber().trim());
             }
+
+            // 提交窗口口径由参数管理配置，每次同步读一次
+            ScoreSubmitWindow.Spec window = scoreSubmitWindowProvider.currentSpec();
 
             // 同一员工同一天只保留提交时间最晚的一条日志（重报视为修正）
             Map<DailyKey, DailyScore> daily = new LinkedHashMap<>();
@@ -126,10 +130,13 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
                 if (submitTime == null) {
                     continue;
                 }
-                LocalDate date = submitTime.toLocalDate();
-                if (date.isBefore(month.atDay(1)) || date.isAfter(month.atEndOfMonth())) {
+                // 按提交日期过滤月份（拉取区间本身以提交时间为准）；归属日再按窗口推断，
+                // 避免月底最后一天跨零点补报的日志被两个月份都丢掉
+                LocalDate submitDate = submitTime.toLocalDate();
+                if (submitDate.isBefore(month.atDay(1)) || submitDate.isAfter(month.atEndOfMonth())) {
                     continue;
                 }
+                LocalDate date = ScoreSubmitWindow.resolvePointDate(window, submitTime);
                 DailyScore row = daily.get(new DailyKey(code, date));
                 if (row != null && row.submitTime != null && !submitTime.isAfter(row.submitTime)) {
                     continue;
@@ -144,23 +151,22 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
             for (Map.Entry<DailyKey, DailyScore> entry : daily.entrySet()) {
                 DailyKey key = entry.getKey();
                 DailyScore row = entry.getValue();
-                boolean inWindow = !row.submitTime.toLocalTime().isBefore(WINDOW_START)
-                    && !row.submitTime.toLocalTime().isAfter(WINDOW_END);
-                boolean lateSubmit = row.submitTime.toLocalTime().isAfter(WINDOW_END);
+                ScoreSubmitWindow.SubmitResult result = ScoreSubmitWindow.evaluate(window, key.pointDate(), row.submitTime);
 
                 ScoreDetailSyncDTO detail = new ScoreDetailSyncDTO();
                 detail.setEmployeeCode(key.employeeCode());
                 detail.setPointDate(key.pointDate());
                 detail.setSubmitTime(row.submitTime);
-                detail.setScore(row.score);
-                detail.setValid(inWindow || lateSubmit);
-                detail.setLateSubmit(lateSubmit);
+                // 窗口外不计入积分：按 0 计，保留 isValid/lateSubmit 标识供列表展示
+                detail.setScore(result.counted() ? row.score : BigDecimal.ZERO);
+                detail.setValid(result.counted());
+                detail.setLateSubmit(result.late());
                 details.add(detail);
                 employeeCodes.add(key.employeeCode());
-                if (!inWindow && !lateSubmit) {
+                if (!result.counted()) {
                     invalid++;
                 }
-                if (lateSubmit) {
+                if (result.late()) {
                     late++;
                 }
             }
@@ -171,10 +177,11 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
 
             String message = String.format(
                 "钉钉积分日报 %d 条；涉及员工 %d 人；每日明细 %d 条；无法匹配工号 %d 条；"
-                    + "19:30 前提交无效 %d 条；23:00 后晚提交 %d 条；"
+                    + "%s~次日%s 窗口外提交不计积分 %d 条；%s 后晚提交 %d 条；"
                     + "口径：日志模板 %s，同员工同日保留最晚提交的一条，月度汇总按明细重算",
-                logs.size(), employeeCodes.size(), details.size(), unmatched, invalid, late,
-                properties.getScoreTemplateNames());
+                logs.size(), employeeCodes.size(), details.size(), unmatched,
+                window.start(), window.end(), invalid, window.lateStart(), late,
+                templateNames);
             if (!unmatchedNames.isEmpty()) {
                 message = message + "；未匹配填报人（最多列 20 个）：" + String.join("、", unmatchedNames);
             }
