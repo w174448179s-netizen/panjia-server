@@ -93,10 +93,13 @@ public class CommissionQueryAdapter implements CommissionQueryPort {
         if (realFacts.isEmpty()) return Collections.emptyList();
         java.util.Set<String> bizKeys = new java.util.LinkedHashSet<>();
         for (PerformanceFactSummaryDTO f : realFacts) {
-            // 统一以订单号为业务锚点（合同号可能为空，不再作为独立键收集）；
-            // findActiveByBizKeys 内部仍会对 contract_no 列做 OR 匹配兜底（历史数据兼容）
+            // 订单号与合同号同时作为业务键：贝壳新签 order_no 可能误填成合同号（两列都是合同号），
+            // 只收集实收订单号会漏掉该合同的新签行，导出兜底金额偏小
             if (f.getOrderNo() != null && !f.getOrderNo().isBlank()) {
                 bizKeys.add(f.getOrderNo());
+            }
+            if (f.getContractNo() != null && !f.getContractNo().isBlank()) {
+                bizKeys.add(f.getContractNo());
             }
         }
         List<PerformanceFactSummaryDTO> expects =

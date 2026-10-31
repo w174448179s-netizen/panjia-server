@@ -20,6 +20,8 @@ public interface ReceivedContractMapper extends BaseMapper<ReceivedContract> {
      * <p>用于实收-应收归属的退化闸门：新签 order_no 误填成合同号导致双键不中时，
      * 仅当新签事实与实收合同两边订单维度都唯一才允许退化按合同号匹配；
      * 全局口径防止同一合同的多笔订单分批到账时被重复归属。
+     * <p>统计排除「新签调整联动虚拟壳」：{@code source_type=MANUAL} 且 {@code order_no=contract_no}
+     * 的壳不承载真实订单号，计入会让真实到账的唯一性判定恒为 2、退化匹配永久失效（2026-10-31）。
      *
      * @param contractNo 合同号
      * @return 去重非空订单号数量
@@ -30,6 +32,7 @@ public interface ReceivedContractMapper extends BaseMapper<ReceivedContract> {
         FROM pj_received_contract
         WHERE contract_no = #{contractNo}
           AND order_no IS NOT NULL AND order_no &lt;&gt; ''
+          AND NOT (source_type = 'MANUAL' AND order_no = contract_no)
         </script>
         """)
     long countDistinctOrderNos(@Param("contractNo") String contractNo);

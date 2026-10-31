@@ -1,6 +1,7 @@
 package com.panjia.received.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.NormalizedRecordDTO;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
@@ -17,6 +18,7 @@ import com.panjia.received.mapper.ReceivedDetailMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -268,6 +270,9 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             if (!isBlank(r.getContractNo())) contractNos.add(r.getContractNo().trim());
         }
         Map<String, ReceivedContract> contractByGroupKey = loadExistingContracts(period, sourceType, orders, contractNos);
+        // 阶段 2.1.1：同期间「新签调整联动」纯虚拟 MANUAL 壳（order_no=合同号、明细净额 0）。
+        // 真实到账先到调整后到（或反之）时复用该壳，避免同合同同月出现两条实收（2026-10-31）
+        Map<String, ReceivedContract> pureVirtualShellByContractNo = loadPureVirtualShells(period, contractNos);
         Map<Long, List<ReceivedDetail>> activeDetailsByContract = loadActiveDetails(contractByGroupKey.values());
 
         // 阶段 2.2：指纹比对，挑出「有变化」的组
@@ -325,6 +330,18 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
 
             NormalizedRecordDTO first = groupRows.get(0);
             ReceivedContract contract = contractByGroupKey.get(entry.getKey());
+            // 纯虚拟 MANUAL 壳复用 / 双壳并存合并（已消费判定通过后才动壳，避免跳过组时改坏数据）
+            ReceivedContract virtualShell = takePureVirtualShell(pureVirtualShellByContractNo, first,
+                contract, contractByGroupKey);
+            boolean adoptedVirtualShell = false;
+            if (virtualShell != null) {
+                if (contract == null) {
+                    contract = adoptVirtualShell(virtualShell, first, period, sourceType, batchId, empMap);
+                    adoptedVirtualShell = true;
+                } else {
+                    mergeVirtualShellInto(virtualShell, contract);
+                }
+            }
             if (contract == null) {
                 EmployeeMainDataDTO emp = first.getEmployeeCode() == null ? null : empMap.get(first.getEmployeeCode());
                 contract = buildContract(first, period, sourceType, batchId, emp);
@@ -332,7 +349,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
                 newContracts++;
                 log.info("[实收写入] 新建合同：id={}, orderNo={}, period={}",
                     contract.getId(), contract.getOrderNo(), period);
-            } else {
+            } else if (!adoptedVirtualShell) {
                 supersedeActiveDetails(activeDetailsByContract.getOrDefault(contract.getId(), List.of()), batchId);
             }
 
@@ -413,6 +430,172 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             result.computeIfAbsent(d.getContractId(), k -> new ArrayList<>()).add(d);
         }
         return result;
+    }
+
+    // ==================== 新签调整虚拟壳复用（作废重开 + 虚拟行回绑，2026-10-31） ====================
+
+    /**
+     * 加载同期间「新签调整联动」的纯虚拟 MANUAL 壳，按合同号索引。
+     * <p>同一合同存在多个纯虚拟壳时不自动合并（数据异常，交人工）；空壳/非纯虚拟壳不返回。
+     */
+    private Map<String, ReceivedContract> loadPureVirtualShells(String period, Set<String> contractNos) {
+        if (contractNos.isEmpty()) {
+            return Map.of();
+        }
+        List<ReceivedContract> shells = contractMapper.selectList(new LambdaQueryWrapper<ReceivedContract>()
+            .eq(ReceivedContract::getPeriod, period)
+            .eq(ReceivedContract::getSourceType, "MANUAL")
+            .in(ReceivedContract::getContractNo, contractNos));
+        if (shells.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, List<ReceivedDetail>> details = loadActiveDetails(shells);
+        Map<String, ReceivedContract> result = new LinkedHashMap<>();
+        Set<String> duplicated = new LinkedHashSet<>();
+        for (ReceivedContract c : shells) {
+            if (!isPureVirtualShell(c, details.getOrDefault(c.getId(), List.of()))) continue;
+            String cn = c.getContractNo().trim();
+            if (result.containsKey(cn)) {
+                duplicated.add(cn);
+                continue;
+            }
+            result.put(cn, c);
+        }
+        for (String cn : duplicated) {
+            result.remove(cn);
+            log.warn("[实收写入] 同合同存在多个纯虚拟壳，不做自动合并：contractNo={}", cn);
+        }
+        return result;
+    }
+
+    /**
+     * 纯虚拟壳判定（设计 §3.1）：MANUAL、{@code order_no=contract_no}，
+     * 全部 ACTIVE 明细无来源批次、无归一化记录、有 adjust_id，且金额合计为 0。
+     */
+    private boolean isPureVirtualShell(ReceivedContract c, List<ReceivedDetail> activeRows) {
+        if (c == null || !"MANUAL".equals(c.getSourceType())) {
+            return false;
+        }
+        if (isBlank(c.getOrderNo()) || isBlank(c.getContractNo())
+            || !c.getOrderNo().trim().equals(c.getContractNo().trim())) {
+            return false;
+        }
+        if (activeRows.isEmpty()) {
+            return false;
+        }
+        BigDecimal net = BigDecimal.ZERO;
+        for (ReceivedDetail d : activeRows) {
+            if (d.getSourceBatchId() != null || d.getNormalizedRecordId() != null || d.getAdjustId() == null) {
+                return false;
+            }
+            net = net.add(d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount());
+        }
+        return net.signum() == 0;
+    }
+
+    /**
+     * 取本组可复用的纯虚拟壳（每壳只用一次）。
+     * <p>该合同本批已加载到多笔真实订单壳（同合同多订单）时不自动合并，保持原有分壳逻辑。
+     */
+    private ReceivedContract takePureVirtualShell(Map<String, ReceivedContract> virtualByContractNo,
+                                                 NormalizedRecordDTO first,
+                                                 ReceivedContract realShell,
+                                                 Map<String, ReceivedContract> contractByGroupKey) {
+        if (first == null || isBlank(first.getContractNo())) {
+            return null;
+        }
+        String contractNo = first.getContractNo().trim();
+        ReceivedContract virtual = virtualByContractNo.get(contractNo);
+        if (virtual == null) {
+            return null;
+        }
+        Set<String> keOrderNos = keOrderNosOf(contractByGroupKey, contractNo);
+        if (keOrderNos.size() > 1) {
+            log.info("[实收写入] 同合同多笔真实订单，不复用虚拟壳：contractNo={}, orders={}", contractNo, keOrderNos);
+            return null;
+        }
+        // 真实订单已存在但与本组订单不一致（非同月唯一订单）→ 不合并
+        if (realShell == null && !keOrderNos.isEmpty()) {
+            return null;
+        }
+        virtualByContractNo.remove(contractNo);
+        return virtual;
+    }
+
+    /** 本批已加载的同期间 KE 壳中，该合同号下的真实订单号集合（按合同 ID 去重后统计）。 */
+    private Set<String> keOrderNosOf(Map<String, ReceivedContract> contractByGroupKey, String contractNo) {
+        Map<Long, ReceivedContract> byId = new LinkedHashMap<>();
+        for (ReceivedContract c : contractByGroupKey.values()) {
+            if (c != null && c.getId() != null) {
+                byId.putIfAbsent(c.getId(), c);
+            }
+        }
+        Set<String> orders = new LinkedHashSet<>();
+        for (ReceivedContract c : byId.values()) {
+            if (!isBlank(c.getContractNo()) && contractNo.equals(c.getContractNo().trim())
+                && !isBlank(c.getOrderNo())) {
+                orders.add(c.getOrderNo().trim());
+            }
+        }
+        return orders;
+    }
+
+    /**
+     * 复用纯虚拟壳：{@code order_no} 改真实订单号、{@code source_type} 改真实来源、{@code batch_id} 改本批，
+     * 其余字段仅空值回填（不覆盖人工维护数据）。
+     * <p>撞 {@code uk_received_contract_anchor} 时回查真实壳，降级为「双壳合并」（虚拟行迁到真实壳、删空壳）。
+     */
+    private ReceivedContract adoptVirtualShell(ReceivedContract virtual, NormalizedRecordDTO first,
+                                               String period, String sourceType, Long batchId,
+                                               Map<String, EmployeeMainDataDTO> empMap) {
+        String realOrderNo = first.getOrderNo() != null ? first.getOrderNo().trim() : virtual.getOrderNo();
+        EmployeeMainDataDTO emp = first.getEmployeeCode() == null ? null : empMap.get(first.getEmployeeCode());
+        virtual.setOrderNo(realOrderNo);
+        virtual.setSourceType(sourceType);
+        virtual.setBatchId(batchId);
+        if (virtual.getDeptId() == null && emp != null) {
+            virtual.setDeptId(emp.getDeptId());
+        }
+        if (virtual.getPropertyAddress() == null && first.getPropertyAddress() != null) {
+            virtual.setPropertyAddress(first.getPropertyAddress());
+        }
+        if (virtual.getContractAmount() == null && first.getOriginAmount() != null) {
+            virtual.setContractAmount(first.getOriginAmount());
+        }
+        if (virtual.getBizType() == null && first.getBizType() != null) {
+            virtual.setBizType(first.getBizType());
+        }
+        try {
+            contractMapper.updateById(virtual);
+            log.info("[实收写入] 复用新签调整虚拟壳：contractId={}, contractNo={}, orderNo={}, period={}",
+                virtual.getId(), virtual.getContractNo(), realOrderNo, period);
+            return virtual;
+        } catch (DuplicateKeyException e) {
+            log.warn("[实收写入] 虚拟壳重键撞唯一索引，降级双壳合并：contractId={}, orderNo={}",
+                virtual.getId(), realOrderNo);
+            ReceivedContract real = contractMapper.selectOne(new LambdaQueryWrapper<ReceivedContract>()
+                .eq(ReceivedContract::getOrderNo, realOrderNo)
+                .eq(ReceivedContract::getPeriod, period)
+                .eq(ReceivedContract::getSourceType, sourceType)
+                .last("LIMIT 1"));
+            if (real == null) {
+                throw e;
+            }
+            mergeVirtualShellInto(virtual, real);
+            // 并发写入的真实壳可能已有 ACTIVE 行：按常规替换语义置 SUPERSEDED 后再插本批行
+            supersedeActiveDetails(loadActiveDetails(List.of(real)).getOrDefault(real.getId(), List.of()), batchId);
+            return real;
+        }
+    }
+
+    /** 双壳并存：把虚拟壳下全部明细迁到真实壳，再删除空壳（保留 detail 的幂等锚点不变）。 */
+    private void mergeVirtualShellInto(ReceivedContract virtual, ReceivedContract real) {
+        detailMapper.update(null, new LambdaUpdateWrapper<ReceivedDetail>()
+            .eq(ReceivedDetail::getContractId, virtual.getId())
+            .set(ReceivedDetail::getContractId, real.getId()));
+        contractMapper.deleteById(virtual.getId());
+        log.info("[实收写入] 双壳合并：虚拟壳 {} 明细已迁至真实壳 {}，空壳已删除",
+            virtual.getId(), real.getId());
     }
 
     /** 已消费原因：结佣域（跨域端口，一次批量）+ 实收审批单 SUBMITTED/APPROVED + 明细带调整痕迹。 */

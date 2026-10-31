@@ -381,14 +381,24 @@ public class CommissionApplicationService {
     /**
      * 加载该业务键全部未结佣新签事实（跨期，不按发起月截断），已剔除被其它结佣单占用的事实。
      * <p>
-     * 业务键匹配用双列 OR（order_no 或 contract_no 命中即可）：调用方传入的键可能是订单号，
-     * 也可能因缺订单号退化为合同号，与批量发起的键口径保持一致。
+     * 业务键匹配：合同号+订单号同传时双键精确、未命中按双侧闸门退化合同号；仅传其一时按
+     * order_no/contract_no 双列 OR 宽捞，与批量发起的键口径保持一致。
      */
     private java.util.List<PerformanceFactSummaryDTO> loadUnsettledExpectFacts(String orderNo, String contractNo) {
-        String bizKey = StringUtils.isNotBlank(orderNo) ? orderNo.trim() : StringUtils.trimToNull(contractNo);
-        java.util.List<PerformanceFactSummaryDTO> expects = bizKey == null
-            ? java.util.Collections.emptyList()
-            : performanceQueryPort.findActiveByBizKeys(java.util.List.of(bizKey), FACT_TYPE_EXPECT);
+        String on = StringUtils.trimToNull(orderNo);
+        String cn = StringUtils.trimToNull(contractNo);
+        java.util.List<PerformanceFactSummaryDTO> expects;
+        if (on != null && cn != null) {
+            // 合同号/订单号同传：双键精确优先，未命中时端口内按双侧闸门退化按合同号匹配。
+            // 不能只用订单号做业务键宽捞——贝壳新签 order_no 误填合同号时（两列都是合同号）
+            // 用真实订单号永远捞不到，人工发起会被误判为「无可结佣新签」（2026-10-31）
+            expects = performanceQueryPort.findActiveByBizKey(null, on, cn, FACT_TYPE_EXPECT);
+        } else {
+            String bizKey = on != null ? on : cn;
+            expects = bizKey == null
+                ? java.util.Collections.emptyList()
+                : performanceQueryPort.findActiveByBizKeys(java.util.List.of(bizKey), FACT_TYPE_EXPECT);
+        }
         java.util.Map<Long, PerformanceFactSummaryDTO> byId = new java.util.LinkedHashMap<>();
         for (PerformanceFactSummaryDTO e : expects) {
             if (e.getFactId() == null || e.getEmployeeId() == null

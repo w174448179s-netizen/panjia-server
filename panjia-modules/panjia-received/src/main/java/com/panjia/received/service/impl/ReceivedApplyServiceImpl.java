@@ -470,14 +470,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             operatorId = 1L;
         }
         // 该合同当月合同壳（联动建虚拟实收时已建/复用）
-        LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract> cw = new LambdaQueryWrapper<>();
-        cw.eq(com.panjia.received.domain.ReceivedContract::getPeriod, period);
-        if (StringUtils.isNotBlank(orderNo)) {
-            cw.eq(com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo);
-        } else {
-            cw.eq(com.panjia.received.domain.ReceivedContract::getContractNo, contractNo);
-        }
-        List<com.panjia.received.domain.ReceivedContract> contracts = contractMapper.selectList(cw);
+        // 订单号优先，查不到再用合同号兜底（新签联动建壳时 order_no 可能已被真实到账改写为真实订单号）
+        List<com.panjia.received.domain.ReceivedContract> contracts =
+            queryContractsByPeriodAndKey(period, orderNo, contractNo);
         if (contracts.isEmpty()) {
             return 0;
         }
@@ -554,6 +549,69 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             }
         }
         return created;
+    }
+
+    /**
+     * 按「归属月 + 订单号/合同号」查合同壳：订单号优先，查不到再用合同号兜底。
+     * <p>真实实收到账复用虚拟壳后 order_no 已改为真实订单号，仅按 order_no 查会漏。
+     */
+    private List<com.panjia.received.domain.ReceivedContract> queryContractsByPeriodAndKey(
+            String period, String orderNo, String contractNo) {
+        LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract> cw = new LambdaQueryWrapper<>();
+        cw.eq(com.panjia.received.domain.ReceivedContract::getPeriod, period);
+        if (StringUtils.isNotBlank(orderNo)) {
+            cw.eq(com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo);
+        } else {
+            cw.eq(com.panjia.received.domain.ReceivedContract::getContractNo, contractNo);
+        }
+        List<com.panjia.received.domain.ReceivedContract> contracts = contractMapper.selectList(cw);
+        if (contracts.isEmpty() && StringUtils.isNotBlank(orderNo) && StringUtils.isNotBlank(contractNo)) {
+            contracts = contractMapper.selectList(new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .eq(com.panjia.received.domain.ReceivedContract::getPeriod, period)
+                .eq(com.panjia.received.domain.ReceivedContract::getContractNo, contractNo));
+        }
+        return contracts;
+    }
+
+    /**
+     * 收集 0 元联动实收单上可回绑的<b>纯虚拟调整行</b> ID。
+     * <p>纯虚拟口径：ACTIVE 行全部无来源批次、无归一化记录、有 adjust_id，且净额为 0。
+     * 空单返回空集合；存在任一非纯虚拟行返回 {@code null}（调用方跳过自动合并，交人工）。
+     */
+    private List<Long> collectPureVirtualDetailIds(Long applyId) {
+        List<com.panjia.received.domain.ReceivedDetail> bound = detailMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .eq(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId, applyId)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"));
+        if (bound.isEmpty()) {
+            return List.of();
+        }
+        BigDecimal net = BigDecimal.ZERO;
+        for (com.panjia.received.domain.ReceivedDetail d : bound) {
+            if (d.getSourceBatchId() != null || d.getNormalizedRecordId() != null || d.getAdjustId() == null) {
+                return null;
+            }
+            net = net.add(nvlAmount(d.getPerformanceAmount()));
+        }
+        if (net.signum() != 0) {
+            return null;
+        }
+        return bound.stream().map(com.panjia.received.domain.ReceivedDetail::getId).toList();
+    }
+
+    /**
+     * 把 0 元联动单上的虚拟调整行回绑到新建的真实审批单，并把条数合并为「真实行 + 虚拟行」。
+     * <p>实收金额只取真实到账合计（虚拟行净额 0，不回加），人员/角色口径由虚拟行保留。
+     */
+    private void carryOverVirtualDetails(ReceivedApply apply, List<Long> virtualDetailIds, int realRowCount) {
+        if (virtualDetailIds == null || virtualDetailIds.isEmpty()) {
+            return;
+        }
+        bindFacts(virtualDetailIds, apply.getId());
+        apply.setItemCount(realRowCount + virtualDetailIds.size());
+        applyMapper.updateById(apply);
+        log.info("[实收审批] 0 元联动单虚拟调整行已回绑新单：applyId={}, orderNo={}, virtualRows={}, itemCount={}",
+            apply.getId(), apply.getOrderNo(), virtualDetailIds.size(), apply.getItemCount());
     }
 
     /**
@@ -709,6 +767,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             BigDecimal expectedAmount = expectTotalByOrder.getOrDefault(orderNo, BigDecimal.ZERO);
             try {
                 ReceivedApply existing = activeApplies.get(orderNo);
+                // 0 元联动单作废后需回绑到新单的虚拟调整行（纯虚拟壳场景，2026-10-31）
+                List<Long> carryOverDetailIds = List.of();
                 if (existing != null && existing.getStatus() == ReceivedApplyStatus.APPROVED) {
                     BigDecimal existingAmount = existing.getReceivedAmount();
                     if (existingAmount != null && existingAmount.signum() != 0) {
@@ -716,14 +776,23 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                             existing.getId(), orderNo);
                         continue;
                     }
-                    // 新签调整联动直建的 0 元 APPROVED 单：作废以释放 (period, order_no) 唯一键，
-                    // 让真实到账按正常分流重新建单（2026-10-31）
+                    // 1) 先收集 0 元单上的虚拟调整行（无来源批次、无归一化记录、有 adjustId 且净额 0）；
+                    //    非纯虚拟（承载真实金额/真实到账行）时不做自动合并，交人工处理
+                    carryOverDetailIds = collectPureVirtualDetailIds(existing.getId());
+                    if (carryOverDetailIds == null) {
+                        String msg = "订单 " + orderNo + " 存在 0 元实收单 " + existing.getApplyNo()
+                            + "，其绑定明细非纯虚拟调整行，未自动合并，请人工处理";
+                        log.warn("[实收审批] {}", msg);
+                        importBatchWritePort.recordBatchIssue(batchId, ISSUE_TYPE_MANUAL_APPROVAL, msg);
+                        continue;
+                    }
+                    // 2) 作废以释放 (period, order_no) 唯一键，让真实到账按正常分流重新建单
                     existing.setStatus(ReceivedApplyStatus.CANCELLED);
                     existing.setCurrentNode(null);
                     existing.setProcessInstanceId(null);
                     applyMapper.updateById(existing);
-                    log.info("[实收审批] 0 元联动实收单已作废，放行真实到账建单：applyId={}, orderNo={}",
-                        existing.getId(), orderNo);
+                    log.info("[实收审批] 0 元联动实收单已作废，放行真实到账建单：applyId={}, orderNo={}, 回绑虚拟行={}",
+                        existing.getId(), orderNo, carryOverDetailIds.size());
                     existing = null;
                 }
                 if (existing != null) {
@@ -800,6 +869,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     apply.setStatus(ReceivedApplyStatus.SUBMITTED);
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
+                    carryOverVirtualDetails(apply, carryOverDetailIds, rows.size());
                     startWorkflow(apply, apply.getApplicantId(), Set.of());
                     log.info("[实收审批] 贝壳实收建单并提交人工审批：applyNo={}, orderNo={}, received={}",
                         apply.getApplyNo(), orderNo, apply.getReceivedAmount());
@@ -816,6 +886,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     apply.setApproveTime(LocalDateTime.now());
                     insertApply(apply);
                     bindFacts(factIds, apply.getId());
+                    carryOverVirtualDetails(apply, carryOverDetailIds, rows.size());
                     emitApprovedEvent(apply, operatorId, true);
                     log.info("[实收审批] 贝壳实收自动通过直建（实收保留到账金额）：applyNo={}, orderNo={}, received={}",
                         apply.getApplyNo(), orderNo, apply.getReceivedAmount());
@@ -1332,30 +1403,37 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             operatorId = 1L;
         }
 
-        // 1. 该订单在该期间已有在途/已通过单 → 无需补建，避免重复出单
+        // 1. 定位实收合同壳（三级回退）：订单号 → 合同号别名（合并前虚拟壳/历史按合同号建的壳）
+        //    → 合同号且该合同非虚拟订单号唯一；避免新签 order_no 误填合同号时定位不到已重键的真实壳
+        List<com.panjia.received.domain.ReceivedContract> contracts =
+            resolvePendingContracts(contractNo, orderNo);
+        if (contracts.isEmpty()) {
+            return false;
+        }
+
+        // 2. 该锚点在该期间已有在途/已通过单 → 无需补建，避免重复出单
         //    （已作废/已驳回不算：作废会解绑明细，需重新出单；驳回单仍握有明细，下方按未绑定明细自然返回 false）
+        Set<String> anchorOrderNos = contracts.stream()
+            .map(com.panjia.received.domain.ReceivedContract::getOrderNo)
+            .filter(StringUtils::isNotBlank).map(String::trim)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<String> anchorContractNos = contracts.stream()
+            .map(com.panjia.received.domain.ReceivedContract::getContractNo)
+            .filter(StringUtils::isNotBlank).map(String::trim)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (anchorOrderNos.isEmpty() && anchorContractNos.isEmpty()) {
+            return false;
+        }
         LambdaQueryWrapper<ReceivedApply> existsQ = new LambdaQueryWrapper<ReceivedApply>()
             .eq(ReceivedApply::getPeriod, period)
-            .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED);
-        if (StringUtils.isNotBlank(orderNo)) {
-            existsQ.eq(ReceivedApply::getOrderNo, orderNo);
-        } else {
-            existsQ.eq(ReceivedApply::getContractNo, contractNo);
-        }
+            .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
+            .in(!anchorOrderNos.isEmpty(), ReceivedApply::getOrderNo, anchorOrderNos)
+            .in(anchorOrderNos.isEmpty(), ReceivedApply::getContractNo, anchorContractNos);
         if (applyMapper.selectCount(existsQ) > 0) {
             return false;
         }
 
-        // 2. 定位未绑定审批单的 ACTIVE 实收明细（按订单锚定；订单为空时按合同号）
-        List<com.panjia.received.domain.ReceivedContract> contracts =
-            contractMapper.selectList(new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
-                .eq(StringUtils.isNotBlank(orderNo),
-                    com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo)
-                .eq(StringUtils.isBlank(orderNo),
-                    com.panjia.received.domain.ReceivedContract::getContractNo, contractNo));
-        if (contracts.isEmpty()) {
-            return false;
-        }
+        // 3. 定位未绑定审批单的 ACTIVE 实收明细（锚点壳已按订单/合同号回退定位）
         Map<Long, com.panjia.received.domain.ReceivedContract> contractById = new HashMap<>();
         for (com.panjia.received.domain.ReceivedContract c : contracts) {
             contractById.put(c.getId(), c);
@@ -1441,6 +1519,46 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         log.info("[实收审批] 新签到达补建单并提交人工审批：applyNo={}, orderNo={}, received={}, expect={},"
             + " rosterMismatch={}", apply.getApplyNo(), apply.getOrderNo(), realSumAll, expectTotal, rosterMismatch);
         return true;
+    }
+
+    /**
+     * 新签到达补建单：定位实收合同壳（三级回退，均不限期间，交由明细按归属月过滤）。
+     * <ol>
+     *   <li>{@code order_no = 订单号}（正常路径）；</li>
+     *   <li>{@code order_no = 合同号}（合并前虚拟壳 / 历史按合同号建的壳）；</li>
+     *   <li>{@code contract_no = 合同号} 且该合同非虚拟订单号唯一（多订单禁止，防串单）。</li>
+     * </ol>
+     * 命中别名壳时若同合同下还存在真实壳，则改用真实壳，避免别名壳挡住待绑定的真实到账。
+     */
+    private List<com.panjia.received.domain.ReceivedContract> resolvePendingContracts(
+            String contractNo, String orderNo) {
+        String on = StringUtils.trimToNull(orderNo);
+        String cn = StringUtils.trimToNull(contractNo);
+        List<com.panjia.received.domain.ReceivedContract> contracts = List.of();
+        if (on != null) {
+            contracts = contractMapper.selectList(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                    .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, on));
+        }
+        if (contracts.isEmpty() && cn != null && !cn.equals(on)) {
+            contracts = contractMapper.selectList(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                    .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, cn));
+        }
+        if (cn == null || contractMapper.countDistinctOrderNos(cn) != 1L) {
+            return contracts;
+        }
+        List<com.panjia.received.domain.ReceivedContract> byContract = contractMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .eq(com.panjia.received.domain.ReceivedContract::getContractNo, cn));
+        if (contracts.isEmpty()) {
+            return byContract;
+        }
+        boolean onlyAlias = contracts.stream()
+            .allMatch(c -> cn.equals(StringUtils.trimToNull(c.getOrderNo())));
+        boolean hasReal = byContract.stream()
+            .anyMatch(c -> !cn.equals(StringUtils.trimToNull(c.getOrderNo())));
+        return onlyAlias && hasReal ? byContract : contracts;
     }
 
     @Override
@@ -1568,18 +1686,26 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         for (PerformanceFact f : expectPairs) {
             expectCountByContract.merge(f.getContractNo(), 1, Integer::sum);
         }
-        // 实收侧：实收合同表 (合同号, 订单号) 去重对（全局，不限期间/批次）
+        // 实收侧：实收合同表 (合同号, 订单号, 来源) 去重对（全局，不限期间/批次）。
+        // 排除新签调整联动虚拟壳（MANUAL 且 order_no=contract_no）：它不承载真实订单号，
+        // 计入会让真实到账的唯一性判定恒为 2、退化匹配永久失效（2026-10-31）
         List<com.panjia.received.domain.ReceivedContract> receivedPairs = contractMapper.selectList(
             new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
                 .select(com.panjia.received.domain.ReceivedContract::getContractNo,
-                    com.panjia.received.domain.ReceivedContract::getOrderNo)
+                    com.panjia.received.domain.ReceivedContract::getOrderNo,
+                    com.panjia.received.domain.ReceivedContract::getSourceType)
                 .in(com.panjia.received.domain.ReceivedContract::getContractNo, candidates)
                 .isNotNull(com.panjia.received.domain.ReceivedContract::getOrderNo)
                 .ne(com.panjia.received.domain.ReceivedContract::getOrderNo, "")
                 .groupBy(com.panjia.received.domain.ReceivedContract::getContractNo,
-                    com.panjia.received.domain.ReceivedContract::getOrderNo));
+                    com.panjia.received.domain.ReceivedContract::getOrderNo,
+                    com.panjia.received.domain.ReceivedContract::getSourceType));
         Map<String, Integer> receivedCountByContract = new HashMap<>();
         for (com.panjia.received.domain.ReceivedContract c : receivedPairs) {
+            if ("MANUAL".equals(c.getSourceType())
+                && c.getContractNo() != null && c.getContractNo().equals(c.getOrderNo())) {
+                continue;
+            }
             receivedCountByContract.merge(c.getContractNo(), 1, Integer::sum);
         }
         Set<String> allowed = new LinkedHashSet<>();
@@ -3822,6 +3948,22 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     /** 按 (order_no, period, MANUAL) 幂等查/建手工实收合同（uk_received_contract_anchor 兜底）。 */
     private com.panjia.received.domain.ReceivedContract getOrCreateManualContract(
             PerformanceFact expect, String period, Long operatorId) {
+        // 复用同期间同合同的唯一真实壳：新签 order_no 误填合同号时不再新建第三个「合同号壳」
+        String cn = StringUtils.trimToNull(expect.getContractNo());
+        if (cn != null && contractMapper.countDistinctOrderNos(cn) == 1L) {
+            List<com.panjia.received.domain.ReceivedContract> shells = contractMapper.selectList(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                    .eq(com.panjia.received.domain.ReceivedContract::getPeriod, period)
+                    .eq(com.panjia.received.domain.ReceivedContract::getContractNo, cn));
+            if (shells.size() == 1) {
+                com.panjia.received.domain.ReceivedContract only = shells.get(0);
+                boolean realShell = !SOURCE_TYPE_MANUAL.equals(only.getSourceType())
+                    || !cn.equals(StringUtils.trimToNull(only.getOrderNo()));
+                if (realShell) {
+                    return only;
+                }
+            }
+        }
         com.panjia.received.domain.ReceivedContract existing = contractMapper.selectOne(
             new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
                 .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, expect.getOrderNo())
