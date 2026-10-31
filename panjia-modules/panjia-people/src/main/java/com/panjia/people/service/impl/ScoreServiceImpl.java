@@ -59,6 +59,9 @@ public class ScoreServiceImpl implements ScoreService {
     /** 数据来源：积分日报导入同步 */
     private static final String DATA_SOURCE_IMPORT = "IMPORT";
 
+    /** 钉钉积分同步的固定来源批次号（负值，与导入批次正 ID 区分，便于按整月替换） */
+    private static final long DINGTALK_SOURCE_BATCH_ID = -1L;
+
     /** 超级管理员角色键（全量数据权限） */
     private static final String ROLE_KEY_SUPERADMIN = "superadmin";
 
@@ -77,6 +80,17 @@ public class ScoreServiceImpl implements ScoreService {
     private final ScoreAttendDaysResolver attendDaysResolver;
 
     // ==================== 导入同步（ScoreArchiveHandler） ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncDingTalkScoreDetails(String period, List<ScoreDetailSyncDTO> details) {
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        // 钉钉来源统一打固定批次号：重跑时整月清掉上一轮钉钉明细，导入来源的明细不受影响
+        details.forEach(detail -> detail.setSourceBatchId(DINGTALK_SOURCE_BATCH_ID));
+        syncScoreDetails(period, details, List.of(DINGTALK_SOURCE_BATCH_ID));
+    }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -563,6 +577,19 @@ public class ScoreServiceImpl implements ScoreService {
             .orderByAsc(ScoreDetail::getPointDate);
 
         List<ScoreDetail> details = scoreDetailMapper.selectList(wrapper);
+        return enrichDetails(details);
+    }
+
+    @Override
+    public List<ScoreDetailVO> listDetails(Long employeeId, String scoreMonth) {
+        LocalDate monthStart = parseMonthStart(scoreMonth);
+        if (employeeId == null || monthStart == null) {
+            return List.of();
+        }
+        List<ScoreDetail> details = scoreDetailMapper.selectList(new LambdaQueryWrapper<ScoreDetail>()
+            .eq(ScoreDetail::getEmployeeId, employeeId)
+            .eq(ScoreDetail::getScoreMonth, monthStart)
+            .orderByAsc(ScoreDetail::getPointDate));
         return enrichDetails(details);
     }
 

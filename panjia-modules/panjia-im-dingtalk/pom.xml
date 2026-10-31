@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <groupId>com.panjia</groupId>
+        <artifactId>panjia-modules</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>panjia-im-dingtalk</artifactId>
+
+    <description>
+        panjia-im-dingtalk 钉钉集成域（考勤汇总同步）
+    </description>
+
+    <dependencies>
+        <!-- 盘家契约层（PeopleAttendanceSyncPort） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-contracts</artifactId>
+        </dependency>
+
+        <!-- 盘家公共模块（PanjiaBaseEntity / 异常处理） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-common</artifactId>
+        </dependency>
+
+        <!-- 底座公共核心（R / ServiceException） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-core</artifactId>
+        </dependency>
+
+        <!-- 底座 MyBatis-Plus（BaseMapperPlus / PageQuery / PageResult） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-mybatis</artifactId>
+        </dependency>
+
+        <!-- 底座 Web（@RestController / BaseController） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-web</artifactId>
+        </dependency>
+
+        <!-- 底座 sa-token（@SaCheckPermission） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-satoken</artifactId>
+        </dependency>
+
+        <!-- 底座 Redis（Redisson 分布式锁 / 定时任务防重） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-redis</artifactId>
+        </dependency>
+
+        <!-- 底座 JSON（Jackson 3 tools.jackson） -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
+        </dependency>
+
+        <!-- hutool HTTP（钉钉 OpenAPI 调用） -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-http</artifactId>
+        </dependency>
+
+        <!-- Lombok -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+</project>

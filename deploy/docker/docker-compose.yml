@@ -127,6 +127,12 @@ services:
       PANJIA_BACKUP_USER: ${POSTGRES_USER:?err}
       PANJIA_BACKUP_PASS: ${POSTGRES_PASSWORD:?err}
       PANJIA_BACKUP_DIR: /ruoyi/server/backup
+      # 钉钉集成（人员/考勤同步）：凭证只存 .env（已 gitignore），不写进镜像与配置仓库
+      PANJIA_DINGTALK_ENABLED: ${PANJIA_DINGTALK_ENABLED:-false}
+      DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
+      DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:-}
+      DINGTALK_AGENT_ID: ${DINGTALK_AGENT_ID:-5111097099}
+      DINGTALK_SYNC_CRON: "${DINGTALK_SYNC_CRON:-0 30 23 * * ?}"
       JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC -Duser.timezone=Asia/Shanghai}
     volumes:
       - ./logs:/ruoyi/server/logs

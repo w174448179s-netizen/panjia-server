@@ -3,6 +3,7 @@ package com.panjia.people.service;
 import com.panjia.contracts.dto.ScoreDetailSyncDTO;
 import com.panjia.contracts.dto.ScoreSummarySyncDTO;
 import com.panjia.contracts.port.PeopleScoreQueryPort;
+import com.panjia.contracts.port.PeopleScoreSyncPort;
 import com.panjia.people.dto.ScoreDetailVO;
 import com.panjia.people.dto.ScoreQuery;
 import com.panjia.people.dto.ScoreVO;
@@ -14,10 +15,11 @@ import java.util.List;
 /**
  * 绩效积分月度汇总服务：积分日报导入同步 + 明细查询。
  * <p>
- * 同时实现 {@link PeopleScoreQueryPort} 供薪酬域算薪读取绩效等级。
- * 积分数据全部来自导入同步（upsert 幂等），无人工登记入口。
+ * 同时实现 {@link PeopleScoreQueryPort} 供薪酬域算薪读取绩效等级，
+ * 并实现 {@link PeopleScoreSyncPort} 供钉钉积分同步写入。
+ * 积分数据全部来自导入/钉钉同步（upsert 幂等），无人工登记入口。
  */
-public interface ScoreService extends PeopleScoreQueryPort {
+public interface ScoreService extends PeopleScoreQueryPort, PeopleScoreSyncPort {
 
     /**
      * 导入批次归档后的积分月度同步（ScoreArchiveHandler 消费调用）。
@@ -92,6 +94,15 @@ public interface ScoreService extends PeopleScoreQueryPort {
      * @return 每日明细列表
      */
     List<ScoreDetailVO> listMyDetails(Long userId, String scoreMonth);
+
+    /**
+     * 管理端查询指定员工某月的积分每日明细（积分管理页「详情」）。
+     *
+     * @param employeeId 员工 ID
+     * @param scoreMonth 积分月份（yyyy-MM）
+     * @return 每日明细列表（按日期升序）
+     */
+    List<ScoreDetailVO> listDetails(Long employeeId, String scoreMonth);
 
     /** 明细查询 */
     ScoreVO getById(Long id);

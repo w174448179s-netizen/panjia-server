@@ -61,6 +61,19 @@ public class ScoreController extends BaseController {
     }
 
     /**
+     * 管理端积分每日明细（积分管理页「详情」）。
+     *
+     * @param employeeId 员工 ID
+     * @param scoreMonth 积分月份（yyyy-MM）
+     */
+    @SaCheckPermission("people:score:list")
+    @GetMapping("/details")
+    public R<List<ScoreDetailVO>> details(@RequestParam Long employeeId,
+                                          @RequestParam String scoreMonth) {
+        return R.ok(scoreService.listDetails(employeeId, scoreMonth));
+    }
+
+    /**
      * 本人/组织视角积分查询（综合查询→积分查询）。
      * <p>
      * 数据权限：超管/总监→全量；店长→本门店子树；其他→仅本人。
