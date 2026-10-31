@@ -726,12 +726,12 @@ public class ImportEngine {
         Map<String, NormalizedRecord> pendingRecords = dedupDaily ? new java.util.LinkedHashMap<>() : null;
         Map<String, Integer> pendingRowNo = dedupDaily ? new java.util.HashMap<>() : null;
 
-        // 贝壳新签：经纪人为空（roleSysNo 空）的行按店组挂到门店虚拟人（2026-09-28）
+        // 贝壳新签/实收：角色人为空的行按店组挂到门店虚拟人（新签 2026-09-28，实收 2026-10-31）
         //（行上店组编码 → sys_dept.dept_category 部门类别编码 → 该部门工号=店组编码的虚拟人）。
-        // 预扫描空经纪人行的店组编码，一次批量解析，避免循环内逐行跨域查询；
-        // 店组为空/未配置/部门下无虚拟人的店组不在结果中，循环内按匹配失败记 issue
+        // 预扫描空角色行的店组编码，一次批量解析，避免循环内逐行跨域查询；
+        // 店组为空/未配置/部门下无虚拟人的店组不在结果中，循环内按匹配失败处理
         Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> virtualByStoreGroup = Map.of();
-        if (sourceType == ImportSourceType.KE_SIGNED) {
+        if (sourceType == ImportSourceType.KE_SIGNED || sourceType == ImportSourceType.KE_RECEIVED) {
             java.util.Set<String> storeGroups = new java.util.HashSet<>();
             for (RawData raw : rawRows) {
                 Map<String, Object> json = parseRawJson(raw.getRawJson());
@@ -792,7 +792,20 @@ public class ImportEngine {
                 contractLevelRow = sourceType == ImportSourceType.KE_RECEIVED
                     && ((orderNoVal != null && !orderNoVal.toString().isBlank())
                         || (contractNoVal != null && !contractNoVal.toString().isBlank()));
-                if (!contractLevelRow && sourceType == ImportSourceType.KE_SIGNED) {
+                if (contractLevelRow) {
+                    // 贝壳实收空角色行：与新签同口径，先按导入行店组补门店虚拟人（2026-10-31）。
+                    // 挂靠成功按正常员工行处理（明细回填员工/部门，审批单有归属）；
+                    // 店组未配置虚拟人时保留合同级行兜底（真实到账不阻断，employeeId 留空）。
+                    String deptCode = str(jsonMap, "deptCode");
+                    com.panjia.contracts.dto.EmployeeMainDataDTO virtual =
+                        deptCode == null ? null : virtualByStoreGroup.get(deptCode);
+                    if (virtual != null) {
+                        matchedEmployeeId = virtual.getEmployeeId();
+                        externalCode = virtual.getEmployeeCode();
+                        attachedVirtual = true;
+                        contractLevelRow = false;
+                    }
+                } else if (sourceType == ImportSourceType.KE_SIGNED) {
                     String deptCode = str(jsonMap, "deptCode");
                     com.panjia.contracts.dto.EmployeeMainDataDTO virtual =
                         deptCode == null ? null : virtualByStoreGroup.get(deptCode);
@@ -824,7 +837,7 @@ public class ImportEngine {
 
             // 未匹配行不写归一化记录：该行不参与 fact 表下沉；批次进入
             // PENDING_CONFIRM 由人工决定后续动作（修复主数据、重归一化、整批关闭）；
-            // 例外：贝壳实收无角色行（contractLevelRow）照常落库，employeeId 留空
+            // 例外：贝壳实收无角色行（contractLevelRow，且店组未匹配到虚拟人）照常落库，employeeId 留空
             if (matchedEmployeeId == null && !contractLevelRow) {
                 continue;
             }

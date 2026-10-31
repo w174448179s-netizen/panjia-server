@@ -2841,8 +2841,11 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         // 审批节点数据隔离：审批中单据只允许本人角色对应节点可见
         applyApprovalNodeScope(wrapper);
         if (effectiveDeptId != null) {
+            // 无员工归属的单据（贝壳实收空角色行按合同级入库，明细 employee_id/工号均为空）：
+            // 按员工部门永远命中不了，会被部门筛选永久隐藏（待办能看到、驳回后列表找不到）。
+            // 故对「全部 ACTIVE 明细都无员工」的单据不受部门过滤，其余仍严格按部门子树隔离。
             wrapper.apply(
-                "EXISTS (SELECT 1 FROM pj_received_detail rd"
+                "(EXISTS (SELECT 1 FROM pj_received_detail rd"
                     + " JOIN pj_people_employee e ON (e.employee_id = rd.employee_id"
                     + "   OR (NOT EXISTS (SELECT 1 FROM pj_people_employee x WHERE x.employee_id = rd.employee_id)"
                     + "       AND e.employee_code = rd.employee_external_code))"
@@ -2850,7 +2853,12 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     + " AND rd.detail_status = 'ACTIVE'"
                     + " AND (e.dept_id = {0}"
                     + " OR e.dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                    + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))))",
+                    + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))))"
+                    + " OR NOT EXISTS (SELECT 1 FROM pj_received_detail rd0"
+                    + " WHERE rd0.received_apply_id = pj_perf_received_apply.id"
+                    + " AND rd0.detail_status = 'ACTIVE'"
+                    + " AND (rd0.employee_id IS NOT NULL"
+                    + "   OR COALESCE(rd0.employee_external_code, '') <> '')))",
                 effectiveDeptId);
         }
         // 员工筛选：通过实收明细关联员工（口径同上）
