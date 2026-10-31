@@ -10,6 +10,7 @@
 #   积分  pj_people_performance_score / pj_people_score_detail / pj_people_score_approval
 #   考勤  pj_people_attendance / pj_people_attendance_detail
 #         pj_people_attendance_approval / pj_people_attendance_rectify
+#   钉钉  pj_dingtalk_sync_log（人员/考勤/积分同步日志）
 #   导入  仅业务批次（KE_SIGNED / KE_RECEIVED / HISTORY_PAYROLL / POINTS / ATTENDANCE）
 #         pj_import_raw_signed / pj_import_raw_received / pj_import_raw_payroll
 #         pj_import_raw_points / pj_import_raw_attendance
@@ -80,6 +81,7 @@ print_counts() {
     UNION ALL SELECT 'pj_people_attendance_detail', count(*) FROM pj_people_attendance_detail
     UNION ALL SELECT 'pj_people_attendance_approval', count(*) FROM pj_people_attendance_approval
     UNION ALL SELECT 'pj_people_attendance_rectify', count(*) FROM pj_people_attendance_rectify
+    UNION ALL SELECT 'pj_dingtalk_sync_log', count(*) FROM pj_dingtalk_sync_log
     UNION ALL SELECT 'pj_import_batch(业务相关)', count(*) FROM pj_import_batch
       WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE')
     UNION ALL SELECT 'pj_import_raw_signed', count(*) FROM pj_import_raw_signed
@@ -159,7 +161,10 @@ DELETE FROM pj_people_attendance;
 DELETE FROM pj_people_attendance_approval;
 DELETE FROM pj_people_attendance_rectify;
 
--- ---------------- 六、导入（仅业务相关批次） ----------------
+-- ---------------- 六、钉钉同步日志 ----------------
+DELETE FROM pj_dingtalk_sync_log;
+
+-- ---------------- 七、导入（仅业务相关批次） ----------------
 DELETE FROM pj_import_raw_signed
  WHERE batch_id IN (SELECT id FROM pj_import_batch
                     WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE'));
@@ -184,7 +189,7 @@ DELETE FROM pj_normalized_record
 DELETE FROM pj_import_batch
  WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE');
 
--- ---------------- 七、相关 Outbox 事件 ----------------
+-- ---------------- 八、相关 Outbox 事件 ----------------
 DELETE FROM pj_outbox_idempotent
  WHERE event_id IN (SELECT event_id FROM pj_event_outbox
                     WHERE event_type IN ('import.batch.archived','import.batch.revoked','import.batch.renormalized',
@@ -195,7 +200,7 @@ DELETE FROM pj_event_outbox
                       'performance.fact.created','performance.fact.reversed',
                       'received.apply.approved','commission.approved','period.reopened');
 
--- ---------------- 八、相关审批流程实例 ----------------
+-- ---------------- 九、相关审批流程实例 ----------------
 DELETE FROM flow_user
  WHERE associated IN (SELECT id FROM flow_task
                       WHERE instance_id IN (SELECT id FROM flow_instance
