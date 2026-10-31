@@ -210,6 +210,12 @@ PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
 PANJIA_LICENSE_SERVER_URL=https://panjia.online
 PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
 PANJIA_PIN_FP_B=
+# ---- 钉钉集成（考勤/积分同步）：凭证只在本文件维护，部署包不入库 ----
+PANJIA_DINGTALK_ENABLED=false
+DINGTALK_CLIENT_ID=
+DINGTALK_CLIENT_SECRET=
+DINGTALK_AGENT_ID=5111097099
+DINGTALK_SYNC_CRON="0 30 23 * * ?"
 ENVEOF
     # HTTPS 域名模式：compose 据此挂载 HTTPS 配置 + 对公网发布 443
     if [ -n "$DOMAIN" ]; then

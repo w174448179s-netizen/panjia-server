@@ -82,6 +82,16 @@ public interface IReceivedApplyService {
     ReceivedApply resubmit(Long id);
 
     /**
+     * 驳回后调整实收明细并重新提交审批（仅 REJECTED 单据）。
+     * <p>只允许修改既有 ACTIVE 明细的实收金额/角色占比，重算单据与合同合计后立即重提。</p>
+     *
+     * @param id 审批单 ID
+     * @param bo 调整入参（原因 + 明细目标）
+     * @return 重新提交后的审批单
+     */
+    ReceivedApply reviseAndResubmit(Long id, com.panjia.received.domain.bo.ReceivedReviseBo bo);
+
+    /**
      * 作废审批单（仅 SUBMITTED；同步终止流程）。
      *
      * @param id 审批单 ID

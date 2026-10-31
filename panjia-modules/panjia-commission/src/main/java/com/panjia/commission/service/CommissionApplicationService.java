@@ -229,7 +229,7 @@ public class CommissionApplicationService {
             return java.util.List.of();
         }
         CommissionApplication application =
-            createSubmittedForFacts(receivedPeriod, contractNo, orderNo, operatorId, facts, true);
+            createSubmittedForFacts(receivedPeriod, contractNo, orderNo, operatorId, facts, true, true);
         if (receivedApplyId != null) {
             receivedApplyPort.markAutoCommissionApply(receivedApplyId, application.getApplyNo());
         }
@@ -334,7 +334,7 @@ public class CommissionApplicationService {
             return java.util.List.of();
         }
         return java.util.List.of(
-            createSubmittedForFacts(cutPeriod, contractNo, orderNo, operatorId, facts, false));
+            createSubmittedForFacts(cutPeriod, contractNo, orderNo, operatorId, facts, false, false));
     }
 
     /**
@@ -350,7 +350,8 @@ public class CommissionApplicationService {
     private CommissionApplication createSubmittedForFacts(String period, String contractNo, String orderNo,
                                                           Long operatorId,
                                                           java.util.List<PerformanceFactSummaryDTO> facts,
-                                                          boolean skipReceivedApprovedCheck) {
+                                                          boolean skipReceivedApprovedCheck,
+                                                          boolean systemInitiated) {
         String bizKey = bizKeyOf(orderNo, contractNo);
         if (bizKey == null) {
             throw new ServiceException("合同号/订单号不能为空");
@@ -369,7 +370,7 @@ public class CommissionApplicationService {
         ctx.expectedAmounts.put(bizKey, sumAmounts(facts));
         ctx.groupFacts = facts;
         ctx.skipReceivedApprovedCheck = skipReceivedApprovedCheck;
-        return apply(period, bizKey, operatorId, false, ctx, true);
+        return apply(period, bizKey, operatorId, false, ctx, systemInitiated);
     }
 
     /** 业务键归一：订单号优先，无订单号退合同号 */
@@ -867,6 +868,8 @@ public class CommissionApplicationService {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
         }
+        // 实收覆盖校验：待结佣新签合计必须已被 ACTIVE 实收合计覆盖，防止「实收小于新签」仍发起结佣
+        assertReceivedCoversExpect(itemFacts, nonZeroFacts, contractNo);
         // 事实占用预检：新签事实已被他单非 REVERSED 明细绑定时友好拦截
         // （库 uk_citem_fact_active 部分唯一索引兜底，并发/漏网场景由 insertBatch catch 二次兜底）
         assertFactsNotSettled(itemFacts, null, contractNo);
@@ -928,6 +931,8 @@ public class CommissionApplicationService {
             throw new ServiceException(
                 "合同 " + contractNo + " " + period + " 月的新签业绩全部为 0 或缺失，无结佣明细可生成");
         }
+        // 实收覆盖校验（与新建结佣单同口径）：回退重建后的新签合计仍须被实收覆盖
+        assertReceivedCoversExpect(itemFacts, nonZeroFacts, contractNo);
         // 事实占用预检：排除本单自身（本单旧明细已全部 REVERSED，不会命中）
         assertFactsNotSettled(itemFacts, application.getId(), contractNo);
         List<CommissionItem> items = new ArrayList<>(itemFacts.size());
@@ -1032,12 +1037,29 @@ public class CommissionApplicationService {
         log.info("[结佣-审批回退] 新签调整导致 SUBMITTED 单回退 DRAFT：applyNo={}, contractNo={}, period={}",
             app.getApplyNo(), app.getContractNo(), app.getPeriod());
         // 按调整后新签事实重建明细（金额=调整后值）；重建失败不阻断（保留 DRAFT 空单由人工处理）
+        boolean rebuilt = false;
         try {
             rebuildItems(app, app.getPeriod(), app.getContractNo());
+            rebuilt = true;
         } catch (ServiceException e) {
             log.info("[结佣-审批回退] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
         }
         recalcAggregates(applicationId, null);
+        // 明细重建成功 → 自动重新提交审批，避免单据停在草稿无人处理（2026-10-31）。
+        // 事件线程无登录上下文：systemInitiated=true 保证流程发起人变量可用；
+        // markAutoInitiated 沿用原值，人工单不会被误标 auto_initiated。
+        // 重提失败只告警并保留 DRAFT，不能回滚冲销主事务。
+        if (rebuilt) {
+            Long operatorId = app.getApplicantId() != null ? app.getApplicantId() : 1L;
+            try {
+                submit(app, operatorId, true, Boolean.TRUE.equals(app.getAutoInitiated()));
+                log.info("[结佣-审批回退] 明细重建后已自动重新提交审批：applyNo={}, contractNo={}",
+                    app.getApplyNo(), app.getContractNo());
+            } catch (Exception e) {
+                log.warn("[结佣-审批回退] 重建后自动重提失败，保留 DRAFT 待人工提交：applyNo={}, reason={}",
+                    app.getApplyNo(), e.getMessage());
+            }
+        }
     }
 
     /**
@@ -1307,6 +1329,20 @@ public class CommissionApplicationService {
      */
     @Transactional(rollbackFor = Exception.class)
     public void submit(CommissionApplication application, Long operatorId, boolean systemInitiated) {
+        submit(application, operatorId, systemInitiated, systemInitiated);
+    }
+
+    /**
+     * 提交审批（实体入参重载 + 系统自动发起标记解耦）。
+     * <p>
+     * {@code systemInitiated} 只控制流程侧行为（显式指定发起人、跳过总监发起自动过节点）；
+     * {@code markAutoInitiated} 单独控制 {@code auto_initiated} 标记。二者解耦后，
+     * 「新签调整回退后的自动重提」可在无登录上下文下复用系统发起流程，
+     * 又不会把人工发起的单误标为自动单（批次撤销会按该标记硬删单据）。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void submit(CommissionApplication application, Long operatorId, boolean systemInitiated,
+                       boolean markAutoInitiated) {
         if (application == null) {
             throw new ServiceException("结佣申请单不存在");
         }
@@ -1364,7 +1400,7 @@ public class CommissionApplicationService {
 
             // ===== 第二阶段：application 侧改状态 =====
             // 系统自动发起标记：供导入批次撤销时精确识别「导入连锁产生」的结佣单
-            if (systemInitiated) {
+            if (markAutoInitiated) {
                 application.setAutoInitiated(Boolean.TRUE);
             }
             application.setStatus(ApplicationStatus.SUBMITTED);
@@ -3128,6 +3164,33 @@ public class CommissionApplicationService {
         return facts.stream()
             .map(PerformanceFactSummaryDTO::getAmount)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /**
+     * 实收覆盖校验（2026-10-31）：待结佣新签合计必须已被该订单/合同 ACTIVE 实收合计覆盖。
+     * <p>
+     * 口径按“同向覆盖”：新签为正时要求实收 ≥ 新签（到账足够才结佣）；新签为负（退单红冲）时
+     * 要求实收 ≤ 新签（退款到账足够才冲减），避免 0 实收放过负向结佣。
+     *
+     * @param itemFacts     本次待结佣新签事实
+     * @param receivedFacts 该订单/合同 ACTIVE 实收事实
+     * @param bizKey        合同号/订单号（提示文案用）
+     */
+    private void assertReceivedCoversExpect(List<PerformanceFactSummaryDTO> itemFacts,
+                                            List<PerformanceFactSummaryDTO> receivedFacts,
+                                            String bizKey) {
+        BigDecimal expect = sumAmounts(itemFacts);
+        BigDecimal received = sumAmounts(receivedFacts);
+        if (expect.signum() > 0 && received.compareTo(expect) < 0) {
+            throw new ServiceException("合同/订单 " + bizKey + " 实收合计 " + received.toPlainString()
+                + " 小于待结佣新签合计 " + expect.toPlainString()
+                + "，暂不能发起结佣（实收到账覆盖新签后方可结佣）");
+        }
+        if (expect.signum() < 0 && received.compareTo(expect) > 0) {
+            throw new ServiceException("合同/订单 " + bizKey + " 退款到账合计 " + received.toPlainString()
+                + " 未达到待冲减新签合计 " + expect.toPlainString()
+                + "，暂不能发起结佣（退款到账后方可冲减佣金）");
+        }
     }
 
     private Set<String> currentRoles() {

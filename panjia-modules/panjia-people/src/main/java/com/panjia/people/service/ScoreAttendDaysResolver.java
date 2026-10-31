@@ -1,9 +1,13 @@
 package com.panjia.people.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.panjia.people.domain.AttendanceDetail;
 import com.panjia.people.domain.AttendanceRecord;
+import com.panjia.people.mapper.AttendanceDetailMapper;
 import com.panjia.people.mapper.AttendanceRecordMapper;
 import lombok.RequiredArgsConstructor;
+import org.dromara.common.core.utils.StringUtils;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -12,8 +16,10 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 平均积分的分母：考勤出勤天数。
@@ -21,6 +27,11 @@ import java.util.Map;
  * 原口径用「有积分日报的 DISTINCT 填报日期数」，员工可在当日积分低时干脆不填报，
  * 从而抬高平均积分并规避等级扣点。现统一改为取考勤汇总
  * （{@code pj_people_attendance.attend_days}，人事/总监维护的权威出勤事实）。
+ * <p>
+ * 钉钉报表的「出勤天数」含已批准的请假（应出勤口径），会拉低在休长假员工的平均积分。
+ * 因此按考勤每日明细（{@code pj_people_attendance_detail.status} 原文）中的假期名称，
+ * 扣除不参与积分考核的假期天数（{@link #deductLeaveNames} 可配置）；
+ * 休息/未排班日即使挂假也不扣，避免重复扣减非应出勤日。
  * <p>
  * 考勤数据缺失（未导入/未登记）时回退积分表存储的填报天数，保证历史期间结果不变。
  */
@@ -30,10 +41,18 @@ public class ScoreAttendDaysResolver {
 
     private static final DateTimeFormatter MONTH_KEY = DateTimeFormatter.ofPattern("yyyy-MM");
 
+    /** 非应出勤日标记：这些日期即使出现假期名称也不扣减出勤天数 */
+    private static final Set<String> NON_WORK_MARKERS = Set.of("休息", "未排班");
+
+    /** 平均积分分母需扣除的假期名称（按每日考勤状态原文包含匹配，可配置） */
+    @Value("${panjia.score.deduct-leave-names:随心假,年假,生日假,产假,陪产假,丧假,病假（二甲医院以上）}")
+    private List<String> deductLeaveNames;
+
     private final AttendanceRecordMapper attendanceRecordMapper;
+    private final AttendanceDetailMapper attendanceDetailMapper;
 
     /**
-     * 批量解析考勤出勤天数。
+     * 批量解析考勤出勤天数（已扣除不参与考核的假期天数）。
      *
      * @param employeeIds 员工 ID 集合
      * @param monthStarts 涉及的月份（每月 1 日）
@@ -48,12 +67,16 @@ public class ScoreAttendDaysResolver {
             .in(AttendanceRecord::getAttendMonth, monthStarts)
             .select(AttendanceRecord::getEmployeeId, AttendanceRecord::getAttendMonth,
                 AttendanceRecord::getAttendDays));
+        Map<String, Integer> deductDays = resolveDeductLeaveDays(employeeIds, monthStarts);
         Map<String, Integer> result = new HashMap<>();
         for (AttendanceRecord row : rows) {
             Integer days = toInt(row.getAttendDays());
-            if (row.getEmployeeId() != null && row.getAttendMonth() != null && days != null && days > 0) {
-                result.put(key(row.getEmployeeId(), row.getAttendMonth()), days);
+            if (row.getEmployeeId() == null || row.getAttendMonth() == null || days == null || days <= 0) {
+                continue;
             }
+            String key = key(row.getEmployeeId(), row.getAttendMonth());
+            int effectiveDays = Math.max(days - deductDays.getOrDefault(key, 0), 0);
+            result.put(key, effectiveDays);
         }
         return result;
     }
@@ -61,6 +84,59 @@ public class ScoreAttendDaysResolver {
     /** 解析键：employeeId|yyyy-MM */
     public static String key(Long employeeId, LocalDate monthStart) {
         return employeeId + "|" + (monthStart == null ? "" : monthStart.format(MONTH_KEY));
+    }
+
+    /**
+     * 按考勤每日明细统计需扣除的假期天数（同人同月同一天只算一次）。
+     */
+    private Map<String, Integer> resolveDeductLeaveDays(Collection<Long> employeeIds,
+                                                        Collection<LocalDate> monthStarts) {
+        List<AttendanceDetail> details = attendanceDetailMapper.selectList(new LambdaQueryWrapper<AttendanceDetail>()
+            .in(AttendanceDetail::getEmployeeId, employeeIds)
+            .in(AttendanceDetail::getAttendMonth, monthStarts)
+            .select(AttendanceDetail::getEmployeeId, AttendanceDetail::getAttendMonth,
+                AttendanceDetail::getAttendDate, AttendanceDetail::getStatus));
+        Map<String, Set<LocalDate>> datesByEmployeeMonth = new HashMap<>();
+        for (AttendanceDetail detail : details) {
+            if (detail.getEmployeeId() == null || detail.getAttendMonth() == null
+                || detail.getAttendDate() == null || !isDeductLeave(detail.getStatus())) {
+                continue;
+            }
+            datesByEmployeeMonth
+                .computeIfAbsent(key(detail.getEmployeeId(), detail.getAttendMonth()), k -> new HashSet<>())
+                .add(detail.getAttendDate());
+        }
+        Map<String, Integer> result = new HashMap<>();
+        datesByEmployeeMonth.forEach((key, dates) -> result.put(key, dates.size()));
+        return result;
+    }
+
+    /** 状态原文是否属于需扣除的假期（休息/未排班日不计） */
+    private boolean isDeductLeave(String status) {
+        if (StringUtils.isBlank(status)) {
+            return false;
+        }
+        String text = normalize(status);
+        for (String marker : NON_WORK_MARKERS) {
+            if (text.contains(marker)) {
+                return false;
+            }
+        }
+        if (deductLeaveNames == null) {
+            return false;
+        }
+        for (String name : deductLeaveNames) {
+            String keyword = normalize(name);
+            if (StringUtils.isNotBlank(keyword) && text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 归一化：全角/半角括号统一，去掉空白，避免假期名称因格式差异匹配失败 */
+    private String normalize(String text) {
+        return text.replace('(', '（').replace(')', '）').replaceAll("\\s+", "");
     }
 
     private static Integer toInt(BigDecimal value) {

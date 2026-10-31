@@ -120,6 +120,16 @@ public class ReceivedApplyController extends BaseController {
         return R.ok();
     }
 
+    /** 驳回后调整实收明细并重新提交审批（仅 REJECTED） */
+    @SaCheckPermission("perf:received:submit")
+    @Log(title = "实收业绩驳回调整重提", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/revise-and-resubmit")
+    public R<Void> reviseAndResubmit(@PathVariable Long id,
+                                     @RequestBody com.panjia.received.domain.bo.ReceivedReviseBo bo) {
+        receivedApplyService.reviseAndResubmit(id, bo);
+        return R.ok();
+    }
+
     /**
      * 手工批量提交实收：选合同 → 后端查 PERF_EXPECT → 镜像造 PERF_REAL → 按订单号分组建审批单。
      * Body: {"period":"2026-08", "bizKeys":["合同号1","合同号2"]}

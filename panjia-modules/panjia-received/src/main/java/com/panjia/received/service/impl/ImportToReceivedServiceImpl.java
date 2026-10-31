@@ -450,6 +450,12 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             applyQuery.in(com.panjia.performance.domain.ReceivedApply::getOrderNo, orders);
         }
         for (com.panjia.performance.domain.ReceivedApply apply : applyMapper.selectList(applyQuery)) {
+            // 新签调整联动直建的 0 元 APPROVED 单不产生真实到账：不能据此把整组判为已消费，
+            // 否则真实实收永远导不进来（2026-10-31）
+            BigDecimal receivedAmount = apply.getReceivedAmount();
+            if (receivedAmount == null || receivedAmount.signum() == 0) {
+                continue;
+            }
             String reason = "实收审批单" + apply.getStatus();
             if (!isBlank(apply.getContractNo())) {
                 reasons.putIfAbsent("C|" + apply.getContractNo().trim(), reason);
@@ -459,10 +465,24 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
             }
         }
 
-        // 明细带调整痕迹（adjustId 非空）：已被调整单引用，整组不允许替换
+        // 明细带调整痕迹（adjustId 非空）：已被调整单引用，整组不允许替换。
+        // 例外（2026-10-31）：纯「新签调整联动」虚拟行（无来源批次、无归一化记录）且该合同净额为 0 时，
+        // 这组行只用于人员对齐、不承载金额，允许真实到账导入替换。
         for (Map.Entry<Long, List<ReceivedDetail>> entry : activeDetailsByContract.entrySet()) {
-            boolean adjusted = entry.getValue().stream().anyMatch(d -> d.getAdjustId() != null);
+            List<ReceivedDetail> details = entry.getValue();
+            boolean adjusted = details.stream().anyMatch(d -> d.getAdjustId() != null);
             if (!adjusted) continue;
+            boolean hasRealAdjustRow = details.stream().anyMatch(d -> d.getAdjustId() != null
+                && (d.getSourceBatchId() != null || d.getNormalizedRecordId() != null));
+            BigDecimal virtualAdjustNet = details.stream()
+                .filter(d -> d.getAdjustId() != null
+                    && d.getSourceBatchId() == null
+                    && d.getNormalizedRecordId() == null)
+                .map(d -> d.getPerformanceAmount() == null ? BigDecimal.ZERO : d.getPerformanceAmount())
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            if (!hasRealAdjustRow && virtualAdjustNet.signum() == 0) {
+                continue;
+            }
             for (String bizKey : bizKeysByContractId.getOrDefault(entry.getKey(), List.of())) {
                 reasons.putIfAbsent(bizKey, "明细已被调整单引用");
             }
@@ -480,17 +500,25 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         }
         if (!boundApplyIds.isEmpty()) {
             Map<Long, com.panjia.performance.domain.ReceivedApplyStatus> statusByApplyId = new HashMap<>();
+            Set<Long> zeroAmountApplyIds = new LinkedHashSet<>();
             for (com.panjia.performance.domain.ReceivedApply a : applyMapper.selectList(
                     new LambdaQueryWrapper<com.panjia.performance.domain.ReceivedApply>()
                         .in(com.panjia.performance.domain.ReceivedApply::getId, boundApplyIds)
                         .select(com.panjia.performance.domain.ReceivedApply::getId,
-                            com.panjia.performance.domain.ReceivedApply::getStatus))) {
+                            com.panjia.performance.domain.ReceivedApply::getStatus,
+                            com.panjia.performance.domain.ReceivedApply::getReceivedAmount))) {
                 statusByApplyId.put(a.getId(), a.getStatus());
+                // 0 元联动单不承载真实到账：绑定其上的虚拟明细不构成「跨月已出单」
+                BigDecimal amt = a.getReceivedAmount();
+                if (amt == null || amt.signum() == 0) {
+                    zeroAmountApplyIds.add(a.getId());
+                }
             }
             for (Map.Entry<Long, List<ReceivedDetail>> entry : activeDetailsByContract.entrySet()) {
                 boolean boundToLiveApply = entry.getValue().stream()
+                    .filter(d -> d.getReceivedApplyId() != null
+                        && !zeroAmountApplyIds.contains(d.getReceivedApplyId()))
                     .map(ReceivedDetail::getReceivedApplyId)
-                    .filter(java.util.Objects::nonNull)
                     .map(statusByApplyId::get)
                     .anyMatch(s -> s == com.panjia.performance.domain.ReceivedApplyStatus.SUBMITTED
                         || s == com.panjia.performance.domain.ReceivedApplyStatus.APPROVED);

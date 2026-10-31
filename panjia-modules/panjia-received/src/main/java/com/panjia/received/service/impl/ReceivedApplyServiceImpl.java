@@ -710,9 +710,21 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             try {
                 ReceivedApply existing = activeApplies.get(orderNo);
                 if (existing != null && existing.getStatus() == ReceivedApplyStatus.APPROVED) {
-                    log.info("[实收审批] 贝壳实收订单当月审批单已 APPROVED，跳过：applyId={}, orderNo={}",
+                    BigDecimal existingAmount = existing.getReceivedAmount();
+                    if (existingAmount != null && existingAmount.signum() != 0) {
+                        log.info("[实收审批] 贝壳实收订单当月审批单已 APPROVED，跳过：applyId={}, orderNo={}",
+                            existing.getId(), orderNo);
+                        continue;
+                    }
+                    // 新签调整联动直建的 0 元 APPROVED 单：作废以释放 (period, order_no) 唯一键，
+                    // 让真实到账按正常分流重新建单（2026-10-31）
+                    existing.setStatus(ReceivedApplyStatus.CANCELLED);
+                    existing.setCurrentNode(null);
+                    existing.setProcessInstanceId(null);
+                    applyMapper.updateById(existing);
+                    log.info("[实收审批] 0 元联动实收单已作废，放行真实到账建单：applyId={}, orderNo={}",
                         existing.getId(), orderNo);
-                    continue;
+                    existing = null;
                 }
                 if (existing != null) {
                     // DRAFT/SUBMITTED：整单从严，新事实并入人工审批流程
@@ -1937,6 +1949,78 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, "重新提交");
         routeAfterApplicant(apply, currentRoles());
         return apply;
+    }
+
+    // ==================== 驳回后调整并重提 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReceivedApply reviseAndResubmit(Long id, com.panjia.received.domain.bo.ReceivedReviseBo bo) {
+        ReceivedApply apply = getAndCheck(id);
+        if (apply.getStatus() != ReceivedApplyStatus.REJECTED) {
+            throw new ServiceException("仅已驳回状态的审批单可调整后重提（当前：" + apply.getStatus().getDesc() + "）");
+        }
+        if (bo == null || bo.getDetailTargets() == null || bo.getDetailTargets().isEmpty()) {
+            throw new ServiceException("调整明细不能为空");
+        }
+        // 可调整范围与详情展示口径一致：本单已绑定明细 + 同合同同期未绑定的历史明细
+        boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
+            && canDegradeExpectToReceived(apply.getContractNo());
+        List<Long> factIds = factMapper.selectReceivedFactDetails(
+                apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect, apply.getId())
+            .stream()
+            .map(ReceivedFactDetailVo::getFactId)
+            .filter(java.util.Objects::nonNull)
+            .toList();
+        if (factIds.isEmpty()) {
+            throw new ServiceException("该审批单暂无实收明细可调整");
+        }
+        Map<Long, com.panjia.received.domain.ReceivedDetail> editable = new HashMap<>();
+        for (com.panjia.received.domain.ReceivedDetail d : detailMapper.selectBatchIds(factIds)) {
+            if ("ACTIVE".equals(d.getDetailStatus())) {
+                editable.put(d.getId(), d);
+            }
+        }
+        Set<Long> touchedContractIds = new LinkedHashSet<>();
+        int changedRows = 0;
+        for (com.panjia.received.domain.bo.ReceivedReviseBo.Item item : bo.getDetailTargets()) {
+            if (item == null || item.getFactId() == null) {
+                throw new ServiceException("调整明细缺少明细 ID");
+            }
+            com.panjia.received.domain.ReceivedDetail detail = editable.get(item.getFactId());
+            if (detail == null) {
+                throw new ServiceException("实收明细不属于该审批单：" + item.getFactId());
+            }
+            boolean changed = false;
+            if (item.getAmount() != null) {
+                if (item.getAmount().signum() < 0) {
+                    throw new ServiceException("调整后实收金额不能为负");
+                }
+                detail.setPerformanceAmount(item.getAmount());
+                changed = true;
+            }
+            if (item.getShareRatio() != null) {
+                if (item.getShareRatio().signum() < 0 || item.getShareRatio().compareTo(BigDecimal.ONE) > 0) {
+                    throw new ServiceException("角色占比须在 0~1 之间");
+                }
+                detail.setShareRatio(item.getShareRatio());
+                changed = true;
+            }
+            if (changed) {
+                detailMapper.updateById(detail);
+                changedRows++;
+                if (detail.getContractId() != null) {
+                    touchedContractIds.add(detail.getContractId());
+                }
+            }
+        }
+        if (changedRows == 0) {
+            throw new ServiceException("无任何实收变动，无需调整");
+        }
+        refreshTotals(apply);
+        refreshContractAggregates(touchedContractIds);
+        log.info("[实收审批] 驳回后调整并重提：applyId={}, rows={}, reason={}", id, changedRows, bo.getReason());
+        return resubmit(id);
     }
 
     // ==================== 作废 ====================
@@ -3513,6 +3597,28 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo()));
         apply.setUpdateTime(LocalDateTime.now());
         applyMapper.updateById(apply);
+    }
+
+    /** 按 ACTIVE 明细分组合计重算合同级实收合计/条数（与导入、撤销链路同口径）。 */
+    private void refreshContractAggregates(java.util.Collection<Long> contractIds) {
+        if (contractIds == null || contractIds.isEmpty()) {
+            return;
+        }
+        Map<Long, Map<String, Object>> aggregateByContract = new LinkedHashMap<>();
+        for (Map<String, Object> row : detailMapper.selectActiveAggregatesByContractIds(contractIds)) {
+            aggregateByContract.put(((Number) row.get("contractId")).longValue(), row);
+        }
+        List<com.panjia.received.domain.ReceivedContract> contracts = contractMapper.selectList(
+            new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                .in(com.panjia.received.domain.ReceivedContract::getId, contractIds));
+        for (com.panjia.received.domain.ReceivedContract c : contracts) {
+            Map<String, Object> agg = aggregateByContract.get(c.getId());
+            Object total = agg == null ? null : agg.get("totalAmount");
+            Object count = agg == null ? null : agg.get("itemCount");
+            c.setPeriodTotalReceived(total == null ? BigDecimal.ZERO : new BigDecimal(total.toString()));
+            c.setItemCount(count == null ? 0 : ((Number) count).intValue());
+            contractMapper.updateById(c);
+        }
     }
 
     private ReceivedApply getAndCheck(Long id) {
