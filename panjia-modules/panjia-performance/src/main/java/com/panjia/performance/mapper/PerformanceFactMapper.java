@@ -2395,7 +2395,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                ) AS "originalRealAmount",
                (ci.id IS NOT NULL) AS "settled",
                ca.lock_time AS "settleDate",
-               (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust"
+               (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust",
+               FALSE AS "unmatchedReal"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
@@ -2414,7 +2415,76 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE f.fact_status = 'ACTIVE'
           AND f.fact_type = 'PERF_EXPECT'
           AND (f.contract_no = #{bizNo} OR f.order_no = #{bizNo})
-        ORDER BY f.period DESC, e.employee_name, d.dept_id, f.role_type, f.id
+        UNION ALL
+        -- 未匹配新签角色的实收行：该工号在本合同有多个新签角色、且实收角色名对不上任何新签角色时，
+        -- 单独成行展示（新签业绩记 0），保证详情实收合计与列表口径一致，不再静默丢失
+        SELECT NULL AS "factId",
+               rd.period AS "period",
+               COALESCE(rd.dept_id, rc.dept_id) AS "deptId",
+               COALESCE(rd.employee_id, e.employee_id) AS "employeeId",
+               COALESCE(e.employee_code, rd.employee_external_code) AS "employeeCode",
+               e.employee_name AS "employeeName",
+               CASE
+                   WHEN array_length(string_to_array(d.ancestors, ','), 1) >= 3 THEN
+                       CONCAT_WS('-',
+                           NULLIF(gp.dept_name, 'tenant_name'),
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           CASE WHEN d.dept_name = p.dept_name THEN NULL
+                                ELSE NULLIF(d.dept_name, 'tenant_name') END)
+                   ELSE
+                       CONCAT_WS('-',
+                           NULLIF(p.dept_name, 'tenant_name'),
+                           NULLIF(d.dept_name, 'tenant_name'))
+               END AS "deptPath",
+               rd.role_type AS "roleType",
+               rd.role_name AS "roleName",
+               rd.share_ratio AS "shareRatio",
+               rc.business_date AS "businessDate",
+               0 AS "expectAmount",
+               0 AS "originalExpectAmount",
+               rd.performance_amount AS "realAmount",
+               CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                    ELSE COALESCE((
+                        SELECT rdr.performance_amount
+                        FROM pj_received_detail rdr
+                        WHERE rdr.source_key = rd.source_key
+                          AND rdr.detail_status = 'REVERSED'
+                        ORDER BY rdr.id ASC LIMIT 1), rd.performance_amount) END AS "originalRealAmount",
+               FALSE AS "settled",
+               NULL AS "settleDate",
+               FALSE AS "manualAdjust",
+               TRUE AS "unmatchedReal"
+        FROM pj_received_detail rd
+        JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        LEFT JOIN pj_people_employee e
+               ON (e.employee_id = rd.employee_id
+                   OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
+        LEFT JOIN sys_dept d ON d.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
+        LEFT JOIN sys_dept p ON p.dept_id = d.parent_id
+        LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
+        WHERE rd.detail_status = 'ACTIVE'
+          -- 该实收明细的合同属于本次业务键
+          AND EXISTS (
+              SELECT 1 FROM pj_perf_fact fx
+              WHERE fx.fact_type = 'PERF_EXPECT' AND fx.fact_status = 'ACTIVE'
+                AND (fx.contract_no = #{bizNo} OR fx.order_no = #{bizNo})
+                AND (fx.contract_no = rc.contract_no OR fx.order_no = rc.order_no
+                     OR fx.contract_no = rc.order_no OR fx.order_no = rc.contract_no))
+          -- 该工号在本合同新签侧有 ≥2 个角色（无法按唯一角色兜底）
+          AND (SELECT count(DISTINCT f4.role_type) FROM pj_perf_fact f4
+               WHERE f4.fact_type = 'PERF_EXPECT' AND f4.fact_status = 'ACTIVE'
+                 AND f4.employee_external_code IS NOT DISTINCT FROM rd.employee_external_code
+                 AND (f4.contract_no = rc.contract_no OR f4.order_no = rc.order_no
+                      OR f4.contract_no = rc.order_no OR f4.order_no = rc.contract_no)) >= 2
+          -- 且角色确实对不上任何新签角色
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_perf_fact f3
+              WHERE f3.fact_type = 'PERF_EXPECT' AND f3.fact_status = 'ACTIVE'
+                AND f3.employee_external_code IS NOT DISTINCT FROM rd.employee_external_code
+                AND f3.role_type IS NOT DISTINCT FROM rd.role_type
+                AND (f3.contract_no = rc.contract_no OR f3.order_no = rc.order_no
+                     OR f3.contract_no = rc.order_no OR f3.order_no = rc.contract_no))
+        ORDER BY "period" DESC, "employeeName", "deptId", "roleType", "factId" NULLS LAST
         """)
     List<PerformanceSearchDetailVo> selectSearchDetailRows(@Param("bizNo") String bizNo);
 
