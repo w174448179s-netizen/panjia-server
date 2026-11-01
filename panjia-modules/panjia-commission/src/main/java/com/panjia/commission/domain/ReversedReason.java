@@ -22,6 +22,9 @@ public enum ReversedReason {
     /** 申请单作废（未审批明细随单冲销，释放事实供重新发起） */
     APPLICATION_CANCELLED("申请作废"),
 
+    /** 申请单驳回（驳回为终态，未审批明细随单冲销，释放事实供重新发起） */
+    APPLICATION_REJECTED("申请驳回"),
+
     /** 业绩域期间作废 */
     PERIOD_VOID("期间作废");
 

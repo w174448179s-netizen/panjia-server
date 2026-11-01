@@ -9,8 +9,10 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * <pre>
  * SUBMITTED ──审批通过──▶ APPROVED ──锁定──▶ LOCKED
  *     │                        │                │
- *     └──驳回──▶ REJECTED      └──作废──▶ CANCELLED ◀──作废──┘
+ *     ├──驳回──▶ REJECTED(终态) └──作废──▶ CANCELLED ◀──作废──┘
  * </pre>
+ * 驳回（REJECTED）与作废（CANCELLED）均为终态：未审批明细随之冲销、业绩事实释放，
+ * 合同/订单立即回到「可发起」列表，重新发起即新建一张单，不重提旧单、无需先作废。
  * 简化审批实现：审批回调在单事务内完成 SUBMITTED → LOCKED（内部先 APPROVED 落 approved_month）。
  * 已锁定（LOCKED）单可作废：冲销全部明细（含 APPROVED），释放事实供重新发起，作废后不计入工资。
  * <p>

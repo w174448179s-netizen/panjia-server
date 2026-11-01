@@ -124,7 +124,7 @@ public class CommissionApplicationService {
      * <ul>
      *   <li>{@code factsMap}：同步阶段已查的实收事实，建单直接复用</li>
      *   <li>{@code expectedAmounts}：全期间合同汇总一次性加载，建单按 contractNo 取值</li>
-     *   <li>{@code activeApps} / {@code rejectedApps}：一条 IN 查询取所有合同当月申请单</li>
+     *   <li>{@code activeApps}：一条 IN 查询取所有合同当期活跃申请单</li>
      * </ul>
      * 单合同发起路径 ctx=null，走原有逐单查询逻辑。
      */
@@ -135,8 +135,6 @@ public class CommissionApplicationService {
         final Map<String, BigDecimal> expectedAmounts = new HashMap<>();
         /** 输入字符串 → 活跃申请单（SUBMITTED/APPROVED/LOCKED） */
         final Map<String, CommissionApplication> activeApps = new HashMap<>();
-        /** 输入字符串 → 驳回申请单（REJECTED） */
-        final Map<String, CommissionApplication> rejectedApps = new HashMap<>();
         /**
          * 自动/人工发起时传入的待结佣新签事实；非空时建单只用这些事实，
          * 不再跨期全量加载（{@link #createSubmittedForFacts}）。
@@ -172,7 +170,7 @@ public class CommissionApplicationService {
      * 单个发起结佣并提交审批（拉取该订单事实 → 生成明细 → 立即提交进入审批流，§4.1/§3.1）。
      * <p>
      * 业务人员一次操作即完成发起+提交，无需再单独点"提交"按钮。
-     * 兼容驳回重提：该订单已有 REJECTED 单时，直接重新提交该单进入审批流，不新建单。
+     * 驳回/作废单均为终态：明细已冲销、事实已释放，重新发起时直接新建一张单（2026-11-01 定稿）。
      * 新流程前置（§3.2）：订单实收事实必须已完成实收业绩审批（received APPROVED），否则拒绝。
      * <p>
      * 键口径（2026-10-12）：列表行合同号、订单号同传，<b>以订单号为准</b>——业务键 bizKey
@@ -180,7 +178,7 @@ public class CommissionApplicationService {
      * 限定与申请单快照归一化。orderNo 为空（历史/手工入口）时 bizKey 退合同号，
      * 由 {@link #assertSingleOrderScope} 多订单防串单兜底拦截。
      * <p>
-     * 与批量发起共用 {@link BatchApplyContext} 预加载机制：活跃/驳回单、实收事实、应收金额
+     * 与批量发起共用 {@link BatchApplyContext} 预加载机制：活跃单、实收事实、应收金额
      * 各一次查询载入上下文，消除 5 参 {@link #apply} 与 {@link #createApplicationWithItems}
      * 内部的逐项重复查询（P0：原单发链路 apply 与 createApplicationWithItems 各查一遍活跃单）。
      *
@@ -441,7 +439,7 @@ public class CommissionApplicationService {
         // ctx 各 Map（申请单/事实/应收）统一按 bizKey 索引，
         // 5 参 apply 与 createApplicationWithItems 无需感知输入是合同号还是订单号
         BatchApplyContext ctx = new BatchApplyContext();
-        // 活跃/驳回申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）；
+        // 活跃申请单一次预查（P1：原 apply 与 createApplicationWithItems 各查一次）；
         // 输入为订单号时归组自动命中 order_no 索引
         loadApplicationsBatch(period, List.of(bizKey), ctx);
         // 实收事实：跨期查找（period 传 null），发起月不必与实收月一致。
@@ -468,7 +466,7 @@ public class CommissionApplicationService {
      *                      {@code @DataPermission}，拦截器取登录态会抛 SaTokenContextException，
      *                      故异步路径必须跳过（不构成越权：同步阶段已过滤）。
      * @param ctx           批量上下文（预加载的应收/事实/申请单），null 时走单合同路径逐单查；
-     *                      非 null 时跳过 checkPeriodOpen（批量入口已查）、复用预加载的驳回单和事实
+     *                      非 null 时跳过 checkPeriodOpen（批量入口已查）、复用预加载的活跃单和事实
      */
     @Transactional(rollbackFor = Exception.class)
     public CommissionApplication apply(String period, String contractNo, Long operatorId,
@@ -492,14 +490,7 @@ public class CommissionApplicationService {
         }
         period = applyPeriod;
 
-        // 驳回单重提：从 ctx 取预加载的驳回单，避免逐单查（P1）
-        CommissionApplication rejected = ctx != null
-            ? ctx.rejectedApps.get(contractNo)
-            : findRejectedApplication(period, contractNo);
-        if (rejected != null) {
-            submit(rejected, operatorId, systemInitiated);
-            return rejected;
-        }
+        // 驳回/作废均为终态（明细已冲销、事实已释放），不参与幂等判断；重新发起直接新建单。
         // SUBMITTED/APPROVED/LOCKED 属重复发起，直接拒绝（草稿态已取消，不存在「已建未提交」的单）
         CommissionApplication active = ctx != null
             ? ctx.activeApps.get(contractNo)
@@ -516,7 +507,7 @@ public class CommissionApplicationService {
     /**
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐单处理）。
      * <p>去重合同号，逐张发起并提交审批。已有未完结单（SUBMITTED/APPROVED/LOCKED）跳过；
-     * REJECTED 单自动重提。单合同失败不阻断整批。
+     * 驳回/作废为终态，重新发起直接新建单。单合同失败不阻断整批。
      * <p>期间口径：结佣期间由发起人在弹窗手动选择（必传 YYYY-MM），不再自动取当前月；
      * 实收事实跨期查找——6 月实收 10 月发起即归属 10 月结佣，不按实收日期定期间。
      *
@@ -677,7 +668,7 @@ public class CommissionApplicationService {
         CommissionApplicationService self = SpringUtils.getBean(CommissionApplicationService.class);
         CommissionBatchResultVo result = new CommissionBatchResultVo();
         result.setTotal(contractNos.size());
-        // 批量预查：一条 IN 查询取所有合同当月活跃+驳回申请单（P1：N×3→1 次）
+        // 批量预查：一条 IN 查询取所有合同当期活跃申请单（P1：N×3→1 次）
         if (ctx != null) {
             loadApplicationsBatch(period, contractNos, ctx);
         }
@@ -1287,7 +1278,7 @@ public class CommissionApplicationService {
     // ==================== 提交 / 审批（workflow） ====================
 
     /**
-     * 提交审批（§3.1）：REJECTED → 重提；新建单（SUBMITTED 且无流程实例）→ 启动 commission_apply 流程。
+     * 提交审批（§3.1）：新建单（SUBMITTED 且无流程实例）→ 启动 commission_apply 流程。
      * <p>
      * 发起人路由：申请人节点办理后进入总监节点；若发起人=总监（或超管），
      * 系统自动办理总监节点（含 §3.5 差异对齐判定），无差异时继续自动过财务直至完成。
@@ -1333,16 +1324,13 @@ public class CommissionApplicationService {
         if (application == null) {
             throw new ServiceException("结佣申请单不存在");
         }
-        // 可提交的两类单：①新建单（已落 SUBMITTED 但尚未启动流程，草稿态已取消）；
-        // ②已驳回单（REJECTED，流程停在申请人节点，重提继续推进）
-        boolean newFlow = application.getStatus() == ApplicationStatus.SUBMITTED
-            && StringUtils.isBlank(application.getProcessInstanceId());
-        boolean resubmit = application.getStatus() == ApplicationStatus.REJECTED;
-        if (!newFlow && !resubmit) {
-            throw new ServiceException("仅新建单或已驳回单可提交（当前：" + application.getStatus().getDesc() + "）");
+        // 唯一可提交的单：新建单（已落 SUBMITTED 但尚未启动流程，建单即提交，无草稿态）。
+        // 驳回/作废均为终态（2026-11-01）：单据结束、明细已冲销释放事实，重新发起走新建单，绝不重提旧单。
+        if (application.getStatus() != ApplicationStatus.SUBMITTED
+            || StringUtils.isNotBlank(application.getProcessInstanceId())) {
+            throw new ServiceException("仅新建单可提交（当前：" + application.getStatus().getDesc()
+                + "）；已驳回/已作废单请重新发起结佣");
         }
-        // 在改状态之前先记住原状态——REJECTED 走「重提」，其余走「新建流程」
-        ApplicationStatus originalStatus = application.getStatus();
 
         // ===== 第一阶段：流程侧操作（先于 application 改状态）=====
         // 顺序：先跑流程，再改 application.status。原因：
@@ -1359,21 +1347,9 @@ public class CommissionApplicationService {
         boolean workflowCreated = false;
         String workflowIdBefore = application.getProcessInstanceId();
         try {
-            if (originalStatus == ApplicationStatus.REJECTED) {
-                // REJECTED → 重提：驳回后流程停在申请人节点，办理该节点任务继续推进
-                if (StringUtils.isBlank(application.getProcessInstanceId())) {
-                    throw new ServiceException("驳回单缺少流程实例，无法重提，请联系管理员");
-                }
-                Long taskId = approvalPort.currentTaskId(BizType.COMMISSION, application.getId());
-                if (taskId == null) {
-                    throw new ServiceException("审批流程任务不存在，请联系管理员");
-                }
-                approvalPort.completeAsSys(BizType.COMMISSION, application.getId(), ApprovalAction.PASS, "重新提交");
-            } else {
-                // 新建单 → 启动流程（系统自动发起无登录上下文，显式指定办理人，避免发起人变量为空）
-                startWorkflow(application, systemInitiated ? operatorId : null);
-                workflowCreated = true;
-            }
+            // 新建单 → 启动流程（系统自动发起无登录上下文，显式指定办理人，避免发起人变量为空）
+            startWorkflow(application, systemInitiated ? operatorId : null);
+            workflowCreated = true;
 
             // ===== 第二阶段：application 侧改状态 =====
             // 系统自动发起标记：供导入批次撤销时精确识别「导入连锁产生」的结佣单
@@ -1396,7 +1372,7 @@ public class CommissionApplicationService {
                     + application.getContractNo() + ", applyNo=" + application.getApplyNo()
                     + ", version=" + application.getVersion());
             }
-            // 草稿明细随单流转：DRAFT → PENDING；驳回单明细已是 PENDING
+            // 明细随单流转：建单时明细为 DRAFT，提交即推进为 PENDING（与申请单提交同一事务）
             itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
                 .eq(CommissionItem::getApplicationId, application.getId())
                 .eq(CommissionItem::getStatus, ItemStatus.DRAFT)
@@ -1772,7 +1748,7 @@ public class CommissionApplicationService {
      * commission_apply 流程事件处理（CommissionApplyWorkflowListener 调用）。
      * <ul>
      *   <li>finish：SUBMITTED → LOCKED，落 approved_month=当前月，明细 PENDING→APPROVED，发结佣通过事件；</li>
-     *   <li>back：→ REJECTED（明细保持 PENDING）；</li>
+     *   <li>back：→ REJECTED（终态，未审批明细冲销释放事实，用户重新发起新单）；</li>
      *   <li>cancel/invalid/termination：→ CANCELLED，未审批明细冲销释放事实。</li>
      * </ul>
      */
@@ -1823,7 +1799,12 @@ public class CommissionApplicationService {
                 if (application.getStatus() != ApplicationStatus.SUBMITTED) {
                     return;
                 }
+                // 驳回 = 终态（2026-11-01）：未审批明细随单冲销，释放新签事实，
+                // 合同/订单立即回到「可发起」列表，业务人员直接重新发起新单，无需先作废
+                reverseUnapprovedItems(applicationId, ReversedReason.APPLICATION_REJECTED);
                 application.setStatus(ApplicationStatus.REJECTED);
+                application.setItemCount(0);
+                application.setTotalAmount(BigDecimal.ZERO);
                 application.setCurrentNode(null);
                 // 与实收审批单口径一致：驳回也留痕审批人/审批时间
                 if (handlerId != null) {
@@ -1831,10 +1812,10 @@ public class CommissionApplicationService {
                     application.setApproveTime(LocalDateTime.now());
                 }
                 applicationMapper.updateById(application);
-                log.info("[结佣工作流] 驳回：id={}, message={}", applicationId, message);
+                log.info("[结佣工作流] 驳回（终态，明细已冲销释放事实）：id={}, message={}", applicationId, message);
             }
             case "cancel", "invalid", "termination" -> {
-                reverseUnapprovedItems(applicationId);
+                reverseUnapprovedItems(applicationId, ReversedReason.APPLICATION_CANCELLED);
                 application.setItemCount(0);
                 application.setTotalAmount(BigDecimal.ZERO);
                 application.setStatus(ApplicationStatus.CANCELLED);
@@ -2936,12 +2917,12 @@ public class CommissionApplicationService {
      * 注意：只更新明细，不回写申请单聚合——申请单的状态/聚合由调用方在自己持有的版本对象上更新，
      * 避免与调用方形成「一级缓存分叉 + @Version 乐观锁」导致的更新丢失。
      */
-    private int reverseUnapprovedItems(Long applicationId) {
+    private int reverseUnapprovedItems(Long applicationId, ReversedReason reason) {
         return itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
             .eq(CommissionItem::getApplicationId, applicationId)
             .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
             .set(CommissionItem::getStatus, ItemStatus.REVERSED)
-            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
+            .set(CommissionItem::getReversedReason, reason));
     }
 
     /**
@@ -3014,25 +2995,11 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 查询该合同当月最近一张驳回单（REJECTED），供 add 兼容驳回重提使用。
-     * 多张驳回单取最新一张，其余保留不动。
-     */
-    private CommissionApplication findRejectedApplication(String period, String contractNo) {
-        return applicationMapper.selectOne(new LambdaQueryWrapper<CommissionApplication>()
-            .eq(CommissionApplication::getPeriod, period)
-            .and(w -> w.eq(CommissionApplication::getContractNo, contractNo)
-                .or().eq(CommissionApplication::getOrderNo, contractNo))
-            .eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED)
-            .orderByDesc(CommissionApplication::getCreateTime)
-            .last("LIMIT 1"));
-    }
-
-    /**
-     * 批量预查所有合同当月活跃+驳回申请单（P1 优化）。
+     * 批量预查所有合同当期活跃申请单（P1 优化）。
      * <p>
-     * 分片 IN 查询取所有输入合同号对应的活跃（SUBMITTED/APPROVED/LOCKED）和驳回
-     * （REJECTED）申请单，按输入字符串（合同号或订单号）分别建 Map，
-     * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→N/500 次）。
+     * 分片 IN 查询取所有输入合同号对应的活跃（SUBMITTED/APPROVED/LOCKED）申请单，
+     * 按输入字符串（合同号或订单号）分别建 Map，doBatchApply 和 doApply 直接取值，
+     * 避免逐合同查（N×3→N/500 次）。驳回/作废为终态，不参与幂等判断。
      * <p>
      * 同期互斥（2026-10）：同合同同期只允许一张活跃单，跨期补差走新申请单。
      * 同一合同多张单取最新一张（createTime DESC 排序后 putIfAbsent）。
@@ -3041,7 +3008,7 @@ public class CommissionApplicationService {
         if (contractNos.isEmpty()) {
             return;
         }
-        // 同期互斥：按 period 过滤，同合同同期的活跃/驳回单参与幂等判断。
+        // 同期互斥：按 period 过滤，同合同同期的活跃单参与幂等判断。
         // IN 键分片：勾选键集可达数千上万，整包 IN 会撑爆 SQL 文本，分片查询后合并
         List<CommissionApplication> all = new ArrayList<>();
         for (List<String> chunk : chunkKeys(contractNos)) {
@@ -3050,7 +3017,7 @@ public class CommissionApplicationService {
                 .and(w -> w.in(CommissionApplication::getContractNo, chunk)
                     .or().in(CommissionApplication::getOrderNo, chunk))
                 .in(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED,
-                    ApplicationStatus.APPROVED, ApplicationStatus.LOCKED, ApplicationStatus.REJECTED)));
+                    ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)));
         }
         // 跨分片合并后按 createTime DESC, id DESC 全局排序（下方 putIfAbsent 取最新依赖全局有序）
         all.sort((a, b) -> {
@@ -3060,29 +3027,17 @@ public class CommissionApplicationService {
         // 按真实合同号/订单号分别建索引（同键取最新一张）
         Map<String, CommissionApplication> activeByContract = new HashMap<>();
         Map<String, CommissionApplication> activeByOrder = new HashMap<>();
-        Map<String, CommissionApplication> rejectedByContract = new HashMap<>();
-        Map<String, CommissionApplication> rejectedByOrder = new HashMap<>();
         for (CommissionApplication app : all) {
-            boolean isActive = app.getStatus() != ApplicationStatus.REJECTED;
             if (app.getContractNo() != null) {
-                if (isActive) {
-                    activeByContract.putIfAbsent(app.getContractNo(), app);
-                } else {
-                    rejectedByContract.putIfAbsent(app.getContractNo(), app);
-                }
+                activeByContract.putIfAbsent(app.getContractNo(), app);
             }
             if (app.getOrderNo() != null) {
-                if (isActive) {
-                    activeByOrder.putIfAbsent(app.getOrderNo(), app);
-                } else {
-                    rejectedByOrder.putIfAbsent(app.getOrderNo(), app);
-                }
+                activeByOrder.putIfAbsent(app.getOrderNo(), app);
             }
         }
         // 按输入字符串（可能是合同号或订单号）匹配到对应申请单
         for (String input : contractNos) {
             ctx.activeApps.put(input, activeByContract.getOrDefault(input, activeByOrder.get(input)));
-            ctx.rejectedApps.put(input, rejectedByContract.getOrDefault(input, rejectedByOrder.get(input)));
         }
     }
 

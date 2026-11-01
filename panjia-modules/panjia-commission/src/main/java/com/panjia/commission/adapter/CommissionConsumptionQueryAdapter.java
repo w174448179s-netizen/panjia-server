@@ -22,8 +22,7 @@ import java.util.stream.Collectors;
  * 拦截口径见 {@link CommissionConsumptionQueryPort}：
  * <ol>
  *   <li>已提交/已通过/已锁定且<b>持有流程实例</b>的结佣单（正式审批链路）→ 禁止；</li>
- *   <li>已驳回结佣单（流程产物，可能重新提交）→ 禁止；</li>
- *   <li>历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截；</li>
+ *   <li>驳回（REJECTED）、作废（CANCELLED）为终态，明细已冲销、事实已释放，均不拦截；</li>
  *   <li><b>自动发起豁免</b>：{@code auto_initiated=true} 且尚无审批人办理的 SUBMITTED 单不拦截
  *       （导入连锁产物，批次撤销时随批硬删）；审批人办理过则照常拦截。</li>
  * </ol>
@@ -59,7 +58,7 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
         List<CommissionApplication> consumed = selectConsumedApplications(null, contracts, orders);
         if (!consumed.isEmpty()) {
             return RevokeCheckResult.reject(
-                "该批次涉及合同存在已提交/审批/锁定/驳回的结佣申请单（" + consumed.size()
+                "该批次涉及合同存在已提交/审批中/已锁定的结佣申请单（" + consumed.size()
                     + " 张），禁止撤销，请先在结佣模块作废结佣单");
         }
         return RevokeCheckResult.ok();
@@ -89,7 +88,10 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
     }
 
     /**
-     * 查已进入正式审批链路（或已锁定/已驳回）的结佣单。
+     * 查已进入正式审批链路（或已锁定）的结佣单。
+     * <p>
+     * 驳回（REJECTED）、作废（CANCELLED）均为终态：明细已冲销、业绩事实已释放，
+     * 不再构成「已消费」，不阻止批次撤销。
      * <p>
      * period 为空时不过滤期间（撤销预检必须跨月拦截，见类注释）；非空时只看该归属月的
      * 结佣单，另保留 period 为空的历史 LOCKED 单（保守拦截）。
@@ -119,8 +121,7 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
                     .in(CommissionApplication::getStatus,
                         ApplicationStatus.SUBMITTED, ApplicationStatus.APPROVED)
                     .isNotNull(CommissionApplication::getProcessInstanceId))
-                .or().eq(CommissionApplication::getStatus, ApplicationStatus.LOCKED)
-                .or().eq(CommissionApplication::getStatus, ApplicationStatus.REJECTED));
+                .or().eq(CommissionApplication::getStatus, ApplicationStatus.LOCKED));
         if (period != null && !period.isBlank()) {
             appQuery.and(w -> w.eq(CommissionApplication::getPeriod, period.trim())
                 .or().isNull(CommissionApplication::getPeriod));
