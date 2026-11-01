@@ -7,6 +7,7 @@ import com.panjia.dingtalk.domain.DingTalkSyncLog;
 import com.panjia.dingtalk.service.DingTalkAttendanceSyncService;
 import com.panjia.dingtalk.service.DingTalkScoreSyncService;
 import com.panjia.dingtalk.service.DingTalkSyncLogService;
+import com.panjia.dingtalk.service.DingTalkUserMappingSyncService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.PageResult;
@@ -34,8 +35,21 @@ public class DingTalkSyncController extends BaseController {
 
     private final DingTalkAttendanceSyncService attendanceSyncService;
     private final DingTalkScoreSyncService scoreSyncService;
+    private final DingTalkUserMappingSyncService userMappingSyncService;
     private final DingTalkSyncLogService syncLogService;
     private final DingTalkConfigProvider configProvider;
+
+    /**
+     * 手动同步人员映射（钉钉通讯录 → IM 账号映射表，异步执行）。
+     */
+    @SaCheckPermission("dingtalk:sync:employee")
+    @Log(title = "钉钉人员映射同步", businessType = BusinessType.OTHER)
+    @PostMapping("/employee")
+    public R<DingTalkSyncLog> syncEmployee() {
+        assertEnabled();
+        return R.ok("已开始同步，完成后可在同步记录中查看结果",
+            userMappingSyncService.startAsync(currentUserId()));
+    }
 
     /**
      * 手动同步考勤（月度汇总 + 每日明细，异步执行）。
@@ -68,9 +82,9 @@ public class DingTalkSyncController extends BaseController {
     /**
      * 同步记录分页（按开始时间倒序，含执行中/成功/部分成功/失败）。
      *
-     * @param syncType 同步类型：ATTENDANCE(考勤) / SCORE(积分)，默认考勤
+     * @param syncType 同步类型：ATTENDANCE(考勤) / SCORE(积分) / EMPLOYEE(人员映射)，默认考勤
      */
-    @SaCheckPermission(value = {"dingtalk:sync:attendance", "dingtalk:sync:score"}, mode = SaMode.OR)
+    @SaCheckPermission(value = {"dingtalk:sync:attendance", "dingtalk:sync:score", "dingtalk:sync:employee"}, mode = SaMode.OR)
     @GetMapping("/logs")
     public R<PageResult<DingTalkSyncLog>> logs(
         @RequestParam(defaultValue = DingTalkSyncLogService.TYPE_ATTENDANCE) String syncType,

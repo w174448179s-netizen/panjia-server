@@ -17,12 +17,13 @@
 | `V12xxxx`           | **import 域**         | `panjia-modules/panjia-import`      | `V120002`-`V120006` | 导入模板 / 批次表 / 模板管理菜单                    |
 | `V13xxxx`           | **outbox 域**         | `panjia-modules/panjia-outbox`      | `V130001`-`V130002` | 事件 outbox + 幂等键                        |
 | `V14xxxx`           | **performance 域**    | `panjia-modules/panjia-performance` | `V140002`-`V140003` | 业绩事实表 + 业绩域菜单                          |
-| `V15xxxx`           | **commission 域**     | `panjia-modules/panjia-commission`  | （即将新建）| 结佣申请 / 审批 / 锁定                         |
-| `V16xxxx`           | **payroll 域**        | `panjia-modules/panjia-payroll`     | （即将新建）| 薪酬结算：算薪引擎 / 工资批次 / 状态机                 |
-| `V17xxxx`           | **received 域**       | `panjia-modules/panjia-received`    | （即将新建）| 实收                                     |
-| `V18xxxx`           | **ledger 域**         | `panjia-modules/panjia-ledger`      | （即将新建）| 经营结算：收入 / 支出 / 部门台账 / 利润               |
-| `V19xxxx`           | **rules 域**          | `panjia-modules/panjia-rules`       | （即将新建）| 规则引擎（条件 / 动作 / 评分 / 触发器）               |
-| `V20xxxx`-`V29xxxx` | 预留扩展                 | TBD                                 | — | 第 2 代盘家业务域（10 个域位备用）                   |
+| `V15xxxx`           | **commission 域**     | `panjia-modules/panjia-commission`  | `V150001`-`V150010` | 结佣申请 / 审批 / 锁定                         |
+| `V16xxxx`           | **payroll 域**        | `panjia-modules/panjia-payroll`     | `V160001`-`V160020` | 薪酬结算：算薪引擎 / 工资批次 / 状态机                 |
+| `V17xxxx`           | **received 域**       | `panjia-modules/panjia-received`    | `V170001`-`V170013` | 实收                                     |
+| `V18xxxx`           | **im-dingtalk 域**    | `panjia-modules/panjia-im-dingtalk` | `V180001`-`V180003` | 钉钉同步（考勤 / 积分 / 人员映射）: IM 账号映射 |
+| `V19xxxx`           | **系统横切（admin）**     | `ruoyi-admin`                       | `V199999`           | 跨域收尾脚本（总监全量授权等；rules 域未建，段位暂由 admin 占用） |
+| `V20xxxx`           | **系统横切（admin）**     | `ruoyi-admin`                       | `V200000`-`V200011` | 菜单调整 / 配置清理 / 授权补丁                    |
+| `V21xxxx`-`V29xxxx` | 预留扩展                 | TBD                                 | — | 第 2 代盘家业务域（9 个域位备用）                   |
 | `V30xxxx`-`V69xxxx` | 长期预留                 | TBD                                 | — | 第 3/4 代业务（40 个域位）                      |
 | `V70xxxx`-`V89xxxx` | 系统 / 横切域             | TBD                                 | — | license / backup / monitor / log 等基础设施 |
 | `V90xxxx`-`V99xxxx` | auth / cross-cutting | TBD                                 | — | 鉴权 / 跨切关注点                             |
@@ -49,16 +50,16 @@
 | import | `V12xxxx` | `pj_import_*` | 导入模板、批次表、原始记录、标准化记录、模板管理菜单 |
 | outbox | `V13xxxx` | `pj_event_*` | 事件 outbox + 幂等键 |
 | performance | `V14xxxx` | `pj_perf_*` | 业绩事实表、调整单、期间封账 |
-| customer | `V15xxxx` | `pj_customer_*` | 客户域表 |
-| commission | `V16xxxx` | `pj_commission_*` | 结佣申请 / 审批 / 锁定 |
-| payroll | `V17xxxx` | `pj_payroll_*` | 算薪引擎 / 工资批次 / 状态机 |
-| ledger | `V18xxxx` | `pj_ledger_*` | 收入 / 支出 / 部门台账 / 利润 |
-| rules | `V19xxxx` | `pj_rule_*` | 规则定义 / 触发器 / 评分卡 |
+| commission | `V15xxxx` | `pj_commission_*` | 结佣申请 / 审批 / 锁定 |
+| payroll | `V16xxxx` | `pj_payroll_*` | 算薪引擎 / 工资批次 / 状态机 |
+| received | `V17xxxx` | `pj_received_*` | 实收 |
+| im-dingtalk | `V18xxxx` | `pj_dingtalk_*` / `pj_people_im_mapping` | 钉钉同步（考勤 / 积分 / 人员映射） |
+| system | `V19xxxx` / `V20xxxx` | `sys_*` / 菜单脚本 | 跨域收尾、菜单调整、配置清理、授权补丁 |
 
 **注意事项**：
 - people 域的"员工导入"功能使用独立的 `pj_people_import_*` 批次表（与 import 域的 `pj_import_*` 并行），这是**设计决定**——员工导入的业务语义与单据导入不同，需要独立的标准化流程。
 - `pj_people_import_*` 内部仍引用 `pj_import_template` 模板定义（人员模板走 import 域模板管理菜单），但实际批次/原始/标准化数据归 people 域。
-- commission → payroll 是**强依赖流水线**（commission 锁定后才能跑算薪），所以 commission 用 `V16`、payroll 用 `V17`，相邻段位便于查阅依赖链路。
+- commission → payroll 是**强依赖流水线**（commission 锁定后才能跑算薪），所以 commission 用 `V15`、payroll 用 `V16`，相邻段位便于查阅依赖链路。
 
 ---
 

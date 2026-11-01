@@ -10,6 +10,7 @@ import com.panjia.dingtalk.domain.DingTalkSyncLog;
 import com.panjia.dingtalk.dto.DingTalkUserDTO;
 import com.panjia.dingtalk.service.DingTalkAttendanceSyncService;
 import com.panjia.dingtalk.service.DingTalkSyncLogService;
+import com.panjia.dingtalk.service.DingTalkUserMappingSyncService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -64,6 +65,7 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
     private final DingTalkContactClient contactClient;
     private final DingTalkAttendanceClient attendanceClient;
     private final PeopleAttendanceSyncPort attendanceSyncPort;
+    private final DingTalkUserMappingSyncService userMappingSyncService;
     private final DingTalkSyncLogService syncLogService;
     private final DingTalkConfigProvider configProvider;
 
@@ -111,6 +113,12 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
     private void runSync(DingTalkSyncLog entity, String period, YearMonth month) {
         try {
             List<DingTalkUserDTO> users = contactClient.listAllUsers();
+            // 顺带刷新 IM 账号映射（复用同一次通讯录结果，失败不影响考勤同步）
+            try {
+                userMappingSyncService.syncUsers(users);
+            } catch (Exception e) {
+                log.warn("[钉钉考勤同步] IM 账号映射刷新失败（不影响考勤）：{}", e.getMessage());
+            }
             Map<String, String> userIdToJobNumber = new LinkedHashMap<>();
             int noJobNumber = 0;
             Set<String> noJobNumberNames = new LinkedHashSet<>();

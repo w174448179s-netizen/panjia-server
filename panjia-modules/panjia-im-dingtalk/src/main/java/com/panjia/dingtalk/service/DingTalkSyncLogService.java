@@ -25,6 +25,8 @@ public class DingTalkSyncLogService {
     public static final String TYPE_ATTENDANCE = "ATTENDANCE";
     /** 同步类型：积分 */
     public static final String TYPE_SCORE = "SCORE";
+    /** 同步类型：人员映射（钉钉通讯录 → IM 账号映射表） */
+    public static final String TYPE_EMPLOYEE = "EMPLOYEE";
 
     /** 触发方式：手动 */
     public static final String TRIGGER_MANUAL = "MANUAL";

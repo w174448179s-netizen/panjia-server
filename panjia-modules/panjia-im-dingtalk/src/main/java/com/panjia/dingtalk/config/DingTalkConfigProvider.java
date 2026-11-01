@@ -31,6 +31,9 @@ public class DingTalkConfigProvider {
     /** 应用 AgentId */
     public static final String KEY_AGENT_ID = "panjia.dingtalk.agent_id";
 
+    /** 企业 CorpId（IM 账号映射按企业隔离用，可空） */
+    public static final String KEY_CORP_ID = "panjia.dingtalk.corp_id";
+
     /** 事假名称（钉钉考勤后台「假种」名称） */
     public static final String KEY_LEAVE_PERSONAL = "panjia.dingtalk.leave_name_personal";
 
@@ -77,6 +80,11 @@ public class DingTalkConfigProvider {
     /** 应用 AgentId（未配置为空） */
     public String agentId() {
         return orBlank(text(KEY_AGENT_ID), null);
+    }
+
+    /** 企业 CorpId（未配置为空串，IM 账号映射 corp_id 用） */
+    public String corpId() {
+        return orBlank(text(KEY_CORP_ID), "");
     }
 
     /** 事假名称 */

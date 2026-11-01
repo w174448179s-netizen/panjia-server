@@ -2292,16 +2292,52 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    f.performance_amount)
                END AS "originalExpectAmount",
                COALESCE(
-                 -- 拆表后实收落在 rd：按「同期间 + 合同双键 + 同工号 + 同角色」配对
+                 -- 拆表后实收落在 rd：按「合同双键 + 同工号 + 同角色」配对。
+                 -- 实收有独立的到账月，不再与「新签归属月」强绑：每条实收归到该工号+角色
+                 -- 「不晚于到账月的最近一个新签期间」那一行（到账月早于全部新签月时归最早一行），
+                 -- 既能让跨月到账正常展示，又保证同组实收只落一行、详情合计不重复。
                  (SELECT SUM(rdx.performance_amount)
                   FROM pj_received_detail rdx
                   JOIN pj_received_contract rc ON rc.id = rdx.contract_id
                   WHERE rdx.detail_status = 'ACTIVE'
-                    AND rdx.period = f.period
                     AND (rc.order_no = f.order_no OR rc.contract_no = f.contract_no
                          OR rc.order_no = f.contract_no OR rc.contract_no = f.order_no)
                     AND rdx.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
-                    AND rdx.role_type IS NOT DISTINCT FROM f.role_type),
+                    -- 角色配对：正常同角色；角色对不上时，若该工号在本合同新签侧只有唯一角色，
+                    -- 按人兜底归到该唯一角色行（覆盖新签/实收角色命名不一致，如「合作人」vs「房源实勘人」）
+                    AND (rdx.role_type IS NOT DISTINCT FROM f.role_type
+                         OR (
+                           NOT EXISTS (
+                             SELECT 1 FROM pj_perf_fact f3
+                             WHERE f3.fact_type = 'PERF_EXPECT' AND f3.fact_status = 'ACTIVE'
+                               AND f3.contract_no = f.contract_no AND f3.order_no = f.order_no
+                               AND f3.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                               AND f3.role_type IS NOT DISTINCT FROM rdx.role_type)
+                           AND (SELECT count(DISTINCT f4.role_type) FROM pj_perf_fact f4
+                                WHERE f4.fact_type = 'PERF_EXPECT' AND f4.fact_status = 'ACTIVE'
+                                  AND f4.contract_no = f.contract_no AND f4.order_no = f.order_no
+                                  AND f4.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1
+                         ))
+                    AND f.period = COALESCE(
+                      (SELECT MAX(f2.period) FROM pj_perf_fact f2
+                       WHERE f2.fact_type = 'PERF_EXPECT' AND f2.fact_status = 'ACTIVE'
+                         AND f2.contract_no = f.contract_no AND f2.order_no = f.order_no
+                         AND f2.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                         AND (f2.role_type IS NOT DISTINCT FROM rdx.role_type
+                              OR (SELECT count(DISTINCT f5.role_type) FROM pj_perf_fact f5
+                                  WHERE f5.fact_type = 'PERF_EXPECT' AND f5.fact_status = 'ACTIVE'
+                                    AND f5.contract_no = f.contract_no AND f5.order_no = f.order_no
+                                    AND f5.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1)
+                         AND f2.period <= rdx.period),
+                      (SELECT MIN(f2.period) FROM pj_perf_fact f2
+                       WHERE f2.fact_type = 'PERF_EXPECT' AND f2.fact_status = 'ACTIVE'
+                         AND f2.contract_no = f.contract_no AND f2.order_no = f.order_no
+                         AND f2.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                         AND (f2.role_type IS NOT DISTINCT FROM rdx.role_type
+                              OR (SELECT count(DISTINCT f5.role_type) FROM pj_perf_fact f5
+                                  WHERE f5.fact_type = 'PERF_EXPECT' AND f5.fact_status = 'ACTIVE'
+                                    AND f5.contract_no = f.contract_no AND f5.order_no = f.order_no
+                                    AND f5.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1)))),
                  0
                ) AS "realAmount",
                COALESCE(
@@ -2317,11 +2353,44 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                   FROM pj_received_detail rdx
                   JOIN pj_received_contract rc ON rc.id = rdx.contract_id
                   WHERE rdx.detail_status = 'ACTIVE'
-                    AND rdx.period = f.period
                     AND (rc.order_no = f.order_no OR rc.contract_no = f.contract_no
                          OR rc.order_no = f.contract_no OR rc.contract_no = f.order_no)
                     AND rdx.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
-                    AND rdx.role_type IS NOT DISTINCT FROM f.role_type),
+                    -- 角色配对与原值列同口径（含唯一角色按人兜底）
+                    AND (rdx.role_type IS NOT DISTINCT FROM f.role_type
+                         OR (
+                           NOT EXISTS (
+                             SELECT 1 FROM pj_perf_fact f3
+                             WHERE f3.fact_type = 'PERF_EXPECT' AND f3.fact_status = 'ACTIVE'
+                               AND f3.contract_no = f.contract_no AND f3.order_no = f.order_no
+                               AND f3.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                               AND f3.role_type IS NOT DISTINCT FROM rdx.role_type)
+                           AND (SELECT count(DISTINCT f4.role_type) FROM pj_perf_fact f4
+                                WHERE f4.fact_type = 'PERF_EXPECT' AND f4.fact_status = 'ACTIVE'
+                                  AND f4.contract_no = f.contract_no AND f4.order_no = f.order_no
+                                  AND f4.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1
+                         ))
+                    -- 与原值列同口径：按「不晚于到账月的最近新签期间」归属，避免跨月到账漏计
+                    AND f.period = COALESCE(
+                      (SELECT MAX(f2.period) FROM pj_perf_fact f2
+                       WHERE f2.fact_type = 'PERF_EXPECT' AND f2.fact_status = 'ACTIVE'
+                         AND f2.contract_no = f.contract_no AND f2.order_no = f.order_no
+                         AND f2.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                         AND (f2.role_type IS NOT DISTINCT FROM rdx.role_type
+                              OR (SELECT count(DISTINCT f5.role_type) FROM pj_perf_fact f5
+                                  WHERE f5.fact_type = 'PERF_EXPECT' AND f5.fact_status = 'ACTIVE'
+                                    AND f5.contract_no = f.contract_no AND f5.order_no = f.order_no
+                                    AND f5.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1)
+                         AND f2.period <= rdx.period),
+                      (SELECT MIN(f2.period) FROM pj_perf_fact f2
+                       WHERE f2.fact_type = 'PERF_EXPECT' AND f2.fact_status = 'ACTIVE'
+                         AND f2.contract_no = f.contract_no AND f2.order_no = f.order_no
+                         AND f2.employee_external_code IS NOT DISTINCT FROM f.employee_external_code
+                         AND (f2.role_type IS NOT DISTINCT FROM rdx.role_type
+                              OR (SELECT count(DISTINCT f5.role_type) FROM pj_perf_fact f5
+                                  WHERE f5.fact_type = 'PERF_EXPECT' AND f5.fact_status = 'ACTIVE'
+                                    AND f5.contract_no = f.contract_no AND f5.order_no = f.order_no
+                                    AND f5.employee_external_code IS NOT DISTINCT FROM f.employee_external_code) = 1)))),
                  0
                ) AS "originalRealAmount",
                (ci.id IS NOT NULL) AS "settled",
