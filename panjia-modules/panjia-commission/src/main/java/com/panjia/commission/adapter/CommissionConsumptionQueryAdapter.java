@@ -23,7 +23,7 @@ import java.util.stream.Collectors;
  * <ol>
  *   <li>已提交/已通过/已锁定且<b>持有流程实例</b>的结佣单（正式审批链路）→ 禁止；</li>
  *   <li>已驳回结佣单（流程产物，可能重新提交）→ 禁止；</li>
- *   <li>DRAFT 草稿单、历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截；</li>
+ *   <li>历史导入 LOCKED 无流程单、CANCELLED 终态单均不拦截；</li>
  *   <li><b>自动发起豁免</b>：{@code auto_initiated=true} 且尚无审批人办理的 SUBMITTED 单不拦截
  *       （导入连锁产物，批次撤销时随批硬删）；审批人办理过则照常拦截。</li>
  * </ol>
@@ -93,7 +93,7 @@ public class CommissionConsumptionQueryAdapter implements CommissionConsumptionQ
      * <p>
      * period 为空时不过滤期间（撤销预检必须跨月拦截，见类注释）；非空时只看该归属月的
      * 结佣单，另保留 period 为空的历史 LOCKED 单（保守拦截）。
-     * LOCKED 不判断 process_instance_id：实收审批通过后自动建 DRAFT → 提交 → 直落 LOCKED
+     * LOCKED 不判断 process_instance_id：实收审批通过后自动建单（建单即提交）→ 直落 LOCKED
      * 的链路无流程实例，但业务上已审批通过并锁定，必须拦截。
      * <p>
      * <b>自动发起豁免</b>：{@code auto_initiated=true} 且尚无审批人办理的 SUBMITTED 单，

@@ -133,7 +133,7 @@ public class CommissionApplicationService {
         final Map<String, List<PerformanceFactSummaryDTO>> factsMap = new HashMap<>();
         /** 合同号 → 应收金额（全期间一次加载） */
         final Map<String, BigDecimal> expectedAmounts = new HashMap<>();
-        /** 输入字符串 → 活跃申请单（DRAFT/SUBMITTED/APPROVED/LOCKED） */
+        /** 输入字符串 → 活跃申请单（SUBMITTED/APPROVED/LOCKED） */
         final Map<String, CommissionApplication> activeApps = new HashMap<>();
         /** 输入字符串 → 驳回申请单（REJECTED） */
         final Map<String, CommissionApplication> rejectedApps = new HashMap<>();
@@ -500,31 +500,11 @@ public class CommissionApplicationService {
             submit(rejected, operatorId, systemInitiated);
             return rejected;
         }
-        // 历史遗留 DRAFT 草稿单（早期实收自动建单不提交）：人工发起时直接提交该草稿；
-        // 草稿常由导入归档操作人身份自动建立，提交时把申请人改为实际提交人
-        // （列表「申请人」、审批中数据隔离均以申请人为准）。
-        // SUBMITTED/APPROVED/LOCKED 属重复发起，直接拒绝。
+        // SUBMITTED/APPROVED/LOCKED 属重复发起，直接拒绝（草稿态已取消，不存在「已建未提交」的单）
         CommissionApplication active = ctx != null
             ? ctx.activeApps.get(contractNo)
             : findActiveApplication(period, contractNo);
         if (active != null) {
-            if (active.getStatus() == ApplicationStatus.DRAFT) {
-                // 新签调整（加人/金额变更）会 supersede 旧事实 → FACT_REVERSED 把旧结佣明细
-                // 置 REVERSED；FACT_CREATED 不重建明细（设计如此）。DRAFT 单明细可能全部被冲销，
-                // 提交前需检查：没有 ACTIVE 明细则从当前新签事实重建。
-                long activeItems = itemMapper.selectCount(new LambdaQueryWrapper<CommissionItem>()
-                    .eq(CommissionItem::getApplicationId, active.getId())
-                    .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
-                if (activeItems == 0) {
-                    rebuildItems(active, period, contractNo);
-                }
-                if (!Objects.equals(active.getApplicantId(), operatorId)) {
-                    active.setApplicantId(operatorId);
-                    applicationMapper.updateById(active);
-                }
-                submit(active, operatorId, systemInitiated);
-                return active;
-            }
             throw new ServiceException("合同 " + contractNo + " " + period
                 + " 月已存在" + active.getStatus().getDesc() + "申请单（" + active.getApplyNo() + "），请勿重复发起");
         }
@@ -535,7 +515,7 @@ public class CommissionApplicationService {
 
     /**
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐单处理）。
-     * <p>去重合同号，逐张发起并提交审批。已有未完结单（DRAFT/SUBMITTED/APPROVED/LOCKED）跳过；
+     * <p>去重合同号，逐张发起并提交审批。已有未完结单（SUBMITTED/APPROVED/LOCKED）跳过；
      * REJECTED 单自动重提。单合同失败不阻断整批。
      * <p>期间口径：结佣期间由发起人在弹窗手动选择（必传 YYYY-MM），不再自动取当前月；
      * 实收事实跨期查找——6 月实收 10 月发起即归属 10 月结佣，不按实收日期定期间。
@@ -862,7 +842,8 @@ public class CommissionApplicationService {
         application.setPropertyAddress(propertyAddress);
         application.setBusinessDate(businessDate);
         application.setDeptId(deptIds.size() == 1 ? first.getDeptId() : null);
-        application.setStatus(ApplicationStatus.DRAFT);
+        // 建单即落「审批中」：草稿态已取消（2026-11-01），提交失败时整个发起事务回滚，不留半成品单据
+        application.setStatus(ApplicationStatus.SUBMITTED);
         application.setApplicantId(operatorId);
         // 结佣金额口径（2026-10-24 定稿）：**全部未结佣**的新签事实（含负数红冲），
         // 不再「当月优先」——导入退单红冲（8 月收 9 月退、6 月收 7 月退 8 月又补一部分）时，
@@ -923,7 +904,7 @@ public class CommissionApplicationService {
      * 重建结佣明细（新签调整后旧明细全部被冲销时，从当前 ACTIVE 新签事实重新生成）。
      * <p>
      * 场景：用户加角色人/调整金额 → 新签事实 supersede → FACT_REVERSED 把旧结佣明细置 REVERSED；
-     * FACT_CREATED 不重建明细（设计如此）。提交前发现 DRAFT 单没有 ACTIVE 明细，
+     * FACT_CREATED 不重建明细（设计如此）。提交前发现单据没有 ACTIVE 明细，
      * 从当前新签事实跨月加载并重建，口径与 {@link #createApplicationWithItems} 一致。
      */
     private void rebuildItems(CommissionApplication application, String period, String contractNo) {
@@ -961,115 +942,111 @@ public class CommissionApplicationService {
     }
 
     /**
-     * DRAFT 结佣单明细被冲销后自动重建（新签调整 supersede 联动）。
+     * 新签调整冲销审批中的结佣单时，在原单上换一条审批流程并按调整后新签金额重建明细（2026-11-01）。
      * <p>
-     * 调用时机：CommissionReverseService.handleReversed 冲销 DRAFT 明细后调用。
-     * 此时新签事实已落库（supersede 同事务，outbox 事件提交后投递）。
-     * 仅 DRAFT 单自动重建；SUBMITTED/APPROVED 需先撤销后重新发起。
-     */
-    public void rebuildItemsIfNeeded(Long applicationId) {
-        CommissionApplication app = applicationMapper.selectById(applicationId);
-        if (app == null || app.getStatus() != ApplicationStatus.DRAFT) {
-            return;
-        }
-        long activeItems = itemMapper.selectCount(new LambdaQueryWrapper<CommissionItem>()
-            .eq(CommissionItem::getApplicationId, applicationId)
-            .ne(CommissionItem::getStatus, ItemStatus.REVERSED));
-        if (activeItems > 0) {
-            return;
-        }
-        try {
-            rebuildItems(app, app.getPeriod(), app.getContractNo());
-        } catch (ServiceException e) {
-            log.info("[结佣-自动重建] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
-        }
-    }
-
-    /**
-     * 新签调整冲销审批中的结佣单时回退到 DRAFT 并按调整后新签金额重建明细（2026-09-30）。
+     * 场景：结佣单处于 SUBMITTED（审批中），新签事实 supersede → FACT_REVERSED 把旧明细冲销。
+     * 规则：终止旧流程 → 冲销剩余未审批明细 → 按调整后新签事实整单重建 → 启动新流程；
+     * 单据状态全程保持 SUBMITTED（草稿态已取消，不再出现「已建未提交」的单据）。
      * <p>
-     * 场景：结佣单处于 SUBMITTED（审批中），新签事实 supersede → FACT_REVERSED
-     * 把旧 PENDING 明细冲销为 REVERSED。规则：终止当前审批流程 + 单状态回 DRAFT
-     * （保留申请单，用户调整后重新提交）+ 按调整后新签事实重建明细（金额=调整后值）。
+     * 兜底：重建/重提任一环节失败时直接作废该单并冲销全部未审批明细（释放业绩事实），
+     * 用户可重新发起；绝不把单据留在无人可处理的中间状态。
      * <p>
      * 时序保证：{@link ApprovalPort#cancel} 走 Warm-Flow 删除链路，同步发 ApprovalEvent(cancel)，
      * Spring {@code @EventListener} 在同事务线程内同步触发 {@link #handleWorkflowEvent}
-     * 的 cancel 分支置 CANCELLED + 冲销未审批明细（幂等）。cancel 返回后本方法覆盖回 DRAFT，
-     * 无异步时序冲突。幂等：非 SUBMITTED 单走原 {@link #rebuildItemsIfNeeded} 路径。
+     * 的 cancel 分支置 CANCELLED + 冲销未审批明细（幂等）。cancel 返回后本方法覆盖回 SUBMITTED
+     * 并启动新流程，无异步时序冲突。
      */
     @Transactional(rollbackFor = Exception.class)
-    public void revertSubmittedToDraftIfNeeded(Long applicationId) {
-        revertSubmittedToDraftIfNeeded(applicationId, null);
-    }
-
-    /**
-     * 同 {@link #revertSubmittedToDraftIfNeeded()}，并携带本次冲销原因（DRAFT 单整单重建时
-     * 写入被连带作废明细的 reversed_reason）。
-     */
-    @Transactional(rollbackFor = Exception.class)
-    public void revertSubmittedToDraftIfNeeded(Long applicationId, ReversedReason reason) {
+    public void revertAndResubmitIfNeeded(Long applicationId, ReversedReason reason) {
         CommissionApplication app = applicationMapper.selectById(applicationId);
         if (app == null) {
             return;
         }
         if (app.getStatus() != ApplicationStatus.SUBMITTED) {
-            // DRAFT 单：冲销事件可能只命中部分明细（增加角色人仅 supersede 被扣除行、
-            // 明细级金额调整只 supersede 一行），其余未命中明细仍是调整前旧快照。
-            // 先把同单其余未审批明细一并作废（rebuildItemsIfNeeded 仅在无 ACTIVE 明细时重建），
-            // 再按当前全部 ACTIVE 新签事实整单重建，保证 DRAFT 单金额与新签完全一致。
-            if (app.getStatus() == ApplicationStatus.DRAFT) {
-                itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
-                    .eq(CommissionItem::getApplicationId, applicationId)
-                    .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
-                    .set(CommissionItem::getStatus, ItemStatus.REVERSED)
-                    .set(reason != null, CommissionItem::getReversedReason, reason));
-            }
-            // 非 SUBMITTED 单：保持 handleReversed 既有行为（DRAFT 单重建、APPROVED/LOCKED 不动）
+            // APPROVED/LOCKED 明细金额不动（V4.2 §9.2-4），仅重算聚合
             recalcAggregates(applicationId, null);
-            rebuildItemsIfNeeded(applicationId);
             return;
         }
-        // SUBMITTED 单：先终止运行中的审批流程（触发 cancel 事件 → CANCELLED + 冲销 PENDING 明细，幂等）
-        if (StringUtils.isNotBlank(app.getProcessInstanceId())) {
-            approvalPort.cancel(BizType.COMMISSION, applicationId);
-        }
-        // cancel 事件已同步置 CANCELLED 并冲销明细；此处覆盖回 DRAFT 保留申请单供用户重新提交
-        app = applicationMapper.selectById(applicationId);
-        if (app == null) {
-            return;
-        }
-        app.setStatus(ApplicationStatus.DRAFT);
-        app.setProcessInstanceId(null);
-        app.setCurrentNode(null);
-        app.setApproverId(null);
-        app.setApproveTime(null);
-        applicationMapper.updateById(app);
-        log.info("[结佣-审批回退] 新签调整导致 SUBMITTED 单回退 DRAFT：applyNo={}, contractNo={}, period={}",
-            app.getApplyNo(), app.getContractNo(), app.getPeriod());
-        // 按调整后新签事实重建明细（金额=调整后值）；重建失败不阻断（保留 DRAFT 空单由人工处理）
-        boolean rebuilt = false;
         try {
-            rebuildItems(app, app.getPeriod(), app.getContractNo());
-            rebuilt = true;
-        } catch (ServiceException e) {
-            log.info("[结佣-审批回退] 合同 {} {} 月重建跳过：{}", app.getContractNo(), app.getPeriod(), e.getMessage());
-        }
-        recalcAggregates(applicationId, null);
-        // 明细重建成功 → 自动重新提交审批，避免单据停在草稿无人处理（2026-10-31）。
-        // 事件线程无登录上下文：systemInitiated=true 保证流程发起人变量可用；
-        // markAutoInitiated 沿用原值，人工单不会被误标 auto_initiated。
-        // 重提失败只告警并保留 DRAFT，不能回滚冲销主事务。
-        if (rebuilt) {
-            Long operatorId = app.getApplicantId() != null ? app.getApplicantId() : 1L;
-            try {
-                submit(app, operatorId, true, Boolean.TRUE.equals(app.getAutoInitiated()));
-                log.info("[结佣-审批回退] 明细重建后已自动重新提交审批：applyNo={}, contractNo={}",
-                    app.getApplyNo(), app.getContractNo());
-            } catch (Exception e) {
-                log.warn("[结佣-审批回退] 重建后自动重提失败，保留 DRAFT 待人工提交：applyNo={}, reason={}",
-                    app.getApplyNo(), e.getMessage());
+            // 1. 终止旧流程（cancel 回调把单置 CANCELLED 并冲销 PENDING 明细）。
+            //    旧流程可能已被上一轮失败操作删除：此时 cancel 会报错，忽略继续在新流程上重提
+            if (StringUtils.isNotBlank(app.getProcessInstanceId())) {
+                try {
+                    approvalPort.cancel(BizType.COMMISSION, applicationId);
+                } catch (Exception e) {
+                    log.warn("[结佣-审批换流] 终止旧流程失败，忽略继续换流：applyNo={}, reason={}",
+                        app.getApplyNo(), e.getMessage());
+                }
             }
+            CommissionApplication latest = applicationMapper.selectById(applicationId);
+            if (latest == null) {
+                return;
+            }
+            // 2. 保留原单并覆盖回 SUBMITTED，清空流程字段等待新流程
+            latest.setStatus(ApplicationStatus.SUBMITTED);
+            latest.setProcessInstanceId(null);
+            latest.setCurrentNode(null);
+            latest.setApproverId(null);
+            latest.setApproveTime(null);
+            int rows = applicationMapper.updateById(latest);
+            if (rows == 0) {
+                throw new ServiceException("申请单并发冲突，审批换流失败：applicationId=" + applicationId);
+            }
+            // 3. 冲销剩余未审批明细（cancel 回调可能只覆盖到部分），再按当前新签事实整单重建
+            itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+                .eq(CommissionItem::getApplicationId, applicationId)
+                .in(CommissionItem::getStatus, ItemStatus.DRAFT, ItemStatus.PENDING)
+                .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+                .set(reason != null, CommissionItem::getReversedReason, reason));
+            rebuildItems(latest, latest.getPeriod(), latest.getContractNo());
+            recalcAggregates(applicationId, null);
+            // 4. 重建/聚合各自 updateById 已推进 version，必须重新查库再启动新流程
+            latest = applicationMapper.selectById(applicationId);
+            if (latest == null) {
+                return;
+            }
+            Long operatorId = latest.getApplicantId() != null ? latest.getApplicantId() : 1L;
+            submit(latest, operatorId, true, Boolean.TRUE.equals(latest.getAutoInitiated()));
+            log.info("[结佣-审批换流] 新签调整后已在原单上重新发起审批：applyNo={}, contractNo={}, period={}",
+                latest.getApplyNo(), latest.getContractNo(), latest.getPeriod());
+        } catch (Exception e) {
+            log.warn("[结佣-审批换流] 重建/重提失败，作废该单释放业绩事实，等待重新发起：applyNo={}, reason={}",
+                app.getApplyNo(), e.getMessage());
+            voidAndRelease(app);
         }
+    }
+
+    /**
+     * 作废并释放业绩事实（新签调整换流失败时的兜底）。
+     * <p>流程实例可能已被 cancel，再次 cancel 失败直接忽略；明细全部冲销后单据置 CANCELLED，
+     * 新签事实释放，用户可重新发起结佣。</p>
+     */
+    private void voidAndRelease(CommissionApplication app) {
+        try {
+            if (StringUtils.isNotBlank(app.getProcessInstanceId())) {
+                approvalPort.cancel(BizType.COMMISSION, app.getId());
+            }
+        } catch (Exception e) {
+            log.warn("[结佣-兜底作废] 终止流程失败，忽略继续释放明细：applyNo={}, reason={}",
+                app.getApplyNo(), e.getMessage());
+        }
+        itemMapper.update(null, new LambdaUpdateWrapper<CommissionItem>()
+            .eq(CommissionItem::getApplicationId, app.getId())
+            .ne(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .set(CommissionItem::getStatus, ItemStatus.REVERSED)
+            .set(CommissionItem::getReversedReason, ReversedReason.APPLICATION_CANCELLED));
+        CommissionApplication latest = applicationMapper.selectById(app.getId());
+        if (latest == null) {
+            return;
+        }
+        latest.setStatus(ApplicationStatus.CANCELLED);
+        latest.setItemCount(0);
+        latest.setTotalAmount(BigDecimal.ZERO);
+        latest.setCurrentNode(null);
+        latest.setProcessInstanceId(null);
+        latest.setApproverId(null);
+        latest.setApproveTime(null);
+        applicationMapper.updateById(latest);
     }
 
     /**
@@ -1310,7 +1287,7 @@ public class CommissionApplicationService {
     // ==================== 提交 / 审批（workflow） ====================
 
     /**
-     * 提交审批（§3.1）：DRAFT / REJECTED → SUBMITTED，启动 commission_apply 流程。
+     * 提交审批（§3.1）：REJECTED → 重提；新建单（SUBMITTED 且无流程实例）→ 启动 commission_apply 流程。
      * <p>
      * 发起人路由：申请人节点办理后进入总监节点；若发起人=总监（或超管），
      * 系统自动办理总监节点（含 §3.5 差异对齐判定），无差异时继续自动过财务直至完成。
@@ -1356,47 +1333,33 @@ public class CommissionApplicationService {
         if (application == null) {
             throw new ServiceException("结佣申请单不存在");
         }
-        if (application.getStatus() != ApplicationStatus.DRAFT
-            && application.getStatus() != ApplicationStatus.REJECTED) {
-            throw new ServiceException("仅草稿/已驳回状态可提交（当前：" + application.getStatus().getDesc() + "）");
+        // 可提交的两类单：①新建单（已落 SUBMITTED 但尚未启动流程，草稿态已取消）；
+        // ②已驳回单（REJECTED，流程停在申请人节点，重提继续推进）
+        boolean newFlow = application.getStatus() == ApplicationStatus.SUBMITTED
+            && StringUtils.isBlank(application.getProcessInstanceId());
+        boolean resubmit = application.getStatus() == ApplicationStatus.REJECTED;
+        if (!newFlow && !resubmit) {
+            throw new ServiceException("仅新建单或已驳回单可提交（当前：" + application.getStatus().getDesc() + "）");
         }
-        // 在改状态之前先记住原状态——DRAFT vs REJECTED 决定后续走「新建流程」还是「重提」
+        // 在改状态之前先记住原状态——REJECTED 走「重提」，其余走「新建流程」
         ApplicationStatus originalStatus = application.getStatus();
 
         // ===== 第一阶段：流程侧操作（先于 application 改状态）=====
         // 顺序：先跑流程，再改 application.status。原因：
         //
         // 测试环境实锤（2026-10-25 18:10~18:18）：同一分钟同一段批量触发代码，
-        // 部分单变成 SUBMITTED，部分变成 DRAFT + 有 processInstanceId（flow_instance 已在
-        // waiting 状态但 application 被回滚）。根因推测是 Warm-Flow + LiteFlow +
-        // dynamic-datasource 某处事务边界被割裂——流程侧的 save 先提交了，但 application 的
-        // update 被回滚了。
+        // 部分单变成 SUBMITTED，部分变成「无流程的单据 + 有 processInstanceId」。根因推测是
+        // Warm-Flow + LiteFlow + dynamic-datasource 某处事务边界被割裂——流程侧的 save 先提交了，
+        // 但 application 的 update 被回滚了。
         //
-        // 重排顺序后，无论事务边界在哪个方向割裂，都不会留下 DRAFT + 流程已存在 的脏数据：
+        // 重排顺序后，无论事务边界在哪个方向割裂，都不会留下「单据未提交 + 流程已存在」的脏数据：
         //   1. startWorkflow 抛异常 → 直接 throw，application 还没改，不会脏
         //   2. startWorkflow 成功了但后续 application update 抛异常 → catch 里 cancel 已创建
         //      的流程实例，保证流程侧也被清理
         boolean workflowCreated = false;
         String workflowIdBefore = application.getProcessInstanceId();
         try {
-            if (originalStatus == ApplicationStatus.DRAFT) {
-                // DRAFT → 新建流程
-                // 脏数据兼容：DRAFT 状态但残留了旧 processInstanceId（Warm-Flow 引擎独立事务提交了
-                // 流程实例，但应用侧事务因后置异常回滚了状态 → 状态 DRAFT + 流程已存在 不一致），
-                // 先清理旧流程实例再走新建，避免走错「重提」分支
-                if (StringUtils.isNotBlank(workflowIdBefore)) {
-                    try {
-                        approvalPort.cancel(BizType.COMMISSION, application.getId());
-                    } catch (Exception e) {
-                        log.warn("[结佣-提交] 清理 DRAFT 单残留旧流程失败，忽略继续新建：applyNo={}, reason={}",
-                            application.getApplyNo(), e.getMessage());
-                    }
-                    application.setProcessInstanceId(null);
-                }
-                // 系统自动发起无登录上下文，显式指定办理人，避免流程发起人变量为空
-                startWorkflow(application, systemInitiated ? operatorId : null);
-                workflowCreated = true;
-            } else {
+            if (originalStatus == ApplicationStatus.REJECTED) {
                 // REJECTED → 重提：驳回后流程停在申请人节点，办理该节点任务继续推进
                 if (StringUtils.isBlank(application.getProcessInstanceId())) {
                     throw new ServiceException("驳回单缺少流程实例，无法重提，请联系管理员");
@@ -1406,6 +1369,10 @@ public class CommissionApplicationService {
                     throw new ServiceException("审批流程任务不存在，请联系管理员");
                 }
                 approvalPort.completeAsSys(BizType.COMMISSION, application.getId(), ApprovalAction.PASS, "重新提交");
+            } else {
+                // 新建单 → 启动流程（系统自动发起无登录上下文，显式指定办理人，避免发起人变量为空）
+                startWorkflow(application, systemInitiated ? operatorId : null);
+                workflowCreated = true;
             }
 
             // ===== 第二阶段：application 侧改状态 =====
@@ -1415,12 +1382,12 @@ public class CommissionApplicationService {
             }
             application.setStatus(ApplicationStatus.SUBMITTED);
             int updated = applicationMapper.updateById(application);
-            // @Version 乐观锁：并发场景下可能被 revertSubmittedToDraftIfNeeded 先 updateById 抢走版本号
+            // @Version 乐观锁：并发场景下可能被 revertAndResubmitIfNeeded 先 updateById 抢走版本号
             // 此时 WHERE id=? AND version=? 匹配不到 → 影响行数=0 → 必须显式抛出异常让事务回滚
             // （第一阶段 startWorkflow 已在同事务里 INSERT 的 flow_instance 也一起回滚），
-            // 否则会静默退出留下 DRAFT + 有 flow_instance 的脏数据
+            // 否则会静默退出留下「单据未提交 + 有 flow_instance」的脏数据
             if (updated == 0) {
-                // 乐观锁冲突是典型的「临时错误」：并发下 revertSubmittedToDraftIfNeeded 抢走了版本号。
+                // 乐观锁冲突是典型的「临时错误」：并发下 revertAndResubmitIfNeeded 抢走了版本号。
                 // 必须抛 RuntimeException（而非 ServiceException），让上层调用方：
                 //   · 批量发起 apply() catch ServiceException 时不会误伤 → 这张单被计入"失败"而非"跳过"
                 //   · Outbox Dispatcher 捕获后会走指数退避重试（30s→60s→120s... 最多 10 次）
@@ -1447,7 +1414,7 @@ public class CommissionApplicationService {
             refreshCurrentNode(application);
         } catch (Exception e) {
             // 如果第一阶段新建了流程，但 application 侧后续操作抛异常，
-            // 手动 cancel 已创建的流程实例，避免留下 DRAFT + 流程已存在 的脏数据
+            // 手动 cancel 已创建的流程实例，避免留下「单据未提交 + 流程已存在」的脏数据
             if (workflowCreated && StringUtils.isNotBlank(application.getProcessInstanceId())
                 && !application.getProcessInstanceId().equals(workflowIdBefore)) {
                 try {
@@ -1455,7 +1422,7 @@ public class CommissionApplicationService {
                     log.warn("[结佣-提交] application 侧操作抛异常，已清理已创建的流程：applyNo={}, reason={}",
                         application.getApplyNo(), e.getMessage());
                 } catch (Exception cancelEx) {
-                    log.error("[结佣-提交] 清理流程实例也失败！！可能残留 DRAFT + 流程脏数据：applyNo={}, cleanupReason={}, originalReason={}",
+                    log.error("[结佣-提交] 清理流程实例也失败！！可能残留「单据未提交 + 流程脏数据」：applyNo={}, cleanupReason={}, originalReason={}",
                         application.getApplyNo(), cancelEx.getMessage(), e.getMessage());
                 }
             }
@@ -1755,10 +1722,10 @@ public class CommissionApplicationService {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED/REJECTED/LOCKED 可作废；
+     * 作废申请单：SUBMITTED/REJECTED/LOCKED 可作废；
      * 超管可作废任意单据，其他用户仅可作废本人发起的单据（服务端兜底防越权）。
      * <p>
-     * - 未锁定单（DRAFT/SUBMITTED/REJECTED）：冲销未审批明细（DRAFT/PENDING），释放事实；
+     * - 未锁定单（SUBMITTED/REJECTED）：冲销未审批明细（DRAFT/PENDING），释放事实；
      * - 已锁定单（LOCKED）：冲销全部明细（含 APPROVED），释放事实，薪资域 findLocked 仅取 APPROVED，
      *   作废后该单不再计入工资；后续可重新发起，按发起日重新生成当月结佣记录。
      * 运行中的流程先终止（cancel 事件回调冲销明细）；REJECTED/LOCKED 单据的流程已结束，
@@ -1771,11 +1738,10 @@ public class CommissionApplicationService {
             && !Objects.equals(application.getApplicantId(), operatorId)) {
             throw new ServiceException("仅可作废本人发起的申请单");
         }
-        if (application.getStatus() != ApplicationStatus.DRAFT
-            && application.getStatus() != ApplicationStatus.SUBMITTED
+        if (application.getStatus() != ApplicationStatus.SUBMITTED
             && application.getStatus() != ApplicationStatus.REJECTED
             && application.getStatus() != ApplicationStatus.LOCKED) {
-            throw new ServiceException("仅草稿/审批中/已驳回/已锁定状态可作废（当前：" + application.getStatus().getDesc() + "）");
+            throw new ServiceException("仅审批中/已驳回/已锁定状态可作废（当前：" + application.getStatus().getDesc() + "）");
         }
         // 封账后不可作废（含已锁定单）：封账期间结佣数据已固化，作废会导致已发工资追溯，必须先解封
         checkPeriodOpen(application.getPeriod(), "作废结佣");
@@ -1783,7 +1749,7 @@ public class CommissionApplicationService {
             // 终止运行中的流程实例（触发 cancel 事件，监听器置 CANCELLED + 冲销明细，幂等）
             approvalPort.cancel(BizType.COMMISSION, applicationId);
         }
-        // 草稿无流程实例：本地直接置 CANCELLED 并冲销明细；
+        // 无流程实例的单（历史迁移来的新建单）：本地直接置 CANCELLED 并冲销明细；
         // 已锁定单：冲销全部明细（含 APPROVED），释放事实供重新发起
         reverseAllItems(applicationId);
         // 明细 UPDATE 会清空 MyBatis 一级缓存并推进数据版本，这里重新加载避免乐观锁更新丢失
@@ -3004,7 +2970,7 @@ public class CommissionApplicationService {
             // 退单冲减单（TD）是已终态的账务容器，不参与「活跃单」判定
             .and(w -> w.isNull(CommissionApplication::getApplyNo)
                 .or().notLikeRight(CommissionApplication::getApplyNo, "TD"))
-            .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+            .in(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED));
     }
 
@@ -3041,7 +3007,7 @@ public class CommissionApplicationService {
             // 退单冲减单（TD）不参与「同期唯一活跃单」判定，避免退单月无法正常发起结佣
             .and(w -> w.isNull(CommissionApplication::getApplyNo)
                 .or().notLikeRight(CommissionApplication::getApplyNo, "TD"))
-            .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+            .in(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED,
                 ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
             .orderByDesc(CommissionApplication::getCreateTime)
             .last("LIMIT 1"));
@@ -3064,7 +3030,7 @@ public class CommissionApplicationService {
     /**
      * 批量预查所有合同当月活跃+驳回申请单（P1 优化）。
      * <p>
-     * 分片 IN 查询取所有输入合同号对应的活跃（DRAFT/SUBMITTED/APPROVED/LOCKED）和驳回
+     * 分片 IN 查询取所有输入合同号对应的活跃（SUBMITTED/APPROVED/LOCKED）和驳回
      * （REJECTED）申请单，按输入字符串（合同号或订单号）分别建 Map，
      * doBatchApply 和 doApply 直接取值，避免逐合同查（N×3→N/500 次）。
      * <p>
@@ -3083,7 +3049,7 @@ public class CommissionApplicationService {
                 .eq(StringUtils.isNotBlank(period), CommissionApplication::getPeriod, period)
                 .and(w -> w.in(CommissionApplication::getContractNo, chunk)
                     .or().in(CommissionApplication::getOrderNo, chunk))
-                .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                .in(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED,
                     ApplicationStatus.APPROVED, ApplicationStatus.LOCKED, ApplicationStatus.REJECTED)));
         }
         // 跨分片合并后按 createTime DESC, id DESC 全局排序（下方 putIfAbsent 取最新依赖全局有序）

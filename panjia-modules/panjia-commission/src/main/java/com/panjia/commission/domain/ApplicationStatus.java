@@ -5,21 +5,23 @@ import com.fasterxml.jackson.annotation.JsonValue;
 /**
  * 结佣申请单状态。
  * <p>
- * 状态机（结佣域详细设计 §3.1）：
+ * 状态机（2026-11-01 起取消草稿态：建单即提交，单据不存在「已建但未提交」的中间态）：
  * <pre>
- * DRAFT ──提交──▶ SUBMITTED ──审批通过──▶ APPROVED ──锁定──▶ LOCKED
- *                     │                        │                │
- *                     └──驳回──▶ REJECTED      └──作废──▶ CANCELLED ◀──作废──┘
+ * SUBMITTED ──审批通过──▶ APPROVED ──锁定──▶ LOCKED
+ *     │                        │                │
+ *     └──驳回──▶ REJECTED      └──作废──▶ CANCELLED ◀──作废──┘
  * </pre>
  * 简化审批实现：审批回调在单事务内完成 SUBMITTED → LOCKED（内部先 APPROVED 落 approved_month）。
  * 已锁定（LOCKED）单可作废：冲销全部明细（含 APPROVED），释放事实供重新发起，作废后不计入工资。
+ * <p>
+ * 新签调整导致审批中的单据失效时，在原单上换一条新流程（状态始终 SUBMITTED），重建/重提失败则
+ * 该单直接作废释放业绩事实，由用户重新发起——不再回退到任何「草稿」状态。</p>
  * <p>
  * 存储约定：DB 字段 status VARCHAR(16) 存 code（与枚举名一致），
  * MyBatis-Plus 默认按枚举 name() 映射；Jackson 经 {@link JsonValue @JsonValue} 输出 code。
  */
 public enum ApplicationStatus {
 
-    DRAFT("草稿"),
     SUBMITTED("已提交"),
     APPROVED("已通过"),
     LOCKED("已锁定"),

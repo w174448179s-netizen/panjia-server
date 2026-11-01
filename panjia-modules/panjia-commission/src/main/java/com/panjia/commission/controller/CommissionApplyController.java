@@ -130,7 +130,7 @@ public class CommissionApplyController extends BaseController {
      * 列表行同时携带合同号与订单号：以订单号为准精确装载该订单事实，同合同多订单互不串单；
      * orderNo 为空（历史入口）时退合同号口径，由服务端多订单防串单校验兜底。
      * <p>
-     * 幂等：该订单当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
+     * 幂等：该订单当月已有 SUBMITTED/APPROVED/LOCKED 单时拒绝；
      * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
      * 已审批/锁定拒绝，不再支持变更。
      *
@@ -197,7 +197,7 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED/REJECTED/LOCKED 可作废。
+     * 作废申请单：SUBMITTED/REJECTED/LOCKED 可作废。
      * 未锁定单冲销未审批明细；已锁定单冲销全部明细（含 APPROVED），释放事实供重新发起，
      * 作废后不计入工资，重新发起按发起日生成当月结佣记录。
      *

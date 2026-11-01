@@ -95,7 +95,7 @@ public class CommissionContractVo implements Serializable {
     /** 门店 ID */
     private Long deptId;
 
-    /** 申请单状态（DRAFT/SUBMITTED/LOCKED/REJECTED/CANCELLED） */
+    /** 申请单状态（SUBMITTED/LOCKED/REJECTED/CANCELLED） */
     private String status;
 
     /** 实收审批状态（APPROVED/SUBMITTED/DRAFT/null） */

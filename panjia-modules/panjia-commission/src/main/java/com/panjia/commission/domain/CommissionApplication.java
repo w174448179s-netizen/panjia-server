@@ -69,7 +69,7 @@ public class CommissionApplication implements Serializable {
     /** 是否已发生实收对齐应收（§3.5 自动对齐后置 true） */
     private Boolean aligned;
 
-    /** 状态 DRAFT/SUBMITTED/APPROVED/LOCKED/REJECTED/CANCELLED */
+    /** 状态 SUBMITTED/APPROVED/LOCKED/REJECTED/CANCELLED（建单即审批中，无草稿态） */
     private ApplicationStatus status;
 
     /**
@@ -86,7 +86,12 @@ public class CommissionApplication implements Serializable {
     /** 审批通过月 = 工资归属月（YYYY-MM，V4.2 硬要求 1） */
     private String approvedMonth;
 
-    /** 审批流程实例 ID（预留 Warm-Flow） */
+    /**
+     * 审批流程实例 ID（预留 Warm-Flow）。
+     * <p>审批换流时必须真正写回 null：MyBatis-Plus 默认 NOT_NULL 策略会忽略 null，
+     * 残留已删除的流程实例 ID 会让单据找不到待办（2026-11-01 实测）。</p>
+     */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String processInstanceId;
 
     /** 发起人 ID */
