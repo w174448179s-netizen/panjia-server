@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.contracts.dto.ImUserMappingSyncResult;
 import com.panjia.contracts.dto.ImUserSyncDTO;
+import com.panjia.contracts.port.ImUserAuthPort;
 import com.panjia.contracts.port.ImUserMappingSyncPort;
 import com.panjia.people.domain.Employee;
 import com.panjia.people.domain.ImUserMapping;
@@ -41,7 +42,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class ImUserMappingService implements ImUserMappingSyncPort {
+public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPort {
 
     /** 匹配方式：工号匹配 */
     private static final String MATCH_CODE = "CODE";
@@ -149,6 +150,30 @@ public class ImUserMappingService implements ImUserMappingSyncPort {
         row.setMatchType(employee == null ? MATCH_NONE : MATCH_CODE);
         row.setLastSyncTime(now);
         row.setUpdateTime(now);
+    }
+
+    @Override
+    public Long findBoundUserId(String channel, String corpId, String externalUserId) {
+        if (StringUtils.isBlank(channel) || StringUtils.isBlank(externalUserId)) {
+            return null;
+        }
+        ImUserMapping mapping = mappingMapper.selectOne(new LambdaQueryWrapper<ImUserMapping>()
+            .eq(ImUserMapping::getChannel, channel)
+            .eq(ImUserMapping::getCorpId, corpId == null ? "" : corpId.trim())
+            .eq(ImUserMapping::getExternalUserId, externalUserId.trim())
+            .last("limit 1"));
+        if (mapping == null) {
+            return null;
+        }
+        if (mapping.getUserId() != null) {
+            return mapping.getUserId();
+        }
+        // 历史数据可能只回填了员工，未带登录账号，按员工取一次
+        if (mapping.getEmployeeId() != null) {
+            Employee employee = employeeMapper.selectById(mapping.getEmployeeId());
+            return employee == null ? null : employee.getUserId();
+        }
+        return null;
     }
 
     // ==================== 管理界面 ====================

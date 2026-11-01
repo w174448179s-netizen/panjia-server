@@ -1,0 +1,109 @@
+package org.dromara.web.controller;
+
+import cn.dev33.satoken.annotation.SaIgnore;
+import cn.dev33.satoken.stp.StpUtil;
+import cn.dev33.satoken.stp.parameter.SaLoginParameter;
+import cn.hutool.core.util.ObjectUtil;
+import com.panjia.contracts.port.DingTalkAuthPort;
+import com.panjia.contracts.port.ImUserAuthPort;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.constant.Constants;
+import org.dromara.common.core.constant.SystemConstants;
+import org.dromara.common.core.domain.R;
+import org.dromara.common.core.utils.ServletUtils;
+import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.satoken.utils.LoginHelper;
+import org.dromara.system.api.model.LoginUser;
+import org.dromara.system.domain.vo.SysClientVo;
+import org.dromara.system.domain.vo.SysUserVo;
+import org.dromara.system.mapper.SysUserMapper;
+import org.dromara.system.service.ISysClientService;
+import org.dromara.web.domain.DingTalkLoginBody;
+import org.dromara.web.domain.vo.LoginVo;
+import org.dromara.web.service.IAuthStrategy;
+import org.dromara.web.service.SysLoginService;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
+
+/**
+ * 钉钉 H5 微应用免登录。
+ * <p>
+ * 流程：钉钉打开应用 → 前端 dd.runtime.permission.requestAuthCode 拿 code
+ * → 本接口用 code 换钉钉 userid → 查 pj_people_im_mapping 绑定的系统登录账号
+ * → 生成 sa-token 登录态，前端拿到 access_token 后即可进入后台。
+ */
+@Slf4j
+@SaIgnore
+@RequiredArgsConstructor
+@RestController
+@RequestMapping("/auth/dingtalk")
+public class DingTalkSsoController {
+
+    /** IM 渠道标识 */
+    private static final String CHANNEL_DINGTALK = "DINGTALK";
+
+    private final DingTalkAuthPort dingTalkAuthPort;
+    private final ImUserAuthPort imUserAuthPort;
+    private final SysLoginService loginService;
+    private final ISysClientService clientService;
+    private final SysUserMapper userMapper;
+
+    /**
+     * 前端获取 H5 微应用免登所需的 CorpId。
+     */
+    @GetMapping("/config")
+    public R<Map<String, String>> config() {
+        return R.ok(Map.of("corp_id", dingTalkAuthPort.corpId()));
+    }
+
+    /**
+     * 免登：code 换 userid，userid 换系统登录用户，签发 token。
+     */
+    @PostMapping("/login")
+    public R<LoginVo> login(@RequestBody DingTalkLoginBody body) {
+        if (ObjectUtil.isNull(body) || StringUtils.isBlank(body.getCode())) {
+            return R.fail("缺少钉钉免登授权码");
+        }
+        if (StringUtils.isBlank(body.getClientId())) {
+            return R.fail("缺少客户端标识");
+        }
+        SysClientVo client = clientService.queryByClientId(body.getClientId());
+        if (ObjectUtil.isNull(client) || !SystemConstants.NORMAL.equals(client.getStatus())) {
+            return R.fail("客户端配置无效");
+        }
+
+        // 1. code → 钉钉 userid（失败会抛出带钉钉错误信息的异常）
+        String externalUserId = dingTalkAuthPort.resolveUserId(body.getCode());
+        // 2. userid → 系统登录用户（依赖「钉钉账号」映射）
+        Long userId = imUserAuthPort.findBoundUserId(CHANNEL_DINGTALK, dingTalkAuthPort.corpId(), externalUserId);
+        if (ObjectUtil.isNull(userId)) {
+            return R.fail("你的钉钉账号还未绑定系统账号，请联系管理员在「钉钉账号」中完成绑定");
+        }
+        SysUserVo user = userMapper.selectVoById(userId);
+        if (ObjectUtil.isNull(user)) {
+            return R.fail("绑定的系统账号不存在");
+        }
+        if (SystemConstants.DISABLE.equals(user.getStatus())) {
+            return R.fail("绑定的系统账号已停用");
+        }
+
+        // 3. 构建登录态并签发 token
+        LoginUser loginUser = loginService.buildLoginUser(user);
+        loginUser.setClientKey(client.getClientKey());
+        loginUser.setDeviceType(client.getDeviceType());
+        SaLoginParameter model = IAuthStrategy.buildLoginParameter(client);
+        LoginHelper.login(loginUser, model);
+
+        loginService.updateLastLoginInfo(userId, ServletUtils.getClientIP());
+        loginService.recordLoginInfo(user.getUserName(), Constants.LOGIN_SUCCESS, "钉钉免登成功");
+
+        LoginVo loginVo = new LoginVo();
+        loginVo.setAccessToken(StpUtil.getTokenValue());
+        loginVo.setExpireIn(StpUtil.getTokenTimeout());
+        loginVo.setClientId(client.getClientId());
+        log.info("[钉钉免登] userid={}, userId={}, userName={}", externalUserId, userId, user.getUserName());
+        return R.ok(loginVo);
+    }
+}
