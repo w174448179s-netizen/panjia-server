@@ -28,10 +28,11 @@ import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 
 /**
- * 钉钉 H5 微应用免登录。
+ * 钉钉免登录（移动端 H5 微应用 + PC 端 OAuth2）。
  * <p>
- * 流程：钉钉打开应用 → 前端 dd.runtime.permission.requestAuthCode 拿 code
- * → 本接口用 code 换钉钉 userid → 查 pj_people_im_mapping 绑定的系统登录账号
+ * 移动端：钉钉打开应用 → 前端 dd.runtime.permission.requestAuthCode 拿 code → /login <br>
+ * PC 端：前端跳转 login.dingtalk.com 授权 → 回调带 code → /oauth-login <br>
+ * 两条链路最终都用 code 换钉钉 userid → 查 pj_people_im_mapping 绑定的系统登录账号
  * → 生成 sa-token 登录态，前端拿到 access_token 后即可进入后台。
  */
 @Slf4j
@@ -51,31 +52,49 @@ public class DingTalkSsoController {
     private final SysUserMapper userMapper;
 
     /**
-     * 前端获取 H5 微应用免登所需的 CorpId。
+     * 前端获取免登所需配置：CorpId（移动端 JSAPI）+ AppKey（PC 端 OAuth2 授权链接）。
      */
     @GetMapping("/config")
     public R<Map<String, String>> config() {
-        return R.ok(Map.of("corp_id", dingTalkAuthPort.corpId()));
+        return R.ok(Map.of("corp_id", dingTalkAuthPort.corpId(), "app_key", dingTalkAuthPort.appKey()));
     }
 
     /**
-     * 免登：code 换 userid，userid 换系统登录用户，签发 token。
+     * 移动端 H5 微应用免登：JSAPI code 换 userid，userid 换系统登录用户，签发 token。
      */
     @PostMapping("/login")
     public R<LoginVo> login(@RequestBody DingTalkLoginBody body) {
         if (ObjectUtil.isNull(body) || StringUtils.isBlank(body.getCode())) {
             return R.fail("缺少钉钉免登授权码");
         }
-        if (StringUtils.isBlank(body.getClientId())) {
+        // 1. code → 钉钉 userid（失败会抛出带钉钉错误信息的异常）
+        return issueToken(dingTalkAuthPort.resolveUserId(body.getCode()), body.getClientId());
+    }
+
+    /**
+     * PC 端 OAuth2 免登：授权回调 code 换 userid，userid 换系统登录用户，签发 token。
+     */
+    @PostMapping("/oauth-login")
+    public R<LoginVo> oauthLogin(@RequestBody DingTalkLoginBody body) {
+        if (ObjectUtil.isNull(body) || StringUtils.isBlank(body.getCode())) {
+            return R.fail("缺少钉钉授权码");
+        }
+        // 1. code → unionId → 钉钉 userid（失败会抛出带钉钉错误信息的异常）
+        return issueToken(dingTalkAuthPort.resolveUserIdByOAuthCode(body.getCode()), body.getClientId());
+    }
+
+    /**
+     * userid → 系统登录用户 → 签发 token。
+     */
+    private R<LoginVo> issueToken(String externalUserId, String clientId) {
+        if (StringUtils.isBlank(clientId)) {
             return R.fail("缺少客户端标识");
         }
-        SysClientVo client = clientService.queryByClientId(body.getClientId());
+        SysClientVo client = clientService.queryByClientId(clientId);
         if (ObjectUtil.isNull(client) || !SystemConstants.NORMAL.equals(client.getStatus())) {
             return R.fail("客户端配置无效");
         }
 
-        // 1. code → 钉钉 userid（失败会抛出带钉钉错误信息的异常）
-        String externalUserId = dingTalkAuthPort.resolveUserId(body.getCode());
         // 2. userid → 系统登录用户（依赖「钉钉账号」映射）
         Long userId = imUserAuthPort.findBoundUserId(CHANNEL_DINGTALK, dingTalkAuthPort.corpId(), externalUserId);
         if (ObjectUtil.isNull(userId)) {
