@@ -11,6 +11,7 @@
 #   考勤  pj_people_attendance / pj_people_attendance_detail
 #         pj_people_attendance_approval / pj_people_attendance_rectify
 #   钉钉  pj_dingtalk_sync_log（人员/考勤/积分同步日志）
+#         pj_people_im_mapping（钉钉账号映射，仅 channel=DINGTALK）
 #   导入  仅业务批次（KE_SIGNED / KE_RECEIVED / HISTORY_PAYROLL / POINTS / ATTENDANCE）
 #         pj_import_raw_signed / pj_import_raw_received / pj_import_raw_payroll
 #         pj_import_raw_points / pj_import_raw_attendance
@@ -82,6 +83,8 @@ print_counts() {
     UNION ALL SELECT 'pj_people_attendance_approval', count(*) FROM pj_people_attendance_approval
     UNION ALL SELECT 'pj_people_attendance_rectify', count(*) FROM pj_people_attendance_rectify
     UNION ALL SELECT 'pj_dingtalk_sync_log', count(*) FROM pj_dingtalk_sync_log
+    UNION ALL SELECT 'pj_people_im_mapping(钉钉)', count(*) FROM pj_people_im_mapping
+      WHERE channel = 'DINGTALK'
     UNION ALL SELECT 'pj_import_batch(业务相关)', count(*) FROM pj_import_batch
       WHERE source_type IN ('KE_SIGNED','KE_RECEIVED','HISTORY_PAYROLL','POINTS','ATTENDANCE')
     UNION ALL SELECT 'pj_import_raw_signed', count(*) FROM pj_import_raw_signed
@@ -161,8 +164,9 @@ DELETE FROM pj_people_attendance;
 DELETE FROM pj_people_attendance_approval;
 DELETE FROM pj_people_attendance_rectify;
 
--- ---------------- 六、钉钉同步日志 ----------------
+-- ---------------- 六、钉钉同步日志与账号映射 ----------------
 DELETE FROM pj_dingtalk_sync_log;
+DELETE FROM pj_people_im_mapping WHERE channel = 'DINGTALK';
 
 -- ---------------- 七、导入（仅业务相关批次） ----------------
 DELETE FROM pj_import_raw_signed

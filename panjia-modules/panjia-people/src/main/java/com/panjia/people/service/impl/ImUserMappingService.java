@@ -78,7 +78,7 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
             }
         }
 
-        // 2. 批量取已存在的映射行，决定新增还是更新
+        // 2. 批量取已存在的映射行，决定新增还是更新（按渠道 + 钉钉 userid 唯一，corp_id 仅作属性回写）
         Set<String> externalIds = users.stream()
             .map(ImUserSyncDTO::getExternalUserId)
             .filter(StringUtils::isNotBlank)
@@ -86,7 +86,6 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
         List<ImUserMapping> existing = externalIds.isEmpty() ? List.of()
             : mappingMapper.selectList(new LambdaQueryWrapper<ImUserMapping>()
                 .eq(ImUserMapping::getChannel, channel)
-                .eq(ImUserMapping::getCorpId, corp)
                 .in(ImUserMapping::getExternalUserId, externalIds));
         Map<String, ImUserMapping> existingByExternalId = new LinkedHashMap<>();
         for (ImUserMapping mapping : existing) {
@@ -121,6 +120,7 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
                 created++;
             } else {
                 target = row;
+                target.setCorpId(corp);
                 fillRow(target, user, employee, now);
                 mappingMapper.updateById(target);
                 updated++;
