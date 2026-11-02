@@ -2130,11 +2130,16 @@ public class CommissionApplicationService {
             if (vo.getConvertedAmount() != null) {
                 summaryConvertedAmount = summaryConvertedAmount.add(vo.getConvertedAmount());
             }
-            if (vo.getExpectedAmount() != null) {
-                summaryExpectedAmount = summaryExpectedAmount.add(vo.getExpectedAmount());
-            }
-            if (vo.getExpectedConvertedAmount() != null) {
-                summaryExpectedConvertedAmount = summaryExpectedConvertedAmount.add(vo.getExpectedConvertedAmount());
+            // 新签合计只统计有效单据（审批中/已通过/已锁定）：驳回、作废为终态，明细已冲销、
+            // 单据不再产生结佣，其新签金额（合同/期间级汇总）若仍参与累加，会与同合同/同期间的
+            // 重新发起单据重复计入（2026-11-02 修复）
+            if (!isTerminalStatus(vo.getStatus())) {
+                if (vo.getExpectedAmount() != null) {
+                    summaryExpectedAmount = summaryExpectedAmount.add(vo.getExpectedAmount());
+                }
+                if (vo.getExpectedConvertedAmount() != null) {
+                    summaryExpectedConvertedAmount = summaryExpectedConvertedAmount.add(vo.getExpectedConvertedAmount());
+                }
             }
             if (vo.getReceivedAmount() != null) {
                 summaryReceivedAmount = summaryReceivedAmount.add(vo.getReceivedAmount());
@@ -2492,6 +2497,12 @@ public class CommissionApplicationService {
     /** 退单冲减结佣单判定：单号 TD 前缀（退单执行时生成，与正常结佣单区分）。 */
     private boolean isRefundApply(CommissionApplication app) {
         return app.getApplyNo() != null && app.getApplyNo().startsWith("TD");
+    }
+
+    /** 终态申请单判定：驳回、作废（明细已冲销、事实已释放，不再产生结佣业绩）。 */
+    private boolean isTerminalStatus(String status) {
+        return ApplicationStatus.REJECTED.getCode().equals(status)
+            || ApplicationStatus.CANCELLED.getCode().equals(status);
     }
 
     /**
