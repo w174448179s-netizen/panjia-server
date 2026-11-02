@@ -25,6 +25,21 @@ public class PerformanceContractSummaryDTO implements Serializable {
     /** 合同号（聚合键） */
     private String contractNo;
 
+    /**
+     * 统一业务键（订单号优先/合同号优先归一后的聚合键）。
+     * <p>仅按业务键跨期查询（如实收分期归属、发起页未结佣分组）返回；其余查询为 null。
+     */
+    private String bizKey;
+
+    /** 正向金额合计（发起页未结佣新签按方向拆分用；与 {@link #negativeAmount} 互不抵消） */
+    private BigDecimal positiveAmount;
+
+    /** 负向金额合计（发起页未结佣新签按方向拆分用；与 {@link #positiveAmount} 互不抵消） */
+    private BigDecimal negativeAmount;
+
+    /** 涉及员工键集合（逗号分隔，跨期去重口径由消费方合并；无则为 null） */
+    private String employeeKeys;
+
     /** 订单号（一手房展示用） */
     private String orderNo;
 
@@ -39,6 +54,24 @@ public class PerformanceContractSummaryDTO implements Serializable {
 
     /** 合同业绩金额合计（事实原样值求和） */
     private BigDecimal amount;
+
+    /**
+     * 实收「正向」合计（仅 PERF_REAL 合同汇总返回；跨全部实收期间合并，
+     * 与 {@link #receivedNegativeAmount} 互不抵消，供结佣列表正数行展示合并实收）。
+     */
+    private BigDecimal receivedPositiveAmount;
+
+    /**
+     * 实收「负向」合计（仅 PERF_REAL 合同汇总返回；退单/冲正分多笔跨期合并，
+     * 与 {@link #receivedPositiveAmount} 互不抵消，供结佣列表退单行展示合并实收）。
+     */
+    private BigDecimal receivedNegativeAmount;
+
+    /** 实收正向行的链原值合计（调整前；与 {@link #receivedPositiveAmount} 比较判定「原值 → 调整后值」） */
+    private BigDecimal receivedOriginalPositiveAmount;
+
+    /** 实收负向行的链原值合计（调整前；与 {@link #receivedNegativeAmount} 比较判定「原值 → 调整后值」） */
+    private BigDecimal receivedOriginalNegativeAmount;
 
     /**
      * 调整前金额合计（可空；仅实收审批通过行 listApprovedApplies 返回——审批单 received_amount 快照，

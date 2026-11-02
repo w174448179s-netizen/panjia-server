@@ -793,8 +793,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                pe.contract_no AS "contractNo",
                pe.period AS "period",
                SUM(pe.performance_amount) AS "expectedAmount",
+               SUM(pe.performance_amount) FILTER (WHERE pe.performance_amount &gt; 0) AS "positiveAmount",
+               SUM(pe.performance_amount) FILTER (WHERE pe.performance_amount &lt; 0) AS "negativeAmount",
                COUNT(*) AS "detailCount",
-               COUNT(DISTINCT pe.employee_id) AS "employeeCount"
+               COUNT(DISTINCT pe.employee_id) AS "employeeCount",
+               STRING_AGG(DISTINCT COALESCE(pe.employee_id::text, pe.employee_external_code), ',')
+                   AS "employeeKeys"
         FROM pj_perf_fact pe
         WHERE pe.fact_status = 'ACTIVE'
           AND pe.fact_type = 'PERF_EXPECT'

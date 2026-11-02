@@ -203,6 +203,7 @@ public interface ReceivedRealFactMapper {
                    rc.business_date,
                    rd.period AS period,
                    rd.performance_amount AS amount,
+                   rd.source_key AS source_key,
                    ra.status AS ra_status,
                    ra.id AS ra_id,
                    COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code) AS emp_key,
@@ -304,6 +305,31 @@ public interface ReceivedRealFactMapper {
             LEFT JOIN expect_period_sum ep2
                    ON ep1.amt IS NULL AND s.contract_no IS NOT NULL AND ep2.biz_key = s.contract_no
         )
+        , sk AS (
+            -- 结果集内「有效」ACTIVE 实收明细的 sourceKey 及其方向（同一 sourceKey 只有一条 ACTIVE 行）；
+            -- 有效 = 未绑定审批单或审批单已通过（SUBMITTED/DRAFT 未审批不计入实收金额与原值）
+            SELECT DISTINCT w.biz_key, w.source_key, (w.amount &lt; 0) AS is_neg
+            FROM s_with_expect w
+            WHERE w.source_key IS NOT NULL
+              AND (w.ra_id IS NULL OR w.ra_status = 'APPROVED')
+        )
+        , orig AS (
+            -- 链最早一条金额 = 调整前原值；实收加人新人行 MANUAL-RADJ 无前序，按 0 计
+            SELECT DISTINCT ON (sk.source_key) sk.biz_key, sk.is_neg,
+                   CASE WHEN sk.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                        ELSE x.performance_amount END AS amt
+            FROM sk
+            JOIN pj_received_detail x ON x.source_key = sk.source_key
+            ORDER BY sk.source_key, x.id ASC
+        )
+        , orig_sum AS (
+            -- 按业务键 + 方向聚合原值，正负互不抵消
+            SELECT biz_key,
+                   SUM(amt) FILTER (WHERE NOT is_neg) AS orig_pos,
+                   SUM(amt) FILTER (WHERE is_neg) AS orig_neg
+            FROM orig
+            GROUP BY biz_key
+        )
         SELECT MAX(w.contract_no) AS "contractNo",
                MAX(w.order_no) AS "orderNo",
                MAX(w.biz_type) AS "bizType",
@@ -324,8 +350,20 @@ public interface ReceivedRealFactMapper {
                    ELSE NULL
                END AS "receivedStatus",
                COUNT(DISTINCT w.emp_key) AS "employeeCount",
-               COUNT(*) AS "detailCount"
+               COUNT(*) AS "detailCount",
+               -- 实收正/负向跨期合并（正负互不抵消），供结佣列表正数行/退单行分别展示；
+               -- 仅统计有效明细（未绑定审批单或审批单已通过），未审批通过的不计入
+               COALESCE(SUM(w.amount) FILTER (
+                   WHERE w.amount &gt; 0 AND (w.ra_id IS NULL OR w.ra_status = 'APPROVED')), 0)
+                   AS "receivedPositiveAmount",
+               COALESCE(SUM(w.amount) FILTER (
+                   WHERE w.amount &lt; 0 AND (w.ra_id IS NULL OR w.ra_status = 'APPROVED')), 0)
+                   AS "receivedNegativeAmount",
+               -- 对应方向的链原值合计（同口径），供「原值 → 调整后值」判定
+               COALESCE(MAX(os.orig_pos), 0) AS "receivedOriginalPositiveAmount",
+               COALESCE(MAX(os.orig_neg), 0) AS "receivedOriginalNegativeAmount"
         FROM s_with_expect w
+        LEFT JOIN orig_sum os ON os.biz_key = w.biz_key
         GROUP BY w.biz_key
         ORDER BY MAX(w.business_date) DESC, w.biz_key
         </script>
@@ -334,6 +372,78 @@ public interface ReceivedRealFactMapper {
                                                                 @Param("deptId") Long deptId,
                                                                 @Param("employeeId") Long employeeId,
                                                                 @Param("keyword") String keyword);
+
+    /**
+     * 按业务键集合跨期间返回「每期」有效实收正/负向及链原值（结佣实收按到账月归属结佣单用）。
+     * <p>
+     * 口径与 {@link #selectContractSummaries} 完全一致：业务键归一（一手房/房产金融/家装荐客
+     * 订单号优先、其余合同号优先）；有效明细 = ACTIVE 且（未绑定审批单或审批单 APPROVED）；
+     * 正负向互不抵消；原值取同一 sourceKey 链最早一条（实收加人新人行 MANUAL-RADJ 按 0）。
+     * <p>与合同汇总的差别仅在于按 {@code rd.period} 分组，供消费方按实收月切片归属。
+     *
+     * @param bizKeys 业务键集合（订单号/合同号）
+     * @return 每行 bizKey + period + 四个方向金额；无实收的期不出现在结果中
+     */
+    @Select("""
+        <script>
+        WITH s AS (
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                        ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
+                   rd.period AS period,
+                   rd.performance_amount AS amount,
+                   rd.source_key AS source_key,
+                   ra.status AS ra_status,
+                   ra.id AS ra_id
+            FROM pj_received_detail rd
+            JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
+            WHERE rd.detail_status = 'ACTIVE'
+              AND (rc.order_no IN
+                  <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
+                   OR rc.contract_no IN
+                  <foreach collection="bizKeys2" item="k" open="(" separator="," close=")">#{k}</foreach>)
+        ),
+        sk AS (
+            SELECT DISTINCT biz_key, source_key, period, (amount &lt; 0) AS is_neg
+            FROM s
+            WHERE source_key IS NOT NULL
+              AND (ra_id IS NULL OR ra_status = 'APPROVED')
+        ),
+        orig AS (
+            SELECT DISTINCT ON (sk.biz_key, sk.source_key) sk.biz_key, sk.period, sk.is_neg,
+                   CASE WHEN sk.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                        ELSE x.performance_amount END AS amt
+            FROM sk
+            JOIN pj_received_detail x ON x.source_key = sk.source_key
+            ORDER BY sk.biz_key, sk.source_key, x.id ASC
+        ),
+        orig_sum AS (
+            SELECT biz_key, period,
+                   SUM(amt) FILTER (WHERE NOT is_neg) AS orig_pos,
+                   SUM(amt) FILTER (WHERE is_neg) AS orig_neg
+            FROM orig
+            GROUP BY biz_key, period
+        )
+        SELECT s.biz_key AS "bizKey",
+               s.period AS "period",
+               COALESCE(SUM(s.amount) FILTER (
+                   WHERE s.amount &gt; 0 AND (s.ra_id IS NULL OR s.ra_status = 'APPROVED')), 0)
+                   AS "receivedPositiveAmount",
+               COALESCE(SUM(s.amount) FILTER (
+                   WHERE s.amount &lt; 0 AND (s.ra_id IS NULL OR s.ra_status = 'APPROVED')), 0)
+                   AS "receivedNegativeAmount",
+               COALESCE(MAX(os.orig_pos), 0) AS "receivedOriginalPositiveAmount",
+               COALESCE(MAX(os.orig_neg), 0) AS "receivedOriginalNegativeAmount"
+        FROM s
+        LEFT JOIN orig_sum os ON os.biz_key = s.biz_key AND os.period = s.period
+        GROUP BY s.biz_key, s.period
+        ORDER BY s.biz_key, s.period
+        </script>
+        """)
+    List<PerformanceContractSummaryDTO> selectDirectionalPeriodSummaries(
+            @Param("bizKeys") Collection<String> bizKeys,
+            @Param("bizKeys2") Collection<String> bizKeys2);
 
     /**
      * 跨合同去重员工数：员工键口径与 {@link #selectContractSummaries} 一致
@@ -424,14 +534,15 @@ public interface ReceivedRealFactMapper {
           <!-- 退单负实收单（单号沿用 TD 退单号）不进结佣发起候选：
                负部分已由结佣冲减明细/负新签事实处理，避免与新签负事实重复冲减 -->
           AND ra.apply_no NOT LIKE 'TD%'
-          <!-- 同一订单（无订单号退合同号）仍有待审批实收单时整单不进发起候选（§3.2）：
-               实收未审批通过前本就不可结佣（人工发起也会被 §3.2 拦截），
-               审批通过后由实收单驱动自动生成结佣单；
-               否则发起页会残留一行「已结佣 7 月 + 待结 8 月退单」的合同，
-               与审批页同合同的结佣单看起来重复 -->
+          <!-- 同一订单（无订单号退合同号）同一期间仍有待审批实收单时该期间不进发起候选（§3.2）：
+               实收未审批通过前本就不可结佣（人工发起也会被 §3.2 拦截）。
+               2026-11-03 修正：由「整单排除」收窄为「同期间排除」——
+               8 月补收单待审不应挡住同一订单 6/7 月已审批实收的发起入口；
+               整单排除会导致作废结佣单后发起页无任何候选，无法重新发起。 -->
           AND NOT EXISTS (
               SELECT 1 FROM pj_perf_received_apply pa
               WHERE pa.status IN ('DRAFT', 'SUBMITTED')
+                AND pa.period = ra.period
                 AND CASE WHEN ra.order_no IS NOT NULL AND ra.order_no &lt;&gt; ''
                          THEN pa.order_no = ra.order_no
                          ELSE (pa.contract_no = ra.contract_no OR pa.order_no = ra.contract_no)

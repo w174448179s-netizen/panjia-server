@@ -125,6 +125,14 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return realMapper.selectDirectionalPeriodSummaries(bizKeys, bizKeys);
+    }
+
+    @Override
     public long countDistinctEmployeesByKeys(String period, Collection<String> bizKeys) {
         // period 可空：跨期汇总时统计全部期间去重员工数（mapper 内期间条件化）
         if (bizKeys == null || bizKeys.isEmpty()) {

@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -449,6 +450,15 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
                 : port.listContractSummaries(period, deptId, employeeId, keyword);
         }
         return factMapper.selectContractSummaries(period, factType, deptId, employeeId, keyword);
+    }
+
+    @Override
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType) {
+        if (!isReal(factType) || bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        ReceivedRealFactPort port = realPort();
+        return port == null ? Collections.emptyList() : port.listDirectionalPeriodSummaries(bizKeys);
     }
 
     @Override

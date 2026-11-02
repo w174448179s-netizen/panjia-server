@@ -121,16 +121,74 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                   OR (NOT rk.cur_nonzero AND chain.period &lt; rk.period))
             GROUP BY 1, 2, 3, 4, 5
         ),
+        app_info AS (
+            -- 本单实收归属窗口（2026-11-02 定稿，取消锁定冻结）：
+            -- 窗口键 = 归一业务键 + 单据方向（正/负单各自成链），与结佣列表/发起页归属算法一致；
+            -- 每笔实收按到账月归属「期间不晚于该月」的最晚一张同向单；
+            -- 本单窗口 = [本单期间, 下一张同向单期间)，首张同向单窗口下界不限（承接更早到账）
+            SELECT x.period, x.biz_key, x.is_neg,
+                   (SELECT COUNT(*)
+                      FROM pj_commission_application b
+                     WHERE b.period &lt; x.period
+                       AND b.status IN ('SUBMITTED','APPROVED','LOCKED')
+                       AND (COALESCE(b.total_amount, 0) &lt; 0) = x.is_neg
+                       AND (CASE WHEN x.order_first
+                                 THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
+                                 ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
+                           = x.biz_key) = 0 AS is_first,
+                   (SELECT MIN(b.period)
+                      FROM pj_commission_application b
+                     WHERE b.period &gt; x.period
+                       AND b.status IN ('SUBMITTED','APPROVED','LOCKED')
+                       AND (COALESCE(b.total_amount, 0) &lt; 0) = x.is_neg
+                       AND (CASE WHEN x.order_first
+                                 THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
+                                 ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
+                           = x.biz_key) AS next_period
+            FROM (
+                SELECT a.period,
+                       t.biz_type IN ('一手房','房产金融','家装荐客') AS order_first,
+                       CASE WHEN t.biz_type IN ('一手房','房产金融','家装荐客')
+                            THEN COALESCE(NULLIF(a.order_no,''), NULLIF(a.contract_no,''))
+                            ELSE COALESCE(NULLIF(a.contract_no,''), NULLIF(a.order_no,'')) END AS biz_key,
+                       (COALESCE(a.total_amount, 0) &lt; 0) AS is_neg
+                FROM pj_commission_application a
+                LEFT JOIN (
+                    SELECT MAX(ci.biz_type) AS biz_type
+                    FROM pj_commission_item ci
+                    WHERE ci.application_id = #{applicationId}
+                ) t ON TRUE
+                WHERE a.id = #{applicationId}
+            ) x
+        ),
         active_received AS (
-            -- 当前 ACTIVE 实收明细按合同+员工+角色+期间聚合；
-            -- recv_amt=当期合计，recv_neg_amt=当期负部（退单红冲行展示用，当期无负数时为 NULL）
-            SELECT rc.contract_no, rc.order_no,
-                   rd.employee_external_code AS emp_code, rd.role_type, rd.period,
-                   SUM(rd.performance_amount) AS recv_amt,
+            -- 当前「有效」ACTIVE 实收明细按业务键+员工+角色+期间聚合；
+            -- 有效 = 未绑定审批单或审批单已通过（SUBMITTED/DRAFT 未审批不计入）；
+            -- 按本单到账归属窗口切片，锁定后新增实收继续计入；
+            -- recv_pos_amt=当期正向合计，recv_neg_amt=当期负部（冲正/退单行展示用，当期无负数时为 NULL）；
+            -- 正负分开累计，避免冲正被并入正向行
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                        ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
+                   COALESCE(rd.employee_id, e.employee_id) AS employee_id,
+                   COALESCE(rd.employee_external_code, e.employee_code) AS emp_code,
+                   rd.role_type, rd.period,
+                   SUM(rd.performance_amount) FILTER (WHERE rd.performance_amount &gt; 0) AS recv_pos_amt,
                    SUM(rd.performance_amount) FILTER (WHERE rd.performance_amount &lt; 0) AS recv_neg_amt
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e
+                   ON (e.employee_id = rd.employee_id
+                       OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
+            CROSS JOIN app_info app
+            LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
             WHERE rd.detail_status = 'ACTIVE'
+              AND (CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                        ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END) = app.biz_key
+              AND (rd.received_apply_id IS NULL OR ra.status = 'APPROVED')
+              AND (app.is_first OR rd.period &gt;= app.period)
+              AND (app.next_period IS NULL OR rd.period &lt; app.next_period)
             GROUP BY 1, 2, 3, 4, 5
         ),
         reversed_rd_chain AS (
@@ -141,20 +199,38 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             ORDER BY source_key, id ASC
         ),
         original_received AS (
-            -- 与 active_received 同配对的 ACTIVE rd 行，逐行取链原值求和（同按期间分组）；
-            -- orig_neg_amt=当期负部行链原值（实收加人新人行 MANUAL-RADJ 无前序，按 0 计）
-            SELECT rc.contract_no, rc.order_no,
-                   rd.employee_external_code AS emp_code, rd.role_type, rd.period,
-                   SUM(CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
-                            ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END) AS orig_recv_amt,
+            -- 与 active_received 同配对/同有效口径/同到账窗口的 ACTIVE rd 行，逐行取链原值求和；
+            -- orig_pos_amt=当期正向行链原值，orig_neg_amt=当期负部行链原值
+            -- （实收加人新人行 MANUAL-RADJ 无前序，按 0 计）
+            SELECT CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                        ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END AS biz_key,
+                   COALESCE(rd.employee_id, e.employee_id) AS employee_id,
+                   COALESCE(rd.employee_external_code, e.employee_code) AS emp_code,
+                   rd.role_type, rd.period,
+                   SUM(CASE WHEN rd.performance_amount &gt; 0 THEN
+                            CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
+                                 ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END
+                       END) AS orig_pos_amt,
                    SUM(CASE WHEN rd.performance_amount &lt; 0 THEN
                             CASE WHEN rd.source_key LIKE '%|MANUAL-RADJ-%' THEN 0
                                  ELSE COALESCE(rrc.performance_amount, rd.performance_amount) END
                        END) AS orig_neg_amt
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e
+                   ON (e.employee_id = rd.employee_id
+                       OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
+            CROSS JOIN app_info app
+            LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
             LEFT JOIN reversed_rd_chain rrc ON rrc.source_key = rd.source_key
             WHERE rd.detail_status = 'ACTIVE'
+              AND (CASE WHEN rc.biz_type IN ('一手房','房产金融','家装荐客')
+                        THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                        ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END) = app.biz_key
+              AND (rd.received_apply_id IS NULL OR ra.status = 'APPROVED')
+              AND (app.is_first OR rd.period &gt;= app.period)
+              AND (app.next_period IS NULL OR rd.period &lt; app.next_period)
             GROUP BY 1, 2, 3, 4, 5
         )
         SELECT ci.id AS "itemId",
@@ -209,13 +285,13 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                ci.amount AS "amount",
                ci.fee_item AS "feeItem",
                ci.status AS "status",
-               -- 实收金额行级口径（与实收明细详情一致）：正数行=累计到本行期间，
-               -- 负数行（退单冲减）=当期负部，无负部时回退累计；避免跨期净额把退单行冲成 0
-               CASE WHEN ci.amount &lt; 0 THEN COALESCE(arc.recv_neg, arc.recv_cum, 0)
-                    ELSE COALESCE(arc.recv_cum, 0) END AS "receivedAmount",
+               -- 实收金额行级口径（与实收明细详情一致）：正数行=全部实收期间正向实收合并（不含冲正），
+               -- 负数行（退单/冲正分多笔）=全部实收期间负向实收合并，两向互不抵消
+               CASE WHEN ci.amount &lt; 0 THEN COALESCE(arc.recv_neg_all, 0)
+                    ELSE COALESCE(arc.recv_pos_all, 0) END AS "receivedAmount",
                -- 配对实收行的链原值合计（同口径）：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
-               CASE WHEN ci.amount &lt; 0 THEN COALESCE(orc.orig_neg, orc.orig_cum, 0)
-                    ELSE COALESCE(orc.orig_cum, 0) END AS "originalReceivedAmount"
+               CASE WHEN ci.amount &lt; 0 THEN COALESCE(orc.orig_neg_all, 0)
+                    ELSE COALESCE(orc.orig_pos_all, 0) END AS "originalReceivedAmount"
         FROM pj_commission_item ci
         -- 绑定事实仅用于新签调整链：同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
@@ -223,24 +299,30 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND ae.source_key = ci.source_key
         LEFT JOIN reversed_expect re ON ci.fact_type = 'PERF_EXPECT'
               AND re.source_key = ci.source_key
-        -- 实收累计（≤本行期间）与当期负部（=本行期间）：LATERAL 逐行聚合，替代原跨期合计直连
+        -- 实收按方向跨期合并：正数行只合并正向实收（分多份实收相加），
+        -- 负数行（退单/冲正分多笔）只合并负向实收；两向互不抵消；
+        -- 业务键按同一归一规则精确匹配，避免同合同多订单串单；员工优先 employee_id，工号兜底
         LEFT JOIN LATERAL (
-            SELECT SUM(a.recv_amt) AS recv_cum,
-                   SUM(a.recv_neg_amt) FILTER (WHERE a.period = ci.period) AS recv_neg
+            SELECT SUM(a.recv_pos_amt) AS recv_pos_all,
+                   SUM(a.recv_neg_amt) AS recv_neg_all
             FROM active_received a
-            WHERE (a.order_no = ci.order_no OR a.contract_no = ci.contract_no)
-              AND a.emp_code IS NOT DISTINCT FROM ci.employee_code
+            WHERE a.biz_key = CASE WHEN ci.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(NULLIF(ci.order_no,''), NULLIF(ci.contract_no,''))
+                                   ELSE COALESCE(NULLIF(ci.contract_no,''), NULLIF(ci.order_no,'')) END
+              AND (a.employee_id = ci.employee_id
+                   OR (a.emp_code IS NOT NULL AND a.emp_code = ci.employee_code))
               AND a.role_type IS NOT DISTINCT FROM ci.role_type
-              AND a.period &lt;= ci.period
         ) arc ON TRUE
         LEFT JOIN LATERAL (
-            SELECT SUM(o.orig_recv_amt) AS orig_cum,
-                   SUM(o.orig_neg_amt) FILTER (WHERE o.period = ci.period) AS orig_neg
+            SELECT SUM(o.orig_pos_amt) AS orig_pos_all,
+                   SUM(o.orig_neg_amt) AS orig_neg_all
             FROM original_received o
-            WHERE (o.order_no = ci.order_no OR o.contract_no = ci.contract_no)
-              AND o.emp_code IS NOT DISTINCT FROM ci.employee_code
+            WHERE o.biz_key = CASE WHEN ci.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(NULLIF(ci.order_no,''), NULLIF(ci.contract_no,''))
+                                   ELSE COALESCE(NULLIF(ci.contract_no,''), NULLIF(ci.order_no,'')) END
+              AND (o.employee_id = ci.employee_id
+                   OR (o.emp_code IS NOT NULL AND o.emp_code = ci.employee_code))
               AND o.role_type IS NOT DISTINCT FROM ci.role_type
-              AND o.period &lt;= ci.period
         ) orc ON TRUE
         LEFT JOIN rd_active_expect rae
                ON ci.fact_type = 'PERF_REAL'

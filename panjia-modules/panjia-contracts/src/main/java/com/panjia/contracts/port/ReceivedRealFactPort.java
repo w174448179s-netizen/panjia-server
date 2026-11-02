@@ -58,6 +58,16 @@ public interface ReceivedRealFactPort {
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId, String keyword);
 
     /**
+     * 按业务键集合跨期间返回「每期」有效实收正/负向及链原值（结佣实收按到账月归属结佣单用）。
+     * <p>业务键归一与 {@link #listContractSummaries} 一致；有效明细 = ACTIVE 且
+     * （未绑定审批单或审批单 APPROVED）；正负向互不抵消；原值为 sourceKey 链最早一条。
+     *
+     * @param bizKeys 业务键集合（订单号/合同号）
+     * @return 每行 bizKey + period + 四个方向金额；无实收的期不返回
+     */
+    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys);
+
+    /**
      * 按期间 + 业务键集合（合同号/订单号）统计去重员工数（结佣明细列表跨合同合计用）。
      * 员工键口径与 {@link #listContractSummaries} 的 employeeCount 一致：
      * COALESCE(rd.employee_id, 工号兜底员工 e.employee_id, rd.employee_external_code)；
