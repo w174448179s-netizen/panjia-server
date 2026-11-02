@@ -157,12 +157,25 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
         if (StringUtils.isBlank(channel) || StringUtils.isBlank(externalUserId)) {
             return null;
         }
+        String cid = corpId == null ? "" : corpId.trim();
         ImUserMapping mapping = mappingMapper.selectOne(new LambdaQueryWrapper<ImUserMapping>()
             .eq(ImUserMapping::getChannel, channel)
-            .eq(ImUserMapping::getCorpId, corpId == null ? "" : corpId.trim())
+            .eq(ImUserMapping::getCorpId, cid)
             .eq(ImUserMapping::getExternalUserId, externalUserId.trim())
             .last("limit 1"));
+        if (mapping == null && !cid.isEmpty()) {
+            // 兼容历史数据：早期同步时 corp_id 未配置，库里存的是空串，按渠道+userid 再兜底一次
+            mapping = mappingMapper.selectOne(new LambdaQueryWrapper<ImUserMapping>()
+                .eq(ImUserMapping::getChannel, channel)
+                .eq(ImUserMapping::getExternalUserId, externalUserId.trim())
+                .orderByDesc(ImUserMapping::getLastSyncTime)
+                .last("limit 1"));
+            if (mapping != null) {
+                log.warn("[IM映射] userid={} 未命中 corpId={}，已按渠道兜底命中 corpId={}", externalUserId, cid, mapping.getCorpId());
+            }
+        }
         if (mapping == null) {
+            log.warn("[IM映射] 未找到映射 channel={}, corpId={}, userid={}", channel, cid, externalUserId);
             return null;
         }
         if (mapping.getUserId() != null) {
@@ -171,8 +184,14 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
         // 历史数据可能只回填了员工，未带登录账号，按员工取一次
         if (mapping.getEmployeeId() != null) {
             Employee employee = employeeMapper.selectById(mapping.getEmployeeId());
-            return employee == null ? null : employee.getUserId();
+            Long userId = employee == null ? null : employee.getUserId();
+            if (userId == null) {
+                log.warn("[IM映射] userid={} 已绑员工 employeeId={}，但该员工未关联系统登录账号",
+                    externalUserId, mapping.getEmployeeId());
+            }
+            return userId;
         }
+        log.warn("[IM映射] userid={} 存在映射但未绑定员工", externalUserId);
         return null;
     }
 
@@ -219,6 +238,9 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
         Employee employee = employeeMapper.selectById(employeeId);
         if (employee == null) {
             throw new ServiceException("员工不存在");
+        }
+        if (employee.getUserId() == null) {
+            throw new ServiceException("员工「" + employee.getEmployeeName() + "」未关联系统登录账号，请先在员工管理中关联账号后再绑定");
         }
         // 同一渠道下员工只允许绑定一个账号，避免一个人挂两个钉钉号
         ImUserMapping conflict = mappingMapper.selectOne(new LambdaQueryWrapper<ImUserMapping>()

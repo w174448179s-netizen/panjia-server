@@ -98,7 +98,7 @@ public class DingTalkSsoController {
         // 2. userid → 系统登录用户（依赖「钉钉账号」映射）
         Long userId = imUserAuthPort.findBoundUserId(CHANNEL_DINGTALK, dingTalkAuthPort.corpId(), externalUserId);
         if (ObjectUtil.isNull(userId)) {
-            return R.fail("你的钉钉账号还未绑定系统账号，请联系管理员在「钉钉账号」中完成绑定");
+            return R.fail("你的钉钉账号还未绑定系统账号（或绑定的员工未关联登录账号），请联系管理员在「钉钉账号」中检查绑定");
         }
         SysUserVo user = userMapper.selectVoById(userId);
         if (ObjectUtil.isNull(user)) {
