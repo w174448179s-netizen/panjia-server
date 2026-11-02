@@ -20,6 +20,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -121,11 +122,14 @@ public class RuleService {
     // ==================== 快照冻结 ====================
 
     /**
-     * 取当前生效规则并合并冻结为 JSON（批次算薪时调用，与批次同事务）。
+     * 取结算月生效规则并合并冻结为 JSON（批次算薪时调用，与批次同事务）。
+     * <p>
+     * 生效参考日取<b>结算月首日</b>而非算薪操作当天：补算历史月份（如 11 月补算 8 月）时，
+     * 若用当天会误取当前最新规则版本，导致历史批次提点/底薪口径错误。
      */
     public RuleSnapshot freezeSnapshot(Long batchId, String period) {
-        LocalDate today = LocalDate.now();
-        ObjectNode root = buildSnapshotRoot(today);
+        LocalDate refDate = YearMonth.parse(period).atDay(1);
+        ObjectNode root = buildSnapshotRoot(refDate);
 
         RuleSnapshot snapshot = new RuleSnapshot();
         snapshot.setBatchId(batchId);
