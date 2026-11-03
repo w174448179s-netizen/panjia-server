@@ -1843,17 +1843,75 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (apply == null || apply.getStatus() != ReceivedApplyStatus.SUBMITTED) {
             return null;
         }
-        Set<Long> expectEmps = expectEmpIdsByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
+        // 一次性取新签事实：人数与金额比较共用，避免重复查询
+        List<PerformanceFact> expectFacts = expectFactsByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
+        Set<Long> expectEmps = currentMonthPriorityEmpIds(expectFacts, apply.getPeriod());
         if (!expectEmps.isEmpty() && !expectEmps.equals(realEmps)) {
             return String.format("新签与实收人数不一致（新签 %d 人/实收 %d 人），需人工核对人员",
                 expectEmps.size(), realEmps.size());
         }
-        BigDecimal realSum = nvlAmount(apply.getReceivedAmount());
-        BigDecimal expectSum = apply.getExpectedAmount() == null ? BigDecimal.ZERO : apply.getExpectedAmount();
-        if (expectSum.signum() > 0 && realSum.compareTo(expectSum) < 0) {
-            return "实收金额小于新签金额，需人工核对";
+        // 金额比较改「同方向累计」口径（2026-11-03，7.7）：分月到账/退单后补收时，单笔实收必然小于
+        // 累计新签；用本笔金额比累计新签会误判（8 月 165 比 841.50）。改为截至本单期间、
+        // 同方向的累计已审批实收（含本单待审金额）vs 累计新签，两者都不足才提示
+        int sign = nvlAmount(apply.getReceivedAmount()).signum();
+        if (sign == 0) {
+            return null;
+        }
+        BigDecimal realSum = cumulativeReceivedOf(apply, sign);
+        BigDecimal expectSum = cumulativeExpectOf(expectFacts, apply.getPeriod(), sign);
+        if (expectSum.signum() != 0 && realSum.abs().compareTo(expectSum.abs()) < 0) {
+            return sign > 0 ? "实收累计小于新签，需人工核对" : "退款累计小于退单新签，需人工核对";
         }
         return null;
+    }
+
+    /**
+     * 该业务键截至本单期间、同方向的累计实收（已审批/未绑单明细 + 本单待审金额）。
+     */
+    private BigDecimal cumulativeReceivedOf(ReceivedApply apply, int sign) {
+        List<String> keys = new ArrayList<>(2);
+        if (StringUtils.isNotBlank(apply.getOrderNo())) {
+            keys.add(apply.getOrderNo());
+        }
+        if (StringUtils.isNotBlank(apply.getContractNo())) {
+            keys.add(apply.getContractNo());
+        }
+        BigDecimal sum = BigDecimal.ZERO;
+        if (!keys.isEmpty() && StringUtils.isNotBlank(apply.getPeriod())) {
+            for (com.panjia.contracts.dto.PerformanceContractSummaryDTO s
+                : realFactMapper.selectDirectionalPeriodSummaries(keys, keys)) {
+                String p = StringUtils.trimToNull(s.getPeriod());
+                if (p == null || p.compareTo(apply.getPeriod()) > 0) {
+                    continue;
+                }
+                BigDecimal amt = sign > 0 ? s.getReceivedPositiveAmount() : s.getReceivedNegativeAmount();
+                if (amt != null) {
+                    sum = sum.add(amt);
+                }
+            }
+        }
+        return sum.add(nvlAmount(apply.getReceivedAmount()));
+    }
+
+    /**
+     * 该业务键截至本单期间、同方向的累计新签（负向只累加负向事实，正负不抵消）。
+     */
+    private BigDecimal cumulativeExpectOf(List<PerformanceFact> facts, String period, int sign) {
+        BigDecimal sum = BigDecimal.ZERO;
+        if (period == null) {
+            return sum;
+        }
+        for (PerformanceFact f : facts) {
+            String p = StringUtils.trimToNull(f.getPeriod());
+            BigDecimal amt = nvlAmount(f.getPerformanceAmount());
+            if (p == null || p.compareTo(period) > 0 || amt.signum() == 0) {
+                continue;
+            }
+            if ((sign > 0 && amt.signum() > 0) || (sign < 0 && amt.signum() < 0)) {
+                sum = sum.add(amt);
+            }
+        }
+        return sum;
     }
 
     /**
@@ -3038,7 +3096,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 业务类型已落库（{@code biz_type}，见 V140009），本方法只在旧数据 bizType 为空时
      * 按 (period, contractNo, orderNo) 从 ACTIVE 事实回退补齐；涉及人数与应收合计仍需实时聚合，
      * 口径与详情弹窗「每人实收明细」一致；按期间分组批量查询，避免 N+1。
-     * 应收合计含已生效调整（新签业绩显示调整后金额），与快照不一致时置「已调整」标记。
+     * 应收合计含已生效调整（新签业绩显示调整后金额），仅按新签事实链存在性置「已调整」标记；
+     * 2026-11-03 起不再用「快照 vs 实时金额不等」判定（快照含负向净额、实时按正向累计，口径不同会误报）。
      * 同合同号挂多订单时按合同号+订单号双键聚合；合同号缺失（一手房/家装荐客等）
      * 直接按订单号聚合（订单号为唯一业务锚点）。
      * 期间/合同号/订单号全缺失的行保持 null，前端显示占位符。
@@ -3204,6 +3263,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             pendingByPeriod.put(period, pendMap);
         }
 
+        // 补收识别（2026-11-03，7.7）：批量取本页业务键的 ACTIVE 新签事实（跨期），
+        // 到账月无正向新签、且此前已退单（负向新签）的正向到账月份标记为「补收」
+        Map<Long, Boolean> supplementById = supplementFlags(records);
+
         for (ReceivedApply apply : records) {
             String effContract = StringUtils.isBlank(apply.getContractNo()) ? "" : apply.getContractNo();
             String effOrder = StringUtils.isBlank(apply.getOrderNo()) ? "" : apply.getOrderNo();
@@ -3222,14 +3285,14 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 // 「已调整」以新签事实链存在性为准（含 AMOUNT 类总额不变的重分配），
                 // 兼容快照与实时不一致的旧口径，避免总额不变时漏标
                 if (m.getExpectedAmount() != null) {
-                    // 快照即「调整前」值，先留存再覆盖为实时值（口径同 getDetail），供前端展示「原值 → 调整后值」
-                    apply.setOriginalExpectedAmount(apply.getExpectedAmount());
+                    // 「已调整」只认新签事实链存在性：快照（含负向净额）与实时值（按正向累计）口径不同，
+                    // 金额不等不代表发生调整，用它兜底会误报「假调整」（2026-11-03，7.7）
                     boolean expectedAdjusted = matchChainAdjusted(
-                            expectedAdjustedByPeriod.get(apply.getPeriod()),
-                            apply.getContractNo(), apply.getOrderNo())
-                        || (apply.getExpectedAmount() != null
-                            && apply.getExpectedAmount().compareTo(m.getExpectedAmount()) != 0);
+                        expectedAdjustedByPeriod.get(apply.getPeriod()),
+                        apply.getContractNo(), apply.getOrderNo());
                     apply.setExpectedAdjusted(expectedAdjusted);
+                    // 仅确实调整过才留存快照为「调整前」值，供前端展示「原值 → 调整后值」
+                    apply.setOriginalExpectedAmount(expectedAdjusted ? apply.getExpectedAmount() : null);
                     apply.setExpectedAmount(m.getExpectedAmount());
                 }
                 // 实收业绩展示实时值（pj_received_detail ACTIVE 合计，含已生效实收调整）；
@@ -3270,7 +3333,97 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     }
                 }
             }
+            // 补收月：该月无正向新签，新签业绩展示 0 且不参与「已调整」比较，仅标注补收
+            boolean supplement = Boolean.TRUE.equals(supplementById.get(apply.getId()));
+            apply.setSupplement(supplement);
+            if (supplement) {
+                apply.setExpectedAmount(BigDecimal.ZERO);
+                apply.setExpectedConvertedAmount(BigDecimal.ZERO);
+                apply.setExpectedAdjusted(false);
+                apply.setOriginalExpectedAmount(null);
+                apply.setOriginalExpectedConvertedAmount(null);
+            }
         }
+    }
+
+    /**
+     * 批量识别「补收」行（2026-11-03，7.7）：到账月无正向新签事实、且该业务键在 ≤ 到账月
+     * 已发生退单（负向新签）时，该月正向到账属于退多后退回来的补收。
+     * <p>只标记正向实收行；负向退单行与普通分期到账行不标记。
+     *
+     * @param records 本页审批单
+     * @return 审批单 ID → 是否补收
+     */
+    private Map<Long, Boolean> supplementFlags(List<ReceivedApply> records) {
+        Map<Long, Boolean> result = new HashMap<>();
+        Set<String> contractKeys = new LinkedHashSet<>();
+        Set<String> orderKeys = new LinkedHashSet<>();
+        for (ReceivedApply a : records) {
+            if (StringUtils.isNotBlank(a.getContractNo())) {
+                contractKeys.add(a.getContractNo());
+            }
+            if (StringUtils.isNotBlank(a.getOrderNo())) {
+                orderKeys.add(a.getOrderNo());
+            }
+        }
+        if (contractKeys.isEmpty() && orderKeys.isEmpty()) {
+            return result;
+        }
+        LambdaQueryWrapper<PerformanceFact> q = new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+            .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE);
+        if (!contractKeys.isEmpty() && !orderKeys.isEmpty()) {
+            q.and(w -> w.in(PerformanceFact::getContractNo, contractKeys)
+                .or().in(PerformanceFact::getOrderNo, orderKeys));
+        } else if (!contractKeys.isEmpty()) {
+            q.in(PerformanceFact::getContractNo, contractKeys);
+        } else {
+            q.in(PerformanceFact::getOrderNo, orderKeys);
+        }
+        Map<String, List<PerformanceFact>> byOrder = new HashMap<>();
+        Map<String, List<PerformanceFact>> byContract = new HashMap<>();
+        for (PerformanceFact f : factMapper.selectList(q)) {
+            if (StringUtils.isNotBlank(f.getOrderNo())) {
+                byOrder.computeIfAbsent(f.getOrderNo(), k -> new ArrayList<>()).add(f);
+            }
+            if (StringUtils.isNotBlank(f.getContractNo())) {
+                byContract.computeIfAbsent(f.getContractNo(), k -> new ArrayList<>()).add(f);
+            }
+        }
+        for (ReceivedApply a : records) {
+            if (a.getId() == null) {
+                continue;
+            }
+            boolean supplement = false;
+            BigDecimal received = nvlAmount(a.getReceivedAmount());
+            String period = StringUtils.trimToNull(a.getPeriod());
+            if (received.signum() > 0 && period != null) {
+                List<PerformanceFact> facts = StringUtils.isNotBlank(a.getOrderNo())
+                    ? byOrder.get(a.getOrderNo()) : null;
+                if ((facts == null || facts.isEmpty()) && StringUtils.isNotBlank(a.getContractNo())) {
+                    facts = byContract.getOrDefault(a.getContractNo(), java.util.Collections.emptyList());
+                }
+                boolean positiveInMonth = false;
+                boolean refundBefore = false;
+                for (PerformanceFact f : facts == null
+                    ? java.util.Collections.<PerformanceFact>emptyList() : facts) {
+                    String p = StringUtils.trimToNull(f.getPeriod());
+                    BigDecimal amt = nvlAmount(f.getPerformanceAmount());
+                    if (p == null || amt.signum() == 0) {
+                        continue;
+                    }
+                    if (p.equals(period) && amt.signum() > 0) {
+                        positiveInMonth = true;
+                    }
+                    if (p.compareTo(period) <= 0 && amt.signum() < 0) {
+                        refundBefore = true;
+                    }
+                }
+                supplement = refundBefore && !positiveInMonth;
+            }
+            result.put(a.getId(), supplement);
+        }
+        return result;
     }
 
     /**
@@ -3366,16 +3519,41 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         ReceivedApply apply = getAndCheck(id);
         // 应收是参照口径（非审批对象）：展示时实时取当前 ACTIVE PERF_EXPECT 合计（含已生效调整），
         // 与明细行「按合同+工号+角色实时配对」口径一致；仅内存覆盖，不落库。
-        // 与提交时快照不一致时置「已调整」标记，让业务人员知道差额来自业绩调整。
+        // 「已调整」只认新签事实链存在性（2026-11-03）：快照与实时口径不同，金额不等不代表发生调整。
         // 脏数据兼容：新签 order_no 误填成合同号时，顶部合计与每人明细统一经双侧闸门退化按合同号配对。
         boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
             && canDegradeExpectToReceived(apply.getContractNo());
         if (StringUtils.isNotBlank(apply.getContractNo()) || StringUtils.isNotBlank(apply.getOrderNo())) {
             BigDecimal expected = sumExpectByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
-            apply.setExpectedAdjusted(apply.getExpectedAmount() != null
-                && apply.getExpectedAmount().compareTo(expected) != 0);
-            // 保留快照供前端展示「调整前」，再覆盖为当前值
-            apply.setOriginalExpectedAmount(apply.getExpectedAmount());
+            // 「已调整」只认新签事实链存在性（2026-11-03，7.7）：快照与实时口径不同，
+            // 金额不等不代表发生调整，用它兜底会误报「假调整」
+            Set<String> expKeys = new LinkedHashSet<>();
+            if (StringUtils.isNotBlank(apply.getContractNo())) {
+                expKeys.add(apply.getContractNo());
+            }
+            if (StringUtils.isNotBlank(apply.getOrderNo())) {
+                expKeys.add(apply.getOrderNo());
+            }
+            Map<String, Boolean> expAdjMap = new HashMap<>();
+            for (Map<String, Object> row : factMapper.selectOriginalFactAmountsByKeys(null, "PERF_EXPECT", expKeys)) {
+                Object bk = row.get("bizKey");
+                Object adjusted = row.get("adjusted");
+                if (bk != null && adjusted != null) {
+                    expAdjMap.put(bk.toString(), Boolean.TRUE.equals(adjusted)
+                        || "true".equalsIgnoreCase(String.valueOf(adjusted)));
+                }
+            }
+            boolean expectedAdjusted = matchChainAdjusted(expAdjMap, apply.getContractNo(), apply.getOrderNo());
+            // 补收月：该月无正向新签，顶部新签展示 0 且不标「已调整」
+            boolean supplement = Boolean.TRUE.equals(supplementFlags(List.of(apply)).get(apply.getId()));
+            apply.setSupplement(supplement);
+            if (supplement) {
+                expected = BigDecimal.ZERO;
+                expectedAdjusted = false;
+            }
+            apply.setExpectedAdjusted(expectedAdjusted);
+            // 仅确实调整过才保留快照供前端展示「调整前」，再覆盖为当前值
+            apply.setOriginalExpectedAmount(expectedAdjusted ? apply.getExpectedAmount() : null);
             apply.setExpectedAmount(expected);
         }
         List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(

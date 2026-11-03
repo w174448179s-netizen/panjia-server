@@ -136,15 +136,48 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                                  THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
                                  ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
                            = x.biz_key) = 0 AS is_first,
-                   (SELECT MIN(b.period)
-                      FROM pj_commission_application b
-                     WHERE b.period &gt; x.period
-                       AND b.status IN ('SUBMITTED','APPROVED','LOCKED')
-                       AND (COALESCE(b.total_amount, 0) &lt; 0) = x.is_neg
-                       AND (CASE WHEN x.order_first
-                                 THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
-                                 ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
-                           = x.biz_key) AS next_period
+                   -- 窗口上界 = 下一张同向单期间，与「正向前置补收月」取小（2026-11-03 补收单独成行）：
+                   -- 补收月（到账月无正向新签、且此前已发生退单后的正向到账）不属于任何结佣单，
+                   -- 提前截断窗口，避免补收金额并入旧正向单（与结佣列表补收行口径一致）
+                   LEAST(
+                       (SELECT MIN(b.period)
+                          FROM pj_commission_application b
+                         WHERE b.period &gt; x.period
+                           AND b.status IN ('SUBMITTED','APPROVED','LOCKED')
+                           AND (COALESCE(b.total_amount, 0) &lt; 0) = x.is_neg
+                           AND (CASE WHEN x.order_first
+                                     THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
+                                     ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
+                               = x.biz_key),
+                       (SELECT MIN(rc.period)
+                          FROM pj_received_detail rd
+                          JOIN pj_received_contract rc ON rc.id = rd.contract_id
+                          LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
+                         WHERE rd.detail_status = 'ACTIVE'
+                           AND rd.performance_amount &gt; 0
+                           AND (rd.received_apply_id IS NULL OR ra.status = 'APPROVED')
+                           AND (CASE WHEN x.order_first
+                                     THEN COALESCE(NULLIF(rc.order_no,''), NULLIF(rc.contract_no,''))
+                                     ELSE COALESCE(NULLIF(rc.contract_no,''), NULLIF(rc.order_no,'')) END)
+                               = x.biz_key
+                           AND NOT EXISTS (
+                               SELECT 1 FROM pj_perf_fact pe
+                                WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                                  AND pe.performance_amount &gt; 0 AND pe.period = rc.period
+                                  AND (CASE WHEN x.order_first
+                                            THEN COALESCE(NULLIF(pe.order_no,''), NULLIF(pe.contract_no,''))
+                                            ELSE COALESCE(NULLIF(pe.contract_no,''), NULLIF(pe.order_no,'')) END)
+                                      = x.biz_key)
+                           AND EXISTS (
+                               SELECT 1 FROM pj_perf_fact nn
+                                WHERE nn.fact_status = 'ACTIVE' AND nn.fact_type = 'PERF_EXPECT'
+                                  AND nn.performance_amount &lt; 0 AND nn.period &lt;= rc.period
+                                  AND (CASE WHEN x.order_first
+                                            THEN COALESCE(NULLIF(nn.order_no,''), NULLIF(nn.contract_no,''))
+                                            ELSE COALESCE(NULLIF(nn.contract_no,''), NULLIF(nn.order_no,'')) END)
+                                      = x.biz_key)
+                       )
+                   ) AS next_period
             FROM (
                 SELECT a.period,
                        t.biz_type IN ('一手房','房产金融','家装荐客') AS order_first,

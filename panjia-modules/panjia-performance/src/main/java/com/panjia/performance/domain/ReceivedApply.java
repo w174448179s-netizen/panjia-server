@@ -98,8 +98,9 @@ public class ReceivedApply implements Serializable {
 
     /**
      * 应收已被调整（非入库字段；展示标记）。
-     * <p>当前 ACTIVE 应收合计 ≠ 提交时快照时置 true，前端据此显示「已调整」标记，
-     * 让业务人员知道应收与实收不一致是业绩调整所致。</p>
+     * <p>以新签事实链存在性为准（链上存在 REVERSED 或新增角色人链），前端据此显示「已调整」标记；
+     * 2026-11-03 起不再用「快照 vs 实时金额不等」判定——两者口径不同（快照含负向净额、实时按正向累计），
+     * 金额不等不代表发生调整，会误报「假调整」。</p>
      */
     @TableField(exist = false)
     private Boolean expectedAdjusted;
@@ -143,6 +144,14 @@ public class ReceivedApply implements Serializable {
     /** 审批中实收调整单的目标金额（非入库字段；调整后实收合计） */
     @TableField(exist = false)
     private BigDecimal adjustPendingAmount;
+
+    /**
+     * 是否「补收」月（非入库字段；展示标记）。
+     * <p>该到账月无正向新签事实、且该业务键在此前已发生退单（负向新签）时的正向到账，
+     * 属于退多后退回来的金额：不计新签、不并入任何结佣单，仅在实收列表标注。</p>
+     */
+    @TableField(exist = false)
+    private Boolean supplement;
 
     /**
      * 转人工审批的原因（非入库字段；列表/详情实时计算，仅 SUBMITTED 审批中单据有值）。
