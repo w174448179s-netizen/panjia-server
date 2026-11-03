@@ -641,9 +641,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     }
 
     /**
-     * 业绩排行：按员工聚合新签业绩金额降序，分页返回。
+     * 业绩排行：按员工聚合「导入的新签原始业绩」金额降序，分页返回。
      * <p>
      * 排行榜面向全员公开（所有员工都能看到全量排名，仅作激励展示）；部门条件仅作筛选，不做数据权限裁剪。
+     * 口径：只统计导入生成的新签业绩（含导入负金额），不计人为业绩调整（调整覆盖后按调整前的原始金额计入）。
      * rank 字段按分页起始序号填充（offset + 1 起）。
      */
     @Override

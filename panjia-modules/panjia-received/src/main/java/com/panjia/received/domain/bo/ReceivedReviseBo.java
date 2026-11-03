@@ -1,5 +1,7 @@
 package com.panjia.received.domain.bo;
 
+import com.panjia.performance.domain.bo.AddMemberItemBo;
+import com.panjia.performance.domain.bo.AdjustDetailTargetBo;
 import lombok.Data;
 
 import java.io.Serial;
@@ -8,9 +10,10 @@ import java.math.BigDecimal;
 import java.util.List;
 
 /**
- * 驳回后调整并重提入参。
+ * 驳回后调整入参（界面与实收调整单一致）。
  * <p>
- * 仅允许修改审批单既有实收明细的实收金额与角色占比；新增/删除角色人仍走实收调整单。
+ * 驳回单不直接改原明细：按同一调整单逻辑创建一张挂靠原单的调整单（状态 PENDING_APPLY），
+ * 随后重新提交原审批单；原单审批通过时调整单自动审批并执行，全程仅一个审批。
  */
 @Data
 public class ReceivedReviseBo implements Serializable {
@@ -21,23 +24,15 @@ public class ReceivedReviseBo implements Serializable {
     /** 调整原因（必填） */
     private String reason;
 
-    /** 明细调整目标 */
-    private List<Item> detailTargets;
+    /** 调整类型：AMOUNT=业绩调整（总额不变）/ DEDUCT=业绩扣减 / INCREASE=业绩增加 */
+    private String adjustType;
 
-    /** 单行调整目标：factId = pj_received_detail.id */
-    @Data
-    public static class Item implements Serializable {
+    /** 调整后实收合计 */
+    private BigDecimal targetAmount;
 
-        @Serial
-        private static final long serialVersionUID = 1L;
+    /** 明细指定值（与原单明细范围一致，须覆盖全部明细） */
+    private List<AdjustDetailTargetBo> detailTargets;
 
-        /** 实收明细 ID */
-        private Long factId;
-
-        /** 调整后实收金额；null=不修改 */
-        private BigDecimal amount;
-
-        /** 角色占比（0~1）；null=不修改 */
-        private BigDecimal shareRatio;
-    }
+    /** 新增角色人（可选） */
+    private List<AddMemberItemBo> newMembers;
 }

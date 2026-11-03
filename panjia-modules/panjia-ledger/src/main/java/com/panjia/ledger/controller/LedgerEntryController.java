@@ -2,21 +2,21 @@ package com.panjia.ledger.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import com.panjia.ledger.domain.LedgerEntry;
+import com.panjia.ledger.dto.LedgerEntryExcelRow;
 import com.panjia.ledger.dto.LedgerEntryVO;
+import com.panjia.ledger.dto.LedgerImportResultVO;
 import com.panjia.ledger.service.LedgerEntryService;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.excel.utils.ExcelBuilder;
 import org.dromara.common.satoken.utils.LoginHelper;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -36,6 +36,49 @@ public class LedgerEntryController {
                                        @RequestParam(required = false) Long deptId,
                                        @RequestParam(required = false) Long subjectId) {
         return R.ok(entryService.list(period, direction, deptId, subjectId));
+    }
+
+    /**
+     * 导入录入数据（模板列：方向 / 科目路径 / 部门 / 金额 / 生效日期 / 失效日期 / 备注）。
+     * <p>整批校验通过才写入，任一行失败会返回逐行错误且不落库。</p>
+     */
+    @SaCheckPermission("ledger:entry:add")
+    @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public R<LedgerImportResultVO> importData(@RequestPart("file") MultipartFile file) throws Exception {
+        List<LedgerEntryExcelRow> rows = ExcelBuilder.read(file.getInputStream(), LedgerEntryExcelRow.class).doReadSync();
+        return R.ok(entryService.importEntries(rows, LoginHelper.getUserId()));
+    }
+
+    /** 下载导入模板（仅表头） */
+    @SaCheckPermission("ledger:entry:list")
+    @PostMapping("/importTemplate")
+    public void importTemplate(HttpServletResponse response) {
+        ExcelBuilder.of(Collections.<LedgerEntryExcelRow>emptyList(), LedgerEntryExcelRow.class)
+            .sheetName("部门收支录入").toResponse(response);
+    }
+
+    /** 导出当前查询条件下的录入明细 */
+    @SaCheckPermission("ledger:entry:list")
+    @PostMapping("/export")
+    public void export(@RequestParam(required = false) String period,
+                       @RequestParam(required = false) String direction,
+                       @RequestParam(required = false) Long deptId,
+                       @RequestParam(required = false) Long subjectId,
+                       HttpServletResponse response) {
+        List<LedgerEntryVO> list = entryService.list(period, direction, deptId, subjectId);
+        List<LedgerEntryExcelRow> rows = new ArrayList<>(list.size());
+        for (LedgerEntryVO vo : list) {
+            LedgerEntryExcelRow row = new LedgerEntryExcelRow();
+            row.setDirection("INCOME".equals(vo.getDirection()) ? "收入" : "支出");
+            row.setSubjectPath(vo.getSubjectPath());
+            row.setDeptName(vo.getDeptName());
+            row.setAmount(vo.getAmount() == null ? "" : vo.getAmount().toPlainString());
+            row.setStartDate(vo.getStartDate() == null ? "" : vo.getStartDate().toString());
+            row.setEndDate(vo.getEndDate() == null ? "" : vo.getEndDate().toString());
+            row.setRemark(vo.getRemark());
+            rows.add(row);
+        }
+        ExcelBuilder.of(rows, LedgerEntryExcelRow.class).sheetName("部门收支录入").toResponse(response);
     }
 
     @SaCheckPermission("ledger:entry:add")

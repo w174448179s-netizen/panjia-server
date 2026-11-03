@@ -31,33 +31,58 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
 
     /**
      * 实收明细按部门汇总（收入）。
-     * <p>有效口径：明细 ACTIVE + 实收申请 APPROVED；明细部门为空时回退员工所属部门；
+     * <p>有效口径：明细 ACTIVE + 实收申请 APPROVED；部门优先取明细/合同快照，
+     * 其次按归属月取 DEPT 事实（员工调店时间轴），最后回退员工当前部门；
      * 退款/冲减行保留负金额参与净额。</p>
      */
     @Select("""
-        SELECT COALESCE(d.dept_id, e.dept_id) AS deptId,
+        SELECT COALESCE(d.dept_id, c.dept_id, df.value::BIGINT, e.dept_id) AS deptId,
                SUM(COALESCE(d.performance_amount, 0)) AS amount
         FROM pj_received_detail d
         JOIN pj_received_contract c ON c.id = d.contract_id
         JOIN pj_perf_received_apply a ON a.id = c.received_apply_id
         LEFT JOIN pj_people_employee e ON e.employee_id = d.employee_id
+        LEFT JOIN LATERAL (
+            SELECT f.value
+            FROM pj_people_salary_fact f
+            WHERE f.employee_id = d.employee_id
+              AND f.fact_type = 'DEPT'
+              AND f.effective_date <= #{refDate}
+              AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+            ORDER BY f.effective_date DESC, f.create_time DESC
+            LIMIT 1
+        ) df ON TRUE
         WHERE d.detail_status = 'ACTIVE'
           AND a.status = 'APPROVED'
           AND d.period = #{period}
-        GROUP BY COALESCE(d.dept_id, e.dept_id)
+        GROUP BY COALESCE(d.dept_id, c.dept_id, df.value::BIGINT, e.dept_id)
         """)
-    List<DeptAmountDTO> sumReceivedByDept(@Param("period") String period);
+    List<DeptAmountDTO> sumReceivedByDept(@Param("period") String period, @Param("refDate") LocalDate refDate);
 
-    /** 工资应发（gross）按部门汇总（支出）；仅统计已计算及之后状态的批次 */
+    /**
+     * 工资应发（gross）按部门汇总（支出）；仅统计已计算及之后状态的批次。
+     * <p>部门优先取工资明细快照，其次按归属月取 DEPT 事实（员工调店时间轴）。</p>
+     */
     @Select("""
-        SELECT d.dept_id AS deptId, SUM(COALESCE(d.gross, 0)) AS amount
+        SELECT COALESCE(d.dept_id, df.value::BIGINT) AS deptId,
+               SUM(COALESCE(d.gross, 0)) AS amount
         FROM pj_payroll_detail d
         JOIN pj_payroll_batch b ON b.id = d.batch_id
+        LEFT JOIN LATERAL (
+            SELECT f.value
+            FROM pj_people_salary_fact f
+            WHERE f.employee_id = d.employee_id
+              AND f.fact_type = 'DEPT'
+              AND f.effective_date <= #{refDate}
+              AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+            ORDER BY f.effective_date DESC, f.create_time DESC
+            LIMIT 1
+        ) df ON TRUE
         WHERE d.period = #{period}
           AND b.status IN ('已计算', '待审核', '已确认', '已锁定', '已发放')
-        GROUP BY d.dept_id
+        GROUP BY COALESCE(d.dept_id, df.value::BIGINT)
         """)
-    List<DeptAmountDTO> sumPayrollGrossByDept(@Param("period") String period);
+    List<DeptAmountDTO> sumPayrollGrossByDept(@Param("period") String period, @Param("refDate") LocalDate refDate);
 
     /**
      * 手工录入按科目+部门汇总；生效期间与归属月相交即整笔计入（不按天折算）。

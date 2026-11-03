@@ -7,6 +7,7 @@ import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReceivedApply;
+import com.panjia.performance.domain.ReceivedAdjust;
 import com.panjia.performance.domain.ReceivedApplyStatus;
 import com.panjia.performance.domain.vo.BatchApproveResultVo;
 import com.panjia.performance.dto.BatchFactBindRow;
@@ -99,6 +100,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     private final EventPort eventPort;
     /** 实收调整单 Mapper（pj_perf_received_adjust）：列表回填实收调整标记与调整前原值 */
     private final ReceivedAdjustMapper receivedAdjustMapper;
+    /** 实收调整服务：驳回后调整按调整单逻辑挂靠原单，随原单审批自动审批执行 */
+    private final com.panjia.performance.service.IReceivedAdjustService receivedAdjustService;
     /** 导入批次问题清单回写（归档阶段转人工审批的订单在批次页可见） */
     private final ImportBatchWritePort importBatchWritePort;
     /** 新签-实收人员对齐补行（与导入链路共用同一实现） */
@@ -1172,6 +1175,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 // 流程实例已软删（cancel 仅标记 del_flag），必须清空指针，
                 // 否则批次撤销预检会把「APPROVED + 有流程实例」误判为人工审批通过而拦截
                 latest.setProcessInstanceId(null);
+                // 历史单若存在挂靠的驳回调整单，先自动审批执行，再置原单通过
+                receivedAdjustService.autoApproveAndExecuteByApply(latest.getId(), operatorId);
                 latest.setApproverId(operatorId);
                 latest.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(latest);
@@ -2113,6 +2118,17 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ReceivedApply resubmit(Long id) {
+        return doResubmit(id, true);
+    }
+
+    /**
+     * 重提核心。
+     *
+     * @param autoRoute true：沿用旧口径（发起人本人是财务/总监时自动办理对应节点）；
+     *                  false：驳回后调整重提场景，不得自动过节点，原单必须停在审批节点等人工审批
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ReceivedApply doResubmit(Long id, boolean autoRoute) {
         ReceivedApply apply = getAndCheck(id);
         if (apply.getStatus() != ReceivedApplyStatus.REJECTED) {
             throw new ServiceException("仅已驳回状态的审批单可重新提交（当前：" + apply.getStatus().getDesc() + "）");
@@ -2123,20 +2139,39 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         applyMapper.updateById(apply);
 
         if (StringUtils.isBlank(apply.getProcessInstanceId())) {
-            startWorkflow(apply, operatorId, currentRoles());
+            startWorkflow(apply, operatorId, autoRoute ? currentRoles() : Set.of(), autoRoute);
             return apply;
         }
-        // 驳回后流程停在申请人节点：办理申请人任务重新提交，并按当前发起人角色路由
+        // 驳回后流程停在申请人节点：办理申请人任务重新提交
         Long taskId = approvalPort.currentTaskId(BizType.REAL_CONFIRM, id);
         if (taskId == null) {
             throw new ServiceException("审批流程任务不存在，请联系管理员");
         }
         approvalPort.completeAsSys(BizType.REAL_CONFIRM, id, ApprovalAction.PASS, "重新提交");
-        routeAfterApplicant(apply, currentRoles());
+        if (autoRoute) {
+            routeAfterApplicant(apply, currentRoles());
+        } else {
+            // 驳回后调整重提：只刷新当前节点，留给审批人人工办理
+            refreshCurrentNode(apply);
+        }
         return apply;
     }
 
     // ==================== 驳回后调整并重提 ====================
+
+    @Override
+    public List<ReceivedFactDetailVo> listReviseDetails(Long id) {
+        ReceivedApply apply = getAndCheck(id);
+        if (apply.getStatus() != ReceivedApplyStatus.REJECTED) {
+            throw new ServiceException("仅已驳回状态的审批单可调整（当前：" + apply.getStatus().getDesc() + "）");
+        }
+        boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
+            && canDegradeExpectToReceived(apply.getContractNo());
+        // 明细直接返回原始行：同人同角色同月的多笔实收不能合并，否则提交时只能改到其中一行
+        List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
+            apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect, apply.getId());
+        return facts == null ? List.of() : facts;
+    }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -2145,67 +2180,46 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         if (apply.getStatus() != ReceivedApplyStatus.REJECTED) {
             throw new ServiceException("仅已驳回状态的审批单可调整后重提（当前：" + apply.getStatus().getDesc() + "）");
         }
-        if (bo == null || bo.getDetailTargets() == null || bo.getDetailTargets().isEmpty()) {
+        if (bo == null) {
+            throw new ServiceException("调整明细不能为空");
+        }
+        List<com.panjia.performance.domain.bo.AdjustDetailTargetBo> items =
+            bo.getDetailTargets() == null ? List.of() : bo.getDetailTargets();
+        List<com.panjia.performance.domain.bo.AddMemberItemBo> newMembers =
+            bo.getNewMembers() == null ? List.of() : bo.getNewMembers().stream()
+                .filter(java.util.Objects::nonNull).toList();
+        if (items.isEmpty() && newMembers.isEmpty()) {
             throw new ServiceException("调整明细不能为空");
         }
         // 可调整范围与详情展示口径一致：本单已绑定明细 + 同合同同期未绑定的历史明细
         boolean degradeExpect = StringUtils.isNotBlank(apply.getOrderNo())
             && canDegradeExpectToReceived(apply.getContractNo());
-        List<Long> factIds = factMapper.selectReceivedFactDetails(
+        List<Long> scopeFactIds = factMapper.selectReceivedFactDetails(
                 apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect, apply.getId())
             .stream()
             .map(ReceivedFactDetailVo::getFactId)
             .filter(java.util.Objects::nonNull)
             .toList();
-        if (factIds.isEmpty()) {
+        if (scopeFactIds.isEmpty()) {
             throw new ServiceException("该审批单暂无实收明细可调整");
         }
-        Map<Long, com.panjia.received.domain.ReceivedDetail> editable = new HashMap<>();
-        for (com.panjia.received.domain.ReceivedDetail d : detailMapper.selectBatchIds(factIds)) {
-            if ("ACTIVE".equals(d.getDetailStatus())) {
-                editable.put(d.getId(), d);
-            }
-        }
-        Set<Long> touchedContractIds = new LinkedHashSet<>();
-        int changedRows = 0;
-        for (com.panjia.received.domain.bo.ReceivedReviseBo.Item item : bo.getDetailTargets()) {
-            if (item == null || item.getFactId() == null) {
-                throw new ServiceException("调整明细缺少明细 ID");
-            }
-            com.panjia.received.domain.ReceivedDetail detail = editable.get(item.getFactId());
-            if (detail == null) {
-                throw new ServiceException("实收明细不属于该审批单：" + item.getFactId());
-            }
-            boolean changed = false;
-            if (item.getAmount() != null) {
-                if (item.getAmount().signum() < 0) {
-                    throw new ServiceException("调整后实收金额不能为负");
-                }
-                detail.setPerformanceAmount(item.getAmount());
-                changed = true;
-            }
-            if (item.getShareRatio() != null) {
-                if (item.getShareRatio().signum() < 0 || item.getShareRatio().compareTo(BigDecimal.ONE) > 0) {
-                    throw new ServiceException("角色占比须在 0~1 之间");
-                }
-                detail.setShareRatio(item.getShareRatio());
-                changed = true;
-            }
-            if (changed) {
-                detailMapper.updateById(detail);
-                changedRows++;
-                if (detail.getContractId() != null) {
-                    touchedContractIds.add(detail.getContractId());
-                }
-            }
-        }
-        if (changedRows == 0) {
-            throw new ServiceException("无任何实收变动，无需调整");
-        }
-        refreshTotals(apply);
-        refreshContractAggregates(touchedContractIds);
-        log.info("[实收审批] 驳回后调整并重提：applyId={}, rows={}, reason={}", id, changedRows, bo.getReason());
-        return resubmit(id);
+        // 按调整单逻辑创建挂靠原单的待审批调整单：不改原明细，快照原单范围
+        com.panjia.performance.domain.bo.ReceivedAdjustCreateBo createBo =
+            new com.panjia.performance.domain.bo.ReceivedAdjustCreateBo();
+        createBo.setPeriod(apply.getPeriod());
+        createBo.setOrderNo(apply.getOrderNo());
+        createBo.setContractNo(apply.getContractNo());
+        createBo.setAdjustType(bo.getAdjustType());
+        createBo.setTargetAmount(bo.getTargetAmount());
+        createBo.setReason(bo.getReason());
+        createBo.setDetailTargets(new ArrayList<>(items));
+        createBo.setNewMembers(new ArrayList<>(newMembers));
+        Long operatorId = LoginHelper.getUserId();
+        receivedAdjustService.createPendingForApply(createBo, apply.getId(), scopeFactIds, operatorId);
+        log.info("[实收审批] 驳回后调整已按调整单逻辑创建快照，重提原单：applyId={}, targets={}, newMembers={}, reason={}",
+            id, items.size(), newMembers.size(), bo.getReason());
+        // 重提不自动过节点：原单必须卡在审批中，人工审批通过后挂靠调整单再自动审批执行
+        return doResubmit(id, false);
     }
 
     // ==================== 作废 ====================
@@ -2231,6 +2245,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         apply.setStatus(ReceivedApplyStatus.CANCELLED);
         apply.setCurrentNode(null);
         applyMapper.updateById(apply);
+        receivedAdjustService.cancelPendingByApply(id);
     }
 
     /**
@@ -2435,6 +2450,8 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.setApproverId(handlerId);
                 apply.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(apply);
+                // 原单审批通过：先自动审批并执行挂靠的驳回调整单，再发结佣事件（保证结佣按调整后金额计算）
+                receivedAdjustService.autoApproveAndExecuteByApply(applyId, handlerId);
                 // 人工审批通过：发布事件，结佣域除二手买卖外自动发起结佣（2026-10-29 改定）
                 emitApprovedEvent(apply, handlerId, false);
                 log.info("[实收审批工作流] 审批通过：applyId={}, handler={}", applyId, handler);
@@ -2446,18 +2463,22 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 apply.setApproverId(handlerId);
                 apply.setApproveTime(LocalDateTime.now());
                 applyMapper.updateById(apply);
+                // 原单被驳回：挂靠调整单同步置 REJECTED，下次可重新调整
+                receivedAdjustService.rejectPendingByApply(applyId, handlerId, message);
                 log.info("[实收审批工作流] 驳回：applyId={}, handler={}, message={}", applyId, handler, message);
             }
             case "cancel" -> {
                 apply.setStatus(ReceivedApplyStatus.CANCELLED);
                 apply.setCurrentNode(null);
                 applyMapper.updateById(apply);
+                receivedAdjustService.cancelPendingByApply(applyId);
                 log.info("[实收审批工作流] 撤销：applyId={}", applyId);
             }
             case "invalid", "termination" -> {
                 apply.setStatus(ReceivedApplyStatus.CANCELLED);
                 apply.setCurrentNode(null);
                 applyMapper.updateById(apply);
+                receivedAdjustService.cancelPendingByApply(applyId);
                 log.info("[实收审批工作流] 作废/终止：applyId={}", applyId);
             }
             default -> log.info("[实收审批工作流] 忽略状态：applyId={}, status={}", applyId, status);
@@ -3311,7 +3332,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                     }
                     apply.setReceivedAmount(m.getReceivedAmount());
                 }
-                // 审批中实收调整单标记：存在 SUBMITTED/APPROVED 单据时展示「调整审批中」+ 目标金额
+                // 审批中实收调整单标记：存在 SUBMITTED/PENDING_APPLY/APPROVED 单据时展示「调整审批中」+ 目标金额
                 Map<String, Map<String, Object>> pendMap = pendingByPeriod.get(apply.getPeriod());
                 if (pendMap != null) {
                     Map<String, Object> pend = matchAdjustByBizKey(pendMap, apply.getContractNo(), apply.getOrderNo());
@@ -3558,7 +3579,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         }
         List<ReceivedFactDetailVo> facts = factMapper.selectReceivedFactDetails(
             apply.getPeriod(), apply.getOrderNo(), apply.getContractNo(), degradeExpect, apply.getId());
-        return assemble(apply, mergeFactRows(facts, false));
+        // 驳回后调整：审批人需要看到挂靠在本单上的待生效调整单（PENDING_APPLY）
+        ReceivedAdjust pendingAdjust = receivedAdjustService.findPendingByApply(apply.getId());
+        return assemble(apply, mergeFactRows(facts, false), pendingAdjust == null ? null : pendingAdjust.getId());
     }
 
     /**
@@ -3689,6 +3712,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     /** 明细行折算、合计与审批提示组装（单期详情与跨期合同详情共用）。 */
     private ReceivedApplyDetail assemble(ReceivedApply apply, List<ReceivedFactDetailVo> facts) {
+        return assemble(apply, facts, null);
+    }
+
+    private ReceivedApplyDetail assemble(ReceivedApply apply, List<ReceivedFactDetailVo> facts, Long pendingAdjustId) {
         // 实收不再做折算；应收折算因子按合同业务类型取（整单同一因子）
         String bizType = apply.getBizType();
         Map<String, BigDecimal> factorMap = conversionFactorPort.factorsOf(
@@ -3729,7 +3756,14 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             .filter(java.util.Objects::nonNull)
             .collect(Collectors.toCollection(LinkedHashSet::new));
         apply.setManualReviewReason(manualReviewReasonOf(apply, realEmps));
-        return new ReceivedApplyDetail(apply, facts);
+        return new ReceivedApplyDetail(apply, facts, pendingAdjustId);
+    }
+
+    @Override
+    public com.panjia.performance.domain.vo.AdjustDetailVo getPendingAdjustDetail(Long id) {
+        ReceivedApply apply = getAndCheck(id);
+        ReceivedAdjust pending = receivedAdjustService.findPendingByApply(apply.getId());
+        return pending == null ? null : receivedAdjustService.getDetail(pending.getId());
     }
 
     @Override
@@ -3769,6 +3803,15 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 发起 perf_received 流程并按发起人角色/配置做节点路由（§2.2）。
      */
     private void startWorkflow(ReceivedApply apply, Long applicantId, Set<String> roles) {
+        startWorkflow(apply, applicantId, roles, true);
+    }
+
+    /**
+     * 发起流程。
+     *
+     * @param autoRoute false：不按发起人角色自动办理财务/总监节点（驳回后调整重提必须等人工审批）
+     */
+    private void startWorkflow(ReceivedApply apply, Long applicantId, Set<String> roles, boolean autoRoute) {
         apply.setStatus(ReceivedApplyStatus.SUBMITTED);
         applyMapper.updateById(apply);
 
@@ -3809,14 +3852,24 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
             apply.setProcessInstanceId(String.valueOf(instanceId));
             applyMapper.updateById(apply);
         }
-        routeAfterApplicant(apply, roles);
+        routeAfterApplicant(apply, roles, autoRoute);
     }
 
     /**
      * 申请人首节点办理后的自动路由：
      * skip_finance 或发起人=财务/总监 → 系统自动过财务；发起人=总监 → 继续自动过总监直至完成。
+     *
+     * @param autoRoute false：跳过全部自动办理，仅刷新当前节点（留给审批人人工处理）
      */
     private void routeAfterApplicant(ReceivedApply apply, Set<String> roles) {
+        routeAfterApplicant(apply, roles, true);
+    }
+
+    private void routeAfterApplicant(ReceivedApply apply, Set<String> roles, boolean autoRoute) {
+        if (!autoRoute) {
+            refreshCurrentNode(apply);
+            return;
+        }
         boolean director = roles != null && roles.contains("director");
         boolean finance = roles != null && roles.contains("finance");
         boolean skipFinance = Boolean.TRUE.equals(configService.getConfigBool(CONFIG_SKIP_FINANCE));

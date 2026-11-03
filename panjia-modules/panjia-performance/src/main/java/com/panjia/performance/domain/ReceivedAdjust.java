@@ -73,11 +73,17 @@ public class ReceivedAdjust implements Serializable {
     /** 调整原因 */
     private String reason;
 
-    /** 状态：SUBMITTED/APPROVED/REJECTED/CANCELLED/EXECUTED（复用 {@link AdjustStatus}） */
+    /** 状态：SUBMITTED/PENDING_APPLY/APPROVED/REJECTED/CANCELLED/EXECUTED（复用 {@link AdjustStatus}） */
     private AdjustStatus status;
 
     /** 审批流程实例 ID */
     private String processInstanceId;
+
+    /**
+     * 来源实收审批单 ID（驳回后调整场景）。
+     * <p>非空表示本调整单不单独发起审批，待原实收单审批通过时自动审批并执行；原单驳回/作废时同步终止。</p>
+     */
+    private Long receivedApplyId;
 
     /** 申请人 ID */
     private Long applicantId;

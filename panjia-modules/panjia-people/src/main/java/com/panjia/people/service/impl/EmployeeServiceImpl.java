@@ -243,6 +243,7 @@ public class EmployeeServiceImpl implements EmployeeService {
         // 8 类算薪事实初始记录（change_field=ALL，生效日=入职日）
         initFact(emp.getEmployeeId(), FactType.LEVEL, dto.getLevelCode(), effect);
         initFact(emp.getEmployeeId(), FactType.STATUS, emp.getStatus().getCode(), effect);
+        initFact(emp.getEmployeeId(), FactType.DEPT, String.valueOf(emp.getDeptId()), effect);
         initFact(emp.getEmployeeId(), FactType.SOCIAL, boolVal(dto.getSocialInsured()), effect);
         initFact(emp.getEmployeeId(), FactType.SOCIAL_FEE, decimalVal(dto.getSocialFee()), effect);
         initFact(emp.getEmployeeId(), FactType.HOUSING, boolVal(dto.getHousingInsured()), effect);
@@ -384,15 +385,27 @@ public class EmployeeServiceImpl implements EmployeeService {
             }
         }
 
-        // ⑥ 归属部门变更 → 同步 sys_user.dept_id（立即生效，日志生效日取当天）
+        // ⑥ 归属部门变更 → 同步 sys_user.dept_id（立即生效），并写 DEPT 事实时间轴
+        // （生效粒度 = 月；未传变更生效月时按当月），供工资/实收按归属月解析历史部门
         if (dto.getDeptId() != null && !dto.getDeptId().equals(emp.getDeptId())) {
+            LocalDate deptEffect = effect != null ? effect : monthStart(LocalDate.now());
             String beforeName = deptPort.findDeptFullName(emp.getDeptId());
             if (emp.getUserId() != null) {
                 accountPort.updateDept(emp.getUserId(), dto.getDeptId());
             }
             emp.setDeptId(dto.getDeptId());
+            salaryFactMapper.closeActiveAt(employeeId, FactType.DEPT, deptEffect);
+            // 回填更早生效月时，删除被新区间完全覆盖的后续开放事实（同 changeFact 语义）
+            salaryFactMapper.deleteOpenAfter(employeeId, FactType.DEPT, deptEffect);
+            SalaryFact deptFact = new SalaryFact();
+            deptFact.setEmployeeId(employeeId);
+            deptFact.setFactType(FactType.DEPT);
+            deptFact.setValue(String.valueOf(dto.getDeptId()));
+            deptFact.setEffectiveDate(deptEffect);
+            deptFact.setChangeField(FactType.DEPT.getCode());
+            salaryFactMapper.insert(deptFact);
             String afterName = deptPort.findDeptFullName(dto.getDeptId());
-            writeLog(employeeId, CHANGE_FIELD_DEPT, beforeName, afterName, LocalDate.now(), operator);
+            writeLog(employeeId, CHANGE_FIELD_DEPT, beforeName, afterName, deptEffect, operator);
         }
 
         // ⑦ 岗位集合变更 → 重建 sys_user_post + 推导重建 sys_user_role（先清后绑，立即生效）
@@ -500,6 +513,22 @@ public class EmployeeServiceImpl implements EmployeeService {
         for (FactType type : FactType.values()) {
             for (SalaryFact fact : salaryFactMapper.selectValuesAt(ids, type, point)) {
                 result.get(fact.getEmployeeId()).put(type.getCode(), fact.getValue());
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public Map<Long, Long> findDeptIdsAt(Collection<Long> employeeIds, LocalDate pointInMonth) {
+        if (employeeIds == null || employeeIds.isEmpty()) {
+            return Map.of();
+        }
+        LocalDate point = monthEnd(pointInMonth);
+        Map<Long, Long> result = new LinkedHashMap<>();
+        for (SalaryFact fact : salaryFactMapper.selectValuesAt(List.copyOf(employeeIds), FactType.DEPT, point)) {
+            Long deptId = parseLongFact(fact.getValue());
+            if (deptId != null) {
+                result.put(fact.getEmployeeId(), deptId);
             }
         }
         return result;
@@ -645,7 +674,9 @@ public class EmployeeServiceImpl implements EmployeeService {
         snap.setEmployeeCode(emp.getEmployeeCode());
         snap.setEmployeeName(emp.getEmployeeName());
         snap.setUserId(emp.getUserId());
-        snap.setDeptId(emp.getDeptId());
+        // 部门优先取 DEPT 事实（按归属月切片），无事实时回退员工主数据当前部门
+        Long factDeptId = factValues == null ? null : parseLongFact(factValues.get(FactType.DEPT.getCode()));
+        snap.setDeptId(factDeptId != null ? factDeptId : emp.getDeptId());
         snap.setHireDate(emp.getHireDate());
         snap.setLeaveDate(emp.getLeaveDate());
         if (factValues != null) {
@@ -681,6 +712,18 @@ public class EmployeeServiceImpl implements EmployeeService {
             return null;
         }
         return Boolean.parseBoolean(value.trim());
+    }
+
+    /** ID 类事实值解析（如 DEPT）：空/非数字 → null */
+    private Long parseLongFact(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /** 金额事实值解析：空/非数字 → null */

@@ -2,6 +2,7 @@ package com.panjia.performance.service.impl;
 
 import cn.hutool.core.util.RandomUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.common.util.DeptScopeUtils;
 import com.panjia.contracts.constant.BizType;
@@ -43,6 +44,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -210,7 +212,7 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
         Long inFlight = receivedAdjustMapper.selectCount(new LambdaQueryWrapper<ReceivedAdjust>()
             .eq(ReceivedAdjust::getContractNo, dto.getContractNo())
             .eq(ReceivedAdjust::getPeriod, dto.getPeriod())
-            .in(ReceivedAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
+            .in(ReceivedAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.PENDING_APPLY, AdjustStatus.APPROVED));
         if (inFlight != null && inFlight > 0) {
             throw new ServiceException("该合同该实收期间存在审批中的实收调整单，请待其审批完成或撤回后再发起");
         }
@@ -260,6 +262,138 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
         log.info("[实收调整] 创建并提交审批成功：adjustId={}, adjustNo={}, contractNo={}, period={}, applicantId={}",
             adjust.getId(), adjust.getAdjustNo(), adjust.getContractNo(), adjust.getPeriod(), applicantId);
         return adjust;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReceivedAdjust createPendingForApply(ReceivedAdjustCreateBo dto, Long applyId,
+                                                Collection<Long> scopeFactIds, Long applicantId) {
+        if (applyId == null || dto == null || StringUtils.isBlank(dto.getContractNo())
+            || StringUtils.isBlank(dto.getPeriod())) {
+            throw new ServiceException("驳回调整缺少原审批单信息");
+        }
+        Set<Long> ids = scopeFactIds == null ? Set.of() : scopeFactIds.stream()
+            .filter(java.util.Objects::nonNull).collect(Collectors.toSet());
+        if (ids.isEmpty()) {
+            throw new ServiceException("该审批单暂无实收明细可调整");
+        }
+        AdjustType adjustType = parseReceivedAdjustType(dto.getAdjustType());
+        // 原单明细范围：按明细 ID 精确装载，避免同合同同期其他审批单的行被一并调整
+        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByFacts(ids);
+        if (facts == null || facts.size() < ids.size()) {
+            throw new ServiceException("原单部分实收明细已变化或已失效，请刷新后重新调整");
+        }
+        for (PerformanceFactSummaryDTO f : facts) {
+            if (!dto.getContractNo().equals(f.getContractNo())) {
+                throw new ServiceException("实收明细不属于该合同，禁止跨合同调整：factId={}", f.getFactId());
+            }
+        }
+        BigDecimal originalAmt = prepareTargets(dto, adjustType, facts);
+        // 驳回调整必须覆盖原单全部明细：执行时按指定行范围核算，未覆盖会破坏金额完整性校验
+        Set<Long> targetIds = dto.getDetailTargets() == null ? Set.of() : dto.getDetailTargets().stream()
+            .filter(t -> t != null && t.getFactId() != null)
+            .map(AdjustDetailTargetBo::getFactId)
+            .collect(Collectors.toSet());
+        if (!targetIds.containsAll(ids)) {
+            throw new ServiceException("驳回调整需覆盖原单全部实收明细，请刷新后重新调整");
+        }
+
+        // 同一审批单的旧待处理调整先置 REJECTED（本次为重新调整）
+        ReceivedAdjust stale = new ReceivedAdjust();
+        stale.setStatus(AdjustStatus.REJECTED);
+        stale.setApproverId(applicantId);
+        stale.setApproveTime(LocalDateTime.now());
+        receivedAdjustMapper.update(stale, new LambdaUpdateWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getReceivedApplyId, applyId)
+            .eq(ReceivedAdjust::getStatus, AdjustStatus.PENDING_APPLY));
+
+        // 在途互斥：同合同同期间已有提交中/待原单审批/审批通过的调整单时拒绝（串行调整，防快照失效）
+        Long inFlight = receivedAdjustMapper.selectCount(new LambdaQueryWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getContractNo, dto.getContractNo())
+            .eq(ReceivedAdjust::getPeriod, dto.getPeriod())
+            .in(ReceivedAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.PENDING_APPLY, AdjustStatus.APPROVED));
+        if (inFlight != null && inFlight > 0) {
+            throw new ServiceException("该合同该实收期间存在审批中的实收调整单，请待其审批完成或撤回后再调整");
+        }
+
+        ReceivedAdjust adjust = new ReceivedAdjust();
+        adjust.setAdjustNo(generateAdjustNo());
+        adjust.setPeriod(dto.getPeriod());
+        adjust.setEmployeeId(dto.getEmployeeId());
+        adjust.setDeptId(dto.getDeptId());
+        adjust.setContractNo(dto.getContractNo());
+        adjust.setOrderNo(dto.getOrderNo());
+        adjust.setBizType(dto.getBizType());
+        adjust.setAdjustType(adjustType.getCode());
+        adjust.setPayloadJson(dto.getPayloadJson());
+        adjust.setTargetAmount(dto.getTargetAmount());
+        adjust.setOriginalAmount(originalAmt);
+        adjust.setReason(StringUtils.isBlank(dto.getReason()) ? "驳回后实收调整" : dto.getReason());
+        // 不单独发起审批：随原实收单审批通过后自动置 APPROVED 并执行
+        adjust.setStatus(AdjustStatus.PENDING_APPLY);
+        adjust.setApplicantId(applicantId);
+        adjust.setReceivedApplyId(applyId);
+        receivedAdjustMapper.insert(adjust);
+        log.info("[实收调整] 驳回后调整已挂靠原单：adjustId={}, adjustNo={}, applyId={}, contractNo={}, period={}",
+            adjust.getId(), adjust.getAdjustNo(), applyId, adjust.getContractNo(), adjust.getPeriod());
+        return adjust;
+    }
+
+    @Override
+    public void autoApproveAndExecuteByApply(Long applyId, Long approverId) {
+        List<ReceivedAdjust> pendings = receivedAdjustMapper.selectList(new LambdaQueryWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getReceivedApplyId, applyId)
+            .eq(ReceivedAdjust::getStatus, AdjustStatus.PENDING_APPLY));
+        for (ReceivedAdjust adjust : pendings) {
+            adjust.setStatus(AdjustStatus.APPROVED);
+            adjust.setApproverId(approverId);
+            adjust.setApproveTime(LocalDateTime.now());
+            receivedAdjustMapper.updateById(adjust);
+            execute(adjust.getId(), approverId);
+            log.info("[实收调整] 原实收单审批通过，调整单自动审批并执行：adjustId={}, applyId={}, approverId={}",
+                adjust.getId(), applyId, approverId);
+        }
+    }
+
+    @Override
+    public ReceivedAdjust findPendingByApply(Long applyId) {
+        if (applyId == null) {
+            return null;
+        }
+        List<ReceivedAdjust> pendings = receivedAdjustMapper.selectList(new LambdaQueryWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getReceivedApplyId, applyId)
+            .eq(ReceivedAdjust::getStatus, AdjustStatus.PENDING_APPLY)
+            .orderByDesc(ReceivedAdjust::getCreateTime)
+            .last("LIMIT 1"));
+        return pendings.isEmpty() ? null : pendings.get(0);
+    }
+
+    @Override
+    public void rejectPendingByApply(Long applyId, Long approverId, String message) {
+        List<ReceivedAdjust> pendings = receivedAdjustMapper.selectList(new LambdaQueryWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getReceivedApplyId, applyId)
+            .eq(ReceivedAdjust::getStatus, AdjustStatus.PENDING_APPLY));
+        for (ReceivedAdjust adjust : pendings) {
+            adjust.setStatus(AdjustStatus.REJECTED);
+            adjust.setApproverId(approverId);
+            adjust.setApproveTime(LocalDateTime.now());
+            receivedAdjustMapper.updateById(adjust);
+            log.info("[实收调整] 原实收单被驳回，调整单同步置 REJECTED：adjustId={}, applyId={}, message={}",
+                adjust.getId(), applyId, message);
+        }
+    }
+
+    @Override
+    public void cancelPendingByApply(Long applyId) {
+        List<ReceivedAdjust> pendings = receivedAdjustMapper.selectList(new LambdaQueryWrapper<ReceivedAdjust>()
+            .eq(ReceivedAdjust::getReceivedApplyId, applyId)
+            .eq(ReceivedAdjust::getStatus, AdjustStatus.PENDING_APPLY));
+        for (ReceivedAdjust adjust : pendings) {
+            adjust.setStatus(AdjustStatus.CANCELLED);
+            receivedAdjustMapper.updateById(adjust);
+            log.info("[实收调整] 原实收单作废/终止，调整单同步置 CANCELLED：adjustId={}, applyId={}",
+                adjust.getId(), applyId);
+        }
     }
 
     /**
@@ -368,7 +502,14 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
      * @return 原实收合计
      */
     private BigDecimal prepareTargets(ReceivedAdjustCreateBo dto, AdjustType adjustType) {
-        List<PerformanceFactSummaryDTO> facts = loadApprovedReceivedFacts(dto);
+        return prepareTargets(dto, adjustType, loadApprovedReceivedFacts(dto));
+    }
+
+    /**
+     * 指定实收事实集合做三类型校验与快照（驳回后调整用：单据尚未审批通过，按原单明细范围准备）。
+     */
+    private BigDecimal prepareTargets(ReceivedAdjustCreateBo dto, AdjustType adjustType,
+                                      List<PerformanceFactSummaryDTO> facts) {
         Map<Long, PerformanceFactSummaryDTO> factById = facts.stream()
             .collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, f -> f, (a, b) -> a));
         BigDecimal total = facts.stream()
@@ -640,9 +781,20 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
      * </ul>
      */
     private void fillDetailRows(ReceivedAdjust adjust, AdjustDetailVo dto) {
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByBizKey(
-            adjust.getPeriod(), adjust.getOrderNo(), adjust.getContractNo(), FACT_TYPE_REAL);
         AddMemberPayload payload = parsePayload(adjust.getPayloadJson());
+        List<PerformanceFactSummaryDTO> facts;
+        if (adjust.getReceivedApplyId() != null && payload != null
+            && payload.getDetailTargets() != null && !payload.getDetailTargets().isEmpty()) {
+            // 驳回后调整：详情只展示原审批单范围内的明细，避免带出同合同同期其他审批单的行
+            Set<Long> targetIds = payload.getDetailTargets().stream()
+                .filter(t -> t != null && t.getFactId() != null)
+                .map(AdjustDetailTargetBo::getFactId)
+                .collect(Collectors.toSet());
+            facts = targetIds.isEmpty() ? List.of() : performanceQueryPort.findActiveByFacts(targetIds);
+        } else {
+            facts = performanceQueryPort.findActiveByBizKey(
+                adjust.getPeriod(), adjust.getOrderNo(), adjust.getContractNo(), FACT_TYPE_REAL);
+        }
         boolean targetsMode = payload != null && (
             (payload.getDetailTargets() != null && !payload.getDetailTargets().isEmpty())
                 || !payload.effectiveMembers().isEmpty());
@@ -985,11 +1137,26 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             throw new ServiceException("实收调整缺少目标金额：adjustId={}", adjust.getId());
         }
         ReceivedRealFactPort port = receivedRealPort();
-        List<PerformanceFactSummaryDTO> facts = performanceQueryPort.findActiveByBizKey(
-            adjust.getPeriod(), adjust.getOrderNo(), adjust.getContractNo(), FACT_TYPE_REAL);
-        if (facts == null || facts.isEmpty()) {
-            throw new ServiceException("执行失败：合同该期间已无有效实收明细，请撤回该调整单后重新发起：adjustId={}",
-                adjust.getId());
+        List<PerformanceFactSummaryDTO> facts;
+        if (adjust.getReceivedApplyId() != null) {
+            // 驳回后调整：执行范围严格限定在快照指定行，避免改动同合同同期其他审批单的实收
+            Set<Long> targetIds = payload.getDetailTargets() == null ? Set.of()
+                : payload.getDetailTargets().stream()
+                    .filter(t -> t != null && t.getFactId() != null)
+                    .map(AdjustDetailTargetBo::getFactId)
+                    .collect(Collectors.toSet());
+            facts = targetIds.isEmpty() ? List.of() : performanceQueryPort.findActiveByFacts(targetIds);
+            if (facts == null || facts.size() < targetIds.size()) {
+                throw new ServiceException("执行失败：原单实收明细已被其他调整变更，"
+                    + "请撤回原实收单后重新发起：adjustId={}", adjust.getId());
+            }
+        } else {
+            facts = performanceQueryPort.findActiveByBizKey(
+                adjust.getPeriod(), adjust.getOrderNo(), adjust.getContractNo(), FACT_TYPE_REAL);
+            if (facts == null || facts.isEmpty()) {
+                throw new ServiceException("执行失败：合同该期间已无有效实收明细，请撤回该调整单后重新发起：adjustId={}",
+                    adjust.getId());
+            }
         }
         Map<Long, PerformanceFactSummaryDTO> factById = facts.stream()
             .collect(Collectors.toMap(PerformanceFactSummaryDTO::getFactId, f -> f, (a, b) -> a));
@@ -1100,7 +1267,7 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
         Long count = receivedAdjustMapper.selectCount(new LambdaQueryWrapper<ReceivedAdjust>()
             .eq(ReceivedAdjust::getContractNo, contractNo)
             .eq(ReceivedAdjust::getPeriod, period)
-            .in(ReceivedAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED));
+            .in(ReceivedAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.PENDING_APPLY, AdjustStatus.APPROVED));
         return count != null && count > 0;
     }
 

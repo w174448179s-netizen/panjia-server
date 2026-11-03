@@ -92,6 +92,15 @@ public interface IReceivedApplyService {
     ReceivedApply reviseAndResubmit(Long id, com.panjia.received.domain.bo.ReceivedReviseBo bo);
 
     /**
+     * 驳回调整弹窗装载明细（按原始明细行，不合并同人同角色同月的多笔实收）。
+     * <p>范围与 reviseAndResubmit 的可编辑范围一致：本单已绑定明细 + 同合同同期未绑定历史明细。</p>
+     *
+     * @param id 审批单 ID
+     * @return 原始实收明细行
+     */
+    List<ReceivedFactDetailVo> listReviseDetails(Long id);
+
+    /**
      * 作废审批单（仅 SUBMITTED；同步终止流程）。
      *
      * @param id 审批单 ID
@@ -164,6 +173,12 @@ public interface IReceivedApplyService {
     Long getInstanceId(Long id);
 
     /**
+     * 查询挂靠在本单上的待生效实收调整单详情（驳回后调整场景）。
+     * <p>无待生效调整时返回 null；供审批人在 received 域权限下查看调整内容。</p>
+     */
+    com.panjia.performance.domain.vo.AdjustDetailVo getPendingAdjustDetail(Long id);
+
+    /**
      * 认领当前节点待办：当前用户拥有节点所需角色但不在 flow_user 授权快照时
      * （如任务创建后才补赋财务角色的总监），将自己追加为待办审批人。
      *
@@ -173,6 +188,11 @@ public interface IReceivedApplyService {
 
     /** 实收审批单明细视图 */
     record ReceivedApplyDetail(ReceivedApply apply,
-                               List<com.panjia.performance.domain.vo.ReceivedFactDetailVo> facts) {
+                               List<com.panjia.performance.domain.vo.ReceivedFactDetailVo> facts,
+                               Long pendingAdjustId) {
+        public ReceivedApplyDetail(ReceivedApply apply,
+                                   List<com.panjia.performance.domain.vo.ReceivedFactDetailVo> facts) {
+            this(apply, facts, null);
+        }
     }
 }

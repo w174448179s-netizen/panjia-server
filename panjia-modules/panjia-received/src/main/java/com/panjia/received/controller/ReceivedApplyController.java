@@ -91,6 +91,13 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(receivedApplyService.getDetail(id));
     }
 
+    /** 驳回后调整：查询挂靠在本单上的待生效调整单详情（审批人查看调整内容用） */
+    @SaCheckPermission("perf:received:query")
+    @GetMapping("/{id}/pending-adjust")
+    public R<com.panjia.performance.domain.vo.AdjustDetailVo> pendingAdjust(@PathVariable Long id) {
+        return R.ok(receivedApplyService.getPendingAdjustDetail(id));
+    }
+
     /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
     @SaCheckPermission("perf:received:query")
     @GetMapping("/{id}/instance")
@@ -118,6 +125,13 @@ public class ReceivedApplyController extends BaseController {
     public R<Void> resubmit(@PathVariable Long id) {
         receivedApplyService.resubmit(id);
         return R.ok();
+    }
+
+    /** 驳回调整弹窗装载明细（原始行，不做同人同角色同月合并） */
+    @SaCheckPermission("perf:received:submit")
+    @GetMapping("/{id}/revise-details")
+    public R<List<ReceivedFactDetailVo>> reviseDetails(@PathVariable Long id) {
+        return R.ok(receivedApplyService.listReviseDetails(id));
     }
 
     /** 驳回后调整实收明细并重新提交审批（仅 REJECTED） */

@@ -73,6 +73,16 @@ public interface PeopleQueryPort {
     Map<Long, Map<String, String>> getSnapshotsAt(Collection<Long> employeeIds, LocalDate pointInMonth);
 
     /**
+     * 批量取多个员工指定月份的归属部门（DEPT 事实时间轴，按归属月切片）。
+     * <p>用于实收导入等按业务月份回填部门：员工调店后补录历史月份时仍能落到当时所属门店。
+     *
+     * @param employeeIds  员工 ID 集合
+     * @param pointInMonth 归属月份内任意一天（取该月月末切片）
+     * @return employeeId → deptId；无 DEPT 事实的 ID 不在结果中
+     */
+    Map<Long, Long> findDeptIdsAt(Collection<Long> employeeIds, LocalDate pointInMonth);
+
+    /**
      * 取单个员工指定月份的<b>强类型</b>算薪事实快照（§10.6 {@link EmployeeSnapshot}）。
      * <p>
      * 与 {@link #getSnapshotAt(Long, LocalDate)} 的 String Map 同源，身份字段取自员工主数据

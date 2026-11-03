@@ -57,7 +57,7 @@ public interface ReceivedAdjustMapper extends BaseMapperPlus<ReceivedAdjust, Rec
     }
 
     /**
-     * 按业务键集合批量查询审批中的实收调整单（SUBMITTED/APPROVED）。
+     * 按业务键集合批量查询审批中的实收调整单（SUBMITTED/PENDING_APPLY/APPROVED）。
      * <p>
      * 供实收合同列表「调整审批中」标记与目标金额预演，投影结构与
      * {@code PerformanceAdjustMapper.doSelectPendingByBizKeys} 对齐
@@ -80,7 +80,7 @@ public interface ReceivedAdjustMapper extends BaseMapperPlus<ReceivedAdjust, Rec
                original_amount AS "originalAmount",
                payload_json AS "payloadJson"
         FROM pj_perf_received_adjust
-        WHERE status IN ('SUBMITTED', 'APPROVED')
+        WHERE status IN ('SUBMITTED', 'PENDING_APPLY', 'APPROVED')
           <if test="period != null and period != ''">AND period = #{period}</if>
           AND (contract_no IN
         <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>

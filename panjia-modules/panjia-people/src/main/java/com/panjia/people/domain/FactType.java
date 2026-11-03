@@ -18,6 +18,9 @@ public enum FactType {
     /** 员工状态（ACTIVE/PARTTIME/LEFT/PENDING） */
     STATUS("状态"),
 
+    /** 归属部门 ID（值为 dept_id；按归属月记录调店时间轴，收支报表按月份取当时部门） */
+    DEPT("归属部门"),
+
     /** 是否缴社保 */
     SOCIAL("社保"),
 

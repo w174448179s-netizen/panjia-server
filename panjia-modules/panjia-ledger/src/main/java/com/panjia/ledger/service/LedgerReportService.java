@@ -75,11 +75,11 @@ public class LedgerReportService {
         }
         for (LedgerSubject subject : subjects) {
             if (LedgerSubjectService.DATA_SOURCE_RECEIVED.equals(subject.getDataSource())) {
-                for (DeptAmountDTO row : entryMapper.sumReceivedByDept(period)) {
+                for (DeptAmountDTO row : entryMapper.sumReceivedByDept(period, periodStart)) {
                     addAmount(amounts, subject, row.getDeptId(), row.getAmount());
                 }
             } else if (LedgerSubjectService.DATA_SOURCE_PAYROLL.equals(subject.getDataSource())) {
-                for (DeptAmountDTO row : entryMapper.sumPayrollGrossByDept(period)) {
+                for (DeptAmountDTO row : entryMapper.sumPayrollGrossByDept(period, periodStart)) {
                     addAmount(amounts, subject, row.getDeptId(), row.getAmount());
                 }
             }

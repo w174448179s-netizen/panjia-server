@@ -2672,11 +2672,19 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             @Param("bizType") String bizType);
 
     /**
-     * 业绩排行分页：按员工聚合新签业绩（PERF_EXPECT ACTIVE），金额降序。
+     * 业绩排行分页：按员工聚合「导入的新签原始业绩」，金额降序。
      * <p>
+     * 口径（2026-11-03）：排行榜只看导入的新签业绩（source=IMPORT），不计人为业绩调整：
+     * <ul>
+     *   <li>导入事实正常计入（导入负金额同样计入，不做正负过滤）；</li>
+     *   <li>人为调整生成的 ACTIVE 事实（adjust_id 非空、或 source=MANUAL 的补录/冲正/新增角色人）不计；</li>
+     *   <li>同期间被调整覆盖的原导入事实（REVERSED/SUPERSEDE）按调整前的原始金额计入，
+     *       保证排行榜展示签约时的原始业绩而非调整后金额；</li>
+     *   <li>导入批次撤销/重归一化/整批替换产生的 REVERSED 行不计，避免重复或失效数据入榜。</li>
+     * </ul>
      * quarter 仅 periodType=QUARTER 时生效，过滤单季；month 仅 periodType=MONTH 时生效，过滤单月；
      * periodType 仅供 service 层校验，SQL 本身按年份（+可选季度/月份）聚合，
-     * 与维度无关（行 = 员工，金额 = 该期间新签合计）。
+     * 与维度无关（行 = 员工，金额 = 该期间新签原始业绩合计）。
      *
      * @param year     年份 YYYY（必填）
      * @param quarter  季度 1-4（可选）
@@ -2688,37 +2696,67 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      */
     @Select("""
         <script>
-        SELECT f.employee_id AS "employeeId",
+        WITH adjusted_chains AS (
+            -- 被人为调整覆盖的链（同 source_key+period 存在 adjust_id 非空的 ACTIVE 调整事实）
+            SELECT DISTINCT a.source_key, a.period
+            FROM pj_perf_fact a
+            WHERE a.fact_type = 'PERF_EXPECT'
+              AND a.fact_status = 'ACTIVE'
+              AND a.adjust_id IS NOT NULL
+              AND a.period LIKE #{year}::text || '-%'
+        ),
+        origin AS (
+            SELECT f.employee_id,
+                   f.dept_id,
+                   f.biz_type,
+                   f.order_no,
+                   f.contract_no,
+                   f.performance_amount,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY f.employee_id, f.source_key, f.period
+                       ORDER BY CASE WHEN f.fact_status = 'ACTIVE' THEN 0 ELSE 1 END, f.id
+                   ) AS rn
+            FROM pj_perf_fact f
+            LEFT JOIN adjusted_chains ac ON ac.source_key = f.source_key AND ac.period = f.period
+            WHERE f.fact_type = 'PERF_EXPECT'
+              AND f.source = 'IMPORT'
+              AND f.adjust_id IS NULL
+              AND f.period LIKE #{year}::text || '-%'
+              <if test="quarter != null">
+                AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
+              </if>
+              <if test="month != null">
+                AND CAST(SUBSTRING(f.period, 6, 2) AS INT) = #{month}
+              </if>
+              <if test="deptId != null">
+                AND (f.dept_id = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
+                                AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
+              <if test="bizType != null and bizType != ''">
+                AND f.biz_type = #{bizType}
+              </if>
+              <if test="employeeId != null">
+                AND f.employee_id = #{employeeId}
+              </if>
+              AND (
+                  f.fact_status = 'ACTIVE'
+                  OR (f.fact_status = 'REVERSED' AND f.reversed_reason = 'SUPERSEDE'
+                      AND ac.source_key IS NOT NULL)
+              )
+        )
+        SELECT o.employee_id AS "employeeId",
                e.employee_name AS "employeeName",
                e.employee_code AS "employeeCode",
                d.dept_name AS "deptName",
-               f.dept_id AS "deptId",
-               COUNT(DISTINCT CASE WHEN f.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(f.order_no,''), NULLIF(f.contract_no,'')) ELSE COALESCE(NULLIF(f.contract_no,''), NULLIF(f.order_no,'')) END) AS "contractCount",
-               COALESCE(SUM(f.performance_amount), 0) AS "totalAmount"
-        FROM pj_perf_fact f
-        LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
-        LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = 'PERF_EXPECT'
-          AND f.period LIKE #{year}::text || '-%'
-          <if test="quarter != null">
-            AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
-          </if>
-          <if test="month != null">
-            AND CAST(SUBSTRING(f.period, 6, 2) AS INT) = #{month}
-          </if>
-          <if test="deptId != null">
-            AND (f.dept_id = #{deptId}
-                 OR EXISTS (SELECT 1 FROM sys_dept sd WHERE sd.dept_id = f.dept_id
-                            AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
-          </if>
-          <if test="bizType != null and bizType != ''">
-            AND f.biz_type = #{bizType}
-          </if>
-          <if test="employeeId != null">
-            AND f.employee_id = #{employeeId}
-          </if>
-        GROUP BY f.employee_id, e.employee_name, e.employee_code, d.dept_name, f.dept_id
+               o.dept_id AS "deptId",
+               COUNT(DISTINCT CASE WHEN o.biz_type IN ('一手房','房产金融','家装荐客') THEN COALESCE(NULLIF(o.order_no,''), NULLIF(o.contract_no,'')) ELSE COALESCE(NULLIF(o.contract_no,''), NULLIF(o.order_no,'')) END) AS "contractCount",
+               COALESCE(SUM(o.performance_amount), 0) AS "totalAmount"
+        FROM origin o
+        LEFT JOIN pj_people_employee e ON e.employee_id = o.employee_id
+        LEFT JOIN sys_dept d ON d.dept_id = o.dept_id
+        WHERE o.rn = 1
+        GROUP BY o.employee_id, e.employee_name, e.employee_code, d.dept_name, o.dept_id
         ORDER BY "totalAmount" DESC
         LIMIT #{pageSize} OFFSET #{offset}
         </script>
@@ -2736,14 +2774,24 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
     /**
      * 业绩排行行数（分页 total，按员工去重）。
      * <p>
-     * 条件口径与 {@link #selectRankPage} 完全一致。
+     * 条件口径与 {@link #selectRankPage} 完全一致（仅统计导入的新签原始业绩）。
      */
     @Select("""
         <script>
+        WITH adjusted_chains AS (
+            SELECT DISTINCT a.source_key, a.period
+            FROM pj_perf_fact a
+            WHERE a.fact_type = 'PERF_EXPECT'
+              AND a.fact_status = 'ACTIVE'
+              AND a.adjust_id IS NOT NULL
+              AND a.period LIKE #{year}::text || '-%'
+        )
         SELECT COUNT(DISTINCT f.employee_id)
         FROM pj_perf_fact f
-        WHERE f.fact_status = 'ACTIVE'
-          AND f.fact_type = 'PERF_EXPECT'
+        LEFT JOIN adjusted_chains ac ON ac.source_key = f.source_key AND ac.period = f.period
+        WHERE f.fact_type = 'PERF_EXPECT'
+          AND f.source = 'IMPORT'
+          AND f.adjust_id IS NULL
           AND f.period LIKE #{year}::text || '-%'
           <if test="quarter != null">
             AND (CAST(SUBSTRING(f.period, 6, 2) AS INT) - 1) / 3 + 1 = #{quarter}
@@ -2762,6 +2810,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
           <if test="employeeId != null">
             AND f.employee_id = #{employeeId}
           </if>
+          AND (
+              f.fact_status = 'ACTIVE'
+              OR (f.fact_status = 'REVERSED' AND f.reversed_reason = 'SUPERSEDE'
+                  AND ac.source_key IS NOT NULL)
+          )
         </script>
         """)
     long countRank(

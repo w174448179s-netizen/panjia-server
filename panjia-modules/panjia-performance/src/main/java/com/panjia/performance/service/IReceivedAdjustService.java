@@ -7,6 +7,7 @@ import com.panjia.performance.domain.vo.AdjustDetailVo;
 import org.dromara.common.core.domain.PageResult;
 import org.dromara.common.mybatis.core.page.PageQuery;
 
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -34,6 +35,39 @@ public interface IReceivedAdjustService {
      * @return 已落库的调整单（ID 供前端跳转）
      */
     ReceivedAdjust create(ReceivedAdjustCreateBo dto, Long applicantId);
+
+    /**
+     * 驳回后调整：以原实收审批单的明细范围为快照创建调整单，状态置 PENDING_APPLY，
+     * 不单独发起审批流程，待原单审批通过时由 {@link #autoApproveAndExecuteByApply} 自动审批并执行。
+     *
+     * @param dto         调整入参（合同/期间/类型/指定行/新角色人）
+     * @param applyId     被驳回的实收审批单 ID
+     * @param scopeFactIds 原单可调整的实收明细 ID 集合
+     * @param applicantId 申请人
+     * @return 待原单审批的调整单
+     */
+    ReceivedAdjust createPendingForApply(ReceivedAdjustCreateBo dto, Long applyId,
+                                         Collection<Long> scopeFactIds, Long applicantId);
+
+    /**
+     * 原实收单审批通过时：自动审批并执行挂靠在该单上的待处理调整单（须在结佣事件发布前调用）。
+     */
+    void autoApproveAndExecuteByApply(Long applyId, Long approverId);
+
+    /**
+     * 查询挂靠某实收审批单的待生效调整单（PENDING_APPLY）；无则返回 null。
+     */
+    ReceivedAdjust findPendingByApply(Long applyId);
+
+    /**
+     * 原实收单被驳回时：同步将挂靠的待处理调整单置 REJECTED，便于下次重新调整。
+     */
+    void rejectPendingByApply(Long applyId, Long approverId, String message);
+
+    /**
+     * 原实收单作废/终止时：同步将挂靠的待处理调整单置 CANCELLED。
+     */
+    void cancelPendingByApply(Long applyId);
 
     /**
      * 查询实收调整单完整详情（含合同信息 + 受影响实收明细与分摊预演）。

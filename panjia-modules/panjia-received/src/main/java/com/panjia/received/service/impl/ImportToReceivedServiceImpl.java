@@ -113,6 +113,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
                 }
             }
             Map<String, EmployeeMainDataDTO> empMap = peopleQueryPort.findEmployeeMainDataByCodes(pageCodes);
+            applyDeptAtPeriod(empMap, period);
 
             // 页级批量预查「已手工退单」业务键（2026-10-25 互斥）：手工退单执行时已镜像生成
             // 负实收明细，此时再写入贝壳导入的负到账行即重复冲减，这些行必须跳过
@@ -255,6 +256,7 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         }
         Map<String, EmployeeMainDataDTO> empMap = codes.isEmpty()
             ? Map.of() : peopleQueryPort.findEmployeeMainDataByCodes(codes);
+        applyDeptAtPeriod(empMap, period);
 
         // === 阶段 2：按 订单号（缺失退合同号）分组 ===
         Map<String, List<NormalizedRecordDTO>> groups = new LinkedHashMap<>();
@@ -940,8 +942,32 @@ public class ImportToReceivedServiceImpl implements ImportToReceivedPort {
         return d;
     }
 
-    // ==================== KE_RECEIVED 新签-实收人员对齐补行（2026-10-29） ====================
+    /**
+     * 按归属月回填员工部门：员工调店后补录历史月份时，取当时所属门店而非当前门店。
+     * <p>DEPT 事实缺失时保留主数据当前部门（兼容未配置调店历史的员工）。
+     */
+    private void applyDeptAtPeriod(Map<String, EmployeeMainDataDTO> empMap, String period) {
+        if (empMap == null || empMap.isEmpty()) {
+            return;
+        }
+        Set<Long> ids = new HashSet<>();
+        for (EmployeeMainDataDTO emp : empMap.values()) {
+            if (emp.getEmployeeId() != null) ids.add(emp.getEmployeeId());
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        Map<Long, Long> deptAtPeriod = peopleQueryPort.findDeptIdsAt(
+            ids, java.time.YearMonth.parse(period).atEndOfMonth());
+        for (EmployeeMainDataDTO emp : empMap.values()) {
+            Long deptId = deptAtPeriod.get(emp.getEmployeeId());
+            if (deptId != null) {
+                emp.setDeptId(deptId);
+            }
+        }
+    }
 
+    // ==================== KE_RECEIVED 新签-实收人员对齐补行（2026-10-29） ====================
     /**
      * 新签-实收人员对齐补行（实现见 {@link com.panjia.received.support.ReceivedSupplementSupport}）。
      * <p>与新签到达补建单链路共用同一实现，先导实收、后导新签时由实收审批侧再次调用。

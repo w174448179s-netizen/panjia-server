@@ -5,7 +5,7 @@ import lombok.Data;
 import java.math.BigDecimal;
 
 /**
- * 业绩排行行（按员工聚合的新签业绩金额降序）。
+ * 业绩排行行（按员工聚合的导入新签原始业绩金额降序）。
  */
 @Data
 public class PerformanceRankVo {
