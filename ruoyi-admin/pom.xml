@@ -154,6 +154,11 @@
             <groupId>com.panjia</groupId>
             <artifactId>panjia-payroll</artifactId>
         </dependency>
+        <!-- 部门收支域（收支科目配置/部门收支录入/部门收支分析报表） -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-ledger</artifactId>
+        </dependency>
         <!-- 备份容灾域（数据库备份/还原/下载，系统管理 → 备份恢复） -->
         <dependency>
             <groupId>com.panjia</groupId>

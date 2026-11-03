@@ -23,7 +23,8 @@
 | `V18xxxx`           | **im-dingtalk 域**    | `panjia-modules/panjia-im-dingtalk` | `V180001`-`V180003` | 钉钉同步（考勤 / 积分 / 人员映射）: IM 账号映射 |
 | `V19xxxx`           | **系统横切（admin）**     | `ruoyi-admin`                       | `V199999`           | 跨域收尾脚本（总监全量授权等；rules 域未建，段位暂由 admin 占用） |
 | `V20xxxx`           | **系统横切（admin）**     | `ruoyi-admin`                       | `V200000`-`V200011` | 菜单调整 / 配置清理 / 授权补丁                    |
-| `V21xxxx`-`V29xxxx` | 预留扩展                 | TBD                                 | — | 第 2 代盘家业务域（9 个域位备用）                   |
+| `V21xxxx`           | **ledger 域（部门收支）**  | `panjia-modules/panjia-ledger`      | `V210001` | 收支科目 / 部门收支录入 / 部门收支分析报表 |
+| `V22xxxx`-`V29xxxx` | 预留扩展                 | TBD                                 | — | 第 2 代盘家业务域（8 个域位备用）                   |
 | `V30xxxx`-`V69xxxx` | 长期预留                 | TBD                                 | — | 第 3/4 代业务（40 个域位）                      |
 | `V70xxxx`-`V89xxxx` | 系统 / 横切域             | TBD                                 | — | license / backup / monitor / log 等基础设施 |
 | `V90xxxx`-`V99xxxx` | auth / cross-cutting | TBD                                 | — | 鉴权 / 跨切关注点                             |
