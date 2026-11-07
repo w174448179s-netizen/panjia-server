@@ -2145,7 +2145,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 2. 新角色人清单（可空）：金额>0、占比不为负、清单内判重、不得已在合同既有事实中
+        // 2. 新角色人清单（可空）：金额非空且不为 0（允许负数=负业绩分摊）、占比不为负、清单内判重、不得已在合同既有事实中
         List<AddMemberItemBo> requestMembers = new ArrayList<>();
         if (dto.getNewMembers() != null) {
             for (AddMemberItemBo item : dto.getNewMembers()) {
@@ -2160,8 +2160,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .collect(Collectors.toSet());
         Set<Long> requestEmpIds = new HashSet<>();
         for (AddMemberItemBo m : requestMembers) {
-            if (m.getAmount() == null || m.getAmount().signum() <= 0) {
-                throw new ServiceException("新角色人业绩金额缺失或不大于 0：employeeId={}", m.getEmployeeId());
+            if (m.getAmount() == null || m.getAmount().signum() == 0) {
+                throw new ServiceException("新角色人业绩金额缺失或为 0：employeeId={}", m.getEmployeeId());
             }
             if (m.getShareRatio() != null && m.getShareRatio().signum() < 0) {
                 throw new ServiceException("新角色人业绩比例不能为负：employeeId={}", m.getEmployeeId());
@@ -2932,7 +2932,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         BigDecimal newAmount = members.stream()
             .map(m -> m.getAmount() == null ? BigDecimal.ZERO : MoneyUtil.round2(m.getAmount()))
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        if (newAmount.signum() <= 0) {
+        if (newAmount.signum() == 0) {
             throw new ServiceException("增加角色人调整缺少新角色人业绩金额：adjustId={}", adjust.getId());
         }
         // 主单 targetAmount 即发起时新人金额合计；不一致说明数据异常，以快照合计为准并告警
@@ -2950,12 +2950,14 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         BigDecimal total = facts.stream()
             .map(f -> f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
-        // 总额不变场景新人金额不得超过合同合计（否则既有行必出现负数）；
-        // 混合金额调整（payload.afterTotal ≠ 执行时合计）时不受此限，完整性由指定值执行分支按快照校验
+        // 总额不变场景新人金额不得超过合同合计（否则既有行必出现反号金额）；
+        // 负数合同（负新签）按绝对值比较；混合金额调整（payload.afterTotal ≠ 执行时合计）时不受此限，
+        // 完整性由指定值执行分支按快照校验
         boolean totalChanged = payload != null && payload.getAfterTotal() != null
             && MoneyUtil.round2(payload.getAfterTotal()).compareTo(MoneyUtil.round2(total)) != 0;
-        if (!totalChanged && newAmount.compareTo(total) > 0) {
-            throw new ServiceException("新角色人业绩金额合计超过合同当前业绩合计，会导致负数：adjustId={}, newAmount={}, total={}",
+        if (!totalChanged && newAmount.abs().compareTo(total.abs()) > 0) {
+            throw new ServiceException("新角色人业绩金额合计绝对值超过合同当前业绩合计绝对值，会导致既有行金额反向："
+                    + "adjustId={}, newAmount={}, total={}",
                 adjust.getId(), newAmount, total);
         }
         // 每个新人都不能已在合同当前事实中，快照内也不允许重复
