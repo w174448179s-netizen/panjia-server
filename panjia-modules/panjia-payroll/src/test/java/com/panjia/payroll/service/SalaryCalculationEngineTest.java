@@ -27,13 +27,18 @@ class SalaryCalculationEngineTest {
     private final SalaryCalculationEngine engine = new SalaryCalculationEngine();
 
     private RuleService.ParsedSnapshot buildSnapshot() {
+        return buildSnapshot("0.02");
+    }
+
+    /** 店长 S1 的金额比例可指定，用于验证不同新签月配置比例变化 */
+    private RuleService.ParsedSnapshot buildSnapshot(String s1AmountRatio) {
         String json = """
         {
           "rank": {
             "A2": {"baseSalary":"0","baseRate":"0.60","minSalary":"0","ruleContent":{"mentorBonusMode":"RATE_ADD","mentorBonusRateAdd":"0.02","mentorBonusRateCap":"0.10"}},
             "A0": {"baseSalary":"4500","baseRate":"0.55","minSalary":"4500","ruleContent":{}},
             "A9": {"baseSalary":"0","baseRate":"0.60","minSalary":"0","ruleContent":{"mentorBonusMode":"AMOUNT_RATIO","mentorBonusAmountRatio":"0.03"}},
-            "S1": {"baseSalary":"0","baseRate":"0.30","minSalary":"8000","teamRate":"0.10","personalRate":"0.70","ruleContent":{"mentorBonusMode":"AMOUNT_RATIO","mentorBonusAmountRatio":"0.02"}},
+            "S1": {"baseSalary":"0","baseRate":"0.30","minSalary":"8000","teamRate":"0.10","personalRate":"0.70","ruleContent":{"mentorBonusMode":"AMOUNT_RATIO","mentorBonusAmountRatio":"%s"}},
             "D":  {"baseSalary":"6000","baseRate":"0.30","minSalary":"0","ruleContent":{"brackets":[{"min":0,"rate":0.06},{"min":100000,"rate":0.07}],"mentorBonusMode":"AMOUNT_RATIO","mentorBonusAmountRatio":"0.02"}}
           },
           "policy": {
@@ -48,7 +53,7 @@ class SalaryCalculationEngineTest {
           },
           "conversion": {"一手房":0.9024,"DEFAULT":0.96}
         }
-        """;
+        """.formatted(s1AmountRatio);
         RuleService svc = new RuleService(null, null, null, null, null, new tools.jackson.databind.ObjectMapper());
         return svc.parseSnapshot(json);
     }
@@ -711,9 +716,9 @@ class SalaryCalculationEngineTest {
         assertEquals(2, calcProcess.split("\"mentorAdd\":0.02", -1).length - 1);
     }
 
-    /** 伯乐奖励按结佣月口径：基数 = 千里马本算薪月折算后结佣业绩合计，比例取本算薪月规则 */
+    /** 伯乐奖励按新签导入月逐期计算：每期取该期折算业绩与该期配置比例，累加且不封顶 */
     @Test
-    void testMentorBonusUsesPayrollMonthCommissionPerf() {
+    void testMentorBonusByNewSignPeriod() {
         EmployeeSnapshot mgr = emp("M030", "S1", "店长");
         EmployeeSnapshot apprentice = emp("A2004", "A2", "经纪人");
         apprentice.setMentorId(mgr.getEmployeeId());
@@ -741,12 +746,20 @@ class SalaryCalculationEngineTest {
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = Map.of(mgr.getEmployeeId(), 1);
         input.factPeriodMap = Map.of(11L, "2026-07", 12L, "2026-08");
-        input.mentorRelationMap = Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId());
+        input.periodMentorRelationMap = Map.of(
+            "2026-07", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()),
+            "2026-08", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()));
 
         PayrollDetail mgrDetail = engine.calculate(input).stream()
             .filter(x -> x.getEmployeeId().equals(mgr.getEmployeeId())).findFirst().orElseThrow();
-        // 基数=本算薪月千里马折算后结佣业绩合计 96000×2=192000，×2% = 3840
+        // 7月：96000×2%=1920；8月：96000×2%=1920，合计 3840
         assertEquals(0, new BigDecimal("3840.00").compareTo(mgrDetail.getMentorBonus()));
+        String bonusProcess = mgrDetail.getMentorBonusCalcProcess();
+        assertNotNull(bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-07\""), bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-08\""), bonusProcess);
+        assertEquals(2, bonusProcess.split("\"base\":96000.00", -1).length - 1);
+        assertEquals(2, bonusProcess.split("\"bonus\":1920.00", -1).length - 1);
     }
 
     /** 全部职级切换金额比例：经纪人（非店长/总监）同样按千里马结佣业绩×配置比例发放 */
@@ -777,17 +790,18 @@ class SalaryCalculationEngineTest {
         input.scoreFacts = Map.of(agentMentor.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = Map.of(agentMentor.getEmployeeId(), 1);
         input.factPeriodMap = Map.of(12L, "2026-08");
-        input.mentorRelationMap = Map.of(apprentice.getEmployeeId(), agentMentor.getEmployeeId());
+        input.periodMentorRelationMap = Map.of(
+            "2026-08", Map.of(apprentice.getEmployeeId(), agentMentor.getEmployeeId()));
 
         PayrollDetail agentDetail = engine.calculate(input).stream()
             .filter(x -> x.getEmployeeId().equals(agentMentor.getEmployeeId())).findFirst().orElseThrow();
-        // 基数=千里马本算薪月折算后结佣业绩 100000×0.96 = 96000，×3% = 2880；RATE_ADD 关闭，加点为空
+        // 8月新签：100000×0.96 = 96000，×3% = 2880；RATE_ADD 关闭，加点为空
         assertEquals(0, new BigDecimal("2880.00").compareTo(agentDetail.getMentorBonus()));
         assertEquals(null, agentDetail.getMentorAdd());
-        // 溯源 JSON 落地结佣月/基数/比例/金额（前端直接展示，不再反推比例）
+        // 溯源 JSON 落地新签月/该期基数/该期比例/该期金额（前端直接展示，不再反推比例）
         String bonusProcess = agentDetail.getMentorBonusCalcProcess();
         assertNotNull(bonusProcess);
-        assertTrue(bonusProcess.contains("\"month\":\"2026-09\""), bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-08\""), bonusProcess);
         assertTrue(bonusProcess.contains("\"base\":96000.00"), bonusProcess);
         assertTrue(bonusProcess.contains("\"ratio\":0.03"), bonusProcess);
         assertTrue(bonusProcess.contains("\"bonus\":2880.00"), bonusProcess);
@@ -823,15 +837,18 @@ class SalaryCalculationEngineTest {
         input.scoreFacts = Map.of(dir.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = Map.of(dir.getEmployeeId(), 1);
         input.factPeriodMap = Map.of(21L, "2026-07", 22L, "2026-08");
-        input.mentorRelationMap = Map.of(apprentice.getEmployeeId(), dir.getEmployeeId());
+        input.periodMentorRelationMap = Map.of(
+            "2026-07", Map.of(apprentice.getEmployeeId(), dir.getEmployeeId()),
+            "2026-08", Map.of(apprentice.getEmployeeId(), dir.getEmployeeId()));
 
         PayrollDetail dirDetail = engine.calculate(input).stream()
             .filter(x -> x.getEmployeeId().equals(dir.getEmployeeId())).findFirst().orElseThrow();
-        // 基数=本算薪月千里马折算后结佣业绩合计 96000×2=192000，×2% = 3840
+        // 7月 96000×2% + 8月 96000×2% = 3840
         assertEquals(0, new BigDecimal("3840.00").compareTo(dirDetail.getMentorBonus()));
         String bonusProcess = dirDetail.getMentorBonusCalcProcess();
         assertNotNull(bonusProcess);
-        assertTrue(bonusProcess.contains("\"base\":192000.00"), bonusProcess);
+        // 逐期落库：两期各 96000.00，而非合并成一个 192000.00
+        assertEquals(2, bonusProcess.split("\"base\":96000.00", -1).length - 1);
         assertTrue(bonusProcess.contains("\"ratio\":0.02"), bonusProcess);
     }
 
@@ -863,7 +880,8 @@ class SalaryCalculationEngineTest {
         input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
         input.qualifiedApprenticeCount = Map.of(mgr.getEmployeeId(), 1);
         input.factPeriodMap = new HashMap<>();
-        input.mentorRelationMap = Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId());
+        input.periodMentorRelationMap = Map.of(
+            "2026-09", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()));
 
         PayrollDetail mgrDetail = engine.calculate(input).stream()
             .filter(x -> x.getEmployeeId().equals(mgr.getEmployeeId())).findFirst().orElseThrow();
@@ -903,10 +921,106 @@ class SalaryCalculationEngineTest {
         input.qualifiedApprenticeCount = Map.of(mgr.getEmployeeId(), 1);
         input.factPeriodMap = new HashMap<>();
         // 算薪月无有效伯乐关系：即使千里马当月有结佣，伯乐也不发放金额比例奖励
-        input.mentorRelationMap = Map.of();
+        input.periodMentorRelationMap = Map.of("2026-09", Map.of());
 
         PayrollDetail mgrDetail = engine.calculate(input).stream()
             .filter(x -> x.getEmployeeId().equals(mgr.getEmployeeId())).findFirst().orElseThrow();
         assertEquals(0, BigDecimal.ZERO.compareTo(mgrDetail.getMentorBonus()));
+    }
+
+    /** 7月与8月配置比例不同：各期按各自比例计算，不能用算薪月比例反向套用历史新签业绩 */
+    @Test
+    void testAmountRatioBonusByPeriodRatio() {
+        EmployeeSnapshot mgr = emp("M033", "S1", "店长");
+        EmployeeSnapshot apprentice = emp("A2009", "A2", "经纪人");
+        CommissionItemDTO julyItem = item(apprentice.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND");
+        julyItem.setPerformanceFactId(31L);
+        CommissionItemDTO augustItem = item(apprentice.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND");
+        augustItem.setPerformanceFactId(32L);
+
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-09";
+        input.employees = List.of(mgr, apprentice);
+        input.lockedByEmp = Map.of(
+            mgr.getEmployeeId(), List.of(),
+            apprentice.getEmployeeId(), List.of(julyItem, augustItem));
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
+        // 算薪月 4% 不参与历史期间计算
+        input.snapshot = buildSnapshot("0.04");
+        input.periodSnapshots = Map.of(
+            "2026-07", buildSnapshot("0.02"),
+            "2026-08", buildSnapshot("0.03"));
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1, apprentice.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = Map.of(mgr.getEmployeeId(), 1);
+        input.factPeriodMap = Map.of(31L, "2026-07", 32L, "2026-08");
+        input.periodMentorRelationMap = Map.of(
+            "2026-07", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()),
+            "2026-08", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()));
+
+        PayrollDetail mgrDetail = engine.calculate(input).stream()
+            .filter(x -> x.getEmployeeId().equals(mgr.getEmployeeId())).findFirst().orElseThrow();
+        // 7月：96000×2%=1920；8月：96000×3%=2880，合计 4800（不是 96000×2×4%）
+        assertEquals(0, new BigDecimal("4800.00").compareTo(mgrDetail.getMentorBonus()));
+        String bonusProcess = mgrDetail.getMentorBonusCalcProcess();
+        assertNotNull(bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-07\""), bonusProcess);
+        assertTrue(bonusProcess.contains("\"ratio\":0.02"), bonusProcess);
+        assertTrue(bonusProcess.contains("\"bonus\":1920.00"), bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-08\""), bonusProcess);
+        assertTrue(bonusProcess.contains("\"ratio\":0.03"), bonusProcess);
+        assertTrue(bonusProcess.contains("\"bonus\":2880.00"), bonusProcess);
+    }
+
+    /** 金额比例按模式生效月：7月伯乐职级为 RATE_ADD 不加金额，8月为 AMOUNT_RATIO 才按比例发放 */
+    @Test
+    void testAmountRatioOnlyWhenPeriodModeIsAmountRatio() {
+        EmployeeSnapshot mgr = emp("M034", "S1", "店长");
+        EmployeeSnapshot apprentice = emp("A2010", "A2", "经纪人");
+        CommissionItemDTO julyItem = item(apprentice.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND");
+        julyItem.setPerformanceFactId(41L);
+        CommissionItemDTO augustItem = item(apprentice.getEmployeeId(), new BigDecimal("100000"), "SECOND_HAND");
+        augustItem.setPerformanceFactId(42L);
+
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-09";
+        input.employees = List.of(mgr, apprentice);
+        input.lockedByEmp = Map.of(
+            mgr.getEmployeeId(), List.of(),
+            apprentice.getEmployeeId(), List.of(julyItem, augustItem));
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
+        input.snapshot = buildSnapshot();
+        // 7月伯乐还是 A2（RATE_ADD 模式）；8月为 S1（AMOUNT_RATIO 2%）
+        input.periodLevelMap = Map.of("2026-07", Map.of(mgr.getEmployeeId(), "A2"));
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(mgr.getEmployeeId(), 1, apprentice.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(mgr.getEmployeeId(), factsA(), apprentice.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = Map.of(mgr.getEmployeeId(), 1);
+        input.factPeriodMap = Map.of(41L, "2026-07", 42L, "2026-08");
+        input.periodMentorRelationMap = Map.of(
+            "2026-07", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()),
+            "2026-08", Map.of(apprentice.getEmployeeId(), mgr.getEmployeeId()));
+
+        PayrollDetail mgrDetail = engine.calculate(input).stream()
+            .filter(x -> x.getEmployeeId().equals(mgr.getEmployeeId())).findFirst().orElseThrow();
+        // 7月 RATE_ADD 期间不发金额奖励，仅 8月 96000×2%=1920
+        assertEquals(0, new BigDecimal("1920.00").compareTo(mgrDetail.getMentorBonus()));
+        String bonusProcess = mgrDetail.getMentorBonusCalcProcess();
+        assertNotNull(bonusProcess);
+        assertTrue(bonusProcess.contains("\"month\":\"2026-08\""), bonusProcess);
+        assertTrue(!bonusProcess.contains("\"month\":\"2026-07\""), bonusProcess);
     }
 }

@@ -31,9 +31,6 @@ import java.util.Map;
 @Component
 public class SalaryCalculationEngine {
 
-    /** 招聘加点上限 +10% */
-    private static final BigDecimal MENTOR_CAP = new BigDecimal("0.10");
-
     /** 自购单加成上限：finalRate + bonus 不超过 100%（提点为比率，超过 100% 无业务意义） */
     private static final BigDecimal MAX_SELF_PURCHASE_RATE = BigDecimal.ONE;
 
@@ -77,9 +74,9 @@ public class SalaryCalculationEngine {
         public Map<String, Map<Long, String>> periodLevelMap = Map.of();
         /** 新签导入月 → 员工ID → 该月历史绩效事实（结佣按新签月积分派生等级；该月无数据按 0 分处理） */
         public Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = Map.of();
-        /** 新签导入月 → 伯乐员工ID → 当月生效千里马数（招聘加点按新签月伯乐切片；未命中回退算薪月） */
+        /** 新签导入月 → 伯乐员工ID → 当月生效千里马数（招聘加点按新签月伯乐切片；切片缺失按 0） */
         public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
-        /** 新签导入月 → 千里马员工ID → 该月伯乐员工ID（伯乐奖励仅统计千里马入职当月起至离职当月的结佣） */
+        /** 新签导入月 → 千里马员工ID → 该月伯乐员工ID（两种伯乐模式均按新签月关系切片；缺失期间按 0） */
         public Map<String, Map<Long, Long>> periodMentorRelationMap = Map.of();
         /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（按新签月口径；该月无调整=不叠加） */
         public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
@@ -120,8 +117,6 @@ public class SalaryCalculationEngine {
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格千里马数（伯乐奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
-        /** 算薪月有效伯乐关系：千里马员工ID → 伯乐员工ID（入职当月生效、离职次月失效） */
-        public Map<Long, Long> mentorRelationMap = Map.of();
         /** employeeId -> 总监管辖门店 deptId 列表（含自身及子孙，总监多门店按门店分别跳点算提成） */
         public Map<Long, List<Long>> directorStoreDepts;
         /** deptId -> 部门展示名（总监门店提成明细 deptName 用） */
@@ -134,6 +129,8 @@ public class SalaryCalculationEngine {
     public List<PayrollDetail> calculate(CalcInput input) {
         List<PayrollDetail> details = new ArrayList<>();
         RuleService.ParsedSnapshot snap = input.snapshot;
+        // 新签导入月 → 员工ID → 该期间折算后结佣业绩（伯乐 AMOUNT_RATIO 按期间口径取数）
+        Map<String, Map<Long, BigDecimal>> perfByEmpPeriod = new HashMap<>();
 
         for (EmployeeSnapshot emp : input.employees) {
             PayrollDetail d = new PayrollDetail();
@@ -315,6 +312,8 @@ public class SalaryCalculationEngine {
                     commissionIncome = commissionIncome.add(periodIncome);
                     // 收集分笔过程：month=新签导入月（无回溯时=算薪月）
                     String basePeriod = (rulePeriod == null || rulePeriod.isEmpty()) ? input.period : rulePeriod;
+                    perfByEmpPeriod.computeIfAbsent(basePeriod, k -> new HashMap<>())
+                        .merge(emp.getEmployeeId(), periodPerf, BigDecimal::add);
                     Map<String, Object> step = new java.util.LinkedHashMap<>();
                     step.put("month", basePeriod);
                     step.put("perf", periodPerf);
@@ -862,29 +861,55 @@ public class SalaryCalculationEngine {
             details.add(d);
         }
 
-        // 伯乐奖励（AMOUNT_RATIO，不限角色）：结佣月口径，全部明细算完后汇总。
-        // 基数 = 千里马本算薪月的折算后结佣业绩（即明细里的 commissionPerformance），
-        // 比例 = 伯乐本算薪月职级规则配置的比例；与历史职级、新签导入月、提点/扣减均无关。
-        Map<Long, BigDecimal> perfByEmp = new HashMap<>();
-        for (PayrollDetail d : details) {
-            BigDecimal perf = MoneyUtil.nvl(d.getCommissionPerformance());
-            if (perf.signum() != 0) {
-                perfByEmp.put(d.getEmployeeId(), perf);
-            }
-        }
-        Map<Long, BigDecimal> mentorBonusBaseByEmp = new HashMap<>();
-        for (Map.Entry<Long, Long> rel : input.mentorRelationMap.entrySet()) {
-            BigDecimal perf = perfByEmp.get(rel.getKey());
-            if (perf == null || perf.signum() == 0) {
+        // 伯乐奖励（AMOUNT_RATIO，不限角色）：按千里马新签导入月逐期计算，全部明细算完后汇总。
+        // 逐期规则：取该期千里马→伯乐关系、该期伯乐的职级与规则快照；
+        // 仅该期规则为 AMOUNT_RATIO 时，按「该期折算后结佣业绩 × 该期配置比例」计入，不封顶。
+        Map<Long, Map<String, BigDecimal>> mentorBaseByPeriod = new HashMap<>();
+        for (Map.Entry<String, Map<Long, Long>> periodRel : input.periodMentorRelationMap.entrySet()) {
+            String period = periodRel.getKey();
+            Map<Long, BigDecimal> perfByEmp = perfByEmpPeriod.get(period);
+            if (perfByEmp == null || perfByEmp.isEmpty()) {
                 continue;
             }
-            mentorBonusBaseByEmp.merge(rel.getValue(), perf, BigDecimal::add);
+            for (Map.Entry<Long, Long> rel : periodRel.getValue().entrySet()) {
+                BigDecimal perf = perfByEmp.get(rel.getKey());
+                if (perf == null || perf.signum() == 0) {
+                    continue;
+                }
+                mentorBaseByPeriod.computeIfAbsent(rel.getValue(), k -> new java.util.LinkedHashMap<>())
+                    .merge(period, perf, BigDecimal::add);
+            }
         }
         Map<Long, EmployeeSnapshot> empById = new HashMap<>();
         input.employees.forEach(e -> empById.put(e.getEmployeeId(), e));
+        // 伯乐不在本次算薪名单：基数已算出但没有明细行可落，奖励会静默丢失，至少告警便于事后排查/补发
+        java.util.Set<Long> detailEmpIds = new java.util.HashSet<>();
+        details.forEach(x -> detailEmpIds.add(x.getEmployeeId()));
+        for (Map.Entry<Long, Map<String, BigDecimal>> e : mentorBaseByPeriod.entrySet()) {
+            if (detailEmpIds.contains(e.getKey())) {
+                continue;
+            }
+            BigDecimal baseTotal = BigDecimal.ZERO;
+            boolean possibleAmountRatio = false;
+            for (Map.Entry<String, BigDecimal> p : e.getValue().entrySet()) {
+                baseTotal = baseTotal.add(p.getValue());
+                String periodLevel = input.periodLevelMap.getOrDefault(p.getKey(), Map.of()).get(e.getKey());
+                RuleService.ParsedSnapshot periodSnap = input.periodSnapshots.getOrDefault(p.getKey(), snap);
+                // 无法判定（伯乐不在名单且无该期职级）时保守告警；明确为 RATE_ADD 的期间不算金额比例
+                if (periodLevel == null || "AMOUNT_RATIO".equals(
+                    periodSnap.rank(periodLevel).path("ruleContent").path("mentorBonusMode").asText())) {
+                    possibleAmountRatio = true;
+                }
+            }
+            if (!possibleAmountRatio || baseTotal.signum() == 0) {
+                continue;
+            }
+            log.warn("[薪酬] 伯乐 {} 不在本次算薪名单，新签月 {} 的金额比例基数合计 {} 无明细可落，伯乐奖励未发放，请确认是否需补发",
+                e.getKey(), e.getValue().keySet(), baseTotal);
+        }
         for (PayrollDetail d : details) {
             BigDecimal mentorBonus = applyMentorBonus(d, input, snap,
-                mentorBonusBaseByEmp.get(d.getEmployeeId()));
+                mentorBaseByPeriod.get(d.getEmployeeId()));
             if (mentorBonus.signum() == 0) {
                 continue;
             }
@@ -947,30 +972,51 @@ public class SalaryCalculationEngine {
     }
 
     /**
-     * 计算并落地伯乐奖励（AMOUNT_RATIO）：结佣月口径，一次计算「千里马当月结佣业绩合计 × 伯乐当月职级规则配置比例」，不封顶。
-     * <p>基数说明：取千里马本算薪月的折算后结佣业绩（算薪里的「结佣业绩」），
+     * 计算并落地伯乐奖励（AMOUNT_RATIO）：按新签导入月逐期计算「该期千里马结佣业绩 × 该期伯乐职级配置比例」，累加且不封顶。
+     * <p>基数说明：取千里马各新签导入月的折算后结佣业绩（算薪里的「结佣业绩」），
      * 与职级提点、绩效扣点、招聘加点、自购加成、人工调整等提点/扣减比例无关。
-     * <p>也不回溯新签导入月、不取伯乐历史职级：比例统一取本算薪月规则快照中该伯乐职级的配置。
+     * <p>期间口径：关系、伯乐职级、规则比例均按新签导入月切片，逐期计算后累加；
+     * 仅该期规则为 AMOUNT_RATIO 时计入，RATE_ADD 期不发金额奖励，避免重复激励。
      *
-     * @param base 伯乐名下千里马本算薪月折算后结佣业绩合计（未命中伯乐关系时为 null）
-     * @return 伯乐奖励金额（未命中 AMOUNT_RATIO 模式时为 0）
+     * @param baseByPeriod 千里马新签导入月 → 该期折算后结佣业绩合计（未命中伯乐关系时为 null）
+     * @return 伯乐奖励金额（各期规则均非 AMOUNT_RATIO 时为 0）
      */
     private BigDecimal applyMentorBonus(PayrollDetail d, CalcInput input, RuleService.ParsedSnapshot snap,
-                                        BigDecimal base) {
+                                        Map<String, BigDecimal> baseByPeriod) {
         BigDecimal mentorBonus = BigDecimal.ZERO;
-        if (base != null && base.signum() != 0) {
-            String level = d.getLevelCode() == null ? "A0" : d.getLevelCode();
-            JsonNode ruleContent = snap.rank(level).path("ruleContent");
-            if ("AMOUNT_RATIO".equals(ruleContent.path("mentorBonusMode").asText())) {
+        if (baseByPeriod != null && !baseByPeriod.isEmpty()) {
+            List<Map.Entry<String, BigDecimal>> periods = new ArrayList<>(baseByPeriod.entrySet());
+            periods.sort(Map.Entry.comparingByKey());
+            List<Map<String, Object>> steps = new ArrayList<>();
+            for (Map.Entry<String, BigDecimal> e : periods) {
+                String period = e.getKey();
+                BigDecimal base = MoneyUtil.round2(e.getValue());
+                if (base.signum() == 0) {
+                    continue;
+                }
+                // 伯乐职级按该新签月切片（缺失回退算薪月职级），规则按该新签月快照（缺失回退算薪月快照）
+                String currentLevel = d.getLevelCode() == null ? "A0" : d.getLevelCode();
+                String periodLevel = input.periodLevelMap.getOrDefault(period, Map.of())
+                    .getOrDefault(d.getEmployeeId(), currentLevel);
+                RuleService.ParsedSnapshot periodSnap = input.periodSnapshots.getOrDefault(period, snap);
+                JsonNode ruleContent = periodSnap.rank(periodLevel).path("ruleContent");
+                // 该期规则不是 AMOUNT_RATIO（如 RATE_ADD 或未配置）→ 该期不发金额奖励，避免与提点加点重复
+                if (!"AMOUNT_RATIO".equals(ruleContent.path("mentorBonusMode").asText())) {
+                    continue;
+                }
                 BigDecimal ratio = bd(ruleContent.path("mentorBonusAmountRatio").asText("0.02"));
-                mentorBonus = MoneyUtil.round2(base.multiply(ratio));
-                // 落地实际取数（结佣月/结佣业绩/规则比例/金额），前端溯源直接展示
+                BigDecimal bonus = MoneyUtil.round2(base.multiply(ratio));
+                mentorBonus = mentorBonus.add(bonus);
+                // 逐期取数：新签月/该期结佣业绩/该期配置比例/该期奖励金额
                 Map<String, Object> step = new java.util.LinkedHashMap<>();
-                step.put("month", input.period);
-                step.put("base", MoneyUtil.round2(base));
+                step.put("month", period);
+                step.put("base", base);
                 step.put("ratio", ratio);
-                step.put("bonus", mentorBonus);
-                d.setMentorBonusCalcProcess(writeMentorBonusJson(List.of(step)));
+                step.put("bonus", bonus);
+                steps.add(step);
+            }
+            if (mentorBonus.signum() != 0) {
+                d.setMentorBonusCalcProcess(writeMentorBonusJson(steps));
             }
         }
         d.setMentorBonus(mentorBonus);
