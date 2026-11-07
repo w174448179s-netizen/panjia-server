@@ -128,6 +128,8 @@ public class PayrollDetail implements Serializable {
     private BigDecimal totalDeduct;
     /** 伯乐加点（RATE_ADD模式：加点费率×达标千里马数封顶，已计入finalRate；AMOUNT_RATIO模式恒0） */
     private BigDecimal mentorAdd;
+    /** 伯乐奖励计算过程 JSON（结佣月口径：[{month,base,ratio,bonus}]，base=千里马当月折算后结佣业绩） */
+    private String mentorBonusCalcProcess;
     /** 提成点调整命中项溯源 JSON（adjustId/type/rate/reason/source） */
     private String rateAdjustJson;
     private Long ruleSnapshotId;

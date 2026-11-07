@@ -374,7 +374,8 @@ public class PayrollBatchService {
                 log.warn("[薪酬] 加载期间人工调整失败：period={}，该期间结佣提成人工调整回退 0", rp, e);
             }
             // 伯乐关系按期间「全员」切片（2026-11 改）：千里马当月即使没有结佣也必须计入，
-            // 否则历史新签月取不到关系时会回退算薪月口径，导致千里马生效前的新签月被错误加上加点
+            // 否则历史新签月取不到关系时会回退算薪月口径，导致千里马生效前的新签月被错误加上加点；
+            // 口径：入职当月生效、离职次月失效
             try {
                 LocalDate refDate = YearMonth.parse(rp).atDay(1);
                 Map<Long, Long> relations = peopleQueryPort.findMentorRelationsAt(refDate);
@@ -618,7 +619,7 @@ public class PayrollBatchService {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
         }
 
-        // 招聘加点千里马数：按算薪月有效伯乐关系全员统计（千里马入职月生效、离职当月即失效）；
+        // 招聘加点千里马数：按算薪月有效伯乐关系全员统计（千里马入职当月生效、离职次月失效）；
         // 历史月切片见 periodApprenticeMap/periodMentorRelationMap
         Map<Long, Long> currentRelations = periodMentorRelationMap.get(period);
         if (currentRelations == null) {

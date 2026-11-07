@@ -616,8 +616,10 @@ public class EmployeeServiceImpl implements EmployeeService {
 
     @Override
     public Map<Long, Long> findMentorRelationsAt(LocalDate pointInMonth) {
+        LocalDate monthStart = pointInMonth.withDayOfMonth(1);
+        LocalDate monthEnd = monthEnd(pointInMonth);
         List<SalaryFact> facts = salaryFactMapper.selectActiveFactsWithEmployedAt(
-            FactType.MENTOR, monthEnd(pointInMonth));
+            FactType.MENTOR, monthEnd, monthStart, monthEnd);
         Map<Long, Long> relations = new java.util.LinkedHashMap<>();
         for (SalaryFact fact : facts) {
             Long mentorId = parseMentorFact(fact.getValue());

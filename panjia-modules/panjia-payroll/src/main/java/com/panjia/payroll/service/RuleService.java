@@ -392,10 +392,6 @@ public class RuleService {
             return root.path("policy");
         }
 
-        public JsonNode employeeOverride(String employeeCode) {
-            return root.path("policy").path("employeeOverride").path(employeeCode);
-        }
-
         /**
          * 门店级政策覆盖（policy.deptOverride[deptId]），如门店社保扣减标准。
          */

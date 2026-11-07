@@ -265,6 +265,22 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
               AND (app.is_first OR rd.period &gt;= app.period)
               AND (app.next_period IS NULL OR rd.period &lt; app.next_period)
             GROUP BY 1, 2, 3, 4, 5
+        ),
+        app_dir AS (
+            -- 本单方向：与结佣列表行一致（按单据合计金额正负）
+            SELECT (COALESCE(total_amount, 0) &lt; 0) AS is_neg
+            FROM pj_commission_application
+            WHERE id = #{applicationId}
+        ),
+        app_received_total AS (
+            -- 本单到账归属窗口内、全部员工的有效实收合计（与结佣列表行同一口径，不依赖员工/角色配对）
+            SELECT SUM(recv_pos_amt) AS pos_amt, SUM(recv_neg_amt) AS neg_amt
+            FROM active_received
+        ),
+        app_original_total AS (
+            -- 同窗口、同有效口径的链原值合计（原值→调整后展示用）
+            SELECT SUM(orig_pos_amt) AS pos_amt, SUM(orig_neg_amt) AS neg_amt
+            FROM original_received
         )
         SELECT ci.id AS "itemId",
                ci.performance_fact_id AS "factId",
@@ -324,8 +340,17 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                     ELSE COALESCE(arc.recv_pos_all, 0) END AS "receivedAmount",
                -- 配对实收行的链原值合计（同口径）：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
                CASE WHEN ci.amount &lt; 0 THEN COALESCE(orc.orig_neg_all, 0)
-                    ELSE COALESCE(orc.orig_pos_all, 0) END AS "originalReceivedAmount"
+                    ELSE COALESCE(orc.orig_pos_all, 0) END AS "originalReceivedAmount",
+               -- 本单实收合计（合同级窗口口径，与结佣列表行一致）：明细行实收仅展示可配对份额，
+               -- 合计不受「实收角色对不上新签/实收人员无新签行」影响，保证不少不重
+               CASE WHEN dir.is_neg THEN COALESCE(aot.neg_amt, 0)
+                    ELSE COALESCE(aot.pos_amt, 0) END AS "contractOriginalReceivedAmount",
+               CASE WHEN dir.is_neg THEN COALESCE(art.neg_amt, 0)
+                    ELSE COALESCE(art.pos_amt, 0) END AS "contractReceivedAmount"
         FROM pj_commission_item ci
+        CROSS JOIN app_dir dir
+        CROSS JOIN app_received_total art
+        CROSS JOIN app_original_total aot
         -- 绑定事实仅用于新签调整链：同链前驱取原值、MANUAL 新人标记
         LEFT JOIN pj_perf_fact f ON f.id = ci.performance_fact_id
         LEFT JOIN active_expect ae ON ci.fact_type = 'PERF_EXPECT'
