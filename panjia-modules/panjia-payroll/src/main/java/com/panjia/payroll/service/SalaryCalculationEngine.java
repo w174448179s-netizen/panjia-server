@@ -534,7 +534,6 @@ public class SalaryCalculationEngine {
                 d.setDeptEmployerSocialTotal(MoneyUtil.round2(sumSocial));
                 d.setDeptDiffAmount(MoneyUtil.round2(sumDiff));
                 d.setStoreRate(BigDecimal.ZERO);
-                d.setFullAttendance(bd(snap.policy().path("fullAttendance").asText("500")));
                 d.setDirectorStoreItems(storeItems.isEmpty() ? null : writeStoreItemsJson(storeItems));
             } else {
                 // 经纪人底薪：从职级规则快照通用读取（A0 实习期、C0/C1 新人保护期等）
@@ -680,14 +679,11 @@ public class SalaryCalculationEngine {
             d.setBonus(MoneyUtil.round2(bonus));
             d.setOtherIncome(MoneyUtil.round2(otherIncome));
 
-            // 应发 = 结佣提成 + 保底补足 + 团队 + 门店 + 底薪 + 伯乐奖励 + 奖金 + 其他收入 + 全勤奖
+            // 应发 = 结佣提成 + 保底补足 + 团队 + 门店 + 底薪 + 伯乐奖励 + 奖金 + 其他收入
             // 注：店长个人新签递延不计入当月应发；经纪人保底场景个人新签提成不单独计入应发
             //（与结佣提成同源同一笔业绩钱，单独计入即重复计薪），仅作为保底比较基准落明细列
-            BigDecimal fullAttendance = d.getFullAttendance() == null
-                ? BigDecimal.ZERO : d.getFullAttendance();
             BigDecimal gross = commissionIncome.add(teamIncome).add(guaranteeFill)
-                .add(storeIncome).add(payableBaseSalary).add(mentorBonus).add(bonus).add(otherIncome)
-                .add(fullAttendance);
+                .add(storeIncome).add(payableBaseSalary).add(mentorBonus).add(bonus).add(otherIncome);
             // 保底触发时，兜底 gross 至少等于「保底线 − 个人新签递延 + 结佣提成」（避免中间 round2 精度丢失导致 gross 偏低）；
             // 个人新签提成递延、不计入当月应发（见上方组装注释），因此托底基线不能直接用 minSalary，
             // 否则会把递延的个人新签提成重复计入当月应发。
@@ -742,21 +738,21 @@ public class SalaryCalculationEngine {
             }
             d.setHousingFund(MoneyUtil.round2(housingFund));
 
-            // 考勤扣款（2026-10 规则，按 policy.attendance 配置驱动）：
-            //   考勤扣款 = 迟到次数 × lateFee
-            //            + 旷工天数 × 旷工日扣款
-            //            + 事假天数 ×（personalLeaveFee + 一天日工资，仅底薪员工扣日工资）
-            //            + 病假（诊所类证明）天数 ×（有底薪 ? sickClinicWithBaseFee : sickClinicNoBaseFee）
-            //            + 病假（二甲医院以上）天数 ×（有底薪 ? sickHospitalWithBaseFee : sickHospitalNoBaseFee）
-            //            + 旧版合计请假差额 × leaveFee（仅有合计、无分项的历史数据兜底）
-            //            + 导入扣款金额（旧扁平模板 receivableAmount，兼容）
-            //   旷工日扣款：有底薪 = 日工资 × absentWithBaseTimes（3 倍）；无底薪 = absentNoBaseFee × 3
-            //   日工资 = 满月底薪 / 当月自然天数（dailyWageFull，与入职折算同口径）
+            // 考勤扣款（2026-11 增补：无底薪且无保底人员回退固定扣款）：
+            //   事假 = 天数 ×（有底薪/保底 ? 缺勤日工资 : personalLeaveFee）
+            //   旷工 = 天数 ×（有底薪/保底 ? 缺勤日工资 × absentWithBaseTimes : absentNoBaseFee × absentWithBaseTimes）
+            //          且旷工扣款不超过当月底薪/保底（有基数时才封顶）
+            //   迟到 = 迟到次数 × lateFee
+            //   病假 = 天数 ×（有底薪 ? 对应档位有底薪标准 : 对应档位无底薪标准）
+            //   旧版合计请假差额 × leaveFee（仅有合计、无分项的历史数据兜底）
+            //   导入扣款金额（旧扁平模板 receivableAmount，兼容）
+            //   缺勤日工资 = 底薪/保底职级固定基数 ÷ 当月自然天数；底薪与保底均为 0 时回退配置的固定扣款
+            //   兼职不参与考勤扣款（兼职不打卡、不考核出勤）
             // DTO 只装事实（AttendanceMetricsDTO），扣款金额由本引擎按 policy.attendance 规则计算。
             BigDecimal attendanceFee = BigDecimal.ZERO;
             AttendanceMetricsDTO att = input.attendanceMetrics == null
                 ? null : input.attendanceMetrics.get(emp.getEmployeeId());
-            if (att != null) {
+            if (att != null && !parttime) {
                 JsonNode cfg = policy.path("attendance");
                 BigDecimal lateFee = bd(cfg.path("lateFee").asText("20"));
                 BigDecimal absentBaseTimes = bd(cfg.path("absentWithBaseTimes").asText("3"));
@@ -775,17 +771,25 @@ public class SalaryCalculationEngine {
                 if (att.getLateCount() != null && lateFee.signum() > 0) {
                     attendanceFee = attendanceFee.add(lateFee.multiply(BigDecimal.valueOf(att.getLateCount())));
                 }
-                // 旷工：缺勤日工资 × 倍数（底薪/保底谁有基数用谁）
+                // 旷工：有底薪/保底按缺勤日工资 × 倍数；无底薪且无保底回退 absentNoBaseFee × 倍数
                 if (att.getAbsentDays() != null && att.getAbsentDays().signum() > 0) {
-                    BigDecimal perDay = dailyWageAbsent.multiply(absentBaseTimes);
-                    attendanceFee = attendanceFee.add(att.getAbsentDays().multiply(perDay));
+                    BigDecimal perDay = dailyWageAbsent.signum() > 0
+                        ? dailyWageAbsent.multiply(absentBaseTimes)
+                        : absentNoBaseFee.multiply(absentBaseTimes);
+                    BigDecimal absentDeduction = att.getAbsentDays().multiply(perDay);
+                    // 旷工扣款不超过当月底薪/保底（有基数才封顶，均为 0 时不封顶）
+                    if (absentBaseSalary.signum() > 0) {
+                        absentDeduction = absentDeduction.min(absentBaseSalary);
+                    }
+                    attendanceFee = attendanceFee.add(absentDeduction);
                 }
                 BigDecimal personalDays = nz(att.getPersonalLeaveDays());
                 BigDecimal sickClinicDays = nz(att.getSickClinicDays());
                 BigDecimal sickHospitalDays = nz(att.getSickHospitalDays());
-                // 事假：缺勤日工资 × 天数（底薪/保底谁有基数用谁）
+                // 事假：有底薪/保底按缺勤日工资 × 天数；无底薪且无保底回退 personalLeaveFee（元/天）
                 if (personalDays.signum() > 0) {
-                    attendanceFee = attendanceFee.add(personalDays.multiply(dailyWageAbsent));
+                    BigDecimal perDay = dailyWageAbsent.signum() > 0 ? dailyWageAbsent : personalLeaveFee;
+                    attendanceFee = attendanceFee.add(personalDays.multiply(perDay));
                 }
                 // 病假（诊所类证明）：有底薪 30/天，无底薪 20/天
                 if (sickClinicDays.signum() > 0) {

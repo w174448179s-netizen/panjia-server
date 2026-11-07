@@ -1,7 +1,6 @@
 package com.panjia.performance.adapter;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.dto.PerformanceContractSummaryDTO;
 import com.panjia.contracts.dto.PerformanceFactSummaryDTO;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
@@ -59,8 +58,6 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     private final PerformanceAdjustMapper adjustMapper;
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
 
-    /** 员工状态：虚拟人（门店公共占位），不参与结佣与算薪 */
-    private static final String STATUS_VIRTUAL = "VIRTUAL";
     /**
      * 实收域端口（PERF_REAL 拆表后唯一读写落地处）。ObjectProvider 惰性取用：
      * 实现 bean 在 panjia-received（performance 不反向依赖 received），运行期由 Spring 装配，
@@ -366,11 +363,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
                 .or().in(PerformanceFact::getContractNo, bizKeys))
             .select(PerformanceFact::getOrderNo, PerformanceFact::getContractNo,
-                PerformanceFact::getEmployeeId, PerformanceFact::getPerformanceAmount);
+                PerformanceFact::getPerformanceAmount);
         java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
         Map<String, BigDecimal> result = new HashMap<>();
-        // 虚拟人（门店公共占位）不参与结佣：剔除其新签业绩后，再累加订单号/合同号键
-        for (PerformanceFact f : excludeVirtualEmployees(factMapper.selectList(wrapper))) {
+        for (PerformanceFact f : factMapper.selectList(wrapper)) {
             BigDecimal amt = f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount();
             // 同一事实同时计入订单号键与合同号键（调用方按输入键取值）
             if (StringUtils.isNotBlank(f.getOrderNo()) && wanted.contains(f.getOrderNo())) {
@@ -396,10 +392,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             .and(w -> w.in(PerformanceFact::getOrderNo, bizKeys)
                 .or().in(PerformanceFact::getContractNo, bizKeys))
             .select(PerformanceFact::getOrderNo, PerformanceFact::getContractNo,
-                PerformanceFact::getEmployeeId, PerformanceFact::getPerformanceAmount);
+                PerformanceFact::getPerformanceAmount);
         java.util.Set<String> wanted = new java.util.HashSet<>(bizKeys);
         Map<String, BigDecimal> result = new HashMap<>();
-        for (PerformanceFact f : excludeVirtualEmployees(factMapper.selectList(wrapper))) {
+        for (PerformanceFact f : factMapper.selectList(wrapper)) {
             BigDecimal amt = f.getPerformanceAmount() == null ? BigDecimal.ZERO : f.getPerformanceAmount();
             if (StringUtils.isNotBlank(f.getOrderNo()) && wanted.contains(f.getOrderNo())) {
                 result.merge(f.getOrderNo(), amt, BigDecimal::add);
@@ -409,34 +405,6 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
             }
         }
         return result;
-    }
-
-    /**
-     * 剔除虚拟人（门店公共占位，status=VIRTUAL）的业绩事实：虚拟人不参与结佣口径与算薪。
-     * 员工主数据缺失时保留事实，避免因跨域数据缺失误删业绩。
-     */
-    private List<PerformanceFact> excludeVirtualEmployees(List<PerformanceFact> facts) {
-        if (facts == null || facts.isEmpty()) {
-            return facts;
-        }
-        Set<Long> employeeIds = new HashSet<>();
-        for (PerformanceFact f : facts) {
-            if (f.getEmployeeId() != null) {
-                employeeIds.add(f.getEmployeeId());
-            }
-        }
-        if (employeeIds.isEmpty()) {
-            return facts;
-        }
-        Map<Long, EmployeeMainDataDTO> employees = employeeMainDataQueryPort.listByIds(employeeIds);
-        List<PerformanceFact> kept = new ArrayList<>(facts.size());
-        for (PerformanceFact f : facts) {
-            EmployeeMainDataDTO employee = f.getEmployeeId() == null ? null : employees.get(f.getEmployeeId());
-            if (employee == null || !STATUS_VIRTUAL.equals(employee.getStatus())) {
-                kept.add(f);
-            }
-        }
-        return kept;
     }
 
     @Override

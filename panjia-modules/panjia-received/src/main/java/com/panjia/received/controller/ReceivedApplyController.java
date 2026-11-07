@@ -176,6 +176,15 @@ public class ReceivedApplyController extends BaseController {
         return R.ok();
     }
 
+    /** 恢复已作废的实收单 */
+    @SaCheckPermission("perf:received:restore")
+    @Log(title = "实收业绩审批恢复", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/restore")
+    public R<Void> restore(@PathVariable Long id) {
+        receivedApplyService.restore(id);
+        return R.ok();
+    }
+
     /**
      * 按合同号批量审批（线程池异步执行，Spring MVC 通过 CompletableFuture 挂起请求等待完成）。
      * <p>逐单办理，去重 + 跳过已审批（非 SUBMITTED 或无待办）。

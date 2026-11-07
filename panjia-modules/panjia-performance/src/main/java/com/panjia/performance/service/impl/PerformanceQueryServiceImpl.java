@@ -259,29 +259,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         return vo;
     }
 
-    /**
-     * 剔除虚拟人员工行（员工状态 VIRTUAL）：员工主数据缺失时保留行，避免因主数据缺失误删明细。
-     */
-    private List<PerformanceManageVo> excludeVirtualEmployeeRows(List<PerformanceManageVo> rows) {
-        if (rows == null || rows.isEmpty()) {
-            return rows;
-        }
-        Set<Long> employeeIds = rows.stream()
-            .map(PerformanceManageVo::getEmployeeId)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toSet());
-        if (employeeIds.isEmpty()) {
-            return rows;
-        }
-        Map<Long, EmployeeMainDataDTO> employees = employeeMainDataQueryPort.listByIds(employeeIds);
-        return rows.stream()
-            .filter(row -> {
-                EmployeeMainDataDTO employee = row.getEmployeeId() == null ? null : employees.get(row.getEmployeeId());
-                return employee == null || !"VIRTUAL".equals(employee.getStatus());
-            })
-            .toList();
-    }
-
     @Override
     public List<PerformanceManageVo> listManageDetailsByContractNos(PerformanceManageContractDetailBo query) {
         String period = query.getPeriod();
@@ -296,10 +273,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         List<PerformanceManageVo> rows = "PERF_REAL".equals(factType)
             ? factMapper.selectReceivedManageListByContractNos(period, contractNos, query.getOnlyEffective())
             : factMapper.selectManageListByContractNos(period, factType, contractNos, query.getOrderNos());
-        // 结佣发起页详情：虚拟人（门店公共占位）不参与结佣，直接剔除其明细行
-        if (Boolean.TRUE.equals(query.getExcludeVirtual())) {
-            rows = excludeVirtualEmployeeRows(rows);
-        }
         fillManageDetailEmployeeAndDept(rows);
         fillManageDetailOriginalAmount(rows, period, factType, contractNos);
         fillManageDetailPendingAdjust(rows, period, factType, contractNos);

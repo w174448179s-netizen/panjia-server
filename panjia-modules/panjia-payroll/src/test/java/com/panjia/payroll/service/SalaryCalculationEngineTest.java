@@ -48,7 +48,7 @@ class SalaryCalculationEngineTest {
           "conversion": {"一手房":0.9024,"DEFAULT":0.96}
         }
         """;
-        RuleService svc = new RuleService(null, null, null, null, new tools.jackson.databind.ObjectMapper());
+        RuleService svc = new RuleService(null, null, null, null, null, new tools.jackson.databind.ObjectMapper());
         return svc.parseSnapshot(json);
     }
 
@@ -375,8 +375,6 @@ class SalaryCalculationEngineTest {
         assertEquals(0, new BigDecimal("1000.00").compareTo(d.getDeptEmployerSocialTotal()));
         // storeRate 固定 0（跳点档位在 directorStoreItems JSON 明细中，不落地到 storeRate）
         assertEquals(0, BigDecimal.ZERO.compareTo(d.getStoreRate()));
-        // 全勤奖兜底 500（policy 未配 fullAttendance 时默认 500）
-        assertEquals(0, new BigDecimal("500.00").compareTo(d.getFullAttendance()));
     }
 
     /** S-18: 总监多门店跳点 — 3 门店各自跳点算提成，汇总 storeIncome，directorStoreItems JSON 含 3 条明细 */
@@ -429,40 +427,15 @@ class SalaryCalculationEngineTest {
         assertTrue(d.getDirectorStoreItems().contains("龙湖店"));
         assertTrue(d.getDirectorStoreItems().contains("云庭店"));
         assertTrue(d.getDirectorStoreItems().contains("长庆店"));
-        // 应发 = 底薪 + 门店提成 + 全勤 = 6000 + 16100 + 500 = 22600
-        assertEquals(0, new BigDecimal("22600.00").compareTo(d.getGross()));
-    }
-
-    /** S-17: 全勤奖默认 500 — policy 未配 fullAttendance 时兜底 500 */
-    @Test
-    void testFullAttendanceDefault500() {
-        EmployeeSnapshot dir = emp("D011", "D", "总监");
-        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
-        input.employees = List.of(dir);
-        input.lockedByEmp = Map.of(dir.getEmployeeId(), new ArrayList<>());
-        input.newsignByEmp = new HashMap<>();
-        input.deptNewSignTotal = Map.of(1L, BigDecimal.ZERO);
-        input.snapshot = buildSnapshot();
-        input.bonusIncome = new HashMap<>();
-        input.otherIncomeMap = new HashMap<>();
-        input.manualDeduct = new HashMap<>();
-        input.negativeBalance = new HashMap<>();
-        input.cumulativeTax = new HashMap<>();
-        input.cumulativeTaxable = new HashMap<>();
-        input.monthsEmployed = Map.of(dir.getEmployeeId(), 1);
-        input.scoreFacts = Map.of(dir.getEmployeeId(), factsA());
-        input.qualifiedApprenticeCount = new HashMap<>();
-
-        PayrollDetail d = engine.calculate(input).get(0);
-        // buildSnapshot policy 无 fullAttendance → 兜底 500
-        assertEquals(0, new BigDecimal("500.00").compareTo(d.getFullAttendance()));
+        // 应发 = 底薪 + 门店提成 = 6000 + 16100 = 22100
+        assertEquals(0, new BigDecimal("22100.00").compareTo(d.getGross()));
     }
 
     /**
-     * S-12（2026-10 规则）: 考勤扣款。归属期 2026-07（31 天），日工资 = 底薪/31。
-     * A2 无底薪：迟到 3×20 + 旷工 2×(50×3) + 事假 1×50 + 病假诊所 1×20 + 病假二甲 1×0 + 导入 10 = 440
+     * S-12（2026-11 规则）: 考勤扣款。归属期 2026-07（31 天），日工资 = 底薪/31；底薪与保底均为 0 时回退固定扣款。
+     * A2 无底薪无保底：迟到 3×20 + 旷工 2×(50×3) + 事假 1×50 + 病假诊所 1×20 + 病假二甲 1×0 + 导入 10 = 440
      * A0 底薪 4500（日工资 4500/31=145.161290）：
-     *   迟到 20 + 旷工 3×145.161290 + 事假 (50+145.161290) + 病假诊所 30 + 病假二甲 20 = 700.65
+     *   迟到 20 + 旷工 3×145.161290 + 事假 145.161290 + 病假诊所 30 + 病假二甲 20 = 650.65
      */
     @Test
     void testAttendanceFeeFromMetrics() {
@@ -507,7 +480,47 @@ class SalaryCalculationEngineTest {
         PayrollDetail d2 = details.stream().filter(x -> x.getEmployeeId().equals(a2.getEmployeeId())).findFirst().orElseThrow();
         PayrollDetail d0 = details.stream().filter(x -> x.getEmployeeId().equals(a0.getEmployeeId())).findFirst().orElseThrow();
         assertEquals(0, new BigDecimal("440.00").compareTo(d2.getAttendanceFee()));
-        assertEquals(0, new BigDecimal("700.65").compareTo(d0.getAttendanceFee()));
+        assertEquals(0, new BigDecimal("650.65").compareTo(d0.getAttendanceFee()));
+    }
+
+    /** 旷工扣款封顶到当月底薪/保底；兼职不参与考勤扣款 */
+    @Test
+    void testAttendanceCapAndPartTime() {
+        EmployeeSnapshot a0 = emp("A0030", "A0", "经纪人"); // 底薪 4500
+        EmployeeSnapshot pt = emp("A0031", "A0", "经纪人");
+        pt.setIsPartTime(true);
+        SalaryCalculationEngine.CalcInput input = new SalaryCalculationEngine.CalcInput();
+        input.period = "2026-07";
+        input.employees = List.of(a0, pt);
+        input.lockedByEmp = Map.of(a0.getEmployeeId(), new ArrayList<>(), pt.getEmployeeId(), new ArrayList<>());
+        input.newsignByEmp = new HashMap<>();
+        input.deptNewSignTotal = new HashMap<>();
+        input.snapshot = buildSnapshot();
+        input.bonusIncome = new HashMap<>();
+        input.otherIncomeMap = new HashMap<>();
+        input.manualDeduct = new HashMap<>();
+        input.negativeBalance = new HashMap<>();
+        input.cumulativeTax = new HashMap<>();
+        input.cumulativeTaxable = new HashMap<>();
+        input.monthsEmployed = Map.of(a0.getEmployeeId(), 1, pt.getEmployeeId(), 1);
+        input.scoreFacts = Map.of(a0.getEmployeeId(), factsA(), pt.getEmployeeId(), factsA());
+        input.qualifiedApprenticeCount = new HashMap<>();
+
+        AttendanceMetricsDTO m0 = new AttendanceMetricsDTO();
+        m0.setAbsentDays(new BigDecimal("20"));
+        AttendanceMetricsDTO mpt = new AttendanceMetricsDTO();
+        mpt.setLateCount(3);
+        mpt.setAbsentDays(new BigDecimal("26"));
+        mpt.setPersonalLeaveDays(BigDecimal.ONE);
+        input.attendanceMetrics = Map.of(a0.getEmployeeId(), m0, pt.getEmployeeId(), mpt);
+
+        List<PayrollDetail> details = engine.calculate(input);
+        PayrollDetail d0 = details.stream().filter(x -> x.getEmployeeId().equals(a0.getEmployeeId())).findFirst().orElseThrow();
+        PayrollDetail dpt = details.stream().filter(x -> x.getEmployeeId().equals(pt.getEmployeeId())).findFirst().orElseThrow();
+        // 旷工 20 × 145.161290 × 3 = 8709.68 > 底薪 4500 → 封顶 4500
+        assertEquals(0, new BigDecimal("4500.00").compareTo(d0.getAttendanceFee()));
+        // 兼职不参与考勤扣款
+        assertEquals(0, BigDecimal.ZERO.compareTo(dpt.getAttendanceFee()));
     }
 
     /** 旧版合计请假兜底：仅有 leaveDays（无三类分项）时按 leaveFee(50)/天扣款，2 天 = 100 */

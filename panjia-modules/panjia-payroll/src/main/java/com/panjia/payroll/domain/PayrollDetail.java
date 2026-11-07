@@ -108,7 +108,7 @@ public class PayrollDetail implements Serializable {
     private BigDecimal storeRate;
     /** 店长保底工资（职级 minSalary，如 8000） */
     private BigDecimal minSalary;
-    /** 总监全勤奖（policy.fullAttendance 默认 500） */
+    /** 总监全勤奖（已停用：2026-11 起引擎不再计算，仅历史归档数据保留该列） */
     private BigDecimal fullAttendance;
     /** 总监各门店提成明细 JSON（deptId/newSign/social/billable/rate/income，导出按门店分行对齐天街工资表） */
     private String directorStoreItems;

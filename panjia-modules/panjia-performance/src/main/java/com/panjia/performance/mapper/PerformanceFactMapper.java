@@ -768,12 +768,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE pe.fact_status = 'ACTIVE'
           AND pe.fact_type = 'PERF_EXPECT'
           <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
-          -- 虚拟人（门店公共占位，status=VIRTUAL）不参与结佣发起
-          AND NOT EXISTS (
-              SELECT 1 FROM pj_people_employee ve
-              WHERE ve.employee_id = pe.employee_id
-                AND ve.status = 'VIRTUAL'
-          )
           AND (pe.order_no IN
               <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
                OR pe.contract_no IN
@@ -812,12 +806,6 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE pe.fact_status = 'ACTIVE'
           AND pe.fact_type = 'PERF_EXPECT'
           <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
-          -- 虚拟人（门店公共占位，status=VIRTUAL）不参与结佣发起
-          AND NOT EXISTS (
-              SELECT 1 FROM pj_people_employee ve
-              WHERE ve.employee_id = pe.employee_id
-                AND ve.status = 'VIRTUAL'
-          )
           AND (pe.order_no IN
               <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
                OR pe.contract_no IN

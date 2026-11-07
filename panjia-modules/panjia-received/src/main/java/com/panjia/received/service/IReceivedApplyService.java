@@ -108,6 +108,14 @@ public interface IReceivedApplyService {
     void cancel(Long id);
 
     /**
+     * 恢复已作废的审批单（仅 CANCELLED；复用原单号，重新绑定未占用的实收明细并重新发起审批）。
+     *
+     * @param id 审批单 ID
+     * @return 审批单
+     */
+    ReceivedApply restore(Long id);
+
+    /**
      * 按合同号批量审批（线程池异步执行，CompletableFuture 让 Spring MVC 挂起请求等待完成）。
      * <p>同步阶段去重合同号 + 捕获操作人信息；异步线程逐单办理当前待办节点。
      * 前端请求超时设 5 分钟，期间显示 loading；完成后返回每张单的处理结果。

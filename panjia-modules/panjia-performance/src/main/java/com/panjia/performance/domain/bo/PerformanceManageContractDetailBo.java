@@ -33,11 +33,4 @@ public class PerformanceManageContractDetailBo {
      * 业绩管理树表 / 调整弹窗需要看到全部 ACTIVE 明细，不传（默认 false）。
      */
     private Boolean onlyEffective;
-
-    /**
-     * 是否剔除虚拟人（门店公共占位，员工状态 VIRTUAL）。
-     * <p>结佣发起页详情弹窗须排除虚拟人明细，传 true；业绩管理树表 / 调整弹窗需要看到全部明细，
-     * 不传（默认 false）。
-     */
-    private Boolean excludeVirtual;
 }

@@ -30,7 +30,6 @@ import com.panjia.contracts.port.ApprovalStartCmd;
 import com.panjia.contracts.port.CommissionPerformanceQueryPort;
 import com.panjia.contracts.port.ConversionFactorPort;
 import com.panjia.contracts.port.MyTaskBrief;
-import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeriodCloseQueryPort;
 import com.panjia.contracts.port.ReceivedApplyPort;
 import lombok.RequiredArgsConstructor;
@@ -121,8 +120,6 @@ public class CommissionApplicationService {
     private final TaskExecutor taskExecutor;
     /** 实收域端口：实收自动审批通过触发结佣自动发起时，回填实收审批单留痕 */
     private final ReceivedApplyPort receivedApplyPort;
-    /** 员工域端口：识别虚拟人（门店公共占位），结佣发起/审批均须排除 */
-    private final PeopleQueryPort peopleQueryPort;
 
     /**
      * 批量发起上下文：承载在批量入口预加载的数据，贯穿 doBatchApply → apply →
@@ -1267,19 +1264,10 @@ public class CommissionApplicationService {
         }
         // 结佣金额口径（2026-10-24 定稿）：全部未结佣新签事实（含负数红冲）一并参与，
         // 与列表「未结佣跨期新签净额」同口径；已结佣事实已在上面剔除，不重复结佣
-        // 虚拟人（门店公共占位）不参与结佣：其新签事实不进明细，避免后续进入算薪名单（2026-11-07）
-        Set<Long> virtualEmployeeIds = new HashSet<>(peopleQueryPort.findVirtualEmployeeIds(
-            expectById.values().stream()
-                .map(PerformanceFactSummaryDTO::getEmployeeId)
-                .filter(Objects::nonNull)
-                .collect(Collectors.toSet())));
         List<PerformanceFactSummaryDTO> result = new ArrayList<>(expectById.size());
         for (PerformanceFactSummaryDTO e : expectById.values()) {
             // 新签事实必有人（导入未匹配即拦截）；空归属行为防御性过滤
             if (e.getEmployeeId() == null) {
-                continue;
-            }
-            if (virtualEmployeeIds.contains(e.getEmployeeId())) {
                 continue;
             }
             if (e.getAmount() == null || e.getAmount().signum() == 0) {

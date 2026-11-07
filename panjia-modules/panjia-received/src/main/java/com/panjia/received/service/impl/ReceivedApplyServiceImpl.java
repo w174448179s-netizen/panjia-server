@@ -2248,6 +2248,75 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         receivedAdjustService.cancelPendingByApply(id);
     }
 
+    // ==================== 恢复 ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReceivedApply restore(Long id) {
+        ReceivedApply apply = getAndCheck(id);
+        if (apply.getStatus() != ReceivedApplyStatus.CANCELLED) {
+            throw new ServiceException("仅已作废的单据可恢复（当前：" + apply.getStatus().getDesc() + "）");
+        }
+        // 同合同/订单同期间只允许存在一张审批中或已通过的单据
+        LambdaQueryWrapper<ReceivedApply> activeWrapper = new LambdaQueryWrapper<ReceivedApply>()
+            .eq(ReceivedApply::getPeriod, apply.getPeriod())
+            .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
+            .ne(ReceivedApply::getId, id);
+        if (StringUtils.isNotBlank(apply.getOrderNo())) {
+            activeWrapper.eq(ReceivedApply::getOrderNo, apply.getOrderNo());
+        } else {
+            activeWrapper.eq(ReceivedApply::getContractNo, apply.getContractNo());
+        }
+        if (applyMapper.selectCount(activeWrapper) > 0) {
+            throw new ServiceException("同合同/订单该期间已存在审批中或已通过的单据，不能恢复");
+        }
+        // 重新绑定作废时解绑的实收明细（仅 ACTIVE 且仍未被其他单据占用）
+        List<com.panjia.received.domain.ReceivedContract> contracts =
+            resolvePendingContracts(apply.getContractNo(), apply.getOrderNo());
+        List<com.panjia.received.domain.ReceivedDetail> rows = contracts.isEmpty() ? List.of()
+            : detailMapper.selectList(new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                .in(com.panjia.received.domain.ReceivedDetail::getContractId,
+                    contracts.stream().map(com.panjia.received.domain.ReceivedContract::getId).toList())
+                .eq(com.panjia.received.domain.ReceivedDetail::getPeriod, apply.getPeriod())
+                .isNull(com.panjia.received.domain.ReceivedDetail::getReceivedApplyId)
+                .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"));
+        if (rows.isEmpty()) {
+            throw new ServiceException("该作废单的实收明细已不存在或已被其他单据占用，无法恢复");
+        }
+        BigDecimal received = rows.stream()
+            .map(r -> nvlAmount(r.getPerformanceAmount()))
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        // 新签事实缺失时不恢复（恢复后会退化为待匹配）；金额为负（退单）属正常业务，只看事实是否存在
+        List<PerformanceFact> expectFacts = expectFactsByBizKey(apply.getPeriod(), apply.getOrderNo(), apply.getContractNo());
+        if (expectFacts.isEmpty()) {
+            throw new ServiceException("该合同/订单当期无新签业绩，无法恢复，请先补录新签业绩");
+        }
+        BigDecimal expected = currentMonthPrioritySum(expectFacts, apply.getPeriod());
+        // 终止作废时可能残留的旧流程实例（幂等，已逻辑删除的实例不影响重新发起）
+        if (StringUtils.isNotBlank(apply.getProcessInstanceId())) {
+            try {
+                approvalPort.cancel(BizType.REAL_CONFIRM, id);
+            } catch (Exception e) {
+                log.warn("[实收审批] 恢复前终止旧流程实例失败，忽略：applyId={}", id, e);
+            }
+            ReceivedApply latest = applyMapper.selectById(id);
+            if (latest != null) {
+                apply = latest;
+            }
+        }
+        apply.setStatus(ReceivedApplyStatus.SUBMITTED);
+        apply.setProcessInstanceId(null);
+        apply.setCurrentNode(null);
+        apply.setReceivedAmount(received);
+        apply.setExpectedAmount(expected);
+        apply.setItemCount(rows.size());
+        bindFacts(rows.stream().map(com.panjia.received.domain.ReceivedDetail::getId).toList(), apply.getId());
+        startWorkflow(apply, apply.getApplicantId(), Set.of());
+        log.info("[实收审批] 作废单恢复：applyId={}, applyNo={}, received={}, expect={}, rows={}",
+            apply.getId(), apply.getApplyNo(), received, expected, rows.size());
+        return apply;
+    }
+
     /**
      * 解绑审批单下所有事实的 receivedApplyId 关联。
      * <p>用于作废场景：让事实恢复自由身，可重新挂载到新的审批单。
