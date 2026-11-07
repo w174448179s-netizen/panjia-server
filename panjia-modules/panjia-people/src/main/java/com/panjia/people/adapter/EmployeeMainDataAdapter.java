@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.dto.EmployeeMainDataDTO;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.people.domain.Employee;
+import com.panjia.people.domain.EmployeeStatus;
 import com.panjia.people.mapper.EmployeeMapper;
 import com.panjia.people.port.DeptPort;
 import lombok.RequiredArgsConstructor;
@@ -133,6 +134,8 @@ public class EmployeeMainDataAdapter implements EmployeeMainDataQueryPort {
             .and(w -> w.like(Employee::getEmployeeName, kw)
                 .or().like(Employee::getEmployeeCode, kw))
             .in(deptIds != null, Employee::getDeptId, deptIds)
+            // 虚拟人（门店公共占位）不可被选择：结佣发起/审批等员工下拉均不出现
+            .ne(Employee::getStatus, EmployeeStatus.VIRTUAL)
             .orderByAsc(Employee::getEmployeeCode)
             .last("LIMIT " + limit));
         if (list.isEmpty()) {

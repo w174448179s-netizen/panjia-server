@@ -259,6 +259,29 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         return vo;
     }
 
+    /**
+     * 剔除虚拟人员工行（员工状态 VIRTUAL）：员工主数据缺失时保留行，避免因主数据缺失误删明细。
+     */
+    private List<PerformanceManageVo> excludeVirtualEmployeeRows(List<PerformanceManageVo> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return rows;
+        }
+        Set<Long> employeeIds = rows.stream()
+            .map(PerformanceManageVo::getEmployeeId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet());
+        if (employeeIds.isEmpty()) {
+            return rows;
+        }
+        Map<Long, EmployeeMainDataDTO> employees = employeeMainDataQueryPort.listByIds(employeeIds);
+        return rows.stream()
+            .filter(row -> {
+                EmployeeMainDataDTO employee = row.getEmployeeId() == null ? null : employees.get(row.getEmployeeId());
+                return employee == null || !"VIRTUAL".equals(employee.getStatus());
+            })
+            .toList();
+    }
+
     @Override
     public List<PerformanceManageVo> listManageDetailsByContractNos(PerformanceManageContractDetailBo query) {
         String period = query.getPeriod();
@@ -271,8 +294,12 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 拆表后 PERF_REAL 物理落在实收域 rd/rc：结佣业绩口径走实收明细表，
         // 其余填充（员工/部门、结佣状态、折算）按 rd.id 与 rc.biz_type 同样适用
         List<PerformanceManageVo> rows = "PERF_REAL".equals(factType)
-            ? factMapper.selectReceivedManageListByContractNos(period, contractNos)
+            ? factMapper.selectReceivedManageListByContractNos(period, contractNos, query.getOnlyEffective())
             : factMapper.selectManageListByContractNos(period, factType, contractNos, query.getOrderNos());
+        // 结佣发起页详情：虚拟人（门店公共占位）不参与结佣，直接剔除其明细行
+        if (Boolean.TRUE.equals(query.getExcludeVirtual())) {
+            rows = excludeVirtualEmployeeRows(rows);
+        }
         fillManageDetailEmployeeAndDept(rows);
         fillManageDetailOriginalAmount(rows, period, factType, contractNos);
         fillManageDetailPendingAdjust(rows, period, factType, contractNos);

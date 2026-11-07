@@ -375,6 +375,8 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
         LEFT JOIN sys_dept gp ON gp.dept_id = p.parent_id
         WHERE ci.application_id = #{applicationId}
           AND ci.status != 'REVERSED'
+          -- 虚拟人（门店公共占位）不参与结佣审批明细
+          AND COALESCE(e.status, '') != 'VIRTUAL'
         ORDER BY e.employee_name, d.dept_id, ci.role_type, ci.id
         </script>
         """)

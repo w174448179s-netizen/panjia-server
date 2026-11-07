@@ -176,6 +176,10 @@ public class PayrollBatchService {
                 empIds.addAll(peopleQueryPort.findEmployeeIdsByCodes(policyCodes).values());
             }
 
+            // 名单剔除：虚拟人（门店公共占位，status=VIRTUAL）不计算工资。
+            // 即使其被结佣明细/手工项关联进名单，也必须在算薪前剔除
+            empIds.removeAll(new HashSet<>(peopleQueryPort.findVirtualEmployeeIds(empIds)));
+
             if (empIds.isEmpty()) {
                 batch.setStatus(BatchStatus.CALCULATED);
                 batch.setEmployeeCount(0);

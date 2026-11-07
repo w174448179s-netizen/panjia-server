@@ -125,4 +125,20 @@ public class CommissionContractVo implements Serializable {
 
     /** 实收金额已被实收调整（链原值 ≠ 当前合计；业绩调整 AMOUNT 总额不变时不置标记） */
     private Boolean receivedAmountAdjusted;
+
+    /**
+     * 实收归属窗口下界（含，YYYY-MM；null=不限）。仅结佣发起页行有值：
+     * 首张同向单承接更早到账时为空，否则=本行最早未结佣期。
+     * 供前端详情弹窗按同一窗口过滤实收明细，保证弹窗与行上实收一致。
+     */
+    private String receivedWindowStart;
+
+    /** 实收归属窗口上界（不含，YYYY-MM；null=不限）。仅结佣发起页行有值：=下一张同向结佣单期间 */
+    private String receivedWindowEnd;
+
+    /** 实收归属方向（POS/NEG）。仅结佣发起页行有值：正/负向行各取同方向实收，正负不抵消 */
+    private String receivedDirection;
+
+    /** 实收归属需排除的期间（补收月，YYYY-MM）。仅结佣发起页行有值，详情按同口径剔除 */
+    private java.util.List<String> receivedExcludePeriods;
 }

@@ -194,4 +194,13 @@ public interface PeopleQueryPort {
      * @return 店组编码 → 虚拟人主数据（employeeId/employeeCode/employeeName）；入参为空返回空 Map
      */
     Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findVirtualEmployeesByStoreGroups(Collection<String> storeGroups);
+
+    /**
+     * 批量筛选出虚拟人员工（门店公共占位，status=VIRTUAL）。
+     * <p>虚拟人不参与结佣发起/审批与工资计算：结佣建单、算薪名单组装时须批量剔除。
+     *
+     * @param employeeIds 待判断员工 ID 集合
+     * @return 其中状态为 VIRTUAL 的员工 ID；入参为空返回空集合
+     */
+    Collection<Long> findVirtualEmployeeIds(Collection<Long> employeeIds);
 }

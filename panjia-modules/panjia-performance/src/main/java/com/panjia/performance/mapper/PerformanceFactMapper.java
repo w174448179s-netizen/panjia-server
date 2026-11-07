@@ -492,9 +492,11 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                FALSE AS "manualAdjust"
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
         LEFT JOIN pj_people_employee e ON e.employee_code = rd.employee_external_code
         WHERE rd.detail_status = 'ACTIVE'
           <if test="period != null and period != ''">AND rd.period = #{period}</if>
+          <if test="onlyEffective">AND (rd.received_apply_id IS NULL OR ra.status = 'APPROVED')</if>
           AND (rc.order_no IN
           <foreach collection="contractNos" item="cn" open="(" separator="," close=")">#{cn}</foreach>
               OR rc.contract_no IN
@@ -504,7 +506,8 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         """)
     List<PerformanceManageVo> selectReceivedManageListByContractNos(
             @Param("period") String period,
-            @Param("contractNos") List<String> contractNos);
+            @Param("contractNos") List<String> contractNos,
+            @Param("onlyEffective") Boolean onlyEffective);
 
     /**
      * 查询指定合同号/订单号下全部 ACTIVE 业绩事实（合同级调整 / 实收建单用）。
@@ -765,6 +768,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE pe.fact_status = 'ACTIVE'
           AND pe.fact_type = 'PERF_EXPECT'
           <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+          -- 虚拟人（门店公共占位，status=VIRTUAL）不参与结佣发起
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_people_employee ve
+              WHERE ve.employee_id = pe.employee_id
+                AND ve.status = 'VIRTUAL'
+          )
           AND (pe.order_no IN
               <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
                OR pe.contract_no IN
@@ -803,6 +812,12 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
         WHERE pe.fact_status = 'ACTIVE'
           AND pe.fact_type = 'PERF_EXPECT'
           <if test="employeeId != null">AND pe.employee_id = #{employeeId}</if>
+          -- 虚拟人（门店公共占位，status=VIRTUAL）不参与结佣发起
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_people_employee ve
+              WHERE ve.employee_id = pe.employee_id
+                AND ve.status = 'VIRTUAL'
+          )
           AND (pe.order_no IN
               <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
                OR pe.contract_no IN

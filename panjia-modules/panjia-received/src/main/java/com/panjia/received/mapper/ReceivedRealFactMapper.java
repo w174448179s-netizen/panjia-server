@@ -461,6 +461,12 @@ public interface ReceivedRealFactMapper {
         WHERE rd.detail_status = 'ACTIVE'
           <if test="period != null and period != ''">AND rd.period = #{period}</if>
           AND COALESCE(rd.employee_id::text, e.employee_id::text, rd.employee_external_code) IS NOT NULL
+          -- 虚拟人（门店公共占位）不参与结佣人数统计
+          AND NOT EXISTS (
+              SELECT 1 FROM pj_people_employee ve
+              WHERE ve.employee_id = COALESCE(rd.employee_id, e.employee_id)
+                AND ve.status = 'VIRTUAL'
+          )
           AND (
             rc.contract_no IN
               <foreach collection="keys" item="bk" open="(" separator="," close=")">#{bk}</foreach>

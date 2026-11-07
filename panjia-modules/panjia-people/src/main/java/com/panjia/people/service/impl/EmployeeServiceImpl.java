@@ -813,6 +813,20 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Collection<Long> findVirtualEmployeeIds(Collection<Long> employeeIds) {
+        if (employeeIds == null || employeeIds.isEmpty()) {
+            return List.of();
+        }
+        return employeeMapper.selectList(new LambdaQueryWrapper<Employee>()
+                .select(Employee::getEmployeeId)
+                .in(Employee::getEmployeeId, employeeIds)
+                .eq(Employee::getStatus, EmployeeStatus.VIRTUAL))
+            .stream()
+            .map(Employee::getEmployeeId)
+            .toList();
+    }
+
+    @Override
     public Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findEmployeeMainDataByCodes(Collection<String> codes) {
         if (codes == null || codes.isEmpty()) {
             return Map.of();

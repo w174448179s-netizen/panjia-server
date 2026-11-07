@@ -16,7 +16,9 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 钉钉日志（积分日报）客户端。
@@ -72,6 +74,10 @@ public class DingTalkScoreClient {
     private List<ScoreLog> fetchTemplate(String templateName, String scoreKey, long start, long end) {
         List<ScoreLog> logs = new ArrayList<>();
         long cursor = 0L;
+        // 钉钉返回的 next_cursor 并非严格单调递增（个别月份会回退），不能按 next<=cursor 判结束，
+        // 否则会提前中断只抓到部分日志；改为记录已用游标，仅在游标重复（死循环）时退出
+        Set<Long> usedCursors = new HashSet<>();
+        usedCursors.add(cursor);
         for (int page = 0; page < MAX_PAGES; page++) {
             JSONObject json = post(templateName, start, end, cursor);
             JSONObject result = json.getJSONObject("result");
@@ -101,7 +107,7 @@ public class DingTalkScoreClient {
             }
             boolean hasMore = Boolean.TRUE.equals(result.getBool("has_more", false));
             Long next = result.getLong("next_cursor");
-            if (!hasMore || next == null || next <= cursor) {
+            if (!hasMore || next == null || !usedCursors.add(next)) {
                 break;
             }
             cursor = next;
