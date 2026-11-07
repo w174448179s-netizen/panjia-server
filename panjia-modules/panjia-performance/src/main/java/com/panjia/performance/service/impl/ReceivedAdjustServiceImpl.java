@@ -426,9 +426,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
         if (MoneyUtil.isZero(deltaTotal)) {
             throw new ServiceException("实收调整额为 0（正数=多收、负数=少收），无需发起调整");
         }
-        if (targetAmt.signum() < 0) {
-            throw new ServiceException("调整后实收合计不能为负：{}", targetAmt);
-        }
 
         // 等比分摊预演
         List<BigDecimal> amounts = facts.stream()
@@ -516,7 +513,7 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             .map(f -> f.getAmount() == null ? BigDecimal.ZERO : f.getAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 1. 明细指定值校验：行须归属本合同本期实收；占比不为负；实收行目标金额不为负
+        // 1. 明细指定值校验：行须归属本合同本期实收；占比不为负；调整后金额允许负数（负实收/红冲）
         List<AdjustDetailTargetBo> validTargets = new ArrayList<>();
         Map<Long, BigDecimal> targetAmountByFact = new HashMap<>();
         BigDecimal coveredSum = BigDecimal.ZERO;
@@ -532,10 +529,6 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             if (t.getShareRatio() != null && t.getShareRatio().signum() < 0) {
                 throw new ServiceException("角色占比不能为负：factId={}", t.getFactId());
             }
-            if (t.getTargetAmount().signum() < 0) {
-                throw new ServiceException("调整后实收金额不能为负：员工={}，金额={}",
-                    fact.getEmployeeName(), MoneyUtil.round2(t.getTargetAmount()));
-            }
             validTargets.add(t);
             coveredIds.add(t.getFactId());
             targetAmountByFact.put(t.getFactId(), MoneyUtil.round2(t.getTargetAmount()));
@@ -546,7 +539,7 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             .map(f -> f.getAmount() == null ? BigDecimal.ZERO : f.getAmount())
             .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 2. 新角色人清单：金额>0、占比不为负、单内判重、不得已在本期实收行中
+        // 2. 新角色人清单：金额非空且不为 0（允许负数=负实收分摊）、占比不为负、单内判重、不得已在本期实收行中
         List<AddMemberItemBo> requestMembers = new ArrayList<>();
         if (dto.getNewMembers() != null) {
             for (AddMemberItemBo item : dto.getNewMembers()) {
@@ -561,8 +554,8 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             .collect(Collectors.toSet());
         Set<Long> requestEmpIds = new HashSet<>();
         for (AddMemberItemBo m : requestMembers) {
-            if (m.getAmount() == null || m.getAmount().signum() <= 0) {
-                throw new ServiceException("新角色人实收金额缺失或不大于 0：employeeId={}", m.getEmployeeId());
+            if (m.getAmount() == null || m.getAmount().signum() == 0) {
+                throw new ServiceException("新角色人实收金额缺失或为 0：employeeId={}", m.getEmployeeId());
             }
             if (m.getShareRatio() != null && m.getShareRatio().signum() < 0) {
                 throw new ServiceException("新角色人角色占比不能为负：employeeId={}", m.getEmployeeId());
