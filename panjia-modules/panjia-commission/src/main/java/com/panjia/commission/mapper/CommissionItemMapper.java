@@ -344,7 +344,26 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                                    ELSE COALESCE(NULLIF(ci.contract_no,''), NULLIF(ci.order_no,'')) END
               AND (a.employee_id = ci.employee_id
                    OR (a.emp_code IS NOT NULL AND a.emp_code = ci.employee_code))
-              AND a.role_type IS NOT DISTINCT FROM ci.role_type
+              -- 角色配对：正常同角色；角色对不上时，若该员工在本合同新签侧只有唯一角色，
+              -- 按人兜底归到该唯一角色行（覆盖新签/实收角色命名不一致，如「合作人」vs「客源成交人」），
+              -- 与业绩查询详情（PerformanceFactMapper）的配对口径一致
+              AND (a.role_type IS NOT DISTINCT FROM ci.role_type
+                   OR (NOT EXISTS (
+                           SELECT 1 FROM pj_perf_fact f3
+                           WHERE f3.fact_type = 'PERF_EXPECT' AND f3.fact_status = 'ACTIVE'
+                             AND (CASE WHEN f3.biz_type IN ('一手房','房产金融','家装荐客')
+                                       THEN COALESCE(NULLIF(f3.order_no,''), NULLIF(f3.contract_no,''))
+                                       ELSE COALESCE(NULLIF(f3.contract_no,''), NULLIF(f3.order_no,'')) END)
+                                 = a.biz_key
+                             AND f3.employee_external_code IS NOT DISTINCT FROM ci.employee_code
+                             AND f3.role_type IS NOT DISTINCT FROM a.role_type)
+                       AND (SELECT count(DISTINCT f4.role_type) FROM pj_perf_fact f4
+                            WHERE f4.fact_type = 'PERF_EXPECT' AND f4.fact_status = 'ACTIVE'
+                              AND (CASE WHEN f4.biz_type IN ('一手房','房产金融','家装荐客')
+                                        THEN COALESCE(NULLIF(f4.order_no,''), NULLIF(f4.contract_no,''))
+                                        ELSE COALESCE(NULLIF(f4.contract_no,''), NULLIF(f4.order_no,'')) END)
+                                  = a.biz_key
+                              AND f4.employee_external_code IS NOT DISTINCT FROM ci.employee_code) = 1))
         ) arc ON TRUE
         LEFT JOIN LATERAL (
             SELECT SUM(o.orig_pos_amt) AS orig_pos_all,
@@ -355,7 +374,24 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                                    ELSE COALESCE(NULLIF(ci.contract_no,''), NULLIF(ci.order_no,'')) END
               AND (o.employee_id = ci.employee_id
                    OR (o.emp_code IS NOT NULL AND o.emp_code = ci.employee_code))
-              AND o.role_type IS NOT DISTINCT FROM ci.role_type
+              -- 同 arc：角色命名不一致时按人兜底（原值口径必须与调整后口径同配对）
+              AND (o.role_type IS NOT DISTINCT FROM ci.role_type
+                   OR (NOT EXISTS (
+                           SELECT 1 FROM pj_perf_fact f3
+                           WHERE f3.fact_type = 'PERF_EXPECT' AND f3.fact_status = 'ACTIVE'
+                             AND (CASE WHEN f3.biz_type IN ('一手房','房产金融','家装荐客')
+                                       THEN COALESCE(NULLIF(f3.order_no,''), NULLIF(f3.contract_no,''))
+                                       ELSE COALESCE(NULLIF(f3.contract_no,''), NULLIF(f3.order_no,'')) END)
+                                 = o.biz_key
+                             AND f3.employee_external_code IS NOT DISTINCT FROM ci.employee_code
+                             AND f3.role_type IS NOT DISTINCT FROM o.role_type)
+                       AND (SELECT count(DISTINCT f4.role_type) FROM pj_perf_fact f4
+                            WHERE f4.fact_type = 'PERF_EXPECT' AND f4.fact_status = 'ACTIVE'
+                              AND (CASE WHEN f4.biz_type IN ('一手房','房产金融','家装荐客')
+                                        THEN COALESCE(NULLIF(f4.order_no,''), NULLIF(f4.contract_no,''))
+                                        ELSE COALESCE(NULLIF(f4.contract_no,''), NULLIF(f4.order_no,'')) END)
+                                  = o.biz_key
+                              AND f4.employee_external_code IS NOT DISTINCT FROM ci.employee_code) = 1))
         ) orc ON TRUE
         LEFT JOIN rd_active_expect rae
                ON ci.fact_type = 'PERF_REAL'

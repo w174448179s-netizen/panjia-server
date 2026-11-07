@@ -615,6 +615,20 @@ public class EmployeeServiceImpl implements EmployeeService {
     }
 
     @Override
+    public Map<Long, Long> findMentorRelationsAt(LocalDate pointInMonth) {
+        List<SalaryFact> facts = salaryFactMapper.selectActiveFactsWithEmployedAt(
+            FactType.MENTOR, monthEnd(pointInMonth));
+        Map<Long, Long> relations = new java.util.LinkedHashMap<>();
+        for (SalaryFact fact : facts) {
+            Long mentorId = parseMentorFact(fact.getValue());
+            if (mentorId != null) {
+                relations.put(fact.getEmployeeId(), mentorId);
+            }
+        }
+        return relations;
+    }
+
+    @Override
     public Map<Long, Long> findStoreAnchors(Collection<Long> deptIds) {
         return deptPort.findStoreAnchors(deptIds);
     }

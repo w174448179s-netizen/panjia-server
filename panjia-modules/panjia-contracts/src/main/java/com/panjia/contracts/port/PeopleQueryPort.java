@@ -136,6 +136,17 @@ public interface PeopleQueryPort {
     Collection<Long> findActiveEmployeeIdsWithLevel(LocalDate pointInMonth);
 
     /**
+     * 取指定月份有效的伯乐关系（MENTOR 事实切片）。
+     * <p>招聘加点与伯乐奖励按「千里马生效月」起算：千里马入职前、离职当月及以后均不计入。
+     * 生效月由 MENTOR 事实生效日决定（入职初始化=入职月，后续变更=变更生效月）；
+     * 离职过滤按员工离职日，离职当月即不再计入。
+     *
+     * @param pointInMonth 算薪月份内任意一天（内部按当月月末切片）
+     * @return 千里马员工 ID → 伯乐员工 ID；无伯乐关系/未入职/已离职当月的不在结果中
+     */
+    Map<Long, Long> findMentorRelationsAt(LocalDate pointInMonth);
+
+    /**
      * 批量解析部门所属的「门店级」锚点部门。
      * <p>组织约定：顶级根（parent_id=0）→ 门店 → 店组。门店自身锚点为自身；
      * 店组锚点为其祖先链上的门店；顶级根无锚点（不在结果中）。

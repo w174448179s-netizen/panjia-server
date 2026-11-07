@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 算薪引擎（纯计算、无副作用）。
@@ -79,6 +80,8 @@ public class SalaryCalculationEngine {
         public Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = Map.of();
         /** 新签导入月 → 伯乐员工ID → 当月生效千里马数（招聘加点按新签月伯乐切片；未命中回退算薪月） */
         public Map<String, Map<Long, Integer>> periodApprenticeMap = Map.of();
+        /** 新签导入月 → 千里马员工ID → 该月伯乐员工ID（伯乐奖励仅统计千里马生效月起的结佣） */
+        public Map<String, Map<Long, Long>> periodMentorRelationMap = Map.of();
         /** 新签导入月 → 员工ID → 该月当时生效的人工调整单（按新签月口径；该月无调整=不叠加） */
         public Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = Map.of();
         /**
@@ -118,6 +121,8 @@ public class SalaryCalculationEngine {
         public Map<Long, List<RateAdjustItem>> manualAdjustItems;
         /** employeeId -> 合格千里马数（伯乐奖励加点用） */
         public Map<Long, Integer> qualifiedApprenticeCount;
+        /** 算薪月有效伯乐关系：千里马员工ID → 伯乐员工ID（入职月生效、离职当月失效） */
+        public Map<Long, Long> mentorRelationMap = Map.of();
         /** employeeId -> 总监管辖门店 deptId 列表（含自身及子孙，总监多门店按门店分别跳点算提成） */
         public Map<Long, List<Long>> directorStoreDepts;
         /** deptId -> 部门展示名（总监门店提成明细 deptName 用） */
@@ -135,14 +140,29 @@ public class SalaryCalculationEngine {
         // applyConversion 为纯函数，可主循环前预算；伯乐归属按算薪月快照 mentorId（伯乐号生效区间当前值）
         Map<Long, BigDecimal> apprenticePerfByMentor = new HashMap<>();
         for (EmployeeSnapshot t : input.employees) {
-            if (t.getMentorId() == null) {
+            Long mentorId = t.getMentorId();
+            if (mentorId == null) {
                 continue;
             }
             List<CommissionItemDTO> tItems = input.lockedByEmp == null ? null : input.lockedByEmp.get(t.getEmployeeId());
             if (tItems == null || tItems.isEmpty()) {
                 continue;
             }
-            apprenticePerfByMentor.merge(t.getMentorId(), applyConversion(tItems, snap), BigDecimal::add);
+            // 只统计「千里马生效月及以后」的结佣：千里马入职前的历史新签月、离职当月及以后
+            // 在该期间取不到有效伯乐关系，均不计入伯乐奖励（关系按新签导入月切片）
+            List<CommissionItemDTO> effectiveItems = new ArrayList<>();
+            for (CommissionItemDTO it : tItems) {
+                String rulePeriod = resolveCommissionRulePeriod(it, input.factPeriodMap);
+                Long relationMentor = input.periodMentorRelationMap.containsKey(rulePeriod)
+                    ? input.periodMentorRelationMap.get(rulePeriod).get(t.getEmployeeId())
+                    : input.mentorRelationMap.get(t.getEmployeeId());
+                if (Objects.equals(relationMentor, mentorId)) {
+                    effectiveItems.add(it);
+                }
+            }
+            if (!effectiveItems.isEmpty()) {
+                apprenticePerfByMentor.merge(mentorId, applyConversion(effectiveItems, snap), BigDecimal::add);
+            }
         }
 
         for (EmployeeSnapshot emp : input.employees) {
@@ -274,11 +294,15 @@ public class SalaryCalculationEngine {
                         .getOrDefault(emp.getEmployeeId(), level);
                     JsonNode periodRank = periodSnap.rank(periodLevel);
 
-                    // 招聘加点：千里马数按新签月伯乐切片（伯乐号生效日期≤该月），未命中回退算薪月；
-                    // 费率/上限取该期间快照
-                    int periodApprenticeCnt = input.periodApprenticeMap
-                        .getOrDefault(rulePeriod, Map.of())
-                        .getOrDefault(emp.getEmployeeId(), apprenticeCnt);
+                    // 招聘加点：千里马数按新签月伯乐切片（伯乐号生效日期≤该月，离职当月失效）；
+                    // 该期间有切片时以切片为准（该月无千里马=0），仅切片整体缺失（构建失败）才回退算薪月
+                    int periodApprenticeCnt;
+                    if (input.periodApprenticeMap.containsKey(rulePeriod)) {
+                        periodApprenticeCnt = input.periodApprenticeMap.get(rulePeriod)
+                            .getOrDefault(emp.getEmployeeId(), 0);
+                    } else {
+                        periodApprenticeCnt = apprenticeCnt;
+                    }
                     BigDecimal periodMentorAdd = calcMentorAdd(periodRank.path("ruleContent"), periodApprenticeCnt);
 
                     // 绩效等级按新签月积分事实派生；阈值/费率取该期间快照。
