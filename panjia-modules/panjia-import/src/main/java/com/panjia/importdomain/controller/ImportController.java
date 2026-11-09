@@ -47,8 +47,23 @@ public class ImportController {
     private final RawDataQueryService rawDataQueryService;
     /** 期间封账卡点（performance 域实现）：新签/实收导入均受同一封账事实源约束 */
     private final com.panjia.contracts.port.PeriodCloseQueryPort periodClosePort;
+    /** 算薪批次跨域查询（payroll 域实现）：工资批次 LOCKED/PAID 即该月已封账 */
+    private final com.panjia.contracts.port.PayrollBatchQueryPort payrollBatchQueryPort;
     /** 考勤导入卡点（people 域实现；模块未装配时为 null，不阻断导入） */
     private final ObjectProvider<com.panjia.contracts.port.PeopleAttendanceRectifyQueryPort> attendanceRectifyPortProvider;
+
+    /**
+     * 期间是否已封账：封账记录为 CLOSED，或该月工资批次已锁定/已发放。
+     * <p>
+     * 工资批次锁定即业务意义上的封账，封账记录是派生副本；两者任一命中即视为封账，
+     * 避免派生记录缺失或延迟时导入漏拦。
+     *
+     * @param period 归属月 YYYY-MM
+     * @return true=已封账
+     */
+    private boolean isPeriodLocked(String period) {
+        return periodClosePort.isClosed(period) || payrollBatchQueryPort.isLocked(period);
+    }
 
     /**
      * 考勤导入前置卡点：当月已有经纪人的有效修改申请（待审批/已通过）时禁止导入。
@@ -89,11 +104,11 @@ public class ImportController {
         if (period == null || period.isBlank()) {
             return R.fail("归属月不能为空，请选择导入归属月后再上传");
         }
-        // 封账卡点：新签/实收写入业绩/实收事实，已封账期间一律拒绝。
-        // 与 performance 侧 PerformanceEngine.buildFromBatch 的口径一致；历史工资为存量补录，豁免。
-        if ((type == ImportSourceType.KE_SIGNED || type == ImportSourceType.KE_RECEIVED)
-            && periodClosePort.isClosed(period)) {
-            return R.fail("归属月 " + period + " 已封账，禁止导入新签/实收；请选择未封账的归属月");
+        // 封账卡点：已封账期间一律禁止导入（新签/实收/积分/考勤/其它都会进入当月算薪口径）。
+        // 业务口径：工资批次 LOCKED 即该月已封账；封账记录表是派生副本，两者任一命中即拦截。
+        // 历史工资（HISTORY_PAYROLL）为存量补录，目标就是早已封账的历史期间，豁免。
+        if (type != ImportSourceType.HISTORY_PAYROLL && isPeriodLocked(period)) {
+            return R.fail("归属月 " + period + " 已封账（工资批次已锁定），禁止导入；如需调整请先反结账/解锁工资批次");
         }
         // 考勤导入卡点：当月已有经纪人的有效修改申请（待审批/已通过）时禁止导入
         if (type == ImportSourceType.ATTENDANCE) {
@@ -271,12 +286,31 @@ public class ImportController {
     }
 
     /**
+     * 封账卡点（按批次归属月）：已封账期间禁止再归档/重归一化，历史工资补录豁免。
+     * <p>
+     * 覆盖「文件在封账前上传、封账后才点归档」的旁路，避免已封账月份被补入数据。
+     */
+    private String periodCloseGateForBatch(Long batchId) {
+        ImportBatch batch = importBatchService.getById(batchId);
+        if (batch == null || batch.getSourceType() == ImportSourceType.HISTORY_PAYROLL) {
+            return null;
+        }
+        if (batch.getPeriod() != null && isPeriodLocked(batch.getPeriod())) {
+            return "归属月 " + batch.getPeriod() + " 已封账（工资批次已锁定），禁止归档/重归一化；如需调整请先反结账/解锁工资批次";
+        }
+        return null;
+    }
+
+    /**
      * 重归一化。
      */
     @SaCheckPermission("import:batch:renormalize")
     @PostMapping("/batches/{id}/renormalize")
     public R<Void> renormalize(@PathVariable Long id) {
-        String gate = attendanceGateForBatch(id);
+        String gate = periodCloseGateForBatch(id);
+        if (gate == null) {
+            gate = attendanceGateForBatch(id);
+        }
         if (gate != null) {
             return R.fail(gate);
         }
@@ -290,7 +324,10 @@ public class ImportController {
     @SaCheckPermission("import:batch:archive")
     @PostMapping("/batches/{id}/archive")
     public R<Void> archive(@PathVariable Long id) {
-        String gate = attendanceGateForBatch(id);
+        String gate = periodCloseGateForBatch(id);
+        if (gate == null) {
+            gate = attendanceGateForBatch(id);
+        }
         if (gate != null) {
             return R.fail(gate);
         }

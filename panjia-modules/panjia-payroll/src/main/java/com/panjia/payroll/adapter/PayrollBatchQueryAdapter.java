@@ -31,4 +31,12 @@ public class PayrollBatchQueryAdapter implements PayrollBatchQueryPort {
                 BatchStatus.APPROVED)));
         return count != null && count > 0;
     }
+
+    @Override
+    public boolean isLocked(String period) {
+        Long count = batchMapper.selectCount(new LambdaQueryWrapper<PayrollBatch>()
+            .eq(PayrollBatch::getPeriod, period)
+            .in(PayrollBatch::getStatus, List.of(BatchStatus.LOCKED, BatchStatus.PAID)));
+        return count != null && count > 0;
+    }
 }
