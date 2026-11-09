@@ -827,9 +827,9 @@ public class SalaryCalculationEngine {
             BigDecimal negativeCarryover = input.negativeBalance.getOrDefault(emp.getEmployeeId(), BigDecimal.ZERO);
             d.setNegativeCarryover(MoneyUtil.round2(negativeCarryover));
 
-            // 积分扣款（积分日报晚提交处罚：晚提交次数 × 罚款单价）——单价优先取默认积分方案
-            // ruleContent.penaltyFee（resolvePerf 装载），缺失回退 policy.points.penaltyFee。
-            BigDecimal pointsFee = resolvePointsFee(snap, perf.lateFeeUnit, scoreFacts);
+            // 积分扣款（积分日报晚提交处罚：晚提交次数 × 罚款单价）——仅积分绩效、店长积分绩效考核：
+            // 两者均取本方案 penaltyFee，不分绩效等级；无绩效、业绩阶梯等其他方案不考核，恒为 0。
+            BigDecimal pointsFee = resolvePointsFee(perf.lateFeeUnit, scoreFacts);
             d.setPointsFee(MoneyUtil.round2(pointsFee));
 
             // 绩效方案金额扣款（业绩阶梯B版/店长积分绩效：未达标扣固定金额，perf.fee 正数=扣款；
@@ -1166,7 +1166,7 @@ public class SalaryCalculationEngine {
                 // 无绩效：不考核，无等级无扣减
             }
             case "RATE_TIER" -> {
-                // 业绩阶梯扣提点：[min,max) 半开区间定档，rate 负=扣点（进费率链）
+                // 业绩阶梯扣提点：[min,max) 半开区间定档，rate 负=扣点（进费率链）；不考核晚提交
                 BigDecimal[] tier = hitTier(rc.path("tiers"), perfBase, "rate");
                 r.rate = tier[2];
                 r.process.put("perf", perfBase == null ? BigDecimal.ZERO : perfBase);
@@ -1175,7 +1175,7 @@ public class SalaryCalculationEngine {
                 r.process.put("deduct", r.rate);
             }
             case "AMOUNT_TIER" -> {
-                // 业绩阶梯扣金额：amount 正=扣款（独立扣款列）
+                // 业绩阶梯扣金额：amount 正=扣款（独立扣款列）；不考核晚提交
                 BigDecimal[] tier = hitTier(rc.path("tiers"), perfBase, "amount");
                 r.fee = tier[2];
                 r.process.put("perf", perfBase == null ? BigDecimal.ZERO : perfBase);
@@ -1187,6 +1187,9 @@ public class SalaryCalculationEngine {
                 // 积分等级扣金额（店长积分绩效）：A=feeA/B=feeB/C=feeC
                 r.grade = resolveGrade(rc, facts);
                 r.fee = bd(rc.path("fee" + r.grade).asText("0"));
+                // 晚提交罚款单价与积分绩效同构（ruleContent.penaltyFee）；A/B/C 均按次数扣
+                JsonNode pf = rc.path("penaltyFee");
+                r.lateFeeUnit = pf.isMissingNode() || pf.isNull() ? null : bd(pf.asText("0"));
                 r.process.put("grade", r.grade);
                 r.process.put("fee", r.fee);
             }
@@ -1308,19 +1311,17 @@ public class SalaryCalculationEngine {
     /**
      * 派生积分扣款（事实 → 金额）。
      * <p>
-     * 扣款 = 晚提交次数 × 罚款单价（保留 2 位）；单价优先取默认积分方案 penaltyFee
-     * （resolvePerf 装载），缺失回退 policy.points（兜底默认 5，与员工域
-     * ScoreGradePolicy.lateFeeOf 一致）；无事实/字段缺失时为 0。
+     * 扣款 = 晚提交次数 × 罚款单价（保留 2 位）。单价由 {@code resolvePerf} 装载：
+     * 积分绩效（GRADE_RATE）取本方案 ruleContent.penaltyFee，未配置则为 0；
+     * 店长积分绩效（GRADE_AMOUNT）取本方案 penaltyFee，不分等级（A/B/C 均扣）；
+     * 无绩效（NONE）、业绩阶梯等其他方案不考核晚提交，恒为 0。
      */
-    private BigDecimal resolvePointsFee(RuleService.ParsedSnapshot snap, BigDecimal lateFeeUnit,
-                                        ScoreFactsDTO facts) {
-        if (facts == null || facts.getLateSubmitCount() == null || facts.getLateSubmitCount() <= 0) {
+    private BigDecimal resolvePointsFee(BigDecimal lateFeeUnit, ScoreFactsDTO facts) {
+        if (lateFeeUnit == null || facts == null
+            || facts.getLateSubmitCount() == null || facts.getLateSubmitCount() <= 0) {
             return BigDecimal.ZERO;
         }
-        BigDecimal penaltyFee = lateFeeUnit != null
-            ? lateFeeUnit
-            : bd(snap.policy().path("points").path("penaltyFee").asText("5"));
-        return penaltyFee.multiply(BigDecimal.valueOf(facts.getLateSubmitCount()))
+        return lateFeeUnit.multiply(BigDecimal.valueOf(facts.getLateSubmitCount()))
             .setScale(2, RoundingMode.HALF_UP);
     }
 

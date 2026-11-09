@@ -47,4 +47,10 @@ public class AdjustDetailVo extends PerformanceAdjust implements Serializable {
 
     /** 调整后目标总金额（= 原合计 + deltaAmount） */
     private java.math.BigDecimal targetAmount;
+
+    /**
+     * 实收联动提示（已执行的新签调整/冲正，且实收只存在于其它期间时给出）：
+     * 联动只落同期间实收行，跨期间实收不会被本单改写，需用「实收调整」另行修正。
+     */
+    private String linkageHint;
 }

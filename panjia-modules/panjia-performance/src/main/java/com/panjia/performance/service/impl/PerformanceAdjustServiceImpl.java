@@ -359,6 +359,9 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 .ifPresent(row -> dto.setDeptName(String.valueOf(row.get("deptName"))));
         }
 
+        // 实收联动提示：联动只落同期间实收行；合同实收只在其它期间时明示「本次未联动」
+        dto.setLinkageHint(buildCrossPeriodLinkageHint(adjust));
+
         String contractNo = adjust.getContractNo();
         String period = adjust.getPeriod();
 
@@ -736,6 +739,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
 
+        // 2.7 回写关联事实ID（2026-11-09）：原先合同级调整单 fact_id 恒为空，
+        //     撤销导入批次时按 fact_id 关联不到调整单。单列只能存代表事实（多事实无法落单列），
+        //     多事实场景由撤销校验按「合同号 + 期间」兜底识别，见 BatchConsumptionQueryAdapter。
+        adjust.setFactId(resolveRepresentativeFactId(dto, adjustType));
+
         adjustMapper.insert(adjust);
 
         // 3. 发起审批流程（bizId=调整单ID），失败则整体回滚
@@ -767,6 +775,43 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         log.info("[调整单] 创建并提交审批成功：adjustId={}, adjustNo={}, type={}, applicantId={}",
             adjust.getId(), adjust.getAdjustNo(), adjustType.getCode(), applicantId);
         return adjust;
+    }
+
+    /**
+     * 解析调整单关联事实ID（回写 pj_perf_adjust.fact_id）。
+     * <p>
+     * 合同级调整可能涉及多条事实，单列只能存代表事实：
+     * 冲正/补录取 offsetItems 中经 normalizeManualOffsetItems 映射过的库内真值（最小 factId）；
+     * 纯新增补录不改写既有事实，返回 null；其余类型回退该合同在调整期间的首条 ACTIVE 事实。
+     * 多事实导致的漏判由 {@code BatchConsumptionQueryAdapter#checkRevocable} 按合同号+期间兜底。
+     */
+    private Long resolveRepresentativeFactId(PerformanceAdjustCreateBo dto, AdjustType adjustType) {
+        if (adjustType == AdjustType.MANUAL_OFFSET) {
+            Long min = null;
+            if (dto.getOffsetItems() != null) {
+                for (ManualOffsetItem item : dto.getOffsetItems()) {
+                    min = minFactId(min, item == null ? null : item.getFactId());
+                }
+            }
+            // 冲正/补录可能纯新增（无可关联事实），此时不写代表事实，避免错误关联到其它月份的批次
+            return min;
+        }
+        if (StringUtils.isBlank(dto.getContractNo()) && StringUtils.isBlank(dto.getOrderNo())) {
+            return null;
+        }
+        // 跨月调整事实在原业绩归属月
+        String loadPeriod = StringUtils.isNotBlank(dto.getOriginalPeriod())
+            ? dto.getOriginalPeriod() : dto.getPeriod();
+        List<PerformanceFact> facts = loadActiveFactsForAdjust(
+            loadPeriod, dto.getFactType(), dto.getOrderNo(), dto.getContractNo());
+        return (facts == null || facts.isEmpty()) ? null : facts.get(0).getId();
+    }
+
+    private Long minFactId(Long current, Long candidate) {
+        if (candidate == null) {
+            return current;
+        }
+        return current == null || candidate < current ? candidate : current;
     }
 
     // ==================== 新签补录（SUPPLEMENT，2026-10-28） ====================
@@ -1725,9 +1770,17 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 门店/组别筛选：含下级组别（与业绩查询/业绩明细的部门子树口径一致）。
         if (query.getDeptId() != null) {
             Long deptId = query.getDeptId();
-            String subtree = "dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))";
+            // 注意：apply 不会自动加括号，内部 OR 必须显式包裹，否则 OR 会把关键字等后续 AND 条件顶掉
+            String subtree = "(dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%')))";
             wrapper.apply(subtree, deptId);
+        }
+        // 关键字：调整单号/合同号/订单号 三字段模糊匹配（与实收调整列表同口径）
+        if (StringUtils.isNotBlank(query.getKeyword())) {
+            String kw = query.getKeyword().trim();
+            wrapper.and(w -> w.like(PerformanceAdjust::getAdjustNo, kw)
+                .or().like(PerformanceAdjust::getContractNo, kw)
+                .or().like(PerformanceAdjust::getOrderNo, kw));
         }
         return wrapper;
     }
@@ -2603,15 +2656,54 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
+     * 「实收只在其它期间」的联动提示（详情页展示用）。
+     * <p>
+     * 联动只落同期间实收行：已执行的新签调整（AMOUNT/DEDUCT/INCREASE/ADD_MEMBER）或业绩冲正，
+     * 若合同存在 ACTIVE 实收行但全部不在调整期间，说明本次未联动任何实收，
+     * 返回提示文案；否则返回 null（无需提示）。
+     */
+    private String buildCrossPeriodLinkageHint(PerformanceAdjust adjust) {
+        if (adjust.getStatus() != AdjustStatus.EXECUTED || StringUtils.isBlank(adjust.getContractNo())) {
+            return null;
+        }
+        // SUPPLEMENT 不联动实收（全新创建事实），无需提示
+        if (adjust.getAdjustType() == AdjustType.SUPPLEMENT) {
+            return null;
+        }
+        ReceivedRealFactPort port = receivedRealPort();
+        if (port == null) {
+            return null;
+        }
+        List<PerformanceFactSummaryDTO> received =
+            port.findActiveByContract(null, adjust.getOrderNo(), adjust.getContractNo());
+        if (received == null || received.isEmpty()) {
+            return null;
+        }
+        boolean samePeriod = received.stream()
+            .anyMatch(r -> adjust.getPeriod() != null && adjust.getPeriod().equals(r.getPeriod()));
+        if (samePeriod) {
+            return null;
+        }
+        String periods = received.stream()
+            .map(PerformanceFactSummaryDTO::getPeriod)
+            .filter(Objects::nonNull)
+            .distinct()
+            .sorted()
+            .collect(Collectors.joining("、"));
+        return "实收在其它期间（" + periods + "），本次调整未联动实收；如需修正实收，请使用「实收调整」。";
+    }
+
+    /**
      * 新签调整实收联动（2026-10-16「按角色行同额联动」；修正「扣减一条角色行、实收却被扣减到多条角色行」）。
      * <p>
      * 联动粒度 = 新签<b>事实行（角色行）</b>：某经纪人某个角色的新签变动 delta，
      * 只落到其实收明细中<b>同员工 + 同角色</b>的行上（同额），
      * 不再按「经纪人」把变动额分摊到其名下全部实收行（原实现按人聚合导致跨角色行扣减）。
      * <ul>
-     *   <li>命中（员工+角色）实收行：按命中行金额占比分摊 delta 后逐行 supersede
-     *       （{@link MoneyUtil#allocateByAmount}，尾差补最大行）；</li>
-     *   <li>未命中同行、但该员工实收侧仍有其它行（角色口径不一致）：退化为按该员工实收行等比分摊（兜底，不新建行）；</li>
+     *   <li>联动范围限定调整单所属期间：只装载/归组同期间实收行，跨期间行不参与分摊；</li>
+     *   <li>命中（员工+角色）实收行：按命中行金额<b>绝对值</b>占比分摊 delta 后逐行 supersede
+     *       （{@link MoneyUtil#allocateByAbsAmount}，尾差补最大行）；</li>
+     *   <li>未命中同行、但该员工同期间实收侧仍有其它行（角色口径不一致）：退化为按该员工同期间实收行分摊（兜底，不新建行）；</li>
      *   <li>该员工实收侧完全无行（尚未到账）：按新签角色行镜像建实收行，金额 = delta（正负均建）；</li>
      *   <li>新增角色人：按（员工+角色）新建实收行，金额 = 该新人新签金额（同额）；</li>
      *   <li>合同整体无 ACTIVE 实收明细：自动建壳建明细，并在末尾直建一张审批通过的实收审批单；</li>
@@ -2632,18 +2724,25 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
         boolean hasAnyReceived = received != null && !received.isEmpty();
-        // 联动前实收合计（镜像单 originalAmount）；联动累计变动额/是否动过行（镜像单 targetAmount 与是否登记判定）
+        // 联动范围限定调整单所属期间：新签变动只落同期间实收行，跨期间行不参与分摊
+        // （曾把全期间实收行按金额占比分摊，负数行权重为负导致符号反转，污染其它期间——
+        //   生产 TGCF2606071055：7月调整把6月实收抬高 25.33）
+        // 联动前同期间实收合计（镜像单 originalAmount）；联动累计变动额/是否动过行
         BigDecimal originalReceivedTotal = BigDecimal.ZERO;
         BigDecimal appliedDelta = BigDecimal.ZERO;
         boolean linkedTouched = false;
-        // 按（员工 + 角色 + 费用项键）归组实收行：角色 trim 归一，空角色统一为空串；
+        // 按（员工 + 角色 + 费用项键）归组同期间实收行：角色 trim 归一，空角色统一为空串；
         // 费用项键二分化（贷款服务费 / 非贷款服务费）——理房通空角色回填行=贷款服务费，
         // 只承接新签贷款服务费的变动，居间代理费等变动不得摊到该行（反之亦然）
         Map<Long, Map<String, List<PerformanceFactSummaryDTO>>> receivedByEmpRole = new HashMap<>();
-        // 模板明细：有实收时用于 addMemberDetail 复制基础字段；无实收时用 createDetailFromContract
+        // 模板明细：仅取同期间行（addMemberDetail 会复制模板期间，跨期间模板会把新行建错期间）；
+        // 同期间无实收时改用 createDetailFromContract 按调整期间建行
         Long templateDetailId = null;
         if (received != null) {
             for (PerformanceFactSummaryDTO r : received) {
+                if (period != null && !period.equals(r.getPeriod())) {
+                    continue;
+                }
                 if (r.getAmount() != null) {
                     originalReceivedTotal = originalReceivedTotal.add(r.getAmount());
                 }
@@ -2828,7 +2927,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
     /**
      * 新签联动实收的镜像单登记：写入 pj_perf_received_adjust（status=EXECUTED），
-     * 让「实收调整」菜单可见可追溯；金额口径 = 联动前实收合计 → 联动后实收合计。
+     * 让「实收调整」菜单可见可追溯；金额口径 = 调整期间联动前实收合计 → 联动后同期间实收合计
+     * （同期间口径，不跨期间累计，避免列表出现与当期无关的净额数字）。
      */
     private void recordLinkedReceivedAdjustMirror(PerformanceAdjust adjust, String bizType,
                                                   BigDecimal originalTotal, BigDecimal appliedDelta, Long operatorId) {
@@ -2882,8 +2982,11 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
-     * 对给定实收明细行按金额占比分摊 delta 后逐行 supersede（{@link MoneyUtil#allocateByAmount}，尾差补最大行）。
+     * 对给定实收明细行按金额<b>绝对值</b>占比分摊 delta 后逐行 supersede
+     * （{@link MoneyUtil#allocateByAbsAmount}，尾差补最大行）。
      * <p>金额允许为负：严格同额，扣减超实收不截断。
+     * <p>按绝对值占比而非带符号占比：正负混合行下带符号分母会反转分摊方向
+     * （如 [495,-990] 分 -70 时正数行反而增加），绝对值占比保证各行沿 delta 同向移动。
      * <p>supersede 后就地回写 DTO 的 factId/amount：receivedByEmpRole 是执行前一次性加载的快照，
      * 同一员工的多个角色行（或退化分支）可能先后命中同一条实收明细，不回写会让后续角色行
      * 再次冲销已 REVERSED 的旧行（生产 TG2603925248 余璇双角色案例）。
@@ -2896,7 +2999,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         List<BigDecimal> amounts = rows.stream()
             .map(r -> r.getAmount() == null ? BigDecimal.ZERO : r.getAmount())
             .toList();
-        BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
+        BigDecimal[] parts = MoneyUtil.allocateByAbsAmount(amounts, delta);
         for (int i = 0; i < rows.size(); i++) {
             if (MoneyUtil.isZero(parts[i])) {
                 continue;
@@ -3199,13 +3302,20 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
 
         List<PerformanceFactSummaryDTO> received = port.findActiveByContract(null, orderNo, contractNo);
         boolean hasAnyReceived = received != null && !received.isEmpty();
+        // 联动范围限定冲正目标期间：冲正变动只落同期间实收行，跨期间行不参与分摊
+        // （与新签调整同口径修复：全期间按金额占比分摊在负数行下会反转方向、污染其它期间）
+        // 联动前同期间实收合计（镜像单 originalAmount）
         BigDecimal originalReceivedTotal = BigDecimal.ZERO;
         BigDecimal appliedDelta = BigDecimal.ZERO;
         boolean linkedTouched = false;
         Map<Long, Map<String, List<PerformanceFactSummaryDTO>>> receivedByEmpRole = new HashMap<>();
+        // 模板明细：仅取同期间行（addMemberDetail 会复制模板期间）
         Long templateDetailId = null;
         if (received != null) {
             for (PerformanceFactSummaryDTO r : received) {
+                if (period != null && !period.equals(r.getPeriod())) {
+                    continue;
+                }
                 if (r.getAmount() != null) {
                     originalReceivedTotal = originalReceivedTotal.add(r.getAmount());
                 }

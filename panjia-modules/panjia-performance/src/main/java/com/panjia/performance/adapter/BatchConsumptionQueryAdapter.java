@@ -4,6 +4,7 @@ import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.BatchConsumptionQueryPort;
 import com.panjia.contracts.port.CommissionConsumptionQueryPort;
 import com.panjia.contracts.port.ReceivedConsumptionQueryPort;
+import com.panjia.performance.domain.AdjustStatus;
 import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceAdjust;
 import com.panjia.performance.domain.PerformanceFact;
@@ -91,11 +92,44 @@ public class BatchConsumptionQueryAdapter implements BatchConsumptionQueryPort {
         List<Long> factIds = facts.stream().map(PerformanceFact::getId).toList();
 
         // 校验②：存在业绩调整单（一创建即走流程，硬删会产生流程孤儿）
-        // adjust → fact → batch，通过 fact_id 关联
+        // 2a) 历史/单事实调整：通过 fact_id 精确关联；
+        // 2b) 合同级调整可能涉及多条事实，单列 fact_id 只能存代表事实，再按
+        //     「合同号 + 本批归属月/原归属月 + 事实口径」兜底，避免同合同跨多批次时漏拦。
+        // 已拒绝/已取消的单据从未改写事实，不阻断撤销（否则单据无法删除会造成永久锁死）。
         if (!factIds.isEmpty()) {
             Long adjustCount = adjustMapper.selectCount(
                 new LambdaQueryWrapper<PerformanceAdjust>()
-                    .in(PerformanceAdjust::getFactId, factIds));
+                    .in(PerformanceAdjust::getFactId, factIds)
+                    .notIn(PerformanceAdjust::getStatus,
+                        AdjustStatus.REJECTED, AdjustStatus.CANCELLED));
+            if (adjustCount == null || adjustCount == 0) {
+                Set<String> contractNos = new LinkedHashSet<>();
+                Set<String> periods = new LinkedHashSet<>();
+                Set<String> factTypes = new LinkedHashSet<>();
+                for (PerformanceFact f : facts) {
+                    if (f.getContractNo() != null && !f.getContractNo().isBlank()) {
+                        contractNos.add(f.getContractNo());
+                    }
+                    if (f.getPeriod() != null && !f.getPeriod().isBlank()) {
+                        periods.add(f.getPeriod());
+                    }
+                    if (f.getFactType() != null) {
+                        factTypes.add(f.getFactType().getCode());
+                    }
+                }
+                if (!contractNos.isEmpty()) {
+                    adjustCount = adjustMapper.selectCount(
+                        new LambdaQueryWrapper<PerformanceAdjust>()
+                            .in(PerformanceAdjust::getContractNo, contractNos)
+                            .in(!factTypes.isEmpty(), PerformanceAdjust::getFactType, factTypes)
+                            .notIn(PerformanceAdjust::getStatus,
+                                AdjustStatus.REJECTED, AdjustStatus.CANCELLED)
+                            .and(!periods.isEmpty(), w -> w
+                                .in(PerformanceAdjust::getPeriod, periods)
+                                .or()
+                                .in(PerformanceAdjust::getOriginalPeriod, periods)));
+                }
+            }
             if (adjustCount != null && adjustCount > 0) {
                 return RevokeCheckResult.reject(
                     "该批次存在业绩调整单（" + adjustCount + " 条），禁止撤销，请先处理调整单");

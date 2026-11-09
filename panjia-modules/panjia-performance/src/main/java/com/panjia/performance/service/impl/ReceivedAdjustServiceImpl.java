@@ -155,8 +155,9 @@ public class ReceivedAdjustServiceImpl implements IReceivedAdjustService {
             ReceivedAdjust::getAdjustType, query.getAdjustType());
         if (query.getDeptId() != null) {
             Long deptId = query.getDeptId();
-            wrapper.apply("dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
-                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%'))", deptId);
+            // 注意：apply 不会自动加括号，内部 OR 必须显式包裹，否则 OR 会把关键字等后续 AND 条件顶掉
+            wrapper.apply("(dept_id = {0} OR dept_id IN (SELECT sd.dept_id FROM sys_dept sd"
+                + " WHERE sd.ancestors LIKE CONCAT('%', {0}, '%')))", deptId);
         }
         if (StringUtils.isNotBlank(query.getKeyword())) {
             String kw = query.getKeyword().trim();
