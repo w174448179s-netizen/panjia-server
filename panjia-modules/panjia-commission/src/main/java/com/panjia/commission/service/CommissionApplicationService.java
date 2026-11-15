@@ -2077,16 +2077,28 @@ public class CommissionApplicationService {
             refundedKeys = performanceQueryPort.findRefundedBizKeys(refundBizKeys);
         }
 
-        // 按员工筛选时：结佣业绩列/合计展示该员工口径的新签业绩，而非申请单合同全量总额
-        Map<String, BigDecimal> empExpectMap = new HashMap<>();
+        // 按员工筛选时：新签/结佣业绩均按「本单该员工明细」口径展示。
+        // 不用申请单合同全量快照（会把同合同其他业绩人金额算进来），
+        // 也不用跨期员工合计（会把后续期间退单负数提前抵扣到本期行，同合同多张单还会重复累计）
+        Map<Long, BigDecimal> empItemAmountMap = new HashMap<>();
         if (query.getEmployeeId() != null) {
-            Set<String> empKeys = new HashSet<>();
-            for (PerformanceContractSummaryDTO c : contracts) {
-                if (StringUtils.isNotBlank(c.getOrderNo())) empKeys.add(c.getOrderNo());
-                if (StringUtils.isNotBlank(c.getContractNo())) empKeys.add(c.getContractNo());
-            }
-            for (List<String> chunk : chunkKeys(empKeys)) {
-                empExpectMap.putAll(performanceQueryPort.sumExpectAmountsByKeysCrossPeriodForEmployee(chunk, query.getEmployeeId()));
+            List<Long> appIds = applications.stream()
+                .map(CommissionApplication::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+            for (int i = 0; i < appIds.size(); i += IN_KEYS_CHUNK) {
+                List<Long> chunk = appIds.subList(i, Math.min(i + IN_KEYS_CHUNK, appIds.size()));
+                for (CommissionItem item : itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
+                    .select(CommissionItem::getApplicationId, CommissionItem::getAmount)
+                    .in(CommissionItem::getApplicationId, chunk)
+                    .eq(CommissionItem::getEmployeeId, query.getEmployeeId())
+                    .ne(CommissionItem::getStatus, ItemStatus.REVERSED))) {
+                    if (item.getAmount() == null) {
+                        continue;
+                    }
+                    empItemAmountMap.merge(item.getApplicationId(), item.getAmount(), BigDecimal::add);
+                }
             }
         }
 
@@ -2192,14 +2204,17 @@ public class CommissionApplicationService {
                     vo.setReceivedAmountAdjusted(false);
                     vo.setOriginalReceivedAmount(null);
                 }
-                // 按员工筛选时：金额改为该员工口径的新签业绩（覆盖申请单合同全量总额）
+                // 按员工筛选时：新签/结佣业绩同源为本单该员工明细合计，逐行一致且汇总自然相等；
+                // 单内调整/退单行保留各自正负值，不再被跨期汇总抵消
                 if (query.getEmployeeId() != null) {
-                    BigDecimal empAmt = empExpectMap.get(c.getOrderNo());
-                    if (empAmt == null) empAmt = empExpectMap.get(c.getContractNo());
+                    BigDecimal empAmt = app.getId() == null ? BigDecimal.ZERO
+                        : empItemAmountMap.getOrDefault(app.getId(), BigDecimal.ZERO);
                     BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
-                    vo.setAmount(empAmt != null ? empAmt : BigDecimal.ZERO);
-                    vo.setConvertedAmount(conversionFactorPort.convert(vo.getAmount(), factor));
-                    // 新签业绩亦按员工口径展示；「已调整」标记来自合同级快照对比，员工口径下无意义，清除以免误展示「合同值→员工值」箭头
+                    vo.setAmount(empAmt);
+                    vo.setConvertedAmount(conversionFactorPort.convert(empAmt, factor));
+                    vo.setExpectedAmount(empAmt);
+                    vo.setExpectedConvertedAmount(conversionFactorPort.convert(empAmt, factor));
+                    // 员工口径下不存在「合同值→员工值」调整箭头
                     vo.setExpectedAdjusted(false);
                     vo.setOriginalExpectedAmount(null);
                     vo.setOriginalExpectedConvertedAmount(null);
