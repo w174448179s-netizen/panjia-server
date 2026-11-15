@@ -187,6 +187,8 @@ public class PerformanceEngine {
         //   handler 在事务外用 markConsumeFailed 补记 FAILED 日志（Outbox 退避重试）。
         int successCount = 0;
         int totalCount = 0;
+        // 新签增量导入（2026-11-09）：本批与既有事实 source_key 幂等命中的行数，完成后回写消费日志
+        int skippedExistingRows = 0;
         String derivedPeriod = null;
 
         // 统计总记录数（用于 totalRows）
@@ -230,8 +232,16 @@ public class PerformanceEngine {
                             record.getId(), record.getRecordType());
                         continue;
                     }
+                    int createdBefore = createdFacts.size();
+                    boolean factReturned = false;
                     for (FactType factType : factTypes) {
-                        buildSingleFact(record, factType, operatorId, createdFacts, skippedRedinkContracts);
+                        PerformanceFact built = buildSingleFact(
+                            record, factType, operatorId, createdFacts, skippedRedinkContracts);
+                        factReturned = factReturned || built != null;
+                    }
+                    // 返回了既有事实但本批未新建 → 幂等命中（增量导入的重复行），仅统计不重复落库
+                    if (factReturned && createdFacts.size() == createdBefore) {
+                        skippedExistingRows++;
                     }
                     // 计数口径＝归一化行数（一行无论发几条事实都算处理成功 1 行），
                     // 实际新建事实条数以 createdFacts / 库表为准并在完成日志中打印
@@ -254,11 +264,20 @@ public class PerformanceEngine {
         consumeLog.setStatus(ConsumeStatus.SUCCESS);
         if (totalCount == 0) {
             consumeLog.setMessage("批次无数据");
-        } else if (!skippedRedinkContracts.isEmpty()) {
-            // 导入/手工退单互斥留痕：这些合同的贝壳退单负数行未写入（手工退单已冲减）
-            consumeLog.setMessage("已跳过 " + skippedRedinkContracts.size()
-                + " 个合同的贝壳退单负数行（该合同已手工退单）："
-                + String.join("、", skippedRedinkContracts.stream().limit(10).toList()));
+        } else {
+            List<String> notes = new ArrayList<>();
+            if (skippedExistingRows > 0) {
+                notes.add("已存在跳过 " + skippedExistingRows + " 条");
+            }
+            if (!skippedRedinkContracts.isEmpty()) {
+                // 导入/手工退单互斥留痕：这些合同的贝壳退单负数行未写入（手工退单已冲减）
+                notes.add("已跳过 " + skippedRedinkContracts.size()
+                    + " 个合同的贝壳退单负数行（该合同已手工退单）："
+                    + String.join("、", skippedRedinkContracts.stream().limit(10).toList()));
+            }
+            if (!notes.isEmpty()) {
+                consumeLog.setMessage(String.join("；", notes));
+            }
         }
 
         consumeLogMapper.updateById(consumeLog);
@@ -268,8 +287,8 @@ public class PerformanceEngine {
         // PERF_EXPECT 事件被其显式忽略（新签透传不走结佣明细）
         emitFactCreatedEvents(batchId, consumeLog.getPeriod(), createdFacts);
 
-        log.info("[业绩消费] 批次消费完成：batchId={}, totalRows={}, successRows={}, createdFacts={}, status={}",
-                batchId, totalCount, successCount, createdFacts.size(), consumeLog.getStatus());
+        log.info("[业绩消费] 批次消费完成：batchId={}, totalRows={}, successRows={}, createdFacts={}, skippedExistingRows={}, status={}",
+                batchId, totalCount, successCount, createdFacts.size(), skippedExistingRows, consumeLog.getStatus());
 
         return consumeLog;
     }
@@ -511,6 +530,24 @@ public class PerformanceEngine {
                 .eq(PerformanceFact::getFactType, factType)
                 .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE);
         PerformanceFact existingFact = factMapper.selectOne(idempotentWrapper);
+        // 增量导入去重补强（2026-11-09）：挂虚拟人/批内正负冲突行的 sourceKey 带 #行号，
+        // 行号会随导出文件行序变化而不稳定；同归属月再按「剥离行号的业务键前缀」幂等一次，
+        // 避免同一业务行在不同批次被重复计入。
+        if (existingFact == null && sourceKey.indexOf('#') >= 0 && record.getPeriod() != null) {
+            String stablePrefix = buildSourceKeyPrefixForRedink(record) + record.getPeriod();
+            // 前缀可能命中多行（历史无 # 行 + 带 # 行并存），取最早一条即可，避免 selectOne 抛多结果
+            List<PerformanceFact> candidates = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getFactType, factType)
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+                .isNull(PerformanceFact::getReversalType)
+                .likeRight(PerformanceFact::getSourceKey, stablePrefix)
+                .orderByAsc(PerformanceFact::getId));
+            if (!candidates.isEmpty()) {
+                existingFact = candidates.get(0);
+                log.info("[业绩构建] 增量导入命中同业务键既有事实，跳过：sourceKey={}, existingKey={}",
+                    sourceKey, existingFact.getSourceKey());
+            }
+        }
         if (existingFact != null) {
             log.debug("[业绩构建] 幂等命中，跳过：sourceKey={}, factType={}", sourceKey, factType);
             return existingFact;
@@ -666,6 +703,21 @@ public class PerformanceEngine {
                         + "，请核对贝壳数据后重新导入");
             }
             redinkPerformance = MoneyUtil.round2(original.getPerformanceAmount().multiply(ratio));
+        }
+
+        // 增量导入去重补强（2026-11-09）：负数行 sourceKey 同样可能带 #行号而不稳定；
+        // 同一原事实 + 同退单月 + 同红冲金额已存在时视为该负数行重复导入，直接跳过，避免重复冲减。
+        List<PerformanceFact> duplicatedRedinks = factMapper.selectList(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, factType)
+            .eq(PerformanceFact::getRefundOfFactId, original.getId())
+            .eq(PerformanceFact::getPeriod, record.getPeriod())
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE)
+            .eq(PerformanceFact::getPerformanceAmount, redinkPerformance)
+            .orderByAsc(PerformanceFact::getId));
+        if (!duplicatedRedinks.isEmpty()) {
+            log.info("[业绩红冲] 增量导入命中同原事实同金额红冲，跳过：originalFactId={}, period={}",
+                original.getId(), record.getPeriod());
+            return duplicatedRedinks.get(0);
         }
 
         PerformanceFact fact = new PerformanceFact();

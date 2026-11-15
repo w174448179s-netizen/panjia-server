@@ -127,6 +127,7 @@ services:
       PANJIA_BACKUP_USER: ${POSTGRES_USER:?err}
       PANJIA_BACKUP_PASS: ${POSTGRES_PASSWORD:?err}
       PANJIA_BACKUP_DIR: /ruoyi/server/backup
+      # 钉钉集成（人员/考勤/积分同步）：开关、凭证、同步时间等统一在「参数管理」维护，不走环境变量
       JAVA_OPTS: ${JAVA_OPTS:--Xms512m -Xmx1024m -XX:+UseG1GC -Duser.timezone=Asia/Shanghai}
     volumes:
       - ./logs:/ruoyi/server/logs

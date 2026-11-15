@@ -81,6 +81,38 @@ public interface SalaryFactMapper extends BaseMapperPlus<SalaryFact, SalaryFact>
                                     @Param("point") LocalDate point);
 
     /**
+     * 取指定时点有效的某类事实（如 MENTOR），并按员工在岗区间过滤：
+     * 入职当月生效（入职日 &le; 当月月末）、离职次月失效（离职日 &ge; 当月 1 号）。
+     * <p>伯乐关系切片用：千里马加点的「生效月」= 入职当月；「失效月」= 离职次月；
+     * 虚拟员工不参与。
+     *
+     * @param factType   事实类型（MENTOR）
+     * @param point      取数时点（传当月月末，保证月粒度比较）
+     * @param monthStart 取数月份 1 号（离职次月失效的月度边界）
+     * @param monthEnd   取数月份月末（入职当月生效的月度边界）
+     * @return 每员工至多一条有效事实（DISTINCT ON 取最新）
+     */
+    @Select("""
+        <script>
+        SELECT DISTINCT ON (f.employee_id) f.*
+        FROM pj_people_salary_fact f
+        JOIN pj_people_employee e ON e.employee_id = f.employee_id
+        WHERE f.fact_type = #{factType}
+          AND f.effective_date &lt;= #{point}
+          AND (f.expire_date IS NULL OR #{point} &lt; f.expire_date)
+          AND f.value &lt;&gt; ''
+          AND e.status &lt;&gt; 'VIRTUAL'
+          AND (e.hire_date IS NULL OR e.hire_date &lt;= #{monthEnd})
+          AND (e.leave_date IS NULL OR e.leave_date &gt;= #{monthStart})
+        ORDER BY f.employee_id, f.effective_date DESC, f.create_time DESC
+        </script>
+        """)
+    List<SalaryFact> selectActiveFactsWithEmployedAt(@Param("factType") FactType factType,
+                                                     @Param("point") LocalDate point,
+                                                     @Param("monthStart") LocalDate monthStart,
+                                                     @Param("monthEnd") LocalDate monthEnd);
+
+    /**
      * 按事实值反查员工 ID：取指定时点持有给定事实值（如职级编码）且未离职的员工。
      * <p>算薪名单扩展用（职级含底薪/保底的员工即使无业绩也应入名单）。
      *

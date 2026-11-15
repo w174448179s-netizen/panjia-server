@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -56,6 +57,7 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     private final ReverseService reverseService;
     private final PerformanceAdjustMapper adjustMapper;
     private final com.panjia.contracts.port.EmployeeMainDataQueryPort employeeMainDataQueryPort;
+
     /**
      * 实收域端口（PERF_REAL 拆表后唯一读写落地处）。ObjectProvider 惰性取用：
      * 实现 bean 在 panjia-received（performance 不反向依赖 received），运行期由 Spring 装配，
@@ -449,6 +451,15 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
                 : port.listContractSummaries(period, deptId, employeeId, keyword);
         }
         return factMapper.selectContractSummaries(period, factType, deptId, employeeId, keyword);
+    }
+
+    @Override
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType) {
+        if (!isReal(factType) || bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        ReceivedRealFactPort port = realPort();
+        return port == null ? Collections.emptyList() : port.listDirectionalPeriodSummaries(bizKeys);
     }
 
     @Override

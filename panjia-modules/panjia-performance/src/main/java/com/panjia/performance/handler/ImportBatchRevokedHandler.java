@@ -136,9 +136,14 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
             replayReceivedApproved(period, restoredContractKeys, event.getOperatorId());
         } else if (SOURCE_TYPE_KE_SIGNED.equals(event.getSourceType()) && !batchContractKeys.isEmpty()) {
             // 5b. 新签整批撤销且无旧版本：自动通过的实收单失去新签依据 → 解绑明细后删除单（去草稿，不回退 DRAFT），
-            //     明细回到「未绑定审批单」= 待新签匹配，下次新签导入由 resolvePendingAfterNewSign 重建
-            int rolledBack = rollbackAutoApprovedApplies(period, batchContractKeys);
-            log.info("[批次撤销-业绩域] 自动通过实收单已解绑并删除：batchId={}, count={}", batchId, rolledBack);
+            //     明细回到「未绑定审批单」= 待新签匹配，下次新签导入由 resolvePendingAfterNewSign 重建。
+            //     ★ 新签同月允许多批次并存（2026-11-09 增量导入）：仅回退「在本批之外已无 ACTIVE 新签事实」
+            //       的合同，避免撤销后到批次把其它批次仍在支撑的合同实收单误删。
+            Set<String> uncoveredKeys = new LinkedHashSet<>(batchContractKeys);
+            uncoveredKeys.removeAll(loadActiveExpectBizKeys(period));
+            int rolledBack = rollbackAutoApprovedApplies(period, uncoveredKeys);
+            log.info("[批次撤销-业绩域] 自动通过实收单已解绑并删除：batchId={}, count={}, 共享合同跳过={}",
+                batchId, rolledBack, batchContractKeys.size() - uncoveredKeys.size());
         }
 
         // 5c. 新签批次撤销：清掉该批新签触发的实收补录（补行 + 压缩还原），
@@ -164,6 +169,28 @@ public class ImportBatchRevokedHandler implements DomainEventHandler {
                 .in(PerformanceFact::getBatchId, batchIds)
                 .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
                 .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE));
+        return collectBizKeys(facts);
+    }
+
+    /**
+     * 查同归属月内仍处于 ACTIVE 的 PERF_EXPECT 业务键。
+     * <p>新签同月允许多批次并存后，撤销某一批次时仅回退「其它批次也不再支撑」的合同，
+     * 防止把共享合同的自动通过实收单误删。
+     */
+    private Set<String> loadActiveExpectBizKeys(String period) {
+        if (StringUtils.isBlank(period)) {
+            return Set.of();
+        }
+        List<PerformanceFact> facts = factMapper.selectList(
+            new LambdaQueryWrapper<PerformanceFact>()
+                .eq(PerformanceFact::getPeriod, period)
+                .eq(PerformanceFact::getFactType, FactType.PERF_EXPECT)
+                .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE));
+        return collectBizKeys(facts);
+    }
+
+    /** 收集事实的合同号/订单号（去空白、去重）。 */
+    private Set<String> collectBizKeys(List<PerformanceFact> facts) {
         Set<String> keys = new LinkedHashSet<>();
         for (PerformanceFact f : facts) {
             if (f.getContractNo() != null && !f.getContractNo().isBlank()) {

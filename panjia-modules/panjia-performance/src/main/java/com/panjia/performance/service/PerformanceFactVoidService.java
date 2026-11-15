@@ -1,7 +1,9 @@
 package com.panjia.performance.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.panjia.contracts.port.PayrollBatchQueryPort;
 import com.panjia.performance.domain.FactStatus;
+import com.panjia.performance.domain.FactType;
 import com.panjia.performance.domain.PerformanceFact;
 import com.panjia.performance.domain.ReversedReason;
 import com.panjia.performance.domain.bo.ContractVoidBo;
@@ -22,7 +24,8 @@ import java.util.List;
  * 业绩事实作废/恢复服务（总监可逆操作）。
  * <p>
  * 作废：ACTIVE → VOIDED，不参与算薪/结佣（所有下游查询过滤 fact_status = ACTIVE）。
- * 恢复：VOIDED → ACTIVE，period 改为当前月，落入当月算薪。
+ * 恢复：VOIDED → ACTIVE，可指定目标月（默认当前月），period 与 source_key 同步改写到目标月，
+ * 保证目标月后续导入仍按业务键幂等，避免同一业务行跨月重复计业绩。
  * <p>
  * 封账后禁止作废和恢复。
  */
@@ -126,11 +129,16 @@ public class PerformanceFactVoidService {
     }
 
     /**
-     * 合同级恢复：该合同该期间全部已作废（VOIDED）业绩一次性恢复为 ACTIVE，
-     * period 统一改为当前月（落入当月算薪），口径与单条恢复一致。
-     * 同合同号挂多订单时按订单号+合同号双键精确限定，只恢复对应订单的业绩。
+     * 合同级恢复：该合同该期间全部已作废（VOIDED）业绩一次性恢复为 ACTIVE。
+     * <p>
+     * 目标月：优先取 {@link ContractVoidBo#getTargetPeriod()}，为空时默认当前月。
+     * 恢复时 period 与 source_key 尾部期间同步改写到目标月，保证目标月后续导入同一业务行
+     * 仍能按 source_key 幂等命中，不会重复计业绩。
+     * <p>
+     * 冲突保护：目标业务键若已存在 ACTIVE 事实（例如作废后已重新导入），或改月前原业务键
+     * 已被重新导入为 ACTIVE，均直接拒绝，避免跨月双计或撞唯一索引。
      *
-     * @param query 恢复条件（原期间/事实口径/合同号/订单号/原因）
+     * @param query 恢复条件（原期间/事实口径/合同号/订单号/目标月/原因）
      * @return 恢复明细条数
      */
     @Transactional(rollbackFor = Exception.class)
@@ -140,26 +148,76 @@ public class PerformanceFactVoidService {
         String contractNo = query.getContractNo();
         String orderNo = query.getOrderNo();
         String reason = query.getReason();
-        String currentPeriod = LocalDate.now().format(PERIOD_FORMATTER);
-        if (periodCloseService.isClosed(currentPeriod)) {
-            throw new ServiceException("当前期间已封账，禁止恢复：period=" + currentPeriod);
+        String targetPeriod = StringUtils.isNotBlank(query.getTargetPeriod())
+            ? query.getTargetPeriod()
+            : LocalDate.now().format(PERIOD_FORMATTER);
+        if (periodCloseService.isClosed(targetPeriod)) {
+            throw new ServiceException("目标期间已封账，禁止恢复：period=" + targetPeriod);
         }
-        if (payrollBatchQueryPort.hasActiveBatch(currentPeriod)) {
-            throw new ServiceException("当前期间存在正在审核的算薪批次，禁止恢复：period=" + currentPeriod);
+        if (payrollBatchQueryPort.hasActiveBatch(targetPeriod)) {
+            throw new ServiceException("目标期间存在正在审核的算薪批次，禁止恢复：period=" + targetPeriod);
         }
         List<PerformanceFact> facts = loadVoidedFactsForRestore(period, factType, orderNo, contractNo);
         if (facts.isEmpty()) {
             throw new ServiceException("合同 " + contractNo + " 在 " + period + " 无已作废业绩，无需恢复");
         }
         for (PerformanceFact fact : facts) {
+            String targetSourceKey = retargetSourceKey(fact.getSourceKey(), fact.getPeriod(), targetPeriod);
+            assertRestorable(fact, targetSourceKey, targetPeriod);
             fact.setFactStatus(FactStatus.ACTIVE);
-            fact.setPeriod(currentPeriod);
+            fact.setPeriod(targetPeriod);
+            fact.setSourceKey(targetSourceKey);
             fact.setReversedReason(null);
             fact.setOperatorId(LoginHelper.getUserId());
             factMapper.updateById(fact);
         }
         log.info("[业绩恢复-合同级] contractNo={}, orderNo={}, 原period={}, 新period={}, factType={}, restored={}, operator={}, reason={}",
-            contractNo, orderNo, period, currentPeriod, factType, facts.size(), LoginHelper.getUserId(), reason);
+            contractNo, orderNo, period, targetPeriod, factType, facts.size(), LoginHelper.getUserId(), reason);
         return facts.size();
+    }
+
+    /**
+     * 将 source_key 尾部的原期间替换为目标期间（形如 {@code KE_SIGNED-业务键-2026-08}）。
+     * 无法识别尾部期间（历史/手工键）时保持原样。
+     */
+    private String retargetSourceKey(String sourceKey, String oldPeriod, String targetPeriod) {
+        if (StringUtils.isBlank(sourceKey) || StringUtils.isBlank(oldPeriod)
+            || oldPeriod.equals(targetPeriod)) {
+            return sourceKey;
+        }
+        String suffix = "-" + oldPeriod;
+        if (sourceKey.endsWith(suffix)) {
+            return sourceKey.substring(0, sourceKey.length() - suffix.length()) + "-" + targetPeriod;
+        }
+        return sourceKey;
+    }
+
+    /**
+     * 恢复前的冲突保护：
+     * <ol>
+     *   <li>改月恢复时，原业务键若已有 ACTIVE 事实（作废后重新导入过），恢复会造成跨月双计，拒绝；</li>
+     *   <li>目标业务键若已有 ACTIVE 事实，恢复会撞 ACTIVE 部分唯一索引，拒绝。</li>
+     * </ol>
+     */
+    private void assertRestorable(PerformanceFact fact, String targetSourceKey, String targetPeriod) {
+        if (!targetSourceKey.equals(fact.getSourceKey())) {
+            Long originalActive = countActiveBySourceKey(fact.getFactType(), fact.getSourceKey());
+            if (originalActive != null && originalActive > 0) {
+                throw new ServiceException("原期间 " + fact.getPeriod()
+                    + " 已存在同业务行有效业绩（可能已重新导入），请先作废后再恢复，避免跨月重复计业绩");
+            }
+        }
+        Long targetActive = countActiveBySourceKey(fact.getFactType(), targetSourceKey);
+        if (targetActive != null && targetActive > 0) {
+            throw new ServiceException("目标期间 " + targetPeriod
+                + " 已存在同业务行有效业绩，无法恢复，请先处理目标月数据");
+        }
+    }
+
+    private Long countActiveBySourceKey(FactType factType, String sourceKey) {
+        return factMapper.selectCount(new LambdaQueryWrapper<PerformanceFact>()
+            .eq(PerformanceFact::getFactType, factType)
+            .eq(PerformanceFact::getSourceKey, sourceKey)
+            .eq(PerformanceFact::getFactStatus, FactStatus.ACTIVE));
     }
 }

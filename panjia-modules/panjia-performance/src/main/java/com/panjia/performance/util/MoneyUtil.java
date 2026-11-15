@@ -211,4 +211,44 @@ public final class MoneyUtil {
         parts[largestIdx] = round2(parts[largestIdx].add(deltaTotal.subtract(allocated)));
         return parts;
     }
+
+    /**
+     * 按金额<b>绝对值</b>占比分摊总变动额，返回各条分摊后的变动额数组。
+     * <p>
+     * 与 {@link #allocateByAmount} 的区别：分摊基准取各条金额的绝对值，分母为绝对值合计。
+     * 带符号占比在正负混合行下分母可能被负数行主导甚至为 0，导致分摊方向反转
+     * （如 [495,-990] 分 -70 时正数行反而 +87）；绝对值占比保证各行沿 delta 同向移动，
+     * 适用于实收联动等不允许行金额反向的场景。
+     * <p>
+     * 保证：Σparts = deltaTotal 精确成立（尾差补到绝对值最大的一条）；全部为 0 时平摊。
+     *
+     * @param amounts    各条金额（按绝对值占比分摊的基准；null 按 0 处理）
+     * @param deltaTotal 总变动额
+     * @return 各条分摊后的变动额数组，长度与 amounts 一致
+     */
+    public static BigDecimal[] allocateByAbsAmount(List<BigDecimal> amounts, BigDecimal deltaTotal) {
+        BigDecimal totalAbs = amounts.stream()
+            .map(a -> a == null ? ZERO : a.abs())
+            .reduce(ZERO, BigDecimal::add);
+        if (totalAbs.signum() == 0) {
+            // 全为 0：平摊（复用带符号版本的全 0 分支语义）
+            return allocateByAmount(amounts, deltaTotal);
+        }
+        BigDecimal[] parts = new BigDecimal[amounts.size()];
+        BigDecimal allocated = ZERO;
+        int largestIdx = 0;
+        BigDecimal largestAbs = ZERO;
+        for (int i = 0; i < amounts.size(); i++) {
+            BigDecimal base = amounts.get(i) == null ? ZERO : amounts.get(i).abs();
+            parts[i] = round2(deltaTotal.multiply(base).divide(totalAbs, 8, RoundingMode.HALF_UP));
+            allocated = allocated.add(parts[i]);
+            if (base.compareTo(largestAbs) > 0) {
+                largestAbs = base;
+                largestIdx = i;
+            }
+        }
+        // 尾差补到绝对值最大的行
+        parts[largestIdx] = round2(parts[largestIdx].add(deltaTotal.subtract(allocated)));
+        return parts;
+    }
 }

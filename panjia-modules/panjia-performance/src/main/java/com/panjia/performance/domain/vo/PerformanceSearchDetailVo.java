@@ -77,4 +77,11 @@ public class PerformanceSearchDetailVo {
      * 来源 MANUAL 且 source_key 带 MANUAL-调整单号标记，前端据此展示「新签调整」标记。
      */
     private Boolean manualAdjust;
+
+    /**
+     * 是否为「未匹配新签角色」的实收行：
+     * 该工号在本合同有多个新签角色、且实收角色名对不上任何新签角色时，
+     * 单独成行展示（新签业绩记 0），保证详情合计与列表口径一致。
+     */
+    private Boolean unmatchedReal;
 }

@@ -20,6 +20,7 @@ import com.panjia.people.port.DeptPort;
 import com.panjia.people.service.ScoreApprovalService;
 import com.panjia.people.service.ScoreAttendDaysResolver;
 import com.panjia.people.service.ScoreGradePolicy;
+import com.panjia.people.service.ScorePerfSchemeResolver;
 import com.panjia.people.service.ScoreService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -59,6 +60,9 @@ public class ScoreServiceImpl implements ScoreService {
     /** 数据来源：积分日报导入同步 */
     private static final String DATA_SOURCE_IMPORT = "IMPORT";
 
+    /** 钉钉积分同步的固定来源批次号（负值，与导入批次正 ID 区分，便于按整月替换） */
+    private static final long DINGTALK_SOURCE_BATCH_ID = -1L;
+
     /** 超级管理员角色键（全量数据权限） */
     private static final String ROLE_KEY_SUPERADMIN = "superadmin";
 
@@ -75,8 +79,20 @@ public class ScoreServiceImpl implements ScoreService {
     private final ScoreApprovalService approvalService;
     private final ScoreGradePolicy scoreGradePolicy;
     private final ScoreAttendDaysResolver attendDaysResolver;
+    private final ScorePerfSchemeResolver scorePerfSchemeResolver;
 
     // ==================== 导入同步（ScoreArchiveHandler） ====================
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void syncDingTalkScoreDetails(String period, List<ScoreDetailSyncDTO> details) {
+        if (details == null || details.isEmpty()) {
+            return;
+        }
+        // 钉钉来源统一打固定批次号：重跑时整月清掉上一轮钉钉明细，导入来源的明细不受影响
+        details.forEach(detail -> detail.setSourceBatchId(DINGTALK_SOURCE_BATCH_ID));
+        syncScoreDetails(period, details, List.of(DINGTALK_SOURCE_BATCH_ID));
+    }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -410,7 +426,9 @@ public class ScoreServiceImpl implements ScoreService {
         Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
         PointsRuleDTO rule = scoreGradePolicy.currentRule();
         Map<String, Integer> attendDaysMap = resolveAttendDays(page.getRecords());
-        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule, attendDaysMap)).toList();
+        Map<String, String> schemeTypeMap = resolveSchemeTypes(page.getRecords());
+        List<ScoreVO> vos = page.getRecords().stream()
+            .map(r -> toVO(r, rule, attendDaysMap, schemeTypeMap)).toList();
         enrich(vos);
         return PageResult.build(vos, page.getTotal());
     }
@@ -421,7 +439,8 @@ public class ScoreServiceImpl implements ScoreService {
         if (record == null) {
             throw new ServiceException("积分记录不存在，id={}", id);
         }
-        ScoreVO vo = toVO(record, scoreGradePolicy.currentRule(), resolveAttendDays(List.of(record)));
+        ScoreVO vo = toVO(record, scoreGradePolicy.currentRule(),
+            resolveAttendDays(List.of(record)), resolveSchemeTypes(List.of(record)));
         enrich(List.of(vo));
         return vo;
     }
@@ -486,7 +505,9 @@ public class ScoreServiceImpl implements ScoreService {
         Page<PerformanceScore> page = scoreMapper.selectPage(pageQuery.build(), wrapper);
         PointsRuleDTO rule = scoreGradePolicy.currentRule();
         Map<String, Integer> attendDaysMap = resolveAttendDays(page.getRecords());
-        List<ScoreVO> vos = page.getRecords().stream().map(r -> toVO(r, rule, attendDaysMap)).toList();
+        Map<String, String> schemeTypeMap = resolveSchemeTypes(page.getRecords());
+        List<ScoreVO> vos = page.getRecords().stream()
+            .map(r -> toVO(r, rule, attendDaysMap, schemeTypeMap)).toList();
         enrich(vos);
         return PageResult.build(vos, page.getTotal());
     }
@@ -563,6 +584,19 @@ public class ScoreServiceImpl implements ScoreService {
             .orderByAsc(ScoreDetail::getPointDate);
 
         List<ScoreDetail> details = scoreDetailMapper.selectList(wrapper);
+        return enrichDetails(details);
+    }
+
+    @Override
+    public List<ScoreDetailVO> listDetails(Long employeeId, String scoreMonth) {
+        LocalDate monthStart = parseMonthStart(scoreMonth);
+        if (employeeId == null || monthStart == null) {
+            return List.of();
+        }
+        List<ScoreDetail> details = scoreDetailMapper.selectList(new LambdaQueryWrapper<ScoreDetail>()
+            .eq(ScoreDetail::getEmployeeId, employeeId)
+            .eq(ScoreDetail::getScoreMonth, monthStart)
+            .orderByAsc(ScoreDetail::getPointDate));
         return enrichDetails(details);
     }
 
@@ -762,7 +796,8 @@ public class ScoreServiceImpl implements ScoreService {
         }
     }
 
-    private ScoreVO toVO(PerformanceScore record, PointsRuleDTO rule, Map<String, Integer> attendDaysMap) {
+    private ScoreVO toVO(PerformanceScore record, PointsRuleDTO rule,
+                         Map<String, Integer> attendDaysMap, Map<String, String> schemeTypeMap) {
         ScoreVO vo = new ScoreVO();
         BeanUtil.copyProperties(record, vo);
         // 出勤天数：优先取考勤汇总（平均积分分母），考勤缺失时回退积分填报天数
@@ -772,12 +807,17 @@ public class ScoreServiceImpl implements ScoreService {
         }
         vo.setAttendDays(attendDays);
         // 派生字段实时计算（不落库）：平均积分/绩效等级/提成扣点/积分扣款
-        vo.setPointsFee(scoreGradePolicy.lateFeeOf(rule, record.getLateSubmitCount()));
         BigDecimal avg = scoreGradePolicy.avgPoints(record.getTotalPoints(), attendDays);
         vo.setAvgPoints(avg);
         // 无有效积分（总积分为空/出勤 0 天）默认方案最差档，与算薪引擎扣点口径一致
         vo.setGrade(scoreGradePolicy.grade(rule, record.getTotalPoints(), attendDays));
         vo.setDeductRate(scoreGradePolicy.deductOf(rule, vo.getGrade()));
+        // 晚提交扣款：仅积分绩效、店长积分绩效考核，不分绩效等级
+        String schemeType = schemeTypeMap.get(
+            ScoreAttendDaysResolver.key(record.getEmployeeId(), record.getScoreMonth()));
+        vo.setPointsFee(scorePerfSchemeResolver.isLateFeeExempt(schemeType)
+            ? BigDecimal.ZERO
+            : scoreGradePolicy.lateFeeOf(rule, record.getLateSubmitCount()));
         return vo;
     }
 
@@ -791,6 +831,28 @@ public class ScoreServiceImpl implements ScoreService {
         Set<LocalDate> months = records.stream().map(PerformanceScore::getScoreMonth)
             .filter(Objects::nonNull).collect(Collectors.toSet());
         return attendDaysResolver.resolve(employeeIds, months);
+    }
+
+    /**
+     * 批量解析员工绩效方案类型（key = employeeId|yyyy-MM）。
+     * 按积分月份月末取 PERF_SCHEME 事实；未指派走默认方案。
+     */
+    private Map<String, String> resolveSchemeTypes(List<PerformanceScore> records) {
+        if (records == null || records.isEmpty()) {
+            return Map.of();
+        }
+        Map<LocalDate, List<Long>> employeeIdsByMonth = records.stream()
+            .filter(r -> r.getEmployeeId() != null && r.getScoreMonth() != null)
+            .collect(Collectors.groupingBy(PerformanceScore::getScoreMonth,
+                Collectors.mapping(PerformanceScore::getEmployeeId, Collectors.toList())));
+        Map<String, String> result = new HashMap<>();
+        employeeIdsByMonth.forEach((month, employeeIds) -> {
+            Map<Long, String> schemeTypes = scorePerfSchemeResolver.schemeTypesAt(
+                employeeIds, month.withDayOfMonth(month.lengthOfMonth()));
+            employeeIds.forEach(employeeId -> result.put(
+                ScoreAttendDaysResolver.key(employeeId, month), schemeTypes.get(employeeId)));
+        });
+        return result;
     }
 
     /** 批量填充工号/姓名/部门/锁定标记 */

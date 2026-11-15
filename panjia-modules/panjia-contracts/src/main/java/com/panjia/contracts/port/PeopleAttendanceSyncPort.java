@@ -1,5 +1,6 @@
 package com.panjia.contracts.port;
 
+import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
 
 import java.util.List;
@@ -24,4 +25,12 @@ public interface PeopleAttendanceSyncPort {
      * @param summaries 月度指标列表（一行一人）
      */
     void syncAttendanceSummaries(String period, List<AttendanceSummarySyncDTO> summaries);
+
+    /**
+     * 按期间覆盖写入考勤每日明细（先删同月同员工的明细，再批量插入）。
+     *
+     * @param period  归属期间（YYYY-MM）
+     * @param details 每日明细（一行一人一天，status 为考勤结果原文）
+     */
+    void syncAttendanceDetails(String period, List<AttendanceDetailSyncDTO> details);
 }

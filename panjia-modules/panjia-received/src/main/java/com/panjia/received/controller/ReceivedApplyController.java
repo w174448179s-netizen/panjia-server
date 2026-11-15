@@ -91,6 +91,13 @@ public class ReceivedApplyController extends BaseController {
         return R.ok(receivedApplyService.getDetail(id));
     }
 
+    /** 驳回后调整：查询挂靠在本单上的待生效调整单详情（审批人查看调整内容用） */
+    @SaCheckPermission("perf:received:query")
+    @GetMapping("/{id}/pending-adjust")
+    public R<com.panjia.performance.domain.vo.AdjustDetailVo> pendingAdjust(@PathVariable Long id) {
+        return R.ok(receivedApplyService.getPendingAdjustDetail(id));
+    }
+
     /** 按审批单 ID 查流程实例 ID（供前端「业务明细直批」绕过 workflow:instance:query 权限） */
     @SaCheckPermission("perf:received:query")
     @GetMapping("/{id}/instance")
@@ -117,6 +124,23 @@ public class ReceivedApplyController extends BaseController {
     @PostMapping("/{id}/resubmit")
     public R<Void> resubmit(@PathVariable Long id) {
         receivedApplyService.resubmit(id);
+        return R.ok();
+    }
+
+    /** 驳回调整弹窗装载明细（原始行，不做同人同角色同月合并） */
+    @SaCheckPermission("perf:received:submit")
+    @GetMapping("/{id}/revise-details")
+    public R<List<ReceivedFactDetailVo>> reviseDetails(@PathVariable Long id) {
+        return R.ok(receivedApplyService.listReviseDetails(id));
+    }
+
+    /** 驳回后调整实收明细并重新提交审批（仅 REJECTED） */
+    @SaCheckPermission("perf:received:submit")
+    @Log(title = "实收业绩驳回调整重提", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/revise-and-resubmit")
+    public R<Void> reviseAndResubmit(@PathVariable Long id,
+                                     @RequestBody com.panjia.received.domain.bo.ReceivedReviseBo bo) {
+        receivedApplyService.reviseAndResubmit(id, bo);
         return R.ok();
     }
 
@@ -149,6 +173,15 @@ public class ReceivedApplyController extends BaseController {
     @PostMapping("/{id}/cancel")
     public R<Void> cancel(@PathVariable Long id) {
         receivedApplyService.cancel(id);
+        return R.ok();
+    }
+
+    /** 恢复已作废的实收单 */
+    @SaCheckPermission("perf:received:restore")
+    @Log(title = "实收业绩审批恢复", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/restore")
+    public R<Void> restore(@PathVariable Long id) {
+        receivedApplyService.restore(id);
         return R.ok();
     }
 

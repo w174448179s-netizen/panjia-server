@@ -147,8 +147,9 @@ public class ImportEngine {
         // 重复导入前置校验（解析/落库前即拦截）：同（类型, 归属月, 部门）已存在生效批次，
         // 且该批次已被下游消费（已封账/已审批业绩调整/已审批实收确认）→ 拒绝本次导入。
         // 与「撤销导入」的 checkRevocable 口径对称，避免整批冲销把已调整、已结佣的数据打回草稿。
-        // 条件与 doNormalizePhase 的 supersede 分支严格一致：POINTS / KE_RECEIVED 同月允许多批次
-        // 并存、不做整批替换，故不参与本校验（KE_RECEIVED 的"已消费"判定下沉到订单粒度）。
+        // 条件与 doNormalizePhase 的 supersede 分支严格一致：POINTS / KE_RECEIVED / KE_SIGNED 同月
+        // 允许多批次并存、不做整批替换，故不参与本校验（KE_RECEIVED 的"已消费"判定下沉到订单粒度，
+        // KE_SIGNED 的已存在行由业绩事实 source_key 幂等锚点跳过）。
         if (!isMergeSource(sourceType)) {
             batchSupersedeService.assertReimportAllowed(sourceType, period, deptId);
         }
@@ -581,6 +582,7 @@ public class ImportEngine {
         // 完全一致 → 批次转 SKIPPED 并抛 ReimportSkippedException（noRollbackFor 保证状态提交），
         // 不冲销旧批次、不归档、不发事件，仅留痕供追溯。
         // 内容有差异（金额修正/行增删）继续走正常替换，保证修正版能生效。
+        // 增量合并来源（POINTS/KE_RECEIVED/KE_SIGNED）不做整批比对与替换，每次导入都留痕。
         if (!isMergeSource(batch.getSourceType())) {
             ImportBatch activeBatch = batchSupersedeService.findActiveArchivedBatch(
                 batch.getSourceType(), batch.getPeriod(), batch.getDeptId(), batch.getId());
@@ -610,8 +612,7 @@ public class ImportEngine {
         //   执行（status=3 触发唯一索引），所以 marker 必须抢在此之前 commit。
         //   整个 doNormalizePhase 是单个事务，与 batch.updateById 一起 all-or-nothing。
         if (ImportBatchStatus.ARCHIVED.equals(batch.getStatus())) {
-            // 积分同月可并存多个批次（二手/租赁/简版各一份文件），按 (员工, 日期) 合并，
-            // 故不做整批替换；其他来源仍走「新批替换旧批」
+            // 积分/实收/新签同月可并存多个批次（增量合并），不做整批替换；其他来源仍走「新批替换旧批」
             if (!isMergeSource(batch.getSourceType())) {
                 supersedeIfDuplicate(batch);
             }
@@ -630,10 +631,14 @@ public class ImportEngine {
      * <p>
      * POINTS：积分按（员工, 日期）合并，同月多份文件各自归档；
      * KE_RECEIVED：实收按「订单 + 归属月」增量合并（2026-10-29），每次导入留痕一份批次，
-     * 明细级增量判定与替换由实收域（{@code ImportToReceivedPort.consumeBatch}）完成。
+     * 明细级增量判定与替换由实收域（{@code ImportToReceivedPort.consumeBatch}）完成；
+     * KE_SIGNED：新签按事实 {@code source_key + fact_type + ACTIVE} 幂等追加（2026-11-09），
+     * 每次导入留痕一份批次，已存在的行跳过、不覆盖既有（含已调整）事实。
      */
     private boolean isMergeSource(ImportSourceType sourceType) {
-        return sourceType == ImportSourceType.POINTS || sourceType == ImportSourceType.KE_RECEIVED;
+        return sourceType == ImportSourceType.POINTS
+            || sourceType == ImportSourceType.KE_RECEIVED
+            || sourceType == ImportSourceType.KE_SIGNED;
     }
 
     /**
@@ -726,12 +731,12 @@ public class ImportEngine {
         Map<String, NormalizedRecord> pendingRecords = dedupDaily ? new java.util.LinkedHashMap<>() : null;
         Map<String, Integer> pendingRowNo = dedupDaily ? new java.util.HashMap<>() : null;
 
-        // 贝壳新签：经纪人为空（roleSysNo 空）的行按店组挂到门店虚拟人（2026-09-28）
+        // 贝壳新签/实收：角色人为空的行按店组挂到门店虚拟人（新签 2026-09-28，实收 2026-10-31）
         //（行上店组编码 → sys_dept.dept_category 部门类别编码 → 该部门工号=店组编码的虚拟人）。
-        // 预扫描空经纪人行的店组编码，一次批量解析，避免循环内逐行跨域查询；
-        // 店组为空/未配置/部门下无虚拟人的店组不在结果中，循环内按匹配失败记 issue
+        // 预扫描空角色行的店组编码，一次批量解析，避免循环内逐行跨域查询；
+        // 店组为空/未配置/部门下无虚拟人的店组不在结果中，循环内按匹配失败处理
         Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> virtualByStoreGroup = Map.of();
-        if (sourceType == ImportSourceType.KE_SIGNED) {
+        if (sourceType == ImportSourceType.KE_SIGNED || sourceType == ImportSourceType.KE_RECEIVED) {
             java.util.Set<String> storeGroups = new java.util.HashSet<>();
             for (RawData raw : rawRows) {
                 Map<String, Object> json = parseRawJson(raw.getRawJson());
@@ -792,7 +797,20 @@ public class ImportEngine {
                 contractLevelRow = sourceType == ImportSourceType.KE_RECEIVED
                     && ((orderNoVal != null && !orderNoVal.toString().isBlank())
                         || (contractNoVal != null && !contractNoVal.toString().isBlank()));
-                if (!contractLevelRow && sourceType == ImportSourceType.KE_SIGNED) {
+                if (contractLevelRow) {
+                    // 贝壳实收空角色行：与新签同口径，先按导入行店组补门店虚拟人（2026-10-31）。
+                    // 挂靠成功按正常员工行处理（明细回填员工/部门，审批单有归属）；
+                    // 店组未配置虚拟人时保留合同级行兜底（真实到账不阻断，employeeId 留空）。
+                    String deptCode = str(jsonMap, "deptCode");
+                    com.panjia.contracts.dto.EmployeeMainDataDTO virtual =
+                        deptCode == null ? null : virtualByStoreGroup.get(deptCode);
+                    if (virtual != null) {
+                        matchedEmployeeId = virtual.getEmployeeId();
+                        externalCode = virtual.getEmployeeCode();
+                        attachedVirtual = true;
+                        contractLevelRow = false;
+                    }
+                } else if (sourceType == ImportSourceType.KE_SIGNED) {
                     String deptCode = str(jsonMap, "deptCode");
                     com.panjia.contracts.dto.EmployeeMainDataDTO virtual =
                         deptCode == null ? null : virtualByStoreGroup.get(deptCode);
@@ -824,7 +842,7 @@ public class ImportEngine {
 
             // 未匹配行不写归一化记录：该行不参与 fact 表下沉；批次进入
             // PENDING_CONFIRM 由人工决定后续动作（修复主数据、重归一化、整批关闭）；
-            // 例外：贝壳实收无角色行（contractLevelRow）照常落库，employeeId 留空
+            // 例外：贝壳实收无角色行（contractLevelRow，且店组未匹配到虚拟人）照常落库，employeeId 留空
             if (matchedEmployeeId == null && !contractLevelRow) {
                 continue;
             }

@@ -29,7 +29,7 @@ import org.springframework.web.bind.annotation.RestController;
  * <p>
  * 审批全走 RuoYi 工作流（flowCode = perf_adjust）：
  * 发起调整单时自动启动审批流程，审批通过后由工作流回调自动执行调整。
- * 调整范围支持：合同级（按业绩比例分摊到各明细）、明细级（单条事实调整）。
+ * 调整范围：合同级（按业绩比例分摊到各明细）。
  */
 @Slf4j
 @Validated

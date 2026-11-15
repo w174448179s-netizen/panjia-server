@@ -7,6 +7,7 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * <p>
  * 状态流转：
  * <ul>
+ *   <li>{@link #PENDING_APPLY}（驳回后调整）→ {@link #APPROVED}（原实收单审批通过时自动置）/ {@link #REJECTED} / {@link #CANCELLED}</li>
  *   <li>{@link #SUBMITTED} → {@link #APPROVED}（工作流 finish 回调先置 APPROVED）/ {@link #REJECTED} / {@link #CANCELLED}</li>
  *   <li>{@link #APPROVED} → {@link #EXECUTED}（自动/手动执行）</li>
  *   <li>禁止 {@link #SUBMITTED} → {@link #EXECUTED} 直连，防止手动 execute 接口绕过审批</li>
@@ -20,6 +21,9 @@ public enum AdjustStatus {
 
     /** 已提交 */
     SUBMITTED("已提交"),
+
+    /** 待原单审批（驳回后调整：随原实收单审批，不单独发起流程） */
+    PENDING_APPLY("待原单审批"),
 
     /** 审批通过 */
     APPROVED("审批通过"),
@@ -100,6 +104,9 @@ public enum AdjustStatus {
         if (this == SUBMITTED) {
             return target == APPROVED || target == REJECTED || target == CANCELLED;
         }
+        if (this == PENDING_APPLY) {
+            return target == APPROVED || target == REJECTED || target == CANCELLED;
+        }
         if (this == APPROVED) {
             return target == EXECUTED;
         }
@@ -121,6 +128,6 @@ public enum AdjustStatus {
      * @return true 表示进行中
      */
     public boolean isRunning() {
-        return this == SUBMITTED || this == APPROVED;
+        return this == SUBMITTED || this == PENDING_APPLY || this == APPROVED;
     }
 }

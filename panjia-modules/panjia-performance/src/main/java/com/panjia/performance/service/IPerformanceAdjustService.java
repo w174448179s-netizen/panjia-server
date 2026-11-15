@@ -106,12 +106,11 @@ public interface IPerformanceAdjustService {
      * 执行调整单（审批通过后由工作流回调自动触发，一般不手动调用）。
      * <p>
      * 状态流转：SUBMITTED → EXECUTED。
-     * 根据调整范围执行不同逻辑：
+     * 执行逻辑（合同级，按调整类型分流）：
      * <ul>
-     *   <li>DETAIL + AMOUNT：单条事实金额调整 → 旧事实冲销 + 新事实生成</li>
-     *   <li>DETAIL + VOID：单条事实冲销</li>
-     *   <li>DETAIL + TRANSFER：单条事实部门划转</li>
-     *   <li>CONTRACT + AMOUNT：合同级金额调整 → 按各明细业绩占比分摊，逐条 supersede</li>
+     *   <li>AMOUNT/DEDUCT/INCREASE：按各明细业绩占比或指定值分摊，逐条 supersede</li>
+     *   <li>MANUAL_OFFSET：按冲正清单生成调整事实</li>
+     *   <li>SUPPLEMENT：按补录清单生成新签业绩事实</li>
      * </ul>
      *
      * @param id          调整单 ID

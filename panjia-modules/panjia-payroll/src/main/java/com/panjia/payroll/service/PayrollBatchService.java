@@ -176,6 +176,10 @@ public class PayrollBatchService {
                 empIds.addAll(peopleQueryPort.findEmployeeIdsByCodes(policyCodes).values());
             }
 
+            // 名单剔除：虚拟人（门店公共占位，status=VIRTUAL）不计算工资。
+            // 即使其被结佣明细/手工项关联进名单，也必须在算薪前剔除
+            empIds.removeAll(new HashSet<>(peopleQueryPort.findVirtualEmployeeIds(empIds)));
+
             if (empIds.isEmpty()) {
                 batch.setStatus(BatchStatus.CALCULATED);
                 batch.setEmployeeCount(0);
@@ -358,7 +362,12 @@ public class PayrollBatchService {
         Map<String, Map<Long, String>> periodLevelMap = new HashMap<>();
         Map<String, Map<Long, ScoreFactsDTO>> periodScoreMap = new HashMap<>();
         Map<String, Map<Long, Integer>> periodApprenticeMap = new HashMap<>();
+        Map<String, Map<Long, Long>> periodMentorRelationMap = new HashMap<>();
         Map<String, Map<Long, java.util.List<RateAdjustItem>>> periodAdjustMap = new HashMap<>();
+        // 算薪月有效伯乐关系（供引擎金额比例与招聘加点共用）
+        Map<Long, Long> currentRelations = null;
+        // 历史职级切片覆盖范围：有结佣/新签明细的员工 + 伯乐（金额比例需按新签月取伯乐当时职级）
+        Set<Long> levelSliceEmpIds = new HashSet<>(commissionEmpIds);
         for (String rp : requiredPeriods) {
             // rate_adjust 必须覆盖所有 requiredPeriod（含算薪月本身），
             // 否则当期生效的人工扣点（如电话考核 -3% start_month=当期）在逐期间结佣重算时取不到，
@@ -368,23 +377,33 @@ public class PayrollBatchService {
             } catch (Exception e) {
                 log.warn("[薪酬] 加载期间人工调整失败：period={}，该期间结佣提成人工调整回退 0", rp, e);
             }
+            // 伯乐关系按期间「全员」切片（2026-11 改）：千里马当月即使没有结佣也必须计入，
+            // 否则历史新签月取不到关系时会回退算薪月口径，导致千里马生效前的新签月被错误加上加点；
+            // 口径：入职当月生效、离职次月失效
+            try {
+                LocalDate refDate = YearMonth.parse(rp).atDay(1);
+                Map<Long, Long> relations = peopleQueryPort.findMentorRelationsAt(refDate);
+                Map<Long, Integer> apprenticeByMentor = new HashMap<>();
+                relations.values().forEach(mentorId -> apprenticeByMentor.merge(mentorId, 1, Integer::sum));
+                periodApprenticeMap.put(rp, apprenticeByMentor);
+                periodMentorRelationMap.put(rp, relations);
+                levelSliceEmpIds.addAll(relations.values());
+                if (rp.equals(period)) {
+                    currentRelations = relations;
+                }
+            } catch (Exception e) {
+                log.warn("[薪酬] 构建伯乐关系切片失败：period={}，该期间伯乐加点按 0 处理（失败关闭，不回退算薪月人数）", rp, e);
+            }
             if (rp.equals(period) || commissionEmpIds.isEmpty()) {
                 continue;
             }
             try {
                 LocalDate refDate = YearMonth.parse(rp).atDay(1);
-                // 一次切片同时取历史职级（LEVEL 事实）与历史伯乐关系（MENTOR 事实，按生效区间）
+                // 历史职级切片（LEVEL 事实，按生效区间）；覆盖伯乐，供金额比例按新签月取当时职级
                 Map<Long, String> levelByEmp = new HashMap<>();
-                Map<Long, Integer> apprenticeByMentor = new HashMap<>();
-                peopleQueryPort.getEmployeeSnapshots(commissionEmpIds, refDate)
-                    .forEach((empId, es) -> {
-                        levelByEmp.put(empId, es.getLevelCode());
-                        if (es.getMentorId() != null) {
-                            apprenticeByMentor.merge(es.getMentorId(), 1, Integer::sum);
-                        }
-                    });
+                peopleQueryPort.getEmployeeSnapshots(levelSliceEmpIds, refDate)
+                    .forEach((empId, es) -> levelByEmp.put(empId, es.getLevelCode()));
                 periodLevelMap.put(rp, levelByEmp);
-                periodApprenticeMap.put(rp, apprenticeByMentor);
                 // 历史绩效积分（该月无事实的员工结佣时按 0 分处理）
                 periodScoreMap.put(rp, scoreQueryPort.scoreFacts(rp));
             } catch (Exception e) {
@@ -394,6 +413,7 @@ public class PayrollBatchService {
         input.periodLevelMap = periodLevelMap;
         input.periodScoreMap = periodScoreMap;
         input.periodApprenticeMap = periodApprenticeMap;
+        input.periodMentorRelationMap = periodMentorRelationMap;
         input.periodAdjustMap = periodAdjustMap;
         // ====== 多期间历史切片 end ======
 
@@ -607,14 +627,16 @@ public class PayrollBatchService {
             input.monthsEmployed.put(e.getEmployeeId(), 1);
         }
 
-        // 招聘加点千里马数：按算薪月伯乐关系（EmployeeSnapshot.mentorId）统计在册千里马数；
-        // 历史月切片见 periodApprenticeMap（新签导入月的 MENTOR 事实）
-        Map<Long, Integer> apprenticeByMentor = new HashMap<>();
-        for (EmployeeSnapshot e : employees) {
-            if (e.getMentorId() != null) {
-                apprenticeByMentor.merge(e.getMentorId(), 1, Integer::sum);
-            }
+        // 招聘加点千里马数：按算薪月有效伯乐关系全员统计（千里马入职当月生效、离职次月失效）；
+        // 历史月切片见 periodApprenticeMap
+        if (currentRelations == null) {
+            // 算薪月切片构建失败时兜底直接取当月关系；成功则补入期间切片，保证两种伯乐模式口径一致
+            currentRelations = peopleQueryPort.findMentorRelationsAt(YearMonth.parse(period).atDay(1));
+            periodMentorRelationMap.put(period, currentRelations);
         }
+        Map<Long, Long> relations = currentRelations;
+        Map<Long, Integer> apprenticeByMentor = new HashMap<>();
+        relations.values().forEach(mentorId -> apprenticeByMentor.merge(mentorId, 1, Integer::sum));
         input.qualifiedApprenticeCount = apprenticeByMentor;
         // 伯乐奖励（AMOUNT_RATIO）的千里马结佣业绩合计由引擎在算薪时基于伯乐关系+结佣明细预算
 

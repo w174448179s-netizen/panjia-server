@@ -130,8 +130,8 @@ public class CommissionApplyController extends BaseController {
      * 列表行同时携带合同号与订单号：以订单号为准精确装载该订单事实，同合同多订单互不串单；
      * orderNo 为空（历史入口）时退合同号口径，由服务端多订单防串单校验兜底。
      * <p>
-     * 幂等：该订单当月已有 DRAFT/SUBMITTED/APPROVED/LOCKED 单时拒绝；
-     * 已有 REJECTED（驳回）单时直接重新提交该单进入审批流，不新建；
+     * 幂等：该订单当月已有 SUBMITTED/APPROVED/LOCKED 单时拒绝；
+     * 驳回/作废为终态（明细已冲销、事实已释放），重新发起直接新建单；
      * 已审批/锁定拒绝，不再支持变更。
      *
      * @param dto 发起条件（期间 + 合同号 + 可选订单号）
@@ -151,7 +151,7 @@ public class CommissionApplyController extends BaseController {
 
     /**
      * 按合同号批量发起结佣（CompletableFuture 挂起等待，线程池逐张发起+提交）。
-     * <p>去重合同号，已有未完结单的跳过，REJECTED 自动重提。前端设 5 分钟超时 + loading。
+     * <p>去重合同号，已有未完结单的跳过；驳回/作废为终态，重新发起直接新建单。前端设 5 分钟超时 + loading。
      *
      * @param request 批量发起请求（period + contractNos）
      * @return 批量发起结果
@@ -197,7 +197,7 @@ public class CommissionApplyController extends BaseController {
     }
 
     /**
-     * 作废申请单：DRAFT/SUBMITTED/REJECTED/LOCKED 可作废。
+     * 作废申请单：SUBMITTED/REJECTED/LOCKED 可作废。
      * 未锁定单冲销未审批明细；已锁定单冲销全部明细（含 APPROVED），释放事实供重新发起，
      * 作废后不计入工资，重新发起按发起日生成当月结佣记录。
      *

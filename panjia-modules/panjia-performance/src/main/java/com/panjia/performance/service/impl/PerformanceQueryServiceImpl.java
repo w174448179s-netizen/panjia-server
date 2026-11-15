@@ -271,7 +271,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 拆表后 PERF_REAL 物理落在实收域 rd/rc：结佣业绩口径走实收明细表，
         // 其余填充（员工/部门、结佣状态、折算）按 rd.id 与 rc.biz_type 同样适用
         List<PerformanceManageVo> rows = "PERF_REAL".equals(factType)
-            ? factMapper.selectReceivedManageListByContractNos(period, contractNos)
+            ? factMapper.selectReceivedManageListByContractNos(period, contractNos, query.getOnlyEffective())
             : factMapper.selectManageListByContractNos(period, factType, contractNos, query.getOrderNos());
         fillManageDetailEmployeeAndDept(rows);
         fillManageDetailOriginalAmount(rows, period, factType, contractNos);
@@ -641,9 +641,10 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     }
 
     /**
-     * 业绩排行：按员工聚合新签业绩金额降序，分页返回。
+     * 业绩排行：按员工聚合「导入的新签原始业绩」金额降序，分页返回。
      * <p>
      * 排行榜面向全员公开（所有员工都能看到全量排名，仅作激励展示）；部门条件仅作筛选，不做数据权限裁剪。
+     * 口径：只统计导入生成的新签业绩（含导入负金额），不计人为业绩调整（调整覆盖后按调整前的原始金额计入）。
      * rank 字段按分页起始序号填充（offset + 1 起）。
      */
     @Override
@@ -1020,14 +1021,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 合同管理明细：批量填充审批中的调整单（SUBMITTED/APPROVED，执行前金额未变）。
      * <p>
-     * 两种口径：
-     * <ul>
-     *   <li>明细级调整（factId 定位）：目标金额直接取调整单 target_amount；</li>
-     *   <li>合同级调整（contract_no 定位）：按各明细金额占比分摊总变动额
-     *       （{@link MoneyUtil#allocateByAmount}，与执行落库共用同一算法），
-     *       审批前即可看到每人分摊的调整金额与调整后业绩。</li>
-     * </ul>
-     * 明细级优先：已命中明细级调整单的行不再叠加合同级分摊。
+     * 合同级调整（contract_no 定位）：按各明细金额占比分摊总变动额
+     * （{@link MoneyUtil#allocateByAmount}，与执行落库共用同一算法），
+     * 审批前即可看到每人分摊的调整金额与调整后业绩。
      */
     private void fillManageDetailPendingAdjust(List<PerformanceManageVo> rows,
                                                String period, String factType,
@@ -1035,34 +1031,7 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         if (rows == null || rows.isEmpty()) {
             return;
         }
-        // 1. 明细级：按 factId 批量查
-        Set<Long> factIds = rows.stream()
-            .map(PerformanceManageVo::getId)
-            .filter(Objects::nonNull)
-            .collect(Collectors.toSet());
-        if (!factIds.isEmpty()) {
-            Map<Long, Map<String, Object>> pendingMap = new HashMap<>();
-            for (Map<String, Object> pending : adjustMapper.doSelectPendingByFactIds(factIds)) {
-                Object key = pending.get("factId");
-                if (key != null) {
-                    pendingMap.put(((Number) key).longValue(), pending);
-                }
-            }
-            for (PerformanceManageVo row : rows) {
-                Map<String, Object> pending = pendingMap.get(row.getId());
-                if (pending != null) {
-                    row.setAdjustPending(true);
-                    Object type = pending.get("adjustType");
-                    row.setAdjustPendingType(type == null ? null : type.toString());
-                    Object target = pending.get("targetAmount");
-                    BigDecimal targetAmt = target == null ? null : new BigDecimal(target.toString());
-                    row.setAdjustPendingAmount(targetAmt);
-                    BigDecimal amt = row.getAmount() != null ? row.getAmount() : BigDecimal.ZERO;
-                    row.setAdjustPendingDelta(targetAmt == null ? null : MoneyUtil.round2(targetAmt.subtract(amt)));
-                }
-            }
-        }
-        // 2. 合同级：按业务键查，delta 按金额占比分摊到各明细行；
+        // 合同级：按业务键查，delta 按金额占比分摊到各明细行；
         //    同合同号多订单时按订单号过滤，只应用本订单的在途单（防跨订单串分摊）
         if (contractNos == null || contractNos.isEmpty()) {
             return;
@@ -1115,9 +1084,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         BigDecimal[] parts = MoneyUtil.allocateByAmount(amounts, delta);
         for (int i = 0; i < rows.size(); i++) {
             PerformanceManageVo row = rows.get(i);
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             BigDecimal amt = amounts.get(i);
             row.setAdjustPending(true);
             row.setAdjustPendingType("AMOUNT");
@@ -1153,9 +1119,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         for (PerformanceManageVo row : rows) {
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
             if (alloc == null && row.getEmployeeId() != null) {
                 alloc = allocByEmployee.get(row.getEmployeeId());
@@ -1227,9 +1190,6 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         for (PerformanceManageVo row : rows) {
-            if (Boolean.TRUE.equals(row.getAdjustPending())) {
-                continue; // 明细级优先，不叠加
-            }
             AddMemberPayload.Alloc alloc = row.getId() != null ? allocByFact.get(row.getId()) : null;
             if (alloc == null && row.getEmployeeId() != null) {
                 alloc = allocByEmployee.get(row.getEmployeeId());

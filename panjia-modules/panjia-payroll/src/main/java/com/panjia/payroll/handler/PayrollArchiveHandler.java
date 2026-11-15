@@ -8,6 +8,7 @@ import com.panjia.contracts.event.DomainEventHandler;
 import com.panjia.contracts.event.ImportBatchArchivedEvent;
 import com.panjia.contracts.port.EmployeeMainDataQueryPort;
 import com.panjia.contracts.port.ImportNormalizedRecordQueryPort;
+import com.panjia.contracts.port.PeopleQueryPort;
 import com.panjia.contracts.port.PeopleSalaryFactSyncPort;
 import com.panjia.payroll.domain.BatchStatus;
 import com.panjia.payroll.domain.EmployeeRole;
@@ -61,6 +62,7 @@ public class PayrollArchiveHandler implements DomainEventHandler {
 
     private final ImportNormalizedRecordQueryPort importQueryPort;
     private final EmployeeMainDataQueryPort employeeQueryPort;
+    private final PeopleQueryPort peopleQueryPort;
     private final PayrollBatchMapper batchMapper;
     private final PayrollDetailMapper detailMapper;
     private final PeopleSalaryFactSyncPort salaryFactSyncPort;
@@ -118,6 +120,8 @@ public class PayrollArchiveHandler implements DomainEventHandler {
 
         // ===== 2. 工号 → 员工主数据（批量预取，避免 N+1） =====
         Map<String, EmployeeMainDataDTO> empMap = loadEmployees(byKind);
+        // 历史工资补录：按归属月取员工当时所属部门，避免调店后历史月份被归到当前门店
+        applyDeptAtPeriod(empMap, period);
 
         // ===== 3. 幂等重建：先删该期间历史批次（期间为历史补录，无正常算薪批次） =====
         clearPeriod(period);
@@ -423,6 +427,30 @@ public class PayrollArchiveHandler implements DomainEventHandler {
             }
         }
         return map;
+    }
+
+    /** 按归属月回填员工部门：补录历史工资时取当时所属门店，而非员工当前门店 */
+    private void applyDeptAtPeriod(Map<String, EmployeeMainDataDTO> empMap, String period) {
+        if (empMap == null || empMap.isEmpty()) {
+            return;
+        }
+        var ids = new java.util.HashSet<Long>();
+        for (EmployeeMainDataDTO dto : empMap.values()) {
+            if (dto.getEmployeeId() != null) {
+                ids.add(dto.getEmployeeId());
+            }
+        }
+        if (ids.isEmpty()) {
+            return;
+        }
+        Map<Long, Long> deptAtPeriod = peopleQueryPort.findDeptIdsAt(
+            ids, java.time.YearMonth.parse(period).atEndOfMonth());
+        for (EmployeeMainDataDTO dto : empMap.values()) {
+            Long deptId = deptAtPeriod.get(dto.getEmployeeId());
+            if (deptId != null) {
+                dto.setDeptId(deptId);
+            }
+        }
     }
 
     /** 职位文本 → 员工角色（对齐老 roleFromPosition） */

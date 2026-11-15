@@ -156,9 +156,11 @@ public class ImportBatchServiceImpl implements ImportBatchService {
         ImportBatch batch = requireBatch(batchId);
         // 先冲销同（类型,期间,部门）的旧生效批次，否则本批次转入 ARCHIVED 撞部分唯一索引；
         // 积分同月允许多批次并存（二手/租赁/简版各一份），按日期合并；
-        // 实收同月允许多批次并存，按「订单/月」增量合并（明细级替换由实收域负责），故均不做整批替换
+        // 实收同月允许多批次并存，按「订单/月」增量合并（明细级替换由实收域负责）；
+        // 新签同月允许多批次并存，按事实 source_key 幂等追加（2026-11-09），均不做整批替换
         if (batch.getSourceType() != ImportSourceType.POINTS
-            && batch.getSourceType() != ImportSourceType.KE_RECEIVED) {
+            && batch.getSourceType() != ImportSourceType.KE_RECEIVED
+            && batch.getSourceType() != ImportSourceType.KE_SIGNED) {
             batchSupersedeService.supersedeOldArchivedBatch(batch);
         }
         batch.archive();

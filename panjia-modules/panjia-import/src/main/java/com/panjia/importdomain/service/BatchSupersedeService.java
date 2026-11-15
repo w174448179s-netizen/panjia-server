@@ -28,6 +28,8 @@ import java.util.List;
  * 考勤/积分等按部门组织且下游按部门消费的来源仍按 dept 维度判定。
  * KE_RECEIVED 自 2026-10-29 起改为「订单 + 归属月」粒度增量合并（见 ImportEngine.isMergeSource），
  * 不再经过本服务整批冲销，批次仅作留痕。
+ * KE_SIGNED 自 2026-11-09 起改为按事实 source_key 幂等追加（见 ImportEngine.isMergeSource），
+ * 同样不再经过本服务整批冲销。
  * <p>
  * 部分唯一索引 uk_import_batch_type_period_dept 仅约束
  * status=ARCHIVED 且 superseded_by_batch_id IS NULL 的行；

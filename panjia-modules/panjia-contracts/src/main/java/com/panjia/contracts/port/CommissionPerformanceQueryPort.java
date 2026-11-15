@@ -124,6 +124,17 @@ public interface CommissionPerformanceQueryPort {
     List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, String factType, Long employeeId, String keyword);
 
     /**
+     * 按业务键集合跨期间返回「每期」有效实收正/负向及链原值（结佣实收按到账月归属结佣单用）。
+     * <p>仅 PERF_REAL 支持；业务键归一、有效明细过滤、正负不抵消、链原值口径与
+     * {@link #listContractSummaries} 一致。
+     *
+     * @param bizKeys  合同号/订单号业务键集合
+     * @param factType 事实口径（仅 PERF_REAL 有数据；其余返回空列表）
+     * @return 每行 bizKey + period + 四个方向金额
+     */
+    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType);
+
+    /**
      * 按期间 + 业务键集合（合同号/订单号）统计跨合同去重员工数（结佣明细列表合计用）。
      *
      * @param period   归属期间 YYYY-MM；可空，空时统计全部期间

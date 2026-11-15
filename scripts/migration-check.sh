@@ -45,11 +45,12 @@ cat > "$SEGMENT_OWNER_FILE" <<'EOF'
 12 panjia-import
 13 panjia-outbox
 14 panjia-performance
-15 panjia-customer
-16 panjia-commission
-17 panjia-payroll
-18 panjia-ledger
-19 panjia-rules
+15 panjia-commission
+16 panjia-payroll
+17 panjia-received
+18 panjia-im-dingtalk
+19 ruoyi-admin
+20 ruoyi-admin
 EOF
 
 ok()    { echo "  [OK]   $*"; }
@@ -229,47 +230,85 @@ with open(sql_list) as f:
             except Exception:
                 pass
 
-# 把每个文件中所有 sys_menu INSERT 语句提取出来
-insert_re = re.compile(
-    r"INSERT\s+INTO\s+sys_menu\s*(?:\(([^)]+)\))?\s*VALUES\s*\(([^;]+)\)\s*;",
-    re.IGNORECASE | re.DOTALL,
+# 把每个文件中所有 sys_menu INSERT 语句提取出来（支持多行 VALUES、多行元组、ON CONFLICT 尾巴）
+insert_head_re = re.compile(
+    r"INSERT\s+INTO\s+sys_menu\s*(?:\(([^)]*)\))?\s*VALUES\s*",
+    re.IGNORECASE,
 )
 
 menu_ids = set()
 parent_refs = []  # [(parent_id, file, menu_id), ...]
 
+def split_sql_values(s):
+    out, buf, in_q, q_ch, depth = [], [], False, '', 0
+    for ch in s:
+        if in_q:
+            buf.append(ch)
+            if ch == q_ch:
+                in_q = False
+        elif ch in ("'", '"'):
+            in_q = True; q_ch = ch
+            buf.append(ch)
+        elif ch == '(':
+            depth += 1; buf.append(ch)
+        elif ch == ')':
+            depth -= 1; buf.append(ch)
+        elif ch == ',' and depth == 0:
+            out.append(''.join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append(''.join(buf).strip())
+    return out
+
+def to_int(s):
+    s = s.strip()
+    if not s or s.upper() == 'NULL':
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        # 比如 now() 之类的，跳过
+        return None
+
+def read_tuple_rows(text, pos):
+    """从 pos 开始读取一个或多个顶层 (...) 元组，自动跳过逗号/空白"""
+    rows = []
+    n = len(text)
+    while pos < n:
+        while pos < n and text[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= n or text[pos] != '(':
+            break
+        depth = 0; in_q = False; q_ch = ''; start = pos
+        while pos < n:
+            ch = text[pos]
+            if in_q:
+                if ch == q_ch:
+                    in_q = False
+            elif ch in ("'", '"'):
+                in_q = True; q_ch = ch
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    rows.append(text[start + 1:pos])
+                    pos += 1
+                    break
+            pos += 1
+    return rows, pos
+
 for path, content in all_sql:
-    # 把跨行 INSERT 压成一行：替换 \n 在 (...) 内部
-    # 简单做法：把所有换行替换为空格，因为 sys_menu INSERT 内容里没有真正的换行需求
+    # 把跨行 INSERT 压成一行，方便扫描
     normalized = re.sub(r"\s+", " ", content)
 
-    for m in insert_re.finditer(normalized):
-        cols_str, vals_str = m.group(1), m.group(2)
-        # 分列：按 SQL 风格（处理引号、括号）
-        def split_sql_values(s):
-            out, buf, in_q, q_ch, depth = [], [], False, '', 0
-            for ch in s:
-                if in_q:
-                    buf.append(ch)
-                    if ch == q_ch:
-                        in_q = False
-                elif ch in ("'", '"'):
-                    in_q = True; q_ch = ch
-                    buf.append(ch)
-                elif ch == '(':
-                    depth += 1; buf.append(ch)
-                elif ch == ')':
-                    depth -= 1; buf.append(ch)
-                elif ch == ',' and depth == 0:
-                    out.append(''.join(buf).strip())
-                    buf = []
-                else:
-                    buf.append(ch)
-            if buf:
-                out.append(''.join(buf).strip())
-            return out
-
-        vals = split_sql_values(vals_str)
+    for m in insert_head_re.finditer(normalized):
+        cols_str = m.group(1)
+        rows, _ = read_tuple_rows(normalized, m.end())
+        if not rows:
+            continue
 
         if cols_str:
             cols = [c.strip().strip('"').strip("'").lower() for c in cols_str.split(',')]
@@ -282,26 +321,16 @@ for path, content in all_sql:
             # 默认顺序: menu_id, menu_name, parent_id, ...
             idx_menu, idx_parent = 0, 2
 
-        if idx_menu >= len(vals) or idx_parent >= len(vals):
-            continue
-
-        def to_int(s):
-            s = s.strip()
-            if not s or s.upper() == 'NULL':
-                return None
-            try:
-                return int(s)
-            except ValueError:
-                # 比如 now() 之类的，跳过
-                return None
-
-        mid = to_int(vals[idx_menu])
-        pid = to_int(vals[idx_parent])
-
-        if mid is not None:
-            menu_ids.add(mid)
-        if pid is not None:
-            parent_refs.append((pid, path, mid))
+        for row in rows:
+            vals = split_sql_values(row)
+            if idx_menu >= len(vals) or idx_parent >= len(vals):
+                continue
+            mid = to_int(vals[idx_menu])
+            pid = to_int(vals[idx_parent])
+            if mid is not None:
+                menu_ids.add(mid)
+            if pid is not None:
+                parent_refs.append((pid, path, mid))
 
 with open(menu_id_file, 'w') as f:
     for mid in sorted(menu_ids):

@@ -37,7 +37,7 @@ import java.util.Set;
  * PENDING→APPROVED + approved_month 口径）。语义同老导入器 ensureCommissionApplications：
  * <ul>
  *   <li>仅取业绩域经端口提供的该批次 ACTIVE PERF_REAL 事实，金额非 0 才入组；</li>
- *   <li>同期间同合同已有未完结申请单（DRAFT/SUBMITTED/APPROVED/LOCKED）→ 挂靠补明细
+ *   <li>同期间同合同已有未完结申请单（SUBMITTED/APPROVED/LOCKED）→ 挂靠补明细
  *       并收敛为 LOCKED（total_amount/item_count 累加，approved_month/lock_time/approve_time
  *       COALESCE 保留原值）；</li>
  *   <li>否则新建 LOCKED 单（无流程实例，历史补录语义），expected_amount 取该合同
@@ -129,7 +129,7 @@ public class CommissionArchiveHandler implements DomainEventHandler {
                 new LambdaQueryWrapper<CommissionApplication>()
                     .eq(CommissionApplication::getPeriod, period)
                     .eq(CommissionApplication::getContractNo, contractNo)
-                    .in(CommissionApplication::getStatus, ApplicationStatus.DRAFT, ApplicationStatus.SUBMITTED,
+                    .in(CommissionApplication::getStatus, ApplicationStatus.SUBMITTED,
                         ApplicationStatus.APPROVED, ApplicationStatus.LOCKED)
                     .last("LIMIT 1"));
             Long applicationId;

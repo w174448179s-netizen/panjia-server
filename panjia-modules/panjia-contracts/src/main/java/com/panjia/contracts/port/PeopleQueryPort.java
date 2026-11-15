@@ -73,6 +73,16 @@ public interface PeopleQueryPort {
     Map<Long, Map<String, String>> getSnapshotsAt(Collection<Long> employeeIds, LocalDate pointInMonth);
 
     /**
+     * 批量取多个员工指定月份的归属部门（DEPT 事实时间轴，按归属月切片）。
+     * <p>用于实收导入等按业务月份回填部门：员工调店后补录历史月份时仍能落到当时所属门店。
+     *
+     * @param employeeIds  员工 ID 集合
+     * @param pointInMonth 归属月份内任意一天（取该月月末切片）
+     * @return employeeId → deptId；无 DEPT 事实的 ID 不在结果中
+     */
+    Map<Long, Long> findDeptIdsAt(Collection<Long> employeeIds, LocalDate pointInMonth);
+
+    /**
      * 取单个员工指定月份的<b>强类型</b>算薪事实快照（§10.6 {@link EmployeeSnapshot}）。
      * <p>
      * 与 {@link #getSnapshotAt(Long, LocalDate)} 的 String Map 同源，身份字段取自员工主数据
@@ -124,6 +134,18 @@ public interface PeopleQueryPort {
      * @return 当月持有有效 LEVEL 事实且未离职的员工 ID
      */
     Collection<Long> findActiveEmployeeIdsWithLevel(LocalDate pointInMonth);
+
+    /**
+     * 取指定月份有效的伯乐关系（MENTOR 事实切片）。
+     * <p>招聘加点与伯乐奖励按「千里马入职当月生效、离职次月失效」口径：
+     * 入职当月计入，离职当月仍计入、离职次月起不计入。
+     * 关系起点还需满足 MENTOR 事实生效月（入职初始化=入职月，后续变更=变更生效月）；
+     * 虚拟员工不参与。
+     *
+     * @param pointInMonth 算薪月份内任意一天（内部按当月月末切片）
+     * @return 千里马员工 ID → 伯乐员工 ID；无伯乐关系/入职次月及以后（未入职）/离职次月及以后的不在结果中
+     */
+    Map<Long, Long> findMentorRelationsAt(LocalDate pointInMonth);
 
     /**
      * 批量解析部门所属的「门店级」锚点部门。
@@ -184,4 +206,13 @@ public interface PeopleQueryPort {
      * @return 店组编码 → 虚拟人主数据（employeeId/employeeCode/employeeName）；入参为空返回空 Map
      */
     Map<String, com.panjia.contracts.dto.EmployeeMainDataDTO> findVirtualEmployeesByStoreGroups(Collection<String> storeGroups);
+
+    /**
+     * 批量筛选出虚拟人员工（门店公共占位，status=VIRTUAL）。
+     * <p>虚拟人不参与结佣发起/审批与工资计算：结佣建单、算薪名单组装时须批量剔除。
+     *
+     * @param employeeIds 待判断员工 ID 集合
+     * @return 其中状态为 VIRTUAL 的员工 ID；入参为空返回空集合
+     */
+    Collection<Long> findVirtualEmployeeIds(Collection<Long> employeeIds);
 }

@@ -33,10 +33,10 @@ public class ScoreDetailSyncDTO implements Serializable {
     /** 当日积分 */
     private BigDecimal score;
 
-    /** 是否晚提交（填报时间晚于 23:00） */
+    /** 是否晚提交（积分日期 23:00 ~ 次日 09:00 提交） */
     private boolean lateSubmit;
 
-    /** 是否计入总积分（早于 19:30 提交为 false） */
+    /** 是否计入总积分（窗口外提交为 false，当日积分按 0 存） */
     private boolean valid;
 
     /** 来源导入批次 ID（整批替换/撤销时按此精确清理本批写入的行） */

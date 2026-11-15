@@ -23,9 +23,9 @@ import java.util.stream.Collectors;
  * <p>
  * 分治规则：
  * <ul>
- *   <li>PENDING/DRAFT（未审批）→ 随动作废 REVERSED，reversed_reason = 事件 reason；
- *       所属 SUBMITTED 单由 {@code revertSubmittedToDraftIfNeeded} 终止审批流程 + 回退 DRAFT
- *       + 按调整后新签金额重建明细；DRAFT 单直接重建明细；</li>
+ *   <li>PENDING（待审批）→ 随动作废 REVERSED，reversed_reason = 事件 reason；
+ *       所属 SUBMITTED 单由 {@code revertAndResubmitIfNeeded} 终止旧流程 + 按调整后新签金额
+ *       重建明细 + 在原单上启动新流程（单据始终为审批中）；</li>
  *   <li>APPROVED（已审批）→ <b>金额一动不动</b>，仅置 origin_reversed = true + 告警
  *       （V4.2 §9.2-4：已审批数据永不覆盖，需人工撤销后重新发起）；</li>
  *   <li>REVERSED（已冲销）→ 忽略（终态）。</li>
@@ -114,16 +114,16 @@ public class CommissionReverseService {
         }
 
         // 聚合重算 + 按单状态分治联动：
-        //   DRAFT 单：明细被冲销后从当前新签事实重建（rebuildItemsIfNeeded）；
-        //   SUBMITTED 单：终止审批流程 + 回退 DRAFT + 按调整后新签金额重建（revertSubmittedToDraftIfNeeded）；
+        //   SUBMITTED 单：终止旧审批流程 → 按调整后新签金额整单重建 → 在同一张单上启动新流程
+        //                 （单据状态全程保持审批中，不再回退草稿）；
         //   APPROVED/LOCKED 单：明细金额不动（仅 origin_reversed 标记），不重建。
         Set<Long> applicationIds = affectedItems.stream()
             .map(CommissionItem::getApplicationId)
             .collect(Collectors.toSet());
         for (Long applicationId : applicationIds) {
-            // DRAFT 单部分明细被冲销（增加角色人只 supersede 被扣除行）时，连带作废同单其余
+            // 部分明细被冲销（增加角色人只 supersede 被扣除行）时，连带作废同单其余
             // 未审批明细并按当前 ACTIVE 新签事实整单重建（原因写入 reversed_reason）
-            applicationService.revertSubmittedToDraftIfNeeded(applicationId, reversedReason);
+            applicationService.revertAndResubmitIfNeeded(applicationId, reversedReason);
         }
 
         // 写消费日志（幂等锚点 + 留痕）

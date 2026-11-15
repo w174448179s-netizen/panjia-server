@@ -231,27 +231,6 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
                                                        @Param("keys") java.util.Collection<String> keys);
 
     /**
-     * 批量查询审批中的明细级调整单（SUBMITTED/APPROVED，每事实取最新一单）。
-     *
-     * @param factIds 事实 ID 集合
-     * @return 每行含 factId / adjustType / targetAmount；空集合返回空列表
-     */
-    @Select("""
-        <script>
-        SELECT DISTINCT ON (fact_id)
-               fact_id AS "factId",
-               adjust_type AS "adjustType",
-               target_amount AS "targetAmount"
-        FROM pj_perf_adjust
-        WHERE status IN ('SUBMITTED', 'APPROVED')
-          AND fact_id IN
-        <foreach collection="factIds" item="id" open="(" separator="," close=")">#{id}</foreach>
-        ORDER BY fact_id, id DESC
-        </script>
-        """)
-    List<Map<String, Object>> doSelectPendingByFactIds(@Param("factIds") java.util.Collection<Long> factIds);
-
-    /**
      * 批量查询已执行的合同级调整单（含链式多次调整，新→旧排列，供逆向还原每人调整前金额）。
      * <p>
      * 覆盖合同级调整：
@@ -284,7 +263,6 @@ public interface PerformanceAdjustMapper extends BaseMapperPlus<PerformanceAdjus
           <if test="period != null and period != ''">AND period = #{period}</if>
           AND fact_type = #{factType}
           AND status = 'EXECUTED'
-          AND adjust_scope = 'CONTRACT'
           AND adjust_type IN ('AMOUNT', 'ADD_MEMBER', 'DEDUCT', 'INCREASE')
           AND contract_no IN
         <foreach collection="keys" item="k" open="(" separator="," close=")">#{k}</foreach>

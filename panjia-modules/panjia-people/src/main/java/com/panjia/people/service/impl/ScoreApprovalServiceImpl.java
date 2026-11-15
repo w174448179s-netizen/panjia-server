@@ -17,6 +17,7 @@ import com.panjia.people.mapper.ScoreApprovalMapper;
 import com.panjia.people.service.ScoreApprovalService;
 import com.panjia.people.service.ScoreAttendDaysResolver;
 import com.panjia.people.service.ScoreGradePolicy;
+import com.panjia.people.service.ScorePerfSchemeResolver;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.exception.ServiceException;
@@ -64,6 +65,7 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
     private final ApprovalPort approvalPort;
     private final ScoreGradePolicy scoreGradePolicy;
     private final ScoreAttendDaysResolver attendDaysResolver;
+    private final ScorePerfSchemeResolver scorePerfSchemeResolver;
 
     @Override
     public ScoreApprovalVO getByPeriod(String period) {
@@ -357,6 +359,9 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         Map<Long, Employee> empMap = empIds.isEmpty() ? Map.of()
             : employeeMapper.selectByIds(new ArrayList<>(empIds))
             .stream().collect(Collectors.toMap(Employee::getEmployeeId, Function.identity(), (a, b) -> a));
+        // 绩效方案类型（无绩效方案不扣晚提交罚款）
+        Map<Long, String> schemeTypeMap = scorePerfSchemeResolver.schemeTypesAt(
+            empIds, month.atEndOfMonth());
 
         List<ScoreApprovalVO.DeductRow> voRows = deductRows.stream().map(r -> {
             ScoreApprovalVO.DeductRow row = new ScoreApprovalVO.DeductRow();
@@ -375,7 +380,7 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             row.setDeductRate(scoreGradePolicy.deductOf(rule, grade));
             row.setLateSubmitCount(r.getLateSubmitCount());
             row.setPointsFee(r.getLateSubmitCount() != null && r.getLateSubmitCount() > 0
-                ? scoreGradePolicy.lateFeeOf(rule, r.getLateSubmitCount()) : null);
+                ? lateFeeOf(rule, r.getLateSubmitCount(), schemeTypeMap.get(r.getEmployeeId())) : null);
             return row;
         }).toList();
 
@@ -401,7 +406,7 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
             row.setEmployeeName(emp == null ? null : emp.getEmployeeName());
             row.setScoreMonth(r.getScoreMonth() == null ? null : r.getScoreMonth().toString());
             row.setLateSubmitCount(r.getLateSubmitCount());
-            row.setPointsFee(scoreGradePolicy.lateFeeOf(rule, r.getLateSubmitCount()));
+            row.setPointsFee(lateFeeOf(rule, r.getLateSubmitCount(), schemeTypeMap.get(r.getEmployeeId())));
             return row;
         }).toList();
         int lateTotalCount = lateRows.stream()
@@ -415,6 +420,13 @@ public class ScoreApprovalServiceImpl implements ScoreApprovalService {
         snapshot.put("lateSubmitRows", lateVoRows);
 
         return JSON.writeValueAsString(snapshot);
+    }
+
+    /** 晚提交扣款：仅积分绩效、店长积分绩效考核，不分绩效等级 */
+    private BigDecimal lateFeeOf(PointsRuleDTO rule, Integer lateSubmitCount, String schemeType) {
+        return scorePerfSchemeResolver.isLateFeeExempt(schemeType)
+            ? BigDecimal.ZERO
+            : scoreGradePolicy.lateFeeOf(rule, lateSubmitCount);
     }
 
     /** 发起流程命令（对齐考勤审批口径；variables 必须可变，适配器会写入流程变量） */

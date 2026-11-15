@@ -28,9 +28,6 @@ public class PerformanceAdjustCreateBo {
     /** 调整类型：AMOUNT / VOID / TRANSFER / ADD_MEMBER */
     private String adjustType;
 
-    /** 调整范围：CONTRACT-合同级 / DETAIL-明细级 */
-    private String adjustScope;
-
     /** 合同号（合同级调整时必填，用于定位该合同下全部明细） */
     private String contractNo;
 

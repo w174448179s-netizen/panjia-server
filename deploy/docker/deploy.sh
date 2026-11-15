@@ -210,6 +210,7 @@ PANJIA_AUTH_CODE=${PANJIA_AUTH_CODE:-}
 PANJIA_LICENSE_SERVER_URL=https://panjia.online
 PANJIA_PIN_FP_A=5f9a4d5dda12751bfa7a7d5fd490a83d5ae0e6aae5abc6eb06a64e21a41e94ce
 PANJIA_PIN_FP_B=
+# ---- 钉钉集成（考勤/积分同步）：开关、凭证、同步时间等统一在「参数管理」维护，不走环境变量 ----
 ENVEOF
     # HTTPS 域名模式：compose 据此挂载 HTTPS 配置 + 对公网发布 443
     if [ -n "$DOMAIN" ]; then

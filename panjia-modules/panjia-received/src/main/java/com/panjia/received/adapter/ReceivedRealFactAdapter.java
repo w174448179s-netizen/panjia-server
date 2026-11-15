@@ -80,7 +80,24 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
         if (matchKey == null || matchKey.isBlank()) {
             return Collections.emptyList();
         }
-        return realMapper.selectActiveByContract(period, orderNo, matchKey);
+        List<PerformanceFactSummaryDTO> rows = realMapper.selectActiveByContract(period, orderNo, matchKey);
+        String on = orderNo == null ? null : orderNo.trim();
+        String cn = contractNo == null ? null : contractNo.trim();
+        if (!rows.isEmpty() || on == null || on.isEmpty() || cn == null || cn.isEmpty()) {
+            return rows;
+        }
+        // 0 命中退化：贝壳新签 order_no 误填合同号、虚拟壳重键后，调整单存档订单号可能已失效。
+        // 注意不能因 on.equals(cn) 提前返回：订单号被误填为合同号时，真实实收订单号反而不同，退化正是为此兜底。
+        // 仅单订单合同允许按合同号退化，多订单保持 0 行防串单（countDistinctOrderNos 已排除纯虚拟壳）
+        if (contractMapper.countDistinctOrderNos(cn) == 1L) {
+            List<PerformanceFactSummaryDTO> degraded = realMapper.selectActiveByContract(period, null, cn);
+            if (!degraded.isEmpty()) {
+                log.warn("[实收-订单号退化] 订单号0命中，改按合同号命中{}行：period={}, orderNo={}, contractNo={}",
+                    degraded.size(), period, on, cn);
+            }
+            return degraded;
+        }
+        return rows;
     }
 
     @Override
@@ -111,6 +128,14 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     public List<PerformanceContractSummaryDTO> listContractSummaries(String period, Long deptId, Long employeeId, String keyword) {
         // period 可空：结佣列表仅录合同号不选期间时跨期汇总（mapper 内期间条件化）
         return realMapper.selectContractSummaries(period, deptId, employeeId, keyword);
+    }
+
+    @Override
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys) {
+        if (bizKeys == null || bizKeys.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return realMapper.selectDirectionalPeriodSummaries(bizKeys, bizKeys);
     }
 
     @Override
