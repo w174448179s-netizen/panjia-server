@@ -382,6 +382,7 @@ public interface ReceivedRealFactMapper {
      * <p>与合同汇总的差别仅在于按 {@code rd.period} 分组，供消费方按实收月切片归属。
      *
      * @param bizKeys 业务键集合（订单号/合同号）
+     * @param employeeId 员工 ID；非空时只统计该员工明细（员工口径）
      * @return 每行 bizKey + period + 四个方向金额；无实收的期不出现在结果中
      */
     @Select("""
@@ -397,12 +398,18 @@ public interface ReceivedRealFactMapper {
                    ra.id AS ra_id
             FROM pj_received_detail rd
             JOIN pj_received_contract rc ON rc.id = rd.contract_id
+            LEFT JOIN pj_people_employee e
+                   ON (e.employee_id = rd.employee_id
+                       OR (rd.employee_id IS NULL AND e.employee_code = rd.employee_external_code))
             LEFT JOIN pj_perf_received_apply ra ON ra.id = rd.received_apply_id
             WHERE rd.detail_status = 'ACTIVE'
               AND (rc.order_no IN
                   <foreach collection="bizKeys" item="k" open="(" separator="," close=")">#{k}</foreach>
                    OR rc.contract_no IN
                   <foreach collection="bizKeys2" item="k" open="(" separator="," close=")">#{k}</foreach>)
+              <if test="employeeId != null">
+                AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
+              </if>
         ),
         sk AS (
             SELECT DISTINCT biz_key, source_key, period, (amount &lt; 0) AS is_neg
@@ -443,7 +450,8 @@ public interface ReceivedRealFactMapper {
         """)
     List<PerformanceContractSummaryDTO> selectDirectionalPeriodSummaries(
             @Param("bizKeys") Collection<String> bizKeys,
-            @Param("bizKeys2") Collection<String> bizKeys2);
+            @Param("bizKeys2") Collection<String> bizKeys2,
+            @Param("employeeId") Long employeeId);
 
     /**
      * 跨合同去重员工数：员工键口径与 {@link #selectContractSummaries} 一致

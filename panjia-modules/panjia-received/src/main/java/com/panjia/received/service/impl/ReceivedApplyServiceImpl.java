@@ -1884,7 +1884,7 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
         BigDecimal sum = BigDecimal.ZERO;
         if (!keys.isEmpty() && StringUtils.isNotBlank(apply.getPeriod())) {
             for (com.panjia.contracts.dto.PerformanceContractSummaryDTO s
-                : realFactMapper.selectDirectionalPeriodSummaries(keys, keys)) {
+                : realFactMapper.selectDirectionalPeriodSummaries(keys, keys, null)) {
                 String p = StringUtils.trimToNull(s.getPeriod());
                 if (p == null || p.compareTo(apply.getPeriod()) > 0) {
                     continue;

@@ -1671,7 +1671,8 @@ public class CommissionApplicationService {
      * 不选条件多分片查询时单合同实收被放大，按合同查询仅单分片时正常）。
      * 这里要求「结果业务键属于本分片」才接受，保证每个业务键只由一个分片返回一次。
      */
-    private Map<String, List<PerformanceContractSummaryDTO>> loadReceivedPeriodStats(Collection<String> bizKeys) {
+    private Map<String, List<PerformanceContractSummaryDTO>> loadReceivedPeriodStats(Collection<String> bizKeys,
+                                                                                   Long employeeId) {
         Map<String, List<PerformanceContractSummaryDTO>> statsByKey = new HashMap<>();
         if (bizKeys == null || bizKeys.isEmpty()) {
             return statsByKey;
@@ -1679,7 +1680,7 @@ public class CommissionApplicationService {
         for (List<String> chunk : chunkKeys(bizKeys)) {
             Set<String> chunkSet = new HashSet<>(chunk);
             for (PerformanceContractSummaryDTO pc
-                : performanceQueryPort.listDirectionalPeriodSummaries(chunk, FACT_TYPE_REAL)) {
+                : performanceQueryPort.listDirectionalPeriodSummaries(chunk, FACT_TYPE_REAL, employeeId)) {
                 if (StringUtils.isBlank(pc.getBizKey()) || !chunkSet.contains(pc.getBizKey())) {
                     continue;
                 }
@@ -1997,7 +1998,7 @@ public class CommissionApplicationService {
         // 晚于最后一张单的到账继续累计到该单（审批锁定不再冻结实收展示）。
         // 一次批量取全部键的逐期实收，避免逐单回表；分片结果按业务键归组（跨片重复已剔除）
         Map<String, List<PerformanceContractSummaryDTO>> receivedStatsByKey =
-            loadReceivedPeriodStats(contractKeys);
+            loadReceivedPeriodStats(contractKeys, query.getEmployeeId());
         // 补收识别（2026-11-03，7.6）：补收月从归属切片中剔除，补收金额不并入任何结佣单
         ReceivedSplit split = splitReceivedBySupplement(receivedStatsByKey, contractKeys);
         // 补收行展示需要合同快照（合同号/订单号/类型/房源/签约时间），按归一业务键取一份
@@ -2428,7 +2429,7 @@ public class CommissionApplicationService {
 
         // 一次取全部候选键的逐期实收：发起页实收与结佣列表/详情共用同一口径（跨片重复已剔除）
         Map<String, List<PerformanceContractSummaryDTO>> receivedStatsByKey =
-            loadReceivedPeriodStats(expectKeys);
+            loadReceivedPeriodStats(expectKeys, query.getEmployeeId());
         // 补收月不并入待发起行的实收（与结佣列表口径一致）
         ReceivedSplit availableSplit = splitReceivedBySupplement(receivedStatsByKey, expectKeys);
 

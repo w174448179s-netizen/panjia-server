@@ -130,9 +130,11 @@ public interface CommissionPerformanceQueryPort {
      *
      * @param bizKeys  合同号/订单号业务键集合
      * @param factType 事实口径（仅 PERF_REAL 有数据；其余返回空列表）
+     * @param employeeId 员工 ID；非空时只统计该员工明细（员工口径，避免合同全量混入）
      * @return 每行 bizKey + period + 四个方向金额
      */
-    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType);
+    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType,
+                                                                      Long employeeId);
 
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计跨合同去重员工数（结佣明细列表合计用）。

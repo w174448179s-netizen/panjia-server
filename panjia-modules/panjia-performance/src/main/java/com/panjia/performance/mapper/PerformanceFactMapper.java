@@ -1870,7 +1870,17 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
             LIMIT 1
         ) lr ON TRUE
         LEFT JOIN LATERAL (
-            SELECT ca.status, ca.apply_no, ca.total_amount
+            SELECT ca.status, ca.apply_no,
+                   <choose>
+                       <when test="employeeId != null">
+                           (SELECT COALESCE(SUM(ci.amount), 0)
+                            FROM pj_commission_item ci
+                            WHERE ci.application_id = ca.id
+                              AND ci.employee_id = #{employeeId}
+                              AND ci.status &lt;&gt; 'REVERSED') AS total_amount
+                       </when>
+                       <otherwise>ca.total_amount</otherwise>
+                   </choose>
             FROM pj_commission_application ca
             WHERE ca.period = fa."period"
               AND ca.contract_no IN (fa."contractNo", fa."orderNo")

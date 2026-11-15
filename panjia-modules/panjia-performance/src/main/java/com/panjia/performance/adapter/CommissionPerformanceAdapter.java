@@ -454,12 +454,13 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType) {
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, String factType,
+                                                                             Long employeeId) {
         if (!isReal(factType) || bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyList();
         }
         ReceivedRealFactPort port = realPort();
-        return port == null ? Collections.emptyList() : port.listDirectionalPeriodSummaries(bizKeys);
+        return port == null ? Collections.emptyList() : port.listDirectionalPeriodSummaries(bizKeys, employeeId);
     }
 
     @Override

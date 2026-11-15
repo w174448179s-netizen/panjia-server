@@ -131,11 +131,11 @@ public class ReceivedRealFactAdapter implements ReceivedRealFactPort {
     }
 
     @Override
-    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys) {
+    public List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, Long employeeId) {
         if (bizKeys == null || bizKeys.isEmpty()) {
             return Collections.emptyList();
         }
-        return realMapper.selectDirectionalPeriodSummaries(bizKeys, bizKeys);
+        return realMapper.selectDirectionalPeriodSummaries(bizKeys, bizKeys, employeeId);
     }
 
     @Override

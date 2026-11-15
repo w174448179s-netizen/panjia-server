@@ -63,9 +63,10 @@ public interface ReceivedRealFactPort {
      * （未绑定审批单或审批单 APPROVED）；正负向互不抵消；原值为 sourceKey 链最早一条。
      *
      * @param bizKeys 业务键集合（订单号/合同号）
+     * @param employeeId 员工 ID；非空时只统计该员工明细（员工口径，避免合同全量混入）
      * @return 每行 bizKey + period + 四个方向金额；无实收的期不返回
      */
-    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys);
+    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, Long employeeId);
 
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计去重员工数（结佣明细列表跨合同合计用）。
