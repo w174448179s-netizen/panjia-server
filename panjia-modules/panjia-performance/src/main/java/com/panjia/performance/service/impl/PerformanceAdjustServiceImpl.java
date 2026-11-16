@@ -2185,7 +2185,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             if (factById.get(t.getFactId()) == null) {
                 // 若该事实归属期间与调整期间不一致，给出更明确的提示，避免用户误以为数据丢失
                 PerformanceFact raw = factMapper.selectById(t.getFactId());
-                if (raw != null && raw.getPeriod() != null && dto.getPeriod() != null
+                if (raw != null && raw.getPeriod() != null && StringUtils.isNotBlank(dto.getPeriod())
                     && !raw.getPeriod().equals(dto.getPeriod())) {
                     throw new ServiceException(
                         "指定调整行归属期间为 {}，与调整期间 {} 不一致，请切换到该期间后重试：factId={}",
