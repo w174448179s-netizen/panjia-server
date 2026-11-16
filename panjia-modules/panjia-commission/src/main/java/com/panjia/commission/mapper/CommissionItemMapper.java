@@ -267,10 +267,29 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
             GROUP BY 1, 2, 3, 4, 5
         ),
         app_dir AS (
-            -- 本单方向：与结佣列表行一致（按单据合计金额正负）
-            SELECT (COALESCE(total_amount, 0) &lt; 0) AS is_neg
-            FROM pj_commission_application
-            WHERE id = #{applicationId}
+            -- 本单方向：与结佣列表行一致（按单据合计金额正负）；
+            -- has_neg：同业务键是否存在活跃负向单。有负向单时负向实收归属负向单，
+            -- 正向单不再下发正/负/净额，避免同一笔负向实收在两单重复展示
+            SELECT (COALESCE(a.total_amount, 0) &lt; 0) AS is_neg,
+                   EXISTS (
+                       SELECT 1
+                       FROM pj_commission_application b
+                       WHERE b.status IN ('SUBMITTED','APPROVED','LOCKED')
+                         AND COALESCE(b.total_amount, 0) &lt; 0
+                         AND (CASE WHEN t.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(NULLIF(b.order_no,''), NULLIF(b.contract_no,''))
+                                   ELSE COALESCE(NULLIF(b.contract_no,''), NULLIF(b.order_no,'')) END)
+                           = (CASE WHEN t.biz_type IN ('一手房','房产金融','家装荐客')
+                                   THEN COALESCE(NULLIF(a.order_no,''), NULLIF(a.contract_no,''))
+                                   ELSE COALESCE(NULLIF(a.contract_no,''), NULLIF(a.order_no,'')) END)
+                   ) AS has_neg
+            FROM pj_commission_application a
+            LEFT JOIN (
+                SELECT MAX(ci.biz_type) AS biz_type
+                FROM pj_commission_item ci
+                WHERE ci.application_id = #{applicationId}
+            ) t ON TRUE
+            WHERE a.id = #{applicationId}
         ),
         app_received_total AS (
             -- 本单到账归属窗口内、全部员工的有效实收合计（与结佣列表行同一口径，不依赖员工/角色配对）
@@ -341,12 +360,28 @@ public interface CommissionItemMapper extends BaseMapperPlus<CommissionItem, Com
                -- 配对实收行的链原值合计（同口径）：与 receivedAmount 不一致时前端展示「原值 → 调整后值」
                CASE WHEN ci.amount &lt; 0 THEN COALESCE(orc.orig_neg_all, 0)
                     ELSE COALESCE(orc.orig_pos_all, 0) END AS "originalReceivedAmount",
+               -- 行级正/负/净额：仅正向单且同键无负向单时下发（前端正负分列，与发起页详情同展示）
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(arc.recv_pos_all, 0) END AS "receivedPositiveAmount",
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(arc.recv_neg_all, 0) END AS "receivedNegativeAmount",
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(arc.recv_pos_all, 0) + COALESCE(arc.recv_neg_all, 0) END AS "receivedNetAmount",
                -- 本单实收合计（合同级窗口口径，与结佣列表行一致）：明细行实收仅展示可配对份额，
                -- 合计不受「实收角色对不上新签/实收人员无新签行」影响，保证不少不重
                CASE WHEN dir.is_neg THEN COALESCE(aot.neg_amt, 0)
                     ELSE COALESCE(aot.pos_amt, 0) END AS "contractOriginalReceivedAmount",
                CASE WHEN dir.is_neg THEN COALESCE(art.neg_amt, 0)
-                    ELSE COALESCE(art.pos_amt, 0) END AS "contractReceivedAmount"
+                    ELSE COALESCE(art.pos_amt, 0) END AS "contractReceivedAmount",
+               -- 合同级正/负/净额：仅正向单且同键无负向单时下发（与结佣列表路径同口径）
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(art.pos_amt, 0) END AS "contractReceivedPositiveAmount",
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(art.neg_amt, 0) END AS "contractReceivedNegativeAmount",
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(art.pos_amt, 0) + COALESCE(art.neg_amt, 0) END AS "contractReceivedNetAmount",
+               CASE WHEN dir.is_neg OR dir.has_neg THEN NULL
+                    ELSE COALESCE(aot.pos_amt, 0) + COALESCE(aot.neg_amt, 0) END AS "contractOriginalReceivedNetAmount"
         FROM pj_commission_item ci
         CROSS JOIN app_dir dir
         CROSS JOIN app_received_total art

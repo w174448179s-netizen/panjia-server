@@ -117,6 +117,15 @@ public class CommissionContractVo implements Serializable {
     /** 实收金额合计（PERF_REAL 事实当前 ACTIVE 金额求和，即客户实际到账） */
     private BigDecimal receivedAmount;
 
+    /** 发起页展示用：到账归属窗口内正向实收合计（仅无负向新签行时下发） */
+    private BigDecimal receivedPositiveAmount;
+
+    /** 发起页展示用：到账归属窗口内负向实收合计（仅无负向新签行时下发） */
+    private BigDecimal receivedNegativeAmount;
+
+    /** 发起页展示用：到账归属窗口内实收净额 = 正向 + 负向（仅无负向新签行时下发） */
+    private BigDecimal receivedNetAmount;
+
     /**
      * 调整前实收金额合计（当前 ACTIVE rd 的 sourceKey 链最早金额求和，实收加人新人行按 0；
      * 仅 {@link #receivedAmountAdjusted}=true 时有值，供展示「原值 → 调整后值」）。
@@ -136,7 +145,8 @@ public class CommissionContractVo implements Serializable {
     /** 实收归属窗口上界（不含，YYYY-MM；null=不限）。仅结佣发起页行有值：=下一张同向结佣单期间 */
     private String receivedWindowEnd;
 
-    /** 实收归属方向（POS/NEG）。仅结佣发起页行有值：正/负向行各取同方向实收，正负不抵消 */
+    /** 实收归属方向（POS/NEG）。仅结佣发起页行有值：正/负向行各取同方向实收，正负不抵消；
+     *  无负向新签行时另下发 receivedPositiveAmount / receivedNegativeAmount / receivedNetAmount */
     private String receivedDirection;
 
     /** 实收归属需排除的期间（补收月，YYYY-MM）。仅结佣发起页行有值，详情按同口径剔除 */

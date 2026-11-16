@@ -96,4 +96,25 @@ public class CommissionItemDetailVo implements Serializable {
 
     /** 实收金额（调整前：配对 rd 行 sourceKey 链最早 REVERSED 金额，实收加人新人行按 0；未调整时 = receivedAmount） */
     private BigDecimal originalReceivedAmount;
+
+    /** 行级正向实收（仅正向单且同键无负向单时下发，前端正负分列展示） */
+    private BigDecimal receivedPositiveAmount;
+
+    /** 行级负向实收（仅正向单且同键无负向单时下发，前端正负分列展示） */
+    private BigDecimal receivedNegativeAmount;
+
+    /** 行级实收净额 = 正向 + 负向（仅正向单且同键无负向单时下发） */
+    private BigDecimal receivedNetAmount;
+
+    /** 本单实收正向合计（合同级窗口口径，仅正向单且同键无负向单时下发） */
+    private BigDecimal contractReceivedPositiveAmount;
+
+    /** 本单实收负向合计（合同级窗口口径，仅正向单且同键无负向单时下发） */
+    private BigDecimal contractReceivedNegativeAmount;
+
+    /** 本单实收净额 = 正向 + 负向（合同级窗口口径，仅正向单且同键无负向单时下发） */
+    private BigDecimal contractReceivedNetAmount;
+
+    /** 本单实收净额调整前原值（合同级窗口口径，用于「原值 → 调整后值」展示） */
+    private BigDecimal contractOriginalReceivedNetAmount;
 }

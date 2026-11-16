@@ -2130,8 +2130,11 @@ public class CommissionApplicationService {
             // 实收按到账月切片归属（见 attributeReceivedByApp）：每张单只取自己窗口内的到账，
             // 同键多张同向单互不重叠；锁定单继续吸收后续到账
             String rowBizKey = summaryBizKey(c);
+            List<CommissionApplication> attributionApps = appsByKey.getOrDefault(rowBizKey, rowApps);
             Map<Long, BigDecimal[]> attributedReceived = attributeReceivedByApp(
-                appsByKey.getOrDefault(rowBizKey, rowApps), split.statsForAttribution().get(rowBizKey));
+                attributionApps, split.statsForAttribution().get(rowBizKey));
+            // 同键存在活跃负向单时，负向实收归属负向单，正向行不展示净额，避免重复
+            boolean hasNegativeApp = hasActiveNegativeApp(attributionApps);
             Set<Long> seenAppIds = new HashSet<>();
             for (CommissionApplication app : rowApps) {
                 if (app.getStatus() == null || (app.getId() != null && !seenAppIds.add(app.getId()))) {
@@ -2198,6 +2201,15 @@ public class CommissionApplicationService {
                 BigDecimal mergedReceived = receivedAttr == null ? BigDecimal.ZERO : receivedAttr[0];
                 BigDecimal mergedOriginal = receivedAttr == null ? BigDecimal.ZERO : receivedAttr[1];
                 vo.setReceivedAmount(mergedReceived);
+                // 无负向结佣单时，负向实收按同一到账归属规则挂到正向单上，仅用于展示正/负/净额；
+                // receivedAmount 与审批校验口径不变
+                if (!hasNegativeApp && receivedAttr != null
+                    && (app.getTotalAmount() == null || app.getTotalAmount().signum() >= 0)) {
+                    BigDecimal displayNegative = receivedAttr[2] == null ? BigDecimal.ZERO : receivedAttr[2];
+                    vo.setReceivedPositiveAmount(mergedReceived);
+                    vo.setReceivedNegativeAmount(displayNegative);
+                    vo.setReceivedNetAmount(mergedReceived.add(displayNegative));
+                }
                 if (mergedOriginal.compareTo(mergedReceived) != 0) {
                     vo.setReceivedAmountAdjusted(true);
                     vo.setOriginalReceivedAmount(mergedOriginal);
@@ -2361,6 +2373,12 @@ public class CommissionApplicationService {
         summary.put("totalExpectedAmount", summaryExpectedAmount);
         summary.put("totalExpectedConvertedAmount", summaryExpectedConvertedAmount);
         summary.put("totalReceivedAmount", summaryReceivedAmount);
+        // 实收净额合计：有正/负/净额的行取净额，其余取自身实收，避免重复累加
+        summary.put("totalReceivedNetAmount", all.stream()
+            .map(r -> r.getReceivedNetAmount() != null
+                ? r.getReceivedNetAmount()
+                : (r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO))
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
         result.setSummary(summary);
         return result;
     }
@@ -2485,8 +2503,8 @@ public class CommissionApplicationService {
             }
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
             List<String> supplementPeriods = supplementPeriodsOf(availableSplit.supplementKeyPeriods(), statKey);
-            addAvailableRow(all, c, pos, stats, existingApps, factor, supplementPeriods);
-            addAvailableRow(all, c, neg, stats, existingApps, factor, supplementPeriods);
+            addAvailableRow(all, c, pos, stats, existingApps, factor, supplementPeriods, neg.isEmpty());
+            addAvailableRow(all, c, neg, stats, existingApps, factor, supplementPeriods, false);
         }
 
         int total = all.size();
@@ -2527,6 +2545,12 @@ public class CommissionApplicationService {
             .reduce(BigDecimal.ZERO, BigDecimal::add));
         summary.put("totalReceivedAmount", all.stream()
             .map(r -> r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        // 净额合计：有正/负/净额的行取净额，负向行取自身实收，避免与净额行重复
+        summary.put("totalReceivedNetAmount", all.stream()
+            .map(r -> r.getReceivedNetAmount() != null
+                ? r.getReceivedNetAmount()
+                : (r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO))
             .reduce(BigDecimal.ZERO, BigDecimal::add));
         result.setSummary(summary);
         return result;
@@ -2659,10 +2683,21 @@ public class CommissionApplicationService {
      */
     private void addAvailableRow(List<CommissionContractVo> all, PerformanceContractSummaryDTO c, DirectionAgg agg,
                                  List<PerformanceContractSummaryDTO> stats, List<CommissionApplication> existingApps,
-                                 BigDecimal factor, List<String> supplementPeriods) {
+                                 BigDecimal factor, List<String> supplementPeriods, boolean showNet) {
         if (agg.isEmpty() || agg.amount.signum() == 0) {
             return;
         }
+        boolean hasNegativeApp = false;
+        if (existingApps != null) {
+            for (CommissionApplication app : existingApps) {
+                if (app.getTotalAmount() != null && app.getTotalAmount().signum() < 0) {
+                    hasNegativeApp = true;
+                    break;
+                }
+            }
+        }
+        // 同键已有负向结佣单时，负向实收可能已归属该单，正向行不再挂净额，避免重复展示
+        boolean netVisible = showNet && !agg.negative && !hasNegativeApp;
         String minPeriod = agg.periods.stream().min(String::compareTo).orElse(null);
         String nextPeriod = null;
         boolean lowerUnbounded = true;
@@ -2682,6 +2717,8 @@ public class CommissionApplicationService {
         }
         BigDecimal receivedSum = BigDecimal.ZERO;
         BigDecimal originalSum = BigDecimal.ZERO;
+        BigDecimal positiveSum = BigDecimal.ZERO;
+        BigDecimal negativeSum = BigDecimal.ZERO;
         if (stats != null && minPeriod != null) {
             for (PerformanceContractSummaryDTO s : stats) {
                 String p = StringUtils.trimToNull(s.getPeriod());
@@ -2700,6 +2737,14 @@ public class CommissionApplicationService {
                 if (orig != null) {
                     originalSum = originalSum.add(orig);
                 }
+                if (netVisible) {
+                    if (s.getReceivedPositiveAmount() != null) {
+                        positiveSum = positiveSum.add(s.getReceivedPositiveAmount());
+                    }
+                    if (s.getReceivedNegativeAmount() != null) {
+                        negativeSum = negativeSum.add(s.getReceivedNegativeAmount());
+                    }
+                }
             }
         }
         CommissionContractVo row = toAvailableContractVO(c, factor);
@@ -2713,7 +2758,13 @@ public class CommissionApplicationService {
         row.setDetailCount(agg.detailCount);
         row.setEmployeeCount((long) agg.employeeKeys.size());
         row.setReceivedAmount(receivedSum);
-        // 实收归属窗口/方向随行下发：前端详情弹窗按同一窗口 + 同方向取明细，保证与行值一致
+        if (netVisible) {
+            row.setReceivedPositiveAmount(positiveSum);
+            row.setReceivedNegativeAmount(negativeSum);
+            row.setReceivedNetAmount(positiveSum.add(negativeSum));
+        }
+        // 实收归属窗口/方向随行下发：前端详情弹窗按同一窗口取明细；
+        // 无负向新签行时另下发正/负/净额，详情正负分列展示
         row.setReceivedWindowStart(lowerUnbounded ? null : minPeriod);
         row.setReceivedWindowEnd(nextPeriod);
         row.setReceivedDirection(agg.negative ? "NEG" : "POS");
@@ -2807,11 +2858,32 @@ public class CommissionApplicationService {
     }
 
     /**
+     * 同业务键是否存在活跃（审批中/已通过/已锁定）的负向结佣单。
+     */
+    private static boolean hasActiveNegativeApp(List<CommissionApplication> apps) {
+        if (apps == null) {
+            return false;
+        }
+        for (CommissionApplication app : apps) {
+            if (app.getStatus() == null || app.getTotalAmount() == null
+                || app.getStatus() == ApplicationStatus.REJECTED || app.getStatus() == ApplicationStatus.CANCELLED) {
+                continue;
+            }
+            if (app.getTotalAmount().signum() < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 实收按到账月归属结佣单（同业务键、同方向）：
      * 每笔有效实收归属「期间不晚于实收月」的最晚一张同向单；早于全部同向单归属最早一张；
      * 晚于全部同向单归属最后一张（锁定单继续吸收后续到账）。各单份额互不重叠。
+     * <p>
+     * 无负向结佣单时，负向实收按同一归属规则挂到正向单上（仅展示用，不并入 receivedAmount）。
      *
-     * @return appId → [实收合计, 链原值合计]
+     * @return appId → [实收合计, 链原值合计, 展示用负向实收]
      */
     private Map<Long, BigDecimal[]> attributeReceivedByApp(List<CommissionApplication> appsForKey,
                                                            List<PerformanceContractSummaryDTO> periodStats) {
@@ -2833,6 +2905,7 @@ public class CommissionApplicationService {
             .thenComparing(a -> a.getId() == null ? 0L : a.getId());
         posApps.sort(order);
         negApps.sort(order);
+        boolean displayNegativeOnPositive = negApps.isEmpty();
         for (PerformanceContractSummaryDTO stat : periodStats) {
             String statPeriod = StringUtils.trimToNull(stat.getPeriod());
             if (statPeriod == null) {
@@ -2843,8 +2916,12 @@ public class CommissionApplicationService {
                     stat.getReceivedPositiveAmount(), stat.getReceivedOriginalPositiveAmount());
             }
             if (stat.getReceivedNegativeAmount() != null && stat.getReceivedNegativeAmount().signum() != 0) {
-                assignReceived(result, negApps, statPeriod,
-                    stat.getReceivedNegativeAmount(), stat.getReceivedOriginalNegativeAmount());
+                if (displayNegativeOnPositive) {
+                    assignDisplayNegative(result, posApps, statPeriod, stat.getReceivedNegativeAmount());
+                } else {
+                    assignReceived(result, negApps, statPeriod,
+                        stat.getReceivedNegativeAmount(), stat.getReceivedOriginalNegativeAmount());
+                }
             }
         }
         return result;
@@ -2857,9 +2934,21 @@ public class CommissionApplicationService {
             return;
         }
         BigDecimal[] slot = result.computeIfAbsent(target.getId(),
-            k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO});
+            k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO});
         slot[0] = slot[0].add(received);
         slot[1] = slot[1].add(original == null ? received : original);
+    }
+
+    /** 无负向单时，把负向实收按同归属规则挂到正向单，仅累加展示位。 */
+    private void assignDisplayNegative(Map<Long, BigDecimal[]> result, List<CommissionApplication> apps,
+                                       String statPeriod, BigDecimal received) {
+        CommissionApplication target = pickReceivedApp(apps, statPeriod);
+        if (target == null) {
+            return;
+        }
+        BigDecimal[] slot = result.computeIfAbsent(target.getId(),
+            k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO});
+        slot[2] = slot[2].add(received);
     }
 
     /** 取期间不晚于实收月的最晚一张；没有则取最早一张。 */
