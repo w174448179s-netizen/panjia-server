@@ -690,13 +690,16 @@ public class SalaryCalculationEngine {
 
             // 社保
             // 档位与职级无关、按人核定（2026-08 实测：同为 A2 有 0/70%/100%/固定档多种），
-            // 优先取员工级自定义金额（SalaryFact SOCIAL_FEE），null 则走三级取值：
+            // 优先取员工级自定义金额（SalaryFact SOCIAL_FEE）：仅「非空且非 0」视为有效覆盖；
+            // null/0 表示未单独核定（清空即回退），走三级取值：
             // 职级固定额 socialFixedFee > 职级比例 socialSettlementRatio × baseSocial
             BigDecimal socialFee = BigDecimal.ZERO;
             BigDecimal employerSocial = BigDecimal.ZERO;
+            BigDecimal customSocialFee = emp.getSocialFee();
+            boolean hasCustomSocialFee = customSocialFee != null && customSocialFee.signum() != 0;
             if (!parttime && Boolean.TRUE.equals(emp.getSocialInsured())) {
-                if (emp.getSocialFee() != null) {
-                    socialFee = emp.getSocialFee();
+                if (hasCustomSocialFee) {
+                    socialFee = customSocialFee;
                     BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
                 } else if (policy.path("socialFixedFee").has(level)) {
