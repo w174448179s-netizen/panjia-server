@@ -2807,6 +2807,22 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             .map(AddMemberPayload.NewMember::getEmployeeId)
             .filter(Objects::nonNull)
             .collect(Collectors.toSet());
+        // 角色调整/划转的新签净变动应为 0：此时实收要全量镜像，扣减侧不能跳过，
+        // 否则只剩新增角色人单边行，实收合计被抬高（2026-11 合同 100016194572）。
+        BigDecimal netDelta = BigDecimal.ZERO;
+        for (Map.Entry<Long, Map<String, BigDecimal>> e : deltaByEmpRole.entrySet()) {
+            // 新增角色人金额在 members 中单独计入，避免重复
+            if (memberEmpIds.contains(e.getKey())) {
+                continue;
+            }
+            for (BigDecimal d : e.getValue().values()) {
+                netDelta = netDelta.add(d == null ? BigDecimal.ZERO : d);
+            }
+        }
+        for (AddMemberPayload.NewMember m : members) {
+            netDelta = netDelta.add(m.getAmount() == null ? BigDecimal.ZERO : m.getAmount());
+        }
+        boolean netZeroTransfer = MoneyUtil.round2(netDelta).signum() == 0;
 
         if (!hasAnyReceived) {
             log.info("[调整单-实收联动] 合同无 ACTIVE 实收明细，自动建壳建虚拟实收：adjustId={}, contractNo={}",
@@ -2854,13 +2870,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     continue;
                 }
                 // 该员工实收侧完全无行：
-                // ① 合同已有实收、但该员工在实收侧不存在 → 不凭空建实收行（否则会出现「实收不存在的人」
-                //    的虚假金额变动行）；仅告警，人数不一致问题由实收导入/审批环节拦截；
-                // ② 合同整体无实收（hasAnyReceived=false）→ 按新签全字段镜像建行、金额=delta，
-                //    且 delta=0 的角色行也一并建出，保证实收合同人员与新签一一对应（如 A-100/B+100/C0）。
-                if (hasAnyReceived) {
+                // ① 合同已有实收、但该员工在实收侧不存在，且不是净额划转 → 不凭空建实收行，
+                //    避免出现「实收不存在的人」的虚假金额变动行；
+                // ② 合同整体无实收，或本次是净额划转（正负成对、合计为 0）→ 按新签全字段镜像建行，
+                //    金额=delta；净额划转时扣减侧也必须建，否则只剩新增角色人单边行，实收合计被抬高。
+                if (hasAnyReceived && !netZeroTransfer) {
                     log.warn("[调整单-实收联动] adjustId={}, employeeId={}, role={}, delta={} 在实收侧不存在"
-                        + "（新签多出的人员），不凭空建实收行", adjust.getId(), employeeId, role, delta);
+                        + "（新签多出的人员），非净额划转不凭空建实收行", adjust.getId(), employeeId, role, delta);
                     continue;
                 }
                 String roleArg = StringUtils.isBlank(role) ? null : role;
@@ -2909,15 +2925,16 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 adjust.getId(), m.getEmployeeId(), role, amt);
         }
 
-        // 4. 合同整体无实收：联动建出的虚拟实收明细须归入一张「审批通过」的实收审批单，
-        //    否则实收审批单列表（按审批单维度展示）查不到这笔实收
-        if (!hasAnyReceived) {
+        // 4. 联动建出的虚拟实收明细须归入一张「审批通过」的实收审批单，
+        //    否则实收审批单列表（按审批单维度展示）查不到这笔实收。
+        //    净额划转时扣减侧/新增侧都是新建行，同样需要挂审批单，结佣覆盖校验才会计入。
+        if (linkedTouched && (!hasAnyReceived || netZeroTransfer)) {
             ReceivedApplyPort applyPort = receivedApplyPort();
             if (applyPort != null) {
                 int newApplies = applyPort.autoCreateApprovedForAdjust(period, orderNo, contractNo,
                     operatorId, adjust.getId());
                 if (newApplies > 0) {
-                    log.info("[调整单-实收联动] 无实收合同已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
+                    log.info("[调整单-实收联动] 已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
                         adjust.getId(), contractNo, newApplies);
                 }
             } else {
@@ -2928,7 +2945,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
         // 5. 登记实收调整镜像单（2026-10-17）：联动只动了 pj_received_detail 冲销链、没有实收调整单记录，
         //    导致「实收调整」菜单查不到、无法追溯。凡是动过实收行（supersede/新建）就补一张
         //    EXECUTED 镜像单（无审批流，与结佣调整登记新签镜像同款），原因里回链新签调整单号。
-        if (linkedTouched) {
+        if (linkedTouched && !MoneyUtil.isZero(appliedDelta)) {
             recordLinkedReceivedAdjustMirror(adjust, bizType, originalReceivedTotal, appliedDelta, operatorId);
         }
     }
@@ -3158,10 +3175,40 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
     }
 
     /**
+     * 冲正明细中的新增角色人行（无 factId）找「同额反方向」的既有冲正行做模板。
+     * 例：客源居间 -14,836.68 与 合作人 +14,836.68 配对，新增行复制居间的费用项/来源，
+     * 避免回退合同第一条事实（可能是贷款服务费）导致费用项错位。
+     */
+    private PerformanceFact findManualOffsetPairTemplate(ManualOffsetItem item,
+                                                          List<ManualOffsetItem> items,
+                                                          Map<Long, PerformanceFact> templateById) {
+        if (item.getFactId() != null || item.getAmount() == null || item.getAmount().signum() == 0) {
+            return null;
+        }
+        for (ManualOffsetItem other : items) {
+            if (other.getFactId() == null || other.getAmount() == null
+                || other.getAmount().signum() == 0) {
+                continue;
+            }
+            if (other.getAmount().signum() == item.getAmount().signum()) {
+                continue;
+            }
+            if (other.getAmount().abs().compareTo(item.getAmount().abs()) != 0) {
+                continue;
+            }
+            PerformanceFact paired = templateById.get(other.getFactId());
+            if (paired != null) {
+                return paired;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 业绩冲正执行（MANUAL_OFFSET）：审批通过后按 payload 中的冲正明细清单，
      * 循环创建 MANUAL 事实（正数补录/负数冲正）。既有行按 payload 携带的 factId
-     * 精确复制对应源事实（门店/费用项/占比等与弹窗所见一致），新增行回退合同
-     * 既有 ACTIVE 事实模板；人员/金额/占比按冲正明细覆盖。
+     * 精确复制对应源事实（门店/费用项/占比等与弹窗所见一致），新增行优先按同额反方向
+     * 冲正行取模板，最后才回退合同既有 ACTIVE 事实；人员/金额/占比按冲正明细覆盖。
      */
     private void executeManualOffsetAdjust(PerformanceAdjust adjust, Long operatorId) {
         List<ManualOffsetItem> items = JsonUtils.parseArray(adjust.getPayloadJson(), ManualOffsetItem.class);
@@ -3210,6 +3257,12 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 && StringUtils.isNotBlank(item.getRoleType())) {
                 template = templateByCodeRole.get(item.getEmployeeCode().trim() + "|" + item.getRoleType().trim());
             }
+            // 新增角色人没有 factId：优先取「同额反方向」的冲正明细做模板，
+            // 保证费用项/来源与被扣减行一致（如客源居间 -14,836.68 → 合作人居间 +14,836.68），
+            // 不能回退合同第一条事实（可能是贷款服务费）
+            if (template == null) {
+                template = findManualOffsetPairTemplate(item, items, templateById);
+            }
             if (template == null) {
                 template = defaultTemplate;
             }
@@ -3221,6 +3274,8 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             fact.setBusinessDate(periodStart.atStartOfDay());
             fact.setEffectiveDate(periodStart);
             fact.setBatchId(null);
+            // 回链调整单：结佣发起据此识别「调整联动生成」的实收行，无需只依赖 REVERSED 链
+            fact.setAdjustId(adjust.getId());
             fact.setPerformanceAmount(item.getAmount());
             // 人员信息按冲正明细覆盖（工号取保存快照、缺失回退员工主数据；部门取员工主数据）
             fact.setEmployeeId(item.getEmployeeId());
@@ -3364,6 +3419,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             exist.amount = MoneyUtil.round2(exist.amount.add(row.amount));
         }
 
+        // 净额划转（如 9 月业绩在 10 月换人）：正负成对、合计为 0。
+        // 这种场景实收也要全量镜像，否则只建新增角色人单边行、扣减侧被跳过，实收合计会虚增。
+        BigDecimal netDelta = merged.values().stream()
+            .map(r -> MoneyUtil.round2(r.amount))
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        boolean netZeroTransfer = netDelta.signum() == 0;
+
         for (OffsetLinkRow row : merged.values()) {
             BigDecimal delta = MoneyUtil.round2(row.amount);
             if (MoneyUtil.isZero(delta)) {
@@ -3391,12 +3453,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                     adjust.getId(), row.employeeId, roleKey, all.size());
                 continue;
             }
-            if (hasAnyReceived && !row.newMember) {
+            if (hasAnyReceived && !row.newMember && !netZeroTransfer) {
                 log.warn("[冲正单-实收联动] adjustId={}, employeeId={}, 角色={}, delta={} 在实收侧不存在，"
-                    + "不凭空建实收行", adjust.getId(), row.employeeId, roleKey, delta);
+                    + "非净额划转不凭空建实收行", adjust.getId(), row.employeeId, roleKey, delta);
                 continue;
             }
-            // 新增角色人 / 合同整体无实收：新建实收行
+            // 新增角色人 / 合同整体无实收 / 净额划转：新建实收行
+            // 净额划转时既有人员的负数行也必须建，才能与新增角色人的正数行成对、净额为 0
             String roleArg = StringUtils.isBlank(row.roleType) ? null : row.roleType;
             if (hasAnyReceived && templateDetailId != null) {
                 port.addMemberDetail(templateDetailId, row.employeeId, row.employeeCode, row.deptId,
@@ -3412,13 +3475,13 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
                 adjust.getId(), row.employeeId, roleArg, delta);
         }
 
-        if (!hasAnyReceived) {
+        if (linkedTouched && (!hasAnyReceived || netZeroTransfer)) {
             ReceivedApplyPort applyPort = receivedApplyPort();
             if (applyPort != null) {
                 int newApplies = applyPort.autoCreateApprovedForAdjust(period, orderNo, contractNo,
                     operatorId, adjust.getId());
                 if (newApplies > 0) {
-                    log.info("[冲正单-实收联动] 无实收合同已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
+                    log.info("[冲正单-实收联动] 已直建审批通过实收审批单：adjustId={}, contractNo={}, 新建={}",
                         adjust.getId(), contractNo, newApplies);
                 }
             } else {
@@ -3426,7 +3489,7 @@ public class PerformanceAdjustServiceImpl implements IPerformanceAdjustService {
             }
         }
 
-        if (linkedTouched) {
+        if (linkedTouched && !MoneyUtil.isZero(appliedDelta)) {
             recordLinkedReceivedAdjustMirror(adjust, bizType, originalReceivedTotal, appliedDelta, operatorId);
         }
     }

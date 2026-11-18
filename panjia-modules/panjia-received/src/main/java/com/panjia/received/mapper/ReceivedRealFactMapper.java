@@ -42,6 +42,7 @@ public interface ReceivedRealFactMapper {
             rd.source_key AS "sourceKey",
             rd.received_apply_id AS "receivedApplyId",
             ra.status AS "receivedStatus",
+            rd.adjust_id AS "adjustId",
             rc.contract_no AS "contractNo",
             rc.order_no AS "orderNo",
             rc.property_address AS "propertyAddress",

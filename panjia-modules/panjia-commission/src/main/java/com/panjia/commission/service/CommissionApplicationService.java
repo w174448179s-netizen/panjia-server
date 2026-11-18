@@ -1168,7 +1168,14 @@ public class CommissionApplicationService {
         if (!expectAdjusted) {
             return;
         }
-        boolean realAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_REAL);
+        // 实收「已调整」判定：优先看实收链上是否有 REVERSED（原有 supersede 链路）；
+        // 业绩划转场景（9 月单 10 月换人）联动建的是“正负成对”的实收新行、没有 REVERSED，
+        // 因此同时认可「adjust_id 回链调整单 + 已挂审批通过实收单」的联动行
+        boolean realAdjusted = performanceQueryPort.hasReversedChain(keys, FACT_TYPE_REAL)
+            || realFacts.stream().anyMatch(f -> f != null
+                && f.getAdjustId() != null
+                && f.getReceivedApplyId() != null
+                && "APPROVED".equals(f.getReceivedStatus()));
         if (!realAdjusted) {
             throw new ServiceException("合同 " + contractNo + " 新签有调整，请进行实收调整后发起");
         }

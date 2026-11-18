@@ -79,6 +79,9 @@ public class PerformanceFactSummaryDTO implements Serializable {
     /** 实收审批单状态（DRAFT/SUBMITTED/APPROVED/REJECTED/CANCELLED；无单为 null） */
     private String receivedStatus;
 
+    /** 关联的业绩/实收调整单 ID（调整联动生成的事实，用于结佣发起识别“实收已调整”） */
+    private Long adjustId;
+
     /** 合同号（raw_signed.contract_no，结佣列表合同维度展示用） */
     private String contractNo;
 
