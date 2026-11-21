@@ -1198,6 +1198,43 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                    </when>
                    <otherwise>
                    CASE
+                       -- 纯调整联动生成的实收单（明细全部为 MANUAL-RADJ 镜像行，如业绩划转）：
+                       -- 新签业绩只取「同一调整单」生成的新签净额（adjust_id 精确配对），
+                       -- 避免同月既有正常到账又有纯调整单时把正常新签也算进来
+                       WHEN BOOL_AND(COALESCE(rd.source_key, '') LIKE '%|MANUAL-RADJ-%')
+                            AND MAX(rd.adjust_id) IS NOT NULL THEN COALESCE((
+                           SELECT SUM(pe.performance_amount)
+                           FROM pj_perf_fact pe
+                           WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                             AND pe.period = #{period}
+                             AND pe.adjust_id IN (
+                                 SELECT rd2.adjust_id
+                                 FROM pj_received_detail rd2
+                                 WHERE rd2.received_apply_id = rd.received_apply_id
+                                   AND rd2.detail_status = 'ACTIVE'
+                                   AND rd2.adjust_id IS NOT NULL
+                             )
+                             AND (
+                                       (k.dg AND pe.contract_no = k.ck)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                                 )
+                       ), 0)
+                       -- 历史镜像单没有 adjust_id 无法配对时，退回「当月新签净额」，
+                       -- 不沿用累计正部口径，否则划转单会显示 9 月以来的累计新签
+                       WHEN BOOL_AND(COALESCE(rd.source_key, '') LIKE '%|MANUAL-RADJ-%') THEN COALESCE((
+                           SELECT SUM(pe.performance_amount)
+                           FROM pj_perf_fact pe
+                           WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
+                             AND (
+                                       (k.dg AND pe.contract_no = k.ck)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
+                                 )
+                             AND pe.period = #{period}
+                       ), 0)
                        -- 退单负实收行（当期合计为负）用「当期负部新签」展示本次冲减对应的新签退单
                        WHEN COALESCE(SUM(rd.performance_amount), 0) &lt; 0 THEN COALESCE((
                            SELECT SUM(CASE WHEN pe.performance_amount &lt; 0 THEN pe.performance_amount ELSE 0 END)
