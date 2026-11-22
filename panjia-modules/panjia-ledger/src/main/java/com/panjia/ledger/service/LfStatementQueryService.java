@@ -49,7 +49,13 @@ public class LfStatementQueryService {
         }
         Page<LfStatementRow> page = rowMapper.selectPage(
             pageQuery == null ? new PageQuery().build() : pageQuery.build(), wrapper);
-        return PageResult.build(toVOs(page.getRecords()), page.getTotal());
+        // 汇总与列表使用完全相同的筛选条件和数据权限，但不含排序、分页
+        BigDecimal totalTransactionAmount = rowMapper.sumTransactionAmount(
+            buildWrapper(query, loginDeptId, allScope, false));
+        PageResult<LfStatementVO> result = PageResult.build(toVOs(page.getRecords()), page.getTotal());
+        result.setSummary(Map.of("totalTransactionAmount",
+            totalTransactionAmount == null ? BigDecimal.ZERO : totalTransactionAmount));
+        return result;
     }
 
     /** 导出等不分页场景 */
@@ -82,6 +88,11 @@ public class LfStatementQueryService {
 
     private LambdaQueryWrapper<LfStatementRow> buildWrapper(LfStatementQuery query, Long loginDeptId,
                                                             boolean allScope) {
+        return buildWrapper(query, loginDeptId, allScope, true);
+    }
+
+    private LambdaQueryWrapper<LfStatementRow> buildWrapper(LfStatementQuery query, Long loginDeptId,
+                                                            boolean allScope, boolean ordered) {
         LambdaQueryWrapper<LfStatementRow> wrapper = new LambdaQueryWrapper<>();
         if (query != null) {
             wrapper.eq(StringUtils.isNotBlank(query.getPeriod()), LfStatementRow::getPeriod, query.getPeriod())
@@ -116,7 +127,9 @@ public class LfStatementQueryService {
         if (!applyDataScope(wrapper, loginDeptId, allScope)) {
             return null;
         }
-        wrapper.orderByDesc(LfStatementRow::getTransactionTime).orderByDesc(LfStatementRow::getId);
+        if (ordered) {
+            wrapper.orderByDesc(LfStatementRow::getTransactionTime).orderByDesc(LfStatementRow::getId);
+        }
         return wrapper;
     }
 

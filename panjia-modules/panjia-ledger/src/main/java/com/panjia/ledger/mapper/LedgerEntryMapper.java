@@ -30,12 +30,20 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
     List<DeptRowDTO> selectActiveDepts();
 
     /**
-     * 实收明细按部门汇总（收入）。
-     * <p>有效口径：明细 ACTIVE + 实收申请 APPROVED；部门优先取明细/合同快照，
-     * 其次按归属月取 DEPT 事实（员工调店时间轴），最后回退员工当前部门；
+     * 已结佣单对应的全部有效实收按当前归属部门汇总（收入）。
+     * <p>先取所选月份的已结佣单，再按订单号/合同号关联全部月份的实收，不限制实收归属月；
+     * 部门优先取明细/合同快照，其次取 DEPT 事实，最后回退员工当前部门；
      * 退款/冲减行保留负金额参与净额。</p>
      */
     @Select("""
+        WITH commission_keys AS (
+            SELECT DISTINCT ci.order_no, ci.contract_no
+            FROM pj_commission_item ci
+            JOIN pj_commission_application ca ON ca.id = ci.application_id
+            WHERE ca.period = #{period}
+              AND ca.status = 'LOCKED'
+              AND ci.status = 'APPROVED'
+        )
         SELECT COALESCE(d.dept_id, c.dept_id, df.value::BIGINT, e.dept_id) AS deptId,
                SUM(COALESCE(d.performance_amount, 0)) AS amount
         FROM pj_received_detail d
@@ -54,7 +62,11 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
         ) df ON TRUE
         WHERE d.detail_status = 'ACTIVE'
           AND a.status = 'APPROVED'
-          AND d.period = #{period}
+          AND EXISTS (
+              SELECT 1 FROM commission_keys k
+              WHERE (NULLIF(BTRIM(k.order_no), '') IS NOT NULL AND k.order_no = c.order_no)
+                 OR (NULLIF(BTRIM(k.contract_no), '') IS NOT NULL AND k.contract_no = c.contract_no)
+          )
         GROUP BY COALESCE(d.dept_id, c.dept_id, df.value::BIGINT, e.dept_id)
         """)
     List<DeptAmountDTO> sumReceivedByDept(@Param("period") String period, @Param("refDate") LocalDate refDate);

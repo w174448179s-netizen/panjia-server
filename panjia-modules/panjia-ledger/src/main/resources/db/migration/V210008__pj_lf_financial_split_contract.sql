@@ -23,7 +23,7 @@ WHERE split_contract_no IS NOT NULL
 UPDATE pj_lf_statement_row r
 SET contract_no = a.new_contract_no,
     match_status = NULL,
-    diff_amount = NULL,
+    match_diff_amount = NULL,
     update_time = NOW()
 FROM pj_lf_financial_split_affected a
 WHERE a.row_id = r.id;
@@ -39,7 +39,7 @@ WHERE EXISTS (
 -- 新旧合同仍有流水时，清除行级旧状态，等待定时任务按新归属重建
 UPDATE pj_lf_statement_row r
 SET match_status = NULL,
-    diff_amount = NULL,
+    match_diff_amount = NULL,
     update_time = NOW()
 WHERE EXISTS (
     SELECT 1

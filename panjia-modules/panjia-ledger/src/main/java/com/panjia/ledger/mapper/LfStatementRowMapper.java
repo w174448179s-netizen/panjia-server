@@ -1,5 +1,6 @@
 package com.panjia.ledger.mapper;
 
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.ledger.domain.LfStatementRow;
 import com.panjia.ledger.dto.DeptRowDTO;
@@ -39,6 +40,16 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
         """)
     List<String> selectAllMatchableContractNos();
 
+    /** 当前查询条件及数据权限范围内的交易金额合计（不含排序、分页）。 */
+    @Select("""
+        <script>
+        SELECT COALESCE(SUM(transaction_amount), 0)
+        FROM pj_lf_statement_row
+        ${ew.customSqlSegment}
+        </script>
+        """)
+    BigDecimal sumTransactionAmount(@Param("ew") Wrapper<LfStatementRow> wrapper);
+
     /** 某合同全部流水净额（收入 + 支出，排除提现/费用/非业务） */
     @Select("""
         SELECT COALESCE(SUM(transaction_amount), 0)
@@ -58,31 +69,55 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
         """)
     int countFlowByContract(@Param("contractNo") String contractNo);
 
-    /** 某合同原始实收导入净额（所有期间，不含实收调整单） */
+    /** 某合同原始实收导入净额（所有期间；有效调整链回溯最早行，不含调整加人/退单新增链） */
     @Select("""
-        SELECT COALESCE(SUM(d.performance_amount), 0)
-        FROM pj_received_detail d
-        JOIN pj_received_contract c ON c.id = d.contract_id
-        WHERE d.detail_status = 'ACTIVE'
-          AND (c.contract_no = #{contractNo} OR c.order_no = #{contractNo})
+        WITH active_source AS (
+            SELECT DISTINCT d.source_key
+            FROM pj_received_detail d
+            JOIN pj_received_contract c ON c.id = d.contract_id
+            WHERE d.detail_status = 'ACTIVE'
+              AND (c.contract_no = #{contractNo} OR c.order_no = #{contractNo})
+              AND d.source_key NOT LIKE '%|MANUAL-RADJ-%'
+              AND d.source_key NOT LIKE '%|MANUAL-RFND-%'
+        ), original AS (
+            SELECT DISTINCT ON (s.source_key) s.source_key, x.performance_amount
+            FROM active_source s
+            JOIN pj_received_detail x ON x.source_key = s.source_key
+            ORDER BY s.source_key, x.id
+        )
+        SELECT COALESCE(SUM(o.performance_amount), 0)
+        FROM original o
         """)
     BigDecimal sumReceivedByContract(@Param("contractNo") String contractNo);
 
-    /** 某合同原始实收导入明细分行（差异下钻，不含实收调整单） */
+    /** 某合同原始实收导入明细分行（差异下钻，与匹配汇总使用同一原始口径） */
     @Select("""
+        WITH active_source AS (
+            SELECT DISTINCT d.source_key
+            FROM pj_received_detail d
+            JOIN pj_received_contract c ON c.id = d.contract_id
+            WHERE d.detail_status = 'ACTIVE'
+              AND (c.contract_no = #{contractNo} OR c.order_no = #{contractNo})
+              AND d.source_key NOT LIKE '%|MANUAL-RADJ-%'
+              AND d.source_key NOT LIKE '%|MANUAL-RFND-%'
+        ), original AS (
+            SELECT DISTINCT ON (s.source_key) s.source_key, x.performance_amount
+            FROM active_source s
+            JOIN pj_received_detail x ON x.source_key = s.source_key
+            ORDER BY s.source_key, x.id
+        )
         SELECT d.id AS "id", d.period AS "period", d.employee_id AS "employeeId",
                d.role_name AS "roleName", d.role_type AS "roleType",
-               d.performance_amount AS "performanceAmount", c.source_type AS "sourceType",
+               o.performance_amount AS "performanceAmount", c.source_type AS "sourceType",
                a.status AS "applyStatus", sd.dept_name AS "deptName"
-        FROM pj_received_detail d
+        FROM original o
+        JOIN pj_received_detail d ON d.source_key = o.source_key AND d.detail_status = 'ACTIVE'
         JOIN pj_received_contract c ON c.id = d.contract_id
         LEFT JOIN pj_perf_received_apply a ON a.id = d.received_apply_id
         LEFT JOIN pj_people_employee e
           ON e.employee_id = d.employee_id
           OR (d.employee_id IS NULL AND e.employee_code = d.employee_external_code)
         LEFT JOIN sys_dept sd ON sd.dept_id = COALESCE(d.dept_id, c.dept_id, e.dept_id)
-        WHERE d.detail_status = 'ACTIVE'
-          AND (c.contract_no = #{contractNo} OR c.order_no = #{contractNo})
         ORDER BY d.period, d.id
         """)
     List<Map<String, Object>> selectReceivedLines(@Param("contractNo") String contractNo);

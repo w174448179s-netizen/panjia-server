@@ -74,31 +74,33 @@ public class LfExpenseService {
     }
 
     /**
-     * 给费用行匹配科目和归属组，部门收入固定归入导入门店。
-     * <p>费用行：单组门店自动归到该组；多组门店为 PENDING，等待手工划归。</p>
+     * 给费用行/部门收入匹配科目和归属组。
+     * <p>单组门店自动归到该组；多组门店为 PENDING，等待手工划归。</p>
      */
     public void applyExpenseMeta(LfStatementRow row, List<LedgerSubject> subjects, List<DeptRowDTO> subtree) {
-        if ("DEPT_INCOME".equals(row.getCategory())) {
-            row.setSubjectId(findDepartmentIncomeSubject());
-            row.setExpenseDeptId(row.getStoreDeptId());
-            row.setAllocStatus("AUTO");
-            return;
-        }
-        if (!"FEE".equals(row.getCategory())) {
+        boolean expense = "FEE".equals(row.getCategory());
+        boolean income = "DEPT_INCOME".equals(row.getCategory());
+        if (!expense && !income) {
             row.setSubjectId(null);
             row.setExpenseDeptId(null);
             row.setAllocStatus(null);
             return;
         }
-        row.setSubjectId(matchSubject(row, subjects));
+        row.setSubjectId(income ? findDepartmentIncomeSubject() : matchSubject(row, subjects));
 
         List<Long> leaves = leafDeptIds(subtree);
         if (leaves.size() == 1) {
             row.setExpenseDeptId(leaves.get(0));
             row.setAllocStatus("AUTO");
         } else if (leaves.isEmpty()) {
-            row.setExpenseDeptId(row.getStoreDeptId());
-            row.setAllocStatus("AUTO");
+            if (income) {
+                // 部门收入必须归到末级组；门店下暂无组时等待补组后手工划归，不能落到门店
+                row.setExpenseDeptId(null);
+                row.setAllocStatus("PENDING");
+            } else {
+                row.setExpenseDeptId(row.getStoreDeptId());
+                row.setAllocStatus("AUTO");
+            }
         } else if ("MANUAL".equals(row.getAllocStatus()) && row.getExpenseDeptId() != null) {
             // 保留手工划归
         } else {
@@ -151,7 +153,7 @@ public class LfExpenseService {
         removeLedgerEntry(row.getVoucherNo());
         boolean expense = "FEE".equals(row.getCategory());
         boolean income = "DEPT_INCOME".equals(row.getCategory());
-        Long deptId = income ? row.getStoreDeptId() : row.getExpenseDeptId();
+        Long deptId = row.getExpenseDeptId();
         if ((!expense && !income) || row.getSubjectId() == null
             || deptId == null || row.getTransactionAmount() == null) {
             return;
@@ -264,8 +266,8 @@ public class LfExpenseService {
 
     /** 校验划归目标必须是门店下的末级组 */
     public void validateAllocTarget(LfStatementRow row, Long deptId) {
-        if (!"FEE".equals(row.getCategory())) {
-            throw new org.dromara.common.core.exception.ServiceException("只有费用类支出可以划归");
+        if (!"FEE".equals(row.getCategory()) && !"DEPT_INCOME".equals(row.getCategory())) {
+            throw new org.dromara.common.core.exception.ServiceException("只有费用支出或部门收入可以划归");
         }
         if (!isLeafUnderStore(row.getStoreDeptId(), deptId)) {
             throw new org.dromara.common.core.exception.ServiceException("划归目标必须是该门店下的末级组");
