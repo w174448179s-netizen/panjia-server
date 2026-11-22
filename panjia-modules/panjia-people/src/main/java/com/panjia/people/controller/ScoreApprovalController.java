@@ -1,6 +1,7 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
 import com.panjia.people.dto.ScoreApprovalVO;
 import com.panjia.people.service.ScoreApprovalService;
 import lombok.RequiredArgsConstructor;
@@ -39,7 +40,13 @@ public class ScoreApprovalController extends BaseController {
     /** 查询期间审批状态（仅登录校验：算薪操作员可能无积分明细权限，用于创建批次前的无积分确认） */
     @GetMapping("/{period}")
     public R<ScoreApprovalVO> getByPeriod(@PathVariable String period) {
-        return R.ok(approvalService.getByPeriod(period));
+        ScoreApprovalVO vo = approvalService.getByPeriod(period);
+        // 数据权限：扣点/晚提交明细快照含他人积分数据，仅拥有积分明细权限的角色可见；其余角色只看审批状态
+        if (vo != null && !StpUtil.hasPermission("people:score:list")) {
+            vo.setDeductRows(null);
+            vo.setLateSubmitRows(null);
+        }
+        return R.ok(vo);
     }
 
     /** 按审批单 ID 查询（工作流办理弹窗详情组件用，含扣点行快照） */
@@ -54,6 +61,7 @@ public class ScoreApprovalController extends BaseController {
      * 提交入口仅在绩效积分管理页（people:score:list 可见），
      * 后续审批办理由工作流引擎判权。
      */
+    @SaCheckPermission("people:score:list")
     @Log(title = "积分审批", businessType = BusinessType.INSERT)
     @PostMapping("/submit")
     public R<Void> submit(@RequestBody Map<String, String> body) {

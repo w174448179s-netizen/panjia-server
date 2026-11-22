@@ -37,6 +37,7 @@ import com.panjia.contracts.port.ApprovalAction;
 import com.panjia.contracts.port.ApprovalPort;
 import com.panjia.contracts.port.ApprovalStartCmd;
 import org.dromara.common.core.exception.ServiceException;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -65,6 +66,8 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class PayrollBatchService {
+
+    private static final String ROLE_KEY_MANAGER = "manager";
 
     private final PayrollBatchMapper batchMapper;
     private final PayrollDetailMapper detailMapper;
@@ -1101,7 +1104,29 @@ public class PayrollBatchService {
         if (me == null || me.getDeptId() == null) {
             return List.of();
         }
-        return enrichConvertedAmounts(commissionQueryPort.findNewSignByDept(period, me.getDeptId()));
+        List<CommissionItemDTO> items = commissionQueryPort.findNewSignByDept(period, me.getDeptId());
+        // 数据权限：仅店长可看本门店团队新签；普通员工（经纪人等）只能看本人，防止越权查看同门店他人业绩
+        if (!hasRole(ROLE_KEY_MANAGER)) {
+            items = items.stream()
+                .filter(it -> Objects.equals(it.getEmployeeId(), me.getEmployeeId()))
+                .toList();
+        }
+        return enrichConvertedAmounts(items);
+    }
+
+    /**
+     * 判断当前登录用户是否拥有指定角色键（用于本人页的服务端数据权限判定）。
+     */
+    private boolean hasRole(String roleKey) {
+        try {
+            var loginUser = LoginHelper.getLoginUser();
+            if (loginUser == null || loginUser.getRoles() == null) {
+                return false;
+            }
+            return loginUser.getRoles().stream().anyMatch(r -> roleKey.equals(r.getRoleKey()));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

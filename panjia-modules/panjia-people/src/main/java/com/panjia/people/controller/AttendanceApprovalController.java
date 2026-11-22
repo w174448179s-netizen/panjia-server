@@ -1,6 +1,7 @@
 package com.panjia.people.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.stp.StpUtil;
 import com.panjia.people.dto.AttendanceApprovalVO;
 import com.panjia.people.service.AttendanceApprovalService;
 import lombok.RequiredArgsConstructor;
@@ -39,7 +40,12 @@ public class AttendanceApprovalController extends BaseController {
     /** 查询期间审批状态（仅登录校验：算薪操作员可能无考勤明细权限，用于创建批次前的无考勤确认） */
     @GetMapping("/{period}")
     public R<AttendanceApprovalVO> getByPeriod(@PathVariable String period) {
-        return R.ok(approvalService.getByPeriod(period));
+        AttendanceApprovalVO vo = approvalService.getByPeriod(period);
+        // 数据权限：异常考勤快照含他人考勤数据，仅拥有考勤明细权限的角色可见；其余角色只看审批状态
+        if (vo != null && !StpUtil.hasPermission("people:attendance:list")) {
+            vo.setAbnormalRows(null);
+        }
+        return R.ok(vo);
     }
 
     /** 按审批单 ID 查询（工作流办理弹窗详情组件用，含异常考勤快照） */
@@ -54,6 +60,7 @@ public class AttendanceApprovalController extends BaseController {
      * 提交入口仅在考勤明细管理页（people:attendance:list 可见），
      * 后续审批办理由工作流引擎判权。
      */
+    @SaCheckPermission("people:attendance:list")
     @Log(title = "考勤审批", businessType = BusinessType.INSERT)
     @PostMapping("/submit")
     public R<Void> submit(@RequestBody Map<String, String> body) {

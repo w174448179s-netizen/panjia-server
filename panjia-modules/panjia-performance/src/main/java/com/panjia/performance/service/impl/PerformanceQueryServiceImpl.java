@@ -109,7 +109,25 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
 
     @Override
     public PageResult<PerformanceFactVo> listFacts(PerformanceFactBo query, PageQuery pageQuery) {
-        LambdaQueryWrapper<PerformanceFact> wrapper = buildQueryWrapper(query);
+        // 数据权限与业绩汇总同口径：超管/总监→全量；店长→本部门子树；
+        // 其他（员工/经纪人/财务/人事等）→仅本人；无员工关联则无数据（防越权）
+        Long currentEmployeeId = resolveCurrentEmployeeId();
+        Long effectiveDeptId;
+        Long filterEmployeeId;
+        if (hasRole(ROLE_KEY_SUPERADMIN) || hasRole(ROLE_KEY_DIRECTOR)) {
+            effectiveDeptId = query.getDeptId();
+            filterEmployeeId = query.getEmployeeId();
+        } else if (hasRole(ROLE_KEY_MANAGER)) {
+            effectiveDeptId = DeptScopeUtils.enforceSelfDeptScope(query.getDeptId(), deptService::selectDeptAndChildById, "业绩明细");
+            filterEmployeeId = query.getEmployeeId();
+        } else {
+            effectiveDeptId = null;
+            filterEmployeeId = currentEmployeeId;
+            if (filterEmployeeId == null) {
+                return new PageResult<>(List.of(), 0);
+            }
+        }
+        LambdaQueryWrapper<PerformanceFact> wrapper = buildQueryWrapper(query, filterEmployeeId, effectiveDeptId);
         wrapper.orderByDesc(PerformanceFact::getCreateTime);
 
         Page<PerformanceFact> page = factMapper.selectPage(pageQuery.build(), wrapper);
@@ -279,6 +297,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         fillManageDetailSettled(rows);
         fillManageDetailConversion(rows);
 
+        // 经纪人只能展开自己参与的合同：须存在本人员工行，防止传任意合同号越权查看他人业绩
+        assertManageDetailInScope(rows);
+
         // §3.6 查看留痕：经纪人打开含他人业绩的合同 → 异步写 view_log
         // 触发条件：当前登录用户是经纪人 + 单合同展开（contractNos.size()==1）
         // 店长/总监/算薪属职权查看不记（resolveSelfEmployeeId 返回 null 即非经纪人）
@@ -299,6 +320,28 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         return rows;
+    }
+
+    /**
+     * 业绩管理明细展开的数据权限校验：经纪人所查合同明细中须存在本人员工行，
+     * 否则拒绝；非经纪人角色（店长/总监/财务等）维持原有权责范围。
+     */
+    private void assertManageDetailInScope(List<PerformanceManageVo> rows) {
+        try {
+            Long selfEmployeeId = resolveSelfEmployeeId();
+            if (selfEmployeeId == null) {
+                return;
+            }
+            boolean hit = rows.stream().anyMatch(r -> selfEmployeeId.equals(r.getEmployeeId()));
+            if (!hit) {
+                throw new ServiceException("无权查看该合同业绩明细");
+            }
+        } catch (ServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[performance] 业绩管理明细展开权限校验失败，默认拒绝", e);
+            throw new ServiceException("数据权限校验失败");
+        }
     }
 
     private long toLong(Object v) {
@@ -348,16 +391,14 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
     /**
      * 构建查询条件。
      */
-    private LambdaQueryWrapper<PerformanceFact> buildQueryWrapper(PerformanceFactBo query) {
+    private LambdaQueryWrapper<PerformanceFact> buildQueryWrapper(PerformanceFactBo query, Long employeeId, Long deptId) {
         LambdaQueryWrapper<PerformanceFact> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(StringUtils.isNotBlank(query.getPeriod()),
             PerformanceFact::getPeriod, query.getPeriod());
         wrapper.eq(StringUtils.isNotBlank(query.getFactType()),
             PerformanceFact::getFactType, FactType.fromCode(query.getFactType()));
-        wrapper.eq(query.getEmployeeId() != null,
-            PerformanceFact::getEmployeeId, query.getEmployeeId());
-        wrapper.eq(query.getDeptId() != null,
-            PerformanceFact::getDeptId, query.getDeptId());
+        wrapper.eq(employeeId != null, PerformanceFact::getEmployeeId, employeeId);
+        wrapper.eq(deptId != null, PerformanceFact::getDeptId, deptId);
         wrapper.eq(StringUtils.isNotBlank(query.getBizType()),
             PerformanceFact::getBizType, query.getBizType());
         wrapper.eq(StringUtils.isNotBlank(query.getFactStatus()),
