@@ -59,6 +59,9 @@ public class LfMatchService {
             boolean decoration = matchDecoration(contractNo, operatorId, stats);
             boolean normal = matchNormal(contractNo, stats);
             if (!normal && !decoration) {
+                // 拆单流水改归其他合同后，原合同可能已无任何流水，不能保留历史匹配结果
+                matchResultMapper.delete(new LambdaQueryWrapper<LfMatchResult>()
+                    .eq(LfMatchResult::getContractNo, contractNo));
                 stats.notFound++;
             }
         }

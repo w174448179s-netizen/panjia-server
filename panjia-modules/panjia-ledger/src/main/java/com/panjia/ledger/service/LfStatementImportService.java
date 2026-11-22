@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * 理房通流水异步导入：请求阶段归档并创建批次，后台按账户串行落库和匹配。
@@ -61,6 +62,7 @@ public class LfStatementImportService {
     );
 
     private static final String DEPARTMENT_INCOME_REMARK = "佣金分账-居间代理费-品效商圈权益";
+    private static final Pattern FINANCIAL_SPLIT_CONTRACT = Pattern.compile("金融分润\\s*([A-Za-z0-9]+)(?:-|$)");
 
     private static final List<String> REVERSAL_KEYWORDS = List.of(
         "解约", "退款", "业绩变更", "冲减", "追回", "调账", "补足手续费", "应付账单", "佣金调账", "退单", "退费"
@@ -238,6 +240,12 @@ public class LfStatementImportService {
                     expenseService.applyExpenseMeta(row, subjects, subtree);
                     rowMapper.updateById(row);
                     expenseService.syncLedgerEntry(row, batch.getOperatorId());
+                    if (existing != null && StringUtils.isNotBlank(existing.getContractNo())
+                        && !existing.getContractNo().equals(row.getContractNo())
+                        && ("BUSINESS".equals(existing.getCategory()) || "REVERSAL".equals(existing.getCategory()))) {
+                        // 合同归属发生变化时，原合同也要重新汇总，避免保留旧匹配结果
+                        chunkContracts.add(existing);
+                    }
                     if (StringUtils.isNotBlank(row.getContractNo())
                         && ("BUSINESS".equals(row.getCategory()) || "REVERSAL".equals(row.getCategory()))) {
                         chunkContracts.add(row);
@@ -419,8 +427,18 @@ public class LfStatementImportService {
             ? fallbackVoucher(row, excel) : StringUtils.trim(excel.getVoucherNo()));
         row.setPaymentNo(StringUtils.trim(excel.getPaymentNo()));
         row.setRawRowNo(lineNo);
+        // 金融分润拆单按备注中的基础合同号匹配；兜底流水号已在上方按 Excel 原合同号生成，保持幂等
+        row.setContractNo(resolveFinancialSplitContract(row.getContractNo(), row.getTransactionRemark()));
         classify(row);
         return row;
+    }
+
+    private String resolveFinancialSplitContract(String originalContractNo, String remark) {
+        if (StringUtils.isBlank(remark)) {
+            return originalContractNo;
+        }
+        var matcher = FINANCIAL_SPLIT_CONTRACT.matcher(remark);
+        return matcher.find() ? matcher.group(1) : originalContractNo;
     }
 
     private String fallbackVoucher(LfStatementRow row, LfStatementExcelRow excel) {
