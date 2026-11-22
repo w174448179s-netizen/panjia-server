@@ -154,6 +154,12 @@ for i in $(seq 1 15); do
 done
 [ "$SUCC" = "0" ] && warn "重试 15 次仍返回 ${CODE}（看日志：ssh ${SSH_TARGET} 'cd ${TARGET_DIR} && sudo ./logs.sh')"
 
+# 同标签 docker load 会将上一版变为悬空镜像；仅在部署成功后清理，失败时保留现场
+if [ "$SUCC" = "1" ]; then
+    info ">>> 清理本次部署产生的悬空旧镜像"
+    ssh "$SSH_TARGET" "sudo docker image prune -f"
+fi
+
 echo ""
 echo "=========================================="
 ok " 后端更新完成【${ENV_NAME}环境】！$TARGET_URL"
