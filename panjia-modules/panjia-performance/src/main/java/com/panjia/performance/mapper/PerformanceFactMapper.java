@@ -2450,7 +2450,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                (ci.id IS NOT NULL) AS "settled",
                ca.lock_time AS "settleDate",
                (f.source = 'MANUAL' AND f.source_key LIKE '%|MANUAL-ADJ%') AS "manualAdjust",
-               FALSE AS "unmatchedReal"
+               FALSE AS "unmatchedReal",
+               f.contract_no AS "contractNo",
+               f.order_no AS "orderNo"
         FROM pj_perf_fact f
         LEFT JOIN pj_people_employee e ON e.employee_id = f.employee_id
         LEFT JOIN sys_dept d ON d.dept_id = f.dept_id
@@ -2507,7 +2509,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                FALSE AS "settled",
                NULL AS "settleDate",
                FALSE AS "manualAdjust",
-               TRUE AS "unmatchedReal"
+               TRUE AS "unmatchedReal",
+               rc.contract_no AS "contractNo",
+               rc.order_no AS "orderNo"
         FROM pj_received_detail rd
         JOIN pj_received_contract rc ON rc.id = rd.contract_id
         LEFT JOIN pj_people_employee e

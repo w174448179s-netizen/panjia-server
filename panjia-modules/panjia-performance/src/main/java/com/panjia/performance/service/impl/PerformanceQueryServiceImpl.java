@@ -53,9 +53,11 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.YearMonth;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -626,6 +628,9 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
         // 命中后仍返回该合同下全部分成行（与合同业绩页「展开可见同合同他人分成」口径一致）。
         assertSearchDetailInScope(rows);
         fillSearchDetailConversion(rows);
+        // 同一合同/订单、期间、员工、角色的多个费用项新签（如贷款 + 居间）合并为一行：
+        // 实收 SQL 已按该组合计并复制到组内每行，直接累加会让实收合计翻倍
+        rows = mergeFeeItemRows(rows);
 
         // 实收金额权限：仅总监/超管可见，经纪人/店长等角色返回空值
         if (!canSeeRealAmount()) {
@@ -634,6 +639,61 @@ public class PerformanceQueryServiceImpl implements IPerformanceQueryService {
             }
         }
         return rows;
+    }
+
+    /**
+     * 同组费用项新签合并（业绩查询详情弹窗）。
+     * <p>
+     * 分组键：合同号 + 订单号 + 期间 + 员工 + 角色。同组内新签/折算金额求和，
+     * 实收金额取一次（SQL 已按该组汇总并原样复制到每行，重复累加会翻倍）；
+     * 「未匹配新签角色」的实收行本身一行一条实收，不参与合并。
+     */
+    private List<PerformanceSearchDetailVo> mergeFeeItemRows(List<PerformanceSearchDetailVo> rows) {
+        Map<String, PerformanceSearchDetailVo> merged = new LinkedHashMap<>();
+        for (PerformanceSearchDetailVo row : rows) {
+            if (Boolean.TRUE.equals(row.getUnmatchedReal())) {
+                merged.put("unmatched:" + merged.size(), row);
+                continue;
+            }
+            String key = String.join("|",
+                nullToEmpty(row.getContractNo()),
+                nullToEmpty(row.getOrderNo()),
+                nullToEmpty(row.getPeriod()),
+                row.getEmployeeId() != null ? "id:" + row.getEmployeeId() : "code:" + nullToEmpty(row.getEmployeeCode()),
+                nullToEmpty(row.getRoleType()),
+                nullToEmpty(row.getRoleName()));
+            PerformanceSearchDetailVo target = merged.get(key);
+            if (target == null) {
+                merged.put(key, row);
+                continue;
+            }
+            target.setExpectAmount(add(target.getExpectAmount(), row.getExpectAmount()));
+            target.setOriginalExpectAmount(add(target.getOriginalExpectAmount(), row.getOriginalExpectAmount()));
+            target.setExpectConvertedAmount(add(target.getExpectConvertedAmount(), row.getExpectConvertedAmount()));
+            target.setOriginalExpectConvertedAmount(
+                add(target.getOriginalExpectConvertedAmount(), row.getOriginalExpectConvertedAmount()));
+            if (target.getRealAmount() == null) {
+                target.setRealAmount(row.getRealAmount());
+            }
+            if (target.getOriginalRealAmount() == null) {
+                target.setOriginalRealAmount(row.getOriginalRealAmount());
+            }
+            target.setManualAdjust(Boolean.TRUE.equals(target.getManualAdjust())
+                || Boolean.TRUE.equals(row.getManualAdjust()));
+            target.setSettled(Boolean.TRUE.equals(target.getSettled()) || Boolean.TRUE.equals(row.getSettled()));
+            if (target.getSettleDate() == null) {
+                target.setSettleDate(row.getSettleDate());
+            }
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private static BigDecimal add(BigDecimal a, BigDecimal b) {
+        return (a == null ? BigDecimal.ZERO : a).add(b == null ? BigDecimal.ZERO : b);
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     /**

@@ -21,6 +21,12 @@ public class PerformanceSearchDetailVo {
     /** 归属期间（明细含该业务键全部期间，与列表的合同全周期聚合口径一致） */
     private String period;
 
+    /** 合同号（同合同多订单时与订单号一起作为明细合并分组键） */
+    private String contractNo;
+
+    /** 订单号（同合同多订单时与合同号一起作为明细合并分组键） */
+    private String orderNo;
+
     /** 归属部门 ID（部门数据权限钻取校验用） */
     private Long deptId;
 
