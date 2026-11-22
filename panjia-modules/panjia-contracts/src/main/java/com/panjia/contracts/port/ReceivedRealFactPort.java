@@ -64,9 +64,10 @@ public interface ReceivedRealFactPort {
      *
      * @param bizKeys 业务键集合（订单号/合同号）
      * @param employeeId 员工 ID；非空时只统计该员工明细（员工口径，避免合同全量混入）
+     * @param deptId 门店 ID；非空时只统计该门店及下级明细
      * @return 每行 bizKey + period + 四个方向金额；无实收的期不返回
      */
-    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, Long employeeId);
+    List<PerformanceContractSummaryDTO> listDirectionalPeriodSummaries(Collection<String> bizKeys, Long employeeId, Long deptId);
 
     /**
      * 按期间 + 业务键集合（合同号/订单号）统计去重员工数（结佣明细列表跨合同合计用）。

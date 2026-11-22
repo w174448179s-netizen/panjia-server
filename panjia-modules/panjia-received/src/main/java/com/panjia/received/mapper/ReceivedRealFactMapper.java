@@ -411,6 +411,12 @@ public interface ReceivedRealFactMapper {
               <if test="employeeId != null">
                 AND COALESCE(rd.employee_id, e.employee_id) = #{employeeId}
               </if>
+              <if test="deptId != null">
+                AND (COALESCE(rd.dept_id, rc.dept_id, e.dept_id) = #{deptId}
+                     OR EXISTS (SELECT 1 FROM sys_dept sd
+                                WHERE sd.dept_id = COALESCE(rd.dept_id, rc.dept_id, e.dept_id)
+                                  AND sd.ancestors LIKE CONCAT('%', #{deptId}, '%')))
+              </if>
         ),
         sk AS (
             SELECT DISTINCT biz_key, source_key, period, (amount &lt; 0) AS is_neg
@@ -452,7 +458,8 @@ public interface ReceivedRealFactMapper {
     List<PerformanceContractSummaryDTO> selectDirectionalPeriodSummaries(
             @Param("bizKeys") Collection<String> bizKeys,
             @Param("bizKeys2") Collection<String> bizKeys2,
-            @Param("employeeId") Long employeeId);
+            @Param("employeeId") Long employeeId,
+            @Param("deptId") Long deptId);
 
     /**
      * 跨合同去重员工数：员工键口径与 {@link #selectContractSummaries} 一致

@@ -1681,7 +1681,7 @@ public class CommissionApplicationService {
      * 这里要求「结果业务键属于本分片」才接受，保证每个业务键只由一个分片返回一次。
      */
     private Map<String, List<PerformanceContractSummaryDTO>> loadReceivedPeriodStats(Collection<String> bizKeys,
-                                                                                   Long employeeId) {
+                                                                                   Long employeeId, Long deptId) {
         Map<String, List<PerformanceContractSummaryDTO>> statsByKey = new HashMap<>();
         if (bizKeys == null || bizKeys.isEmpty()) {
             return statsByKey;
@@ -1689,7 +1689,7 @@ public class CommissionApplicationService {
         for (List<String> chunk : chunkKeys(bizKeys)) {
             Set<String> chunkSet = new HashSet<>(chunk);
             for (PerformanceContractSummaryDTO pc
-                : performanceQueryPort.listDirectionalPeriodSummaries(chunk, FACT_TYPE_REAL, employeeId)) {
+                : performanceQueryPort.listDirectionalPeriodSummaries(chunk, FACT_TYPE_REAL, employeeId, deptId)) {
                 if (StringUtils.isBlank(pc.getBizKey()) || !chunkSet.contains(pc.getBizKey())) {
                     continue;
                 }
@@ -2007,7 +2007,7 @@ public class CommissionApplicationService {
         // 晚于最后一张单的到账继续累计到该单（审批锁定不再冻结实收展示）。
         // 一次批量取全部键的逐期实收，避免逐单回表；分片结果按业务键归组（跨片重复已剔除）
         Map<String, List<PerformanceContractSummaryDTO>> receivedStatsByKey =
-            loadReceivedPeriodStats(contractKeys, query.getEmployeeId());
+            loadReceivedPeriodStats(contractKeys, query.getEmployeeId(), effectiveDeptId);
         // 补收识别（2026-11-03，7.6）：补收月从归属切片中剔除，补收金额不并入任何结佣单
         ReceivedSplit split = splitReceivedBySupplement(receivedStatsByKey, contractKeys);
         // 补收行展示需要合同快照（合同号/订单号/类型/房源/签约时间），按归一业务键取一份
@@ -2103,11 +2103,13 @@ public class CommissionApplicationService {
             refundedKeys = performanceQueryPort.findRefundedBizKeys(refundBizKeys);
         }
 
-        // 按员工筛选时：新签/结佣业绩均按「本单该员工明细」口径展示。
-        // 不用申请单合同全量快照（会把同合同其他业绩人金额算进来），
-        // 也不用跨期员工合计（会把后续期间退单负数提前抵扣到本期行，同合同多张单还会重复累计）
-        Map<Long, BigDecimal> empItemAmountMap = new HashMap<>();
-        if (query.getEmployeeId() != null) {
+        // 按员工或门店筛选时：新签/结佣业绩均按「本单符合筛选条件的明细」口径展示。
+        // 不用申请单合同全量快照（会把同合同其他业绩人/门店金额算进来），
+        // 也不用跨期合计（会把后续期间退单负数提前抵扣到本期行，同合同多张单还会重复累计）
+        List<Long> effectiveDeptIds = effectiveDeptId == null ? null : deptService.selectDeptAndChildById(effectiveDeptId);
+        Map<Long, BigDecimal> scopedItemAmountMap = new HashMap<>();
+        Map<Long, Long> scopedItemCountMap = new HashMap<>();
+        if (query.getEmployeeId() != null || effectiveDeptId != null) {
             List<Long> appIds = applications.stream()
                 .map(CommissionApplication::getId)
                 .filter(Objects::nonNull)
@@ -2118,12 +2120,13 @@ public class CommissionApplicationService {
                 for (CommissionItem item : itemMapper.selectList(new LambdaQueryWrapper<CommissionItem>()
                     .select(CommissionItem::getApplicationId, CommissionItem::getAmount)
                     .in(CommissionItem::getApplicationId, chunk)
-                    .eq(CommissionItem::getEmployeeId, query.getEmployeeId())
+                    .eq(query.getEmployeeId() != null, CommissionItem::getEmployeeId, query.getEmployeeId())
+                    .in(effectiveDeptId != null, CommissionItem::getDeptId, effectiveDeptIds)
                     .ne(CommissionItem::getStatus, ItemStatus.REVERSED))) {
-                    if (item.getAmount() == null) {
-                        continue;
+                    scopedItemCountMap.merge(item.getApplicationId(), 1L, Long::sum);
+                    if (item.getAmount() != null) {
+                        scopedItemAmountMap.merge(item.getApplicationId(), item.getAmount(), BigDecimal::add);
                     }
-                    empItemAmountMap.merge(item.getApplicationId(), item.getAmount(), BigDecimal::add);
                 }
             }
         }
@@ -2264,17 +2267,18 @@ public class CommissionApplicationService {
                     vo.setReceivedAmountAdjusted(false);
                     vo.setOriginalReceivedAmount(null);
                 }
-                // 按员工筛选时：新签/结佣业绩同源为本单该员工明细合计，逐行一致且汇总自然相等；
+                // 按员工或门店筛选时：新签/结佣业绩同源为本单符合筛选条件的明细合计，逐行一致且汇总自然相等；
                 // 单内调整/退单行保留各自正负值，不再被跨期汇总抵消
-                if (query.getEmployeeId() != null) {
-                    BigDecimal empAmt = app.getId() == null ? BigDecimal.ZERO
-                        : empItemAmountMap.getOrDefault(app.getId(), BigDecimal.ZERO);
+                if (query.getEmployeeId() != null || effectiveDeptId != null) {
+                    BigDecimal scopedAmt = app.getId() == null ? BigDecimal.ZERO
+                        : scopedItemAmountMap.getOrDefault(app.getId(), BigDecimal.ZERO);
                     BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
-                    vo.setAmount(empAmt);
-                    vo.setConvertedAmount(conversionFactorPort.convert(empAmt, factor));
-                    vo.setExpectedAmount(empAmt);
-                    vo.setExpectedConvertedAmount(conversionFactorPort.convert(empAmt, factor));
-                    // 员工口径下不存在「合同值→员工值」调整箭头
+                    vo.setAmount(scopedAmt);
+                    vo.setConvertedAmount(conversionFactorPort.convert(scopedAmt, factor));
+                    vo.setExpectedAmount(scopedAmt);
+                    vo.setExpectedConvertedAmount(conversionFactorPort.convert(scopedAmt, factor));
+                    vo.setDetailCount(app.getId() == null ? 0L : scopedItemCountMap.getOrDefault(app.getId(), 0L));
+                    // 员工/门店口径下不存在「合同值→筛选值」调整箭头
                     vo.setExpectedAdjusted(false);
                     vo.setOriginalExpectedAmount(null);
                     vo.setOriginalExpectedConvertedAmount(null);
@@ -2494,7 +2498,7 @@ public class CommissionApplicationService {
 
         // 一次取全部候选键的逐期实收：发起页实收与结佣列表/详情共用同一口径（跨片重复已剔除）
         Map<String, List<PerformanceContractSummaryDTO>> receivedStatsByKey =
-            loadReceivedPeriodStats(expectKeys, query.getEmployeeId());
+            loadReceivedPeriodStats(expectKeys, query.getEmployeeId(), effectiveDeptId);
         // 补收月不并入待发起行的实收（与结佣列表口径一致）
         ReceivedSplit availableSplit = splitReceivedBySupplement(receivedStatsByKey, expectKeys);
 
