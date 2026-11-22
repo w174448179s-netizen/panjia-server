@@ -10,6 +10,8 @@
 #
 # 行为:
 #   - pg_restore --clean --if-exists: 先删除库中已存在对象再导入
+#   - 排除 sys_oss_config / sys_config: 保留当前环境的 OSS、钉钉等环境本地配置,
+#     避免"生产备份直接还原到测试"后测试环境串用生产对象存储/凭证
 #   - 还原前要求二次确认(输入 y)
 #   - 还原后应用重启时 Flyway 会自动校验/补跑迁移
 # ============================================================
@@ -59,8 +61,10 @@ docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
   pg_restore -U "$DB_USER" --list < "$DUMP_FILE" > /dev/null
 
 echo "[还原] 导入 $DUMP_FILE → $DB_NAME (可能需要数分钟)..."
+# -T 排除环境本地配置表：保留当前环境的 OSS/钉钉等配置，不随备份覆盖
 docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
   pg_restore -U "$DB_USER" -d "$DB_NAME" --clean --if-exists --no-owner --no-privileges \
+  -T sys_oss_config -T sys_config \
   < "$DUMP_FILE"
 
 echo "[完成] 还原成功: $DUMP_FILE → $DB_NAME"

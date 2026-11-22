@@ -53,6 +53,16 @@ public class BackupServiceImpl implements BackupService {
     /** 备份文件名白名单（防路径穿越）：字母数字下划线连字符 + .dump */
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+\\.dump$");
 
+    /**
+     * 跨环境还原时保留的“环境本地配置表”（pg_restore -T 排除，不被备份覆盖）。
+     * <p>
+     * 典型场景：把生产备份直接还原到测试库时，整库覆盖会把生产的 OSS 配置
+     * （endpoint / bucket / AK-SK / domain_url）和钉钉等参数一起带过来，导致测试环境
+     * 直连生产对象存储、往生产桶写文件，甚至用生产钉钉凭证跑定时同步。
+     * 这些配置属于“环境身份”，应始终保留当前环境自己的值，还原只覆盖业务数据。
+     */
+    private static final List<String> ENV_LOCAL_TABLES = List.of("sys_oss_config", "sys_config");
+
     private static final DateTimeFormatter STAMP_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
 
     /** pg_restore 单步超时（分钟）：大库还原可能较久，超时视为失败 */
@@ -232,6 +242,11 @@ public class BackupServiceImpl implements BackupService {
             cmd.add("--if-exists");
             cmd.add("--no-owner");
             cmd.add("--no-privileges");
+            // 保留当前环境的环境本地配置，避免生产备份还原到测试后串用生产 OSS / 钉钉
+            for (String table : ENV_LOCAL_TABLES) {
+                cmd.add("-T");
+                cmd.add(table);
+            }
         } else {
             cmd.add("--list");
         }
