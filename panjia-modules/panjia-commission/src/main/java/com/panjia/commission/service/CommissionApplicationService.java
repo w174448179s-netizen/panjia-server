@@ -1157,6 +1157,8 @@ public class CommissionApplicationService {
         }
         // 在途新签调整（审批中/已通过未执行）尚未 supersede 事实，链上无 REVERSED 行，
         // 下面的「已调整」口径判不出来；但调整后金额会变，必须先拦下（2026-10-17 TGCF2608393000 漏拦案例）
+        // 注意：查询侧对「订单号命中」与「合同号命中且调整单无订单号」分别匹配，
+        // 同合同其它订单的订单级调整不会误拦本单（2026-11-22：7202 调整审批中误拦 7209 自动结佣）
         if (performanceQueryPort.hasInflightExpectAdjust(keys)) {
             throw new ServiceException("合同 " + contractNo
                 + " 存在审批中的新签调整单，请先完成调整审批（并联动实收）后再发起结佣");
@@ -2016,7 +2018,23 @@ public class CommissionApplicationService {
                 contractByBizKey.putIfAbsent(k, c);
             }
         }
-        // 同时按 contractNo 和 orderNo 建索引，支持一手房/房产金融/家装荐客以订单号为准
+        // 订单/合同 → 业务类型：用于按每个单据自身的归一业务键归属实收，
+        // 尤其同合同下「二手合同衍生金融单」跨业务类型共享合同号时，避免把金融单的窗口
+        // 算到二手行上（或反之）
+        Map<String, String> bizTypeByOrderNo = new HashMap<>();
+        Map<String, String> bizTypeByContractNo = new HashMap<>();
+        for (PerformanceContractSummaryDTO c : contracts) {
+            if (StringUtils.isBlank(c.getBizType())) {
+                continue;
+            }
+            if (StringUtils.isNotBlank(c.getOrderNo())) {
+                bizTypeByOrderNo.putIfAbsent(c.getOrderNo(), c.getBizType());
+            }
+            if (StringUtils.isNotBlank(c.getContractNo())) {
+                bizTypeByContractNo.putIfAbsent(c.getContractNo(), c.getBizType());
+            }
+        }
+
         // 单据按业务键分组（一个合同/订单可有多张单：按新签归属月拆单后，同一合同每月一张）。
         // 退单冲减单（TD 前缀）不优先，仅在该键下无正常单时兜底，保证「原单 + 退单冲减单」并存时
         // 合同行仍绑定原单不张冠李戴
@@ -2127,7 +2145,15 @@ public class CommissionApplicationService {
             if (rowApps.isEmpty() && StringUtils.isNotBlank(c.getContractNo())) {
                 List<CommissionApplication> byContract = appsByKey.get(c.getContractNo());
                 if (byContract != null) {
-                    rowApps.addAll(byContract);
+                    // 同合同多订单：订单行只挂本订单单据或无订单号的历史合同级单据，
+                    // 禁止把同合同其它订单的单据挂到本行（2026-11-22 合同 100016183366 案例）
+                    for (CommissionApplication app : byContract) {
+                        if (StringUtils.isBlank(c.getOrderNo())
+                            || StringUtils.isBlank(app.getOrderNo())
+                            || c.getOrderNo().equals(app.getOrderNo())) {
+                            rowApps.add(app);
+                        }
+                    }
                 }
             }
             // 实收审批通过后系统自动生成结佣草稿单，无申请单的合同不在结佣明细展示
@@ -2138,6 +2164,20 @@ public class CommissionApplicationService {
             // 同键多张同向单互不重叠；锁定单继续吸收后续到账
             String rowBizKey = summaryBizKey(c);
             List<CommissionApplication> attributionApps = appsByKey.getOrDefault(rowBizKey, rowApps);
+            // 按每个单据自身的归一业务键收敛归属窗口：同合同跨业务类型（二手合同衍生金融单）时，
+            // 合同键下会混入其它业务类型的单据，不能参与本业务键的实收到账归属
+            List<CommissionApplication> sameKeyApps = new ArrayList<>(attributionApps.size());
+            for (CommissionApplication app : attributionApps) {
+                String appBizType = StringUtils.isNotBlank(app.getOrderNo())
+                    ? bizTypeByOrderNo.get(app.getOrderNo())
+                    : bizTypeByContractNo.get(app.getContractNo());
+                if (rowBizKey.equals(normalizedBizKey(appBizType, app.getOrderNo(), app.getContractNo()))) {
+                    sameKeyApps.add(app);
+                }
+            }
+            if (!sameKeyApps.isEmpty()) {
+                attributionApps = sameKeyApps;
+            }
             Map<Long, BigDecimal[]> attributedReceived = attributeReceivedByApp(
                 attributionApps, split.statsForAttribution().get(rowBizKey));
             // 同键存在活跃负向单时，负向实收归属负向单，正向行不展示净额，避免重复
@@ -2481,8 +2521,16 @@ public class CommissionApplicationService {
             List<PerformanceContractSummaryDTO> group = entry.getValue();
             PerformanceContractSummaryDTO c = group.get(0);
             Map<String, PerformanceContractSummaryDTO> byPeriod = unsettledByKey.get(entry.getKey());
-            if (byPeriod == null) {
-                byPeriod = unsettledByKey.get(c.getContractNo());
+            if (byPeriod == null && StringUtils.isNotBlank(c.getContractNo())) {
+                // 订单行自身无未结佣新签时才考虑合同键退化，且仅当合同键分组确为「合同级事实」
+                // （新签事实 order_no 为空或误填合同号的历史脏数据）才允许；同合同多订单下
+                // 其它订单的新签事实（order_no 为具体订单）不得借给本行，避免已结佣订单重复成行、
+                // 金额串单（2026-11-22 合同 100016183366 案例）
+                Map<String, PerformanceContractSummaryDTO> byContract = unsettledByKey.get(c.getContractNo());
+                if (byContract != null && byContract.values().stream().allMatch(u ->
+                    StringUtils.isBlank(u.getOrderNo()) || c.getContractNo().equals(u.getOrderNo()))) {
+                    byPeriod = byContract;
+                }
             }
             if (byPeriod == null) {
                 continue;
@@ -2501,12 +2549,16 @@ public class CommissionApplicationService {
             }
             String statKey = summaryBizKey(c);
             List<PerformanceContractSummaryDTO> stats = availableSplit.statsForAttribution().get(statKey);
-            if (stats == null && StringUtils.isNotBlank(c.getContractNo())) {
-                stats = availableSplit.statsForAttribution().get(c.getContractNo());
-            }
             List<CommissionApplication> existingApps = existingAppsByKey.get(statKey);
-            if (existingApps == null && StringUtils.isNotBlank(c.getContractNo())) {
-                existingApps = existingAppsByKey.get(c.getContractNo());
+            // 只有无订单号的历史合同级行才退化到合同键；有订单号的行只认本订单键，
+            // 避免用同合同其它订单的在途单据计算本行实收到账窗口（2026-11-22 合同 100016183366 案例）
+            if (StringUtils.isBlank(c.getOrderNo())) {
+                if (stats == null && StringUtils.isNotBlank(c.getContractNo())) {
+                    stats = availableSplit.statsForAttribution().get(c.getContractNo());
+                }
+                if (existingApps == null && StringUtils.isNotBlank(c.getContractNo())) {
+                    existingApps = existingAppsByKey.get(c.getContractNo());
+                }
             }
             BigDecimal factor = conversionFactorPort.factorOf(factorMap, c.getBizType());
             List<String> supplementPeriods = supplementPeriodsOf(availableSplit.supplementKeyPeriods(), statKey);

@@ -552,7 +552,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
 
     /**
      * 「是否有在途新签调整单」判定（2026-10-17 结佣发起闸门补强用）：
-     * pj_perf_adjust 状态 SUBMITTED/APPROVED（进行中未执行）且业务键命中合同号/订单号即 true。
+     * pj_perf_adjust 状态 SUBMITTED/APPROVED（进行中未执行）且业务键命中即 true。
+     * <p>
+     * 同合同多订单防串单（2026-11-22）：订单号命中始终有效（兼容 order_no 误填合同号的历史脏数据）；
+     * 合同号命中仅对「无订单号」的合同级调整生效，避免同合同其它订单的在途调整误拦本单。
      */
     @Override
     public boolean hasInflightExpectAdjust(java.util.Collection<String> bizKeys) {
@@ -561,8 +564,10 @@ public class CommissionPerformanceAdapter implements CommissionPerformanceQueryP
         }
         return adjustMapper.selectCount(new LambdaQueryWrapper<PerformanceAdjust>()
             .in(PerformanceAdjust::getStatus, AdjustStatus.SUBMITTED, AdjustStatus.APPROVED)
-            .and(w -> w.in(PerformanceAdjust::getContractNo, bizKeys)
-                .or().in(PerformanceAdjust::getOrderNo, bizKeys))) > 0;
+            .and(w -> w.in(PerformanceAdjust::getOrderNo, bizKeys)
+                .or(x -> x.in(PerformanceAdjust::getContractNo, bizKeys)
+                    .and(y -> y.isNull(PerformanceAdjust::getOrderNo)
+                        .or().eq(PerformanceAdjust::getOrderNo, ""))))) > 0;
     }
 
     // ==================== 历史工资导入（HISTORY_PAYROLL）结佣建单支撑 ====================
