@@ -121,6 +121,27 @@ public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
     List<Map<String, Object>> selectActiveAggregatesByContractIds(@Param("contractIds") Collection<Long> contractIds);
 
     /**
+     * 某合同全部归属月的 ACTIVE 实收，按员工汇总（去化模式全周期审批口径）。
+     */
+    @Select("""
+        SELECT COALESCE(rd.employee_id, 0) AS "employeeId",
+               COALESCE(SUM(rd.performance_amount), 0) AS "amount"
+        FROM pj_received_detail rd
+        JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        WHERE rd.detail_status = 'ACTIVE'
+          AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo})
+        GROUP BY COALESCE(rd.employee_id, 0)
+        UNION ALL
+        SELECT a.employee_id AS "employeeId",
+               SUM(a.target_amount - a.original_amount) AS "amount"
+        FROM pj_perf_received_adjust a
+        WHERE a.status NOT IN ('EXECUTED', 'REJECTED')
+          AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
+        GROUP BY a.employee_id
+        """)
+    List<Map<String, Object>> selectActiveByContractGroupEmployee(@Param("contractNo") String contractNo);
+
+    /**
      * 取批次内 ACTIVE 明细涉及的合同 ID（冲销前快照，用于冲销后重算这些合同的聚合）。
      */
     @Select("""

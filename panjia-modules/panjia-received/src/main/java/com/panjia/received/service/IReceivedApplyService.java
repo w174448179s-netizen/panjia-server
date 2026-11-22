@@ -61,6 +61,18 @@ public interface IReceivedApplyService {
     int autoCreateForReceivedBatch(Long batchId, String period, Long operatorId);
 
     /**
+     * 理房通流水「售前房屋美化」生成的去化模式实收。
+     * <p>按合同 + 归属月落实收合同/明细；重复导入按 source_key 覆盖未审批数据。
+     * 审批口径按合同全周期累计：累计实收 ≥ 累计新签应收 → APPROVED 直建；
+     * 否则 SUBMITTED 并启动工作流。已审批数据不覆盖。</p>
+     *
+     * @param items      去化实收入参（一个合同一个月一条）
+     * @param operatorId 操作人
+     * @return 新建/合并的审批单数量
+     */
+    int createFromLfStatement(List<com.panjia.received.domain.bo.LfStatementReceivedBo> items, Long operatorId);
+
+    /**
      * 历史工资导入批次实收审批单直建（APPROVED 终态，不走工作流）。
      * <p>语义同老导入器第 8 段：按订单号分组建 APPROVED 单并回填 received_apply_id；
      * 无流程实例（current_node/process_instance_id 为空），不影响列表查询（均按 status 过滤）。

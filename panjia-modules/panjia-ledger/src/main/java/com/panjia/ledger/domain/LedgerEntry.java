@@ -43,6 +43,12 @@ public class LedgerEntry implements Serializable {
 
     private String remark;
 
+    /** MANUAL=手工 / LF_STATEMENT=理房通流水 */
+    private String sourceType;
+
+    /** 来源幂等键：理房通记账流水号 */
+    private String sourceSerialNo;
+
     private Long createBy;
 
     private LocalDateTime createTime;

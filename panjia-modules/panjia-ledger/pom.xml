@@ -21,6 +21,23 @@
             <artifactId>panjia-common</artifactId>
         </dependency>
 
+        <!-- 原始 Excel 归档，供异步任务读取 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>common-import-util</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-json</artifactId>
+        </dependency>
+
+        <!-- 去化模式实收通过 received 域落库/建审批单 -->
+        <dependency>
+            <groupId>com.panjia</groupId>
+            <artifactId>panjia-received</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-common-core</artifactId>

@@ -354,6 +354,214 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
 
     @Override
     @Transactional(rollbackFor = Exception.class)
+    public int createFromLfStatement(List<com.panjia.received.domain.bo.LfStatementReceivedBo> items, Long operatorId) {
+        if (items == null || items.isEmpty()) {
+            return 0;
+        }
+        if (operatorId == null) {
+            try {
+                operatorId = LoginHelper.getUserId();
+            } catch (Exception ignored) {
+            }
+        }
+        if (operatorId == null) {
+            operatorId = 1L;
+        }
+        int handled = 0;
+        for (com.panjia.received.domain.bo.LfStatementReceivedBo bo : items) {
+            if (bo == null || StringUtils.isBlank(bo.getContractNo()) || StringUtils.isBlank(bo.getPeriod())
+                || bo.getRoles() == null || bo.getRoles().isEmpty()) {
+                continue;
+            }
+            String orderNo = StringUtils.isNotBlank(bo.getOrderNo()) ? bo.getOrderNo() : bo.getContractNo();
+            com.panjia.received.domain.ReceivedContract contract = contractMapper.selectOne(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedContract>()
+                    .eq(com.panjia.received.domain.ReceivedContract::getOrderNo, orderNo)
+                    .eq(com.panjia.received.domain.ReceivedContract::getPeriod, bo.getPeriod())
+                    .eq(com.panjia.received.domain.ReceivedContract::getSourceType, "LF_STATEMENT")
+                    .last("LIMIT 1"));
+            if (contract == null) {
+                contract = new com.panjia.received.domain.ReceivedContract();
+                contract.setOrderNo(orderNo);
+                contract.setContractNo(bo.getContractNo());
+                contract.setBizType("去化模式");
+                contract.setPeriod(bo.getPeriod());
+                contract.setBusinessDate(bo.getBusinessDate());
+                contract.setSourceType("LF_STATEMENT");
+                contract.setDeptId(bo.getStoreDeptId());
+                contract.setPropertyAddress(bo.getPropertyAddress());
+                contract.setContractAmount(bo.getContractAmount());
+                contract.setPeriodTotalReceived(BigDecimal.ZERO);
+                contract.setItemCount(0);
+                contract.setCreateTime(LocalDateTime.now());
+                contract.setUpdateTime(LocalDateTime.now());
+                contractMapper.insert(contract);
+            } else {
+                contract.setContractNo(bo.getContractNo());
+                contract.setDeptId(bo.getStoreDeptId());
+                contract.setPropertyAddress(bo.getPropertyAddress());
+                contract.setContractAmount(bo.getContractAmount());
+                contract.setUpdateTime(LocalDateTime.now());
+                contractMapper.updateById(contract);
+            }
+
+            List<Long> detailIds = new ArrayList<>();
+            for (com.panjia.received.domain.bo.LfStatementReceivedBo.RoleItem role : bo.getRoles()) {
+                if (role == null || role.getAmount() == null || role.getAmount().compareTo(BigDecimal.ZERO) == 0) {
+                    continue;
+                }
+                String roleKey = role.getEmployeeId() != null
+                    ? String.valueOf(role.getEmployeeId())
+                    : StringUtils.defaultString(role.getRoleName());
+                String sourceKey = "LF:" + bo.getContractNo() + ":" + roleKey + ":" + bo.getPeriod();
+                com.panjia.received.domain.ReceivedDetail detail = detailMapper.selectOne(
+                    new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                        .eq(com.panjia.received.domain.ReceivedDetail::getSourceKey, sourceKey)
+                        .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE")
+                        .last("LIMIT 1"));
+                if (detail != null) {
+                    ReceivedApply bound = detail.getReceivedApplyId() == null ? null : applyMapper.selectById(detail.getReceivedApplyId());
+                    if (bound != null && bound.getStatus() == ReceivedApplyStatus.APPROVED) {
+                        // 已审批数据不覆盖，仅纳入本次建单绑定
+                        detailIds.add(detail.getId());
+                        continue;
+                    }
+                    detail.setEmployeeId(role.getEmployeeId());
+                    detail.setEmployeeExternalCode(role.getEmployeeExternalCode());
+                    detail.setDeptId(role.getDeptId() != null ? role.getDeptId() : bo.getStoreDeptId());
+                    detail.setRoleType(role.getRoleType());
+                    detail.setRoleName(role.getRoleName());
+                    detail.setShareRatio(role.getShareRatio());
+                    detail.setPerformanceAmount(role.getAmount());
+                    detail.setUpdateTime(LocalDateTime.now());
+                    detailMapper.updateById(detail);
+                    detailIds.add(detail.getId());
+                } else {
+                    detail = new com.panjia.received.domain.ReceivedDetail();
+                    detail.setContractId(contract.getId());
+                    detail.setEmployeeId(role.getEmployeeId());
+                    detail.setEmployeeExternalCode(role.getEmployeeExternalCode());
+                    detail.setDeptId(role.getDeptId() != null ? role.getDeptId() : bo.getStoreDeptId());
+                    detail.setRoleType(role.getRoleType());
+                    detail.setRoleName(role.getRoleName());
+                    detail.setShareRatio(role.getShareRatio());
+                    detail.setPerformanceAmount(role.getAmount());
+                    detail.setPeriod(bo.getPeriod());
+                    if (StringUtils.isNotBlank(bo.getPeriod()) && bo.getPeriod().length() >= 7) {
+                        detail.setEffectiveDate(java.time.LocalDate.parse(bo.getPeriod() + "-01"));
+                    }
+                    detail.setSourceKey(sourceKey);
+                    detail.setDetailStatus("ACTIVE");
+                    detail.setOperatorId(operatorId);
+                    detail.setCreateTime(LocalDateTime.now());
+                    detail.setUpdateTime(LocalDateTime.now());
+                    detailMapper.insert(detail);
+                    detailIds.add(detail.getId());
+                }
+            }
+            if (detailIds.isEmpty()) {
+                continue;
+            }
+
+            // 合同合计按 ACTIVE 明细重算
+            List<com.panjia.received.domain.ReceivedDetail> activeDetails = detailMapper.selectList(
+                new LambdaQueryWrapper<com.panjia.received.domain.ReceivedDetail>()
+                    .eq(com.panjia.received.domain.ReceivedDetail::getContractId, contract.getId())
+                    .eq(com.panjia.received.domain.ReceivedDetail::getDetailStatus, "ACTIVE"));
+            BigDecimal contractTotal = activeDetails.stream()
+                .map(com.panjia.received.domain.ReceivedDetail::getPerformanceAmount)
+                .filter(java.util.Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal periodTotal = activeDetails.stream()
+                .filter(d -> bo.getPeriod().equals(d.getPeriod()))
+                .map(com.panjia.received.domain.ReceivedDetail::getPerformanceAmount)
+                .filter(java.util.Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+            contract.setPeriodTotalReceived(contractTotal);
+            contract.setItemCount(activeDetails.size());
+            contract.setUpdateTime(LocalDateTime.now());
+            contractMapper.updateById(contract);
+
+            // 全周期：累计新签应收 vs 累计实收，按角色人比较
+            Map<Long, BigDecimal> expectedByEmployee = new HashMap<>();
+            List<PerformanceFact> expects = factMapper.selectList(
+                new LambdaQueryWrapper<PerformanceFact>()
+                    .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
+                    .eq(PerformanceFact::getFactStatus, "ACTIVE")
+                    .eq(PerformanceFact::getBizType, "去化模式")
+                    .and(w -> w.eq(PerformanceFact::getContractNo, bo.getContractNo())
+                        .or().eq(PerformanceFact::getOrderNo, bo.getContractNo())));
+            for (PerformanceFact fact : expects) {
+                if (fact.getEmployeeId() == null || fact.getPerformanceAmount() == null) {
+                    continue;
+                }
+                expectedByEmployee.merge(fact.getEmployeeId(), fact.getPerformanceAmount(), BigDecimal::add);
+            }
+            Map<Long, BigDecimal> receivedByEmployee = new HashMap<>();
+            for (Map<String, Object> row : detailMapper.selectActiveByContractGroupEmployee(bo.getContractNo())) {
+                Object emp = row.get("employeeId");
+                Object amt = row.get("amount");
+                if (emp != null) {
+                    receivedByEmployee.put(((Number) emp).longValue(),
+                        amt == null ? BigDecimal.ZERO : new BigDecimal(amt.toString()));
+                }
+            }
+            boolean autoApprove = !expectedByEmployee.isEmpty();
+            for (Map.Entry<Long, BigDecimal> entry : expectedByEmployee.entrySet()) {
+                BigDecimal received = receivedByEmployee.getOrDefault(entry.getKey(), BigDecimal.ZERO);
+                if (received.compareTo(entry.getValue()) < 0) {
+                    autoApprove = false;
+                    break;
+                }
+            }
+            BigDecimal expectedTotal = expectedByEmployee.values().stream()
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+            List<ReceivedApply> applies = applyMapper.selectList(new LambdaQueryWrapper<ReceivedApply>()
+                .eq(ReceivedApply::getPeriod, bo.getPeriod())
+                .eq(ReceivedApply::getOrderNo, orderNo)
+                .in(ReceivedApply::getStatus, ReceivedApplyStatus.SUBMITTED, ReceivedApplyStatus.APPROVED)
+                .orderByDesc(ReceivedApply::getId));
+            ReceivedApply apply = applies.isEmpty() ? null : applies.get(0);
+            if (apply != null && apply.getStatus() == ReceivedApplyStatus.APPROVED) {
+                bindFacts(detailIds, apply.getId());
+                handled++;
+                continue;
+            }
+            if (apply == null) {
+                apply = newApplyFromContract(bo.getPeriod(), contract, null, operatorId,
+                    detailIds.size(), periodTotal, expectedTotal, bo.getStoreDeptId());
+                if (autoApprove) {
+                    apply.setStatus(ReceivedApplyStatus.APPROVED);
+                    apply.setApproverId(operatorId);
+                    apply.setApproveTime(LocalDateTime.now());
+                    apply.setCurrentNode(null);
+                    insertApply(apply);
+                    bindFacts(detailIds, apply.getId());
+                    log.info("[实收审批] 理房通去化实收全周期达标直建：applyNo={}, contractNo={}, period={}, received={}, expect={}",
+                        apply.getApplyNo(), bo.getContractNo(), bo.getPeriod(), periodTotal, expectedTotal);
+                } else {
+                    insertApply(apply);
+                    bindFacts(detailIds, apply.getId());
+                    startWorkflow(apply, operatorId, Set.of());
+                    log.info("[实收审批] 理房通去化实收提交人工：applyNo={}, contractNo={}, period={}, received={}, expect={}",
+                        apply.getApplyNo(), bo.getContractNo(), bo.getPeriod(), periodTotal, expectedTotal);
+                }
+            } else {
+                apply.setItemCount(detailIds.size());
+                apply.setReceivedAmount(periodTotal);
+                apply.setExpectedAmount(expectedTotal);
+                apply.setDeptId(bo.getStoreDeptId());
+                applyMapper.updateById(apply);
+                bindFacts(detailIds, apply.getId());
+            }
+            handled++;
+        }
+        return handled;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
     public int autoCreateApprovedForBatch(Long batchId, String period, Long operatorId) {
         if (batchId == null || StringUtils.isBlank(period)) {
             return 0;
