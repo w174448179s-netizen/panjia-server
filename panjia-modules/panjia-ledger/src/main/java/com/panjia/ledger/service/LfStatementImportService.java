@@ -221,9 +221,6 @@ public class LfStatementImportService {
             txTemplate.executeWithoutResult(status -> {
                 for (LfStatementRow row : chunk) {
                     LfStatementRow existing = existingByVoucher.get(row.getVoucherNo());
-                    if (existing == null) {
-                        existing = findByBusinessKey(row, account.getId());
-                    }
                     if (existing != null) {
                         preserveManualAllocation(row, existing);
                         row.setId(existing.getId());
@@ -513,20 +510,6 @@ public class LfStatementImportService {
             }
         }
         return result;
-    }
-
-    /** 兜底：记账流水号变化时按 动账时间 + 金额 + 合同编号 匹配 */
-    private LfStatementRow findByBusinessKey(LfStatementRow row, Long accountId) {
-        if (row.getTransactionTime() == null || row.getTransactionAmount() == null) {
-            return null;
-        }
-        List<LfStatementRow> matches = rowMapper.selectList(new LambdaQueryWrapper<LfStatementRow>()
-            .eq(LfStatementRow::getAccountId, accountId)
-            .eq(LfStatementRow::getTransactionTime, row.getTransactionTime())
-            .eq(LfStatementRow::getTransactionAmount, row.getTransactionAmount())
-            .eq(StringUtils.isNotBlank(row.getContractNo()), LfStatementRow::getContractNo, row.getContractNo())
-            .last("LIMIT 2"));
-        return matches.size() == 1 ? matches.get(0) : null;
     }
 
     private LocalDateTime parseTime(String value) {
