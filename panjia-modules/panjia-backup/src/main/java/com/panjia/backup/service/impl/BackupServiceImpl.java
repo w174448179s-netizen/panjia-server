@@ -12,18 +12,28 @@ import org.springframework.cache.CacheManager;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -54,12 +64,13 @@ public class BackupServiceImpl implements BackupService {
     private static final Pattern FILE_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+\\.dump$");
 
     /**
-     * 跨环境还原时保留的“环境本地配置表”（pg_restore -T 排除，不被备份覆盖）。
+     * 跨环境还原时保留的“环境本地配置表”。
      * <p>
      * 典型场景：把生产备份直接还原到测试库时，整库覆盖会把生产的 OSS 配置
      * （endpoint / bucket / AK-SK / domain_url）和钉钉等参数一起带过来，导致测试环境
      * 直连生产对象存储、往生产桶写文件，甚至用生产钉钉凭证跑定时同步。
      * 这些配置属于“环境身份”，应始终保留当前环境自己的值，还原只覆盖业务数据。
+     * 实现上先快照、整库还原后再回写；不能使用 pg_restore -T（该参数是“指定触发器”）。
      */
     private static final List<String> ENV_LOCAL_TABLES = List.of("sys_oss_config", "sys_config");
 
@@ -70,6 +81,9 @@ public class BackupServiceImpl implements BackupService {
 
     @Autowired(required = false)
     private CacheManager cacheManager;
+
+    @Autowired
+    private DataSource dataSource;
 
     /** 执行模式：docker=宿主机 docker exec；local=本机 pg 客户端直连 */
     @Value("${panjia.backup.mode:docker}")
@@ -153,7 +167,7 @@ public class BackupServiceImpl implements BackupService {
     public void restoreBackup(String fileName) {
         Path dump = requireValidFile(fileName);
         // 与 script/db/restore.sh 同口径：--clean --if-exists 先删后建整库覆盖
-        runProcess(buildRestoreCommand(true), null, dump, "还原");
+        restoreDatabase(dump);
         log.info("[备份恢复] 还原完成：{} → {}", dump.getFileName(), dbName);
         clearCaches();
     }
@@ -175,7 +189,7 @@ public class BackupServiceImpl implements BackupService {
             // 归档完整性校验：pg_restore --list 能解析即合法备份（与 restore.sh 前置校验一致）
             runProcess(buildRestoreCommand(false), null, temp, "备份文件校验");
             // 校验通过后整库覆盖还原
-            runProcess(buildRestoreCommand(true), null, temp, "还原");
+            restoreDatabase(temp);
             log.info("[备份恢复] 上传文件还原完成：{}（{} bytes）→ {}", originalName, file.getSize(), dbName);
             clearCaches();
             return originalName;
@@ -210,6 +224,98 @@ public class BackupServiceImpl implements BackupService {
     }
 
     /**
+     * 整库还原并保留当前环境的环境本地配置。
+     * 必须在还原前快照：pg_restore --clean 会先删表，无法事后再读取原配置。
+     */
+    private void restoreDatabase(Path dump) {
+        Map<String, TableSnapshot> snapshots = snapshotEnvLocalTables();
+        runProcess(buildRestoreCommand(true), null, dump, "还原");
+        restoreEnvLocalTables(snapshots);
+    }
+
+    private Map<String, TableSnapshot> snapshotEnvLocalTables() {
+        Map<String, TableSnapshot> snapshots = new HashMap<>();
+        for (String table : ENV_LOCAL_TABLES) {
+            try (Connection conn = dataSource.getConnection();
+                 Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery("SELECT * FROM " + quoteIdentifier(table))) {
+                ResultSetMetaData metaData = rs.getMetaData();
+                List<String> columns = new ArrayList<>(metaData.getColumnCount());
+                for (int i = 1; i <= metaData.getColumnCount(); i++) {
+                    columns.add(metaData.getColumnLabel(i));
+                }
+                List<List<Object>> rows = new ArrayList<>();
+                while (rs.next()) {
+                    List<Object> row = new ArrayList<>(columns.size());
+                    for (int i = 1; i <= columns.size(); i++) {
+                        row.add(rs.getObject(i));
+                    }
+                    rows.add(row);
+                }
+                snapshots.put(table, new TableSnapshot(columns, rows));
+            } catch (SQLException e) {
+                throw new ServiceException("读取环境本地配置失败：" + table + "（" + e.getMessage() + "）");
+            }
+        }
+        return snapshots;
+    }
+
+    private void restoreEnvLocalTables(Map<String, TableSnapshot> snapshots) {
+        try (Connection conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try {
+                for (String table : ENV_LOCAL_TABLES) {
+                    TableSnapshot snapshot = snapshots.get(table);
+                    try (Statement stmt = conn.createStatement()) {
+                        stmt.executeUpdate("DELETE FROM " + quoteIdentifier(table));
+                    }
+                    if (snapshot.rows().isEmpty()) {
+                        continue;
+                    }
+                    String columnSql = snapshot.columns().stream()
+                        .map(BackupServiceImpl::quoteIdentifier)
+                        .collect(Collectors.joining(", "));
+                    String placeholders = snapshot.columns().stream()
+                        .map(column -> "?")
+                        .collect(Collectors.joining(", "));
+                    String insertSql = "INSERT INTO " + quoteIdentifier(table)
+                        + " (" + columnSql + ") VALUES (" + placeholders + ")";
+                    try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
+                        for (List<Object> row : snapshot.rows()) {
+                            for (int i = 0; i < row.size(); i++) {
+                                ps.setObject(i + 1, row.get(i));
+                            }
+                            ps.addBatch();
+                        }
+                        ps.executeBatch();
+                    }
+                }
+                conn.commit();
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackError) {
+                    e.addSuppressed(rollbackError);
+                }
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw new ServiceException("回写环境本地配置失败，请检查 sys_oss_config / sys_config（"
+                + e.getMessage() + "）");
+        }
+        log.info("[备份恢复] 环境本地配置已保留：{}", ENV_LOCAL_TABLES.stream()
+            .map(table -> table + "=" + snapshots.get(table).rows().size() + "行")
+            .collect(Collectors.joining(", ")));
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private record TableSnapshot(List<String> columns, List<List<Object>> rows) {
+    }
+
+    /**
      * 构造 pg_dump 备份命令。
      * docker 模式经 {@code docker exec} 在数据库容器内执行；local 模式本机直连 db-host:db-port。
      */
@@ -240,13 +346,9 @@ public class BackupServiceImpl implements BackupService {
             cmd.add(dbName);
             cmd.add("--clean");
             cmd.add("--if-exists");
+            cmd.add("--exit-on-error");
             cmd.add("--no-owner");
             cmd.add("--no-privileges");
-            // 保留当前环境的环境本地配置，避免生产备份还原到测试后串用生产 OSS / 钉钉
-            for (String table : ENV_LOCAL_TABLES) {
-                cmd.add("-T");
-                cmd.add(table);
-            }
         } else {
             cmd.add("--list");
         }

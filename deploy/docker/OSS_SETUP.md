@@ -56,7 +56,7 @@ docker network connect docker_default panjia-local-backend
 6. **sys_oss / sys_oss_config 有 Redis 缓存**——直改 SQL 后必须清缓存：删 `sys_oss_config` 缓存必须紧跟重启后端（删了缓存不重启会导致运行中后端配置实例丢失，上传报「配置信息不存在」）；`sys_oss` 缓存删掉即可（按需重建）。脚本第 7 步按正确顺序处理
 7. **多环境同机部署（如测试+生产）**——容器名带项目前缀（`panjia-postgres` vs `panjia-test-postgres`），**严禁脚本写死容器名**；fix-oss.sh 通过 `docker compose ps -q <服务名>` 在当前部署目录内定位容器，只作用于当前环境
 8. **改完配置旧图不会自愈**——存量 `sys_oss.url` 是写死的绝对地址，脚本第 5 步按新域名整体重建
-9. **生产备份还原到测试会串环境**——还原是整库覆盖，会把生产的 `sys_oss_config`（endpoint/桶/AK-SK/domain_url）和 `sys_config`（钉钉凭证等）一起带到测试库，测试上传会写进生产桶。系统内“备份恢复”和 `script/db/restore.sh` 已用 `pg_restore -T sys_oss_config -T sys_config` 排除这两张表，保留当前环境自己的配置；若历史数据已被污染，在对应部署目录跑 `bash fix-oss.sh` 重建 OSS 配置，并在测试库确认 `panjia.dingtalk.enabled=false`
+9. **生产备份还原到测试会串环境**——还原是整库覆盖，会把生产的 `sys_oss_config`（endpoint/桶/AK-SK/domain_url）和 `sys_config`（钉钉凭证等）一起带到测试库，测试上传会写进生产桶。系统内“备份恢复”和 `script/db/restore.sh` 会在整库还原前快照这两张表、还原后回写，保留当前环境自己的配置；注意 `pg_restore -T` 是“指定触发器”，不能用于排除表。若历史数据已被污染，在对应部署目录跑 `bash fix-oss.sh` 重建 OSS 配置，并在测试库确认 `panjia.dingtalk.enabled=false`
 
 ## 四、故障速查
 

@@ -10,7 +10,7 @@
 #
 # 行为:
 #   - pg_restore --clean --if-exists: 先删除库中已存在对象再导入
-#   - 排除 sys_oss_config / sys_config: 保留当前环境的 OSS、钉钉等环境本地配置,
+#   - 先快照再回写 sys_oss_config / sys_config: 保留当前环境的 OSS、钉钉等配置,
 #     避免"生产备份直接还原到测试"后测试环境串用生产对象存储/凭证
 #   - 还原前要求二次确认(输入 y)
 #   - 还原后应用重启时 Flyway 会自动校验/补跑迁移
@@ -60,12 +60,28 @@ echo "[校验] 检查备份归档..."
 docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
   pg_restore -U "$DB_USER" --list < "$DUMP_FILE" > /dev/null
 
+# 环境本地配置先快照，整库还原后回写。
+# 注意：pg_restore 的 -T 是“指定触发器”，不能用来排除表。
+ENV_CONFIG_DUMP="$(mktemp "${TMPDIR:-/tmp}/panjia-env-config.XXXXXX.dump")"
+trap 'rm -f "$ENV_CONFIG_DUMP"' EXIT
+
+echo "[保留] 快照当前环境的 OSS/参数配置..."
+docker exec -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
+  pg_dump -U "$DB_USER" -Fc --data-only -t sys_oss_config -t sys_config "$DB_NAME" \
+  > "$ENV_CONFIG_DUMP"
+
 echo "[还原] 导入 $DUMP_FILE → $DB_NAME (可能需要数分钟)..."
-# -T 排除环境本地配置表：保留当前环境的 OSS/钉钉等配置，不随备份覆盖
 docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
-  pg_restore -U "$DB_USER" -d "$DB_NAME" --clean --if-exists --no-owner --no-privileges \
-  -T sys_oss_config -T sys_config \
+  pg_restore -U "$DB_USER" -d "$DB_NAME" --clean --if-exists --exit-on-error --no-owner --no-privileges \
   < "$DUMP_FILE"
+
+echo "[保留] 回写当前环境的 OSS/参数配置..."
+docker exec -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
+  psql -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+  -c 'TRUNCATE TABLE sys_oss_config, sys_config'
+docker exec -i -e PGPASSWORD="$DB_PASS" "$CONTAINER" \
+  pg_restore -U "$DB_USER" -d "$DB_NAME" --data-only --disable-triggers \
+  < "$ENV_CONFIG_DUMP"
 
 echo "[完成] 还原成功: $DUMP_FILE → $DB_NAME"
 echo "[提示] 重启应用后 Flyway 将自动校验迁移版本"
