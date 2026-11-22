@@ -10,6 +10,7 @@
 #   bash build.sh                # 后端 + 前端 全量出包
 #   bash build.sh --backend      # 只出后端
 #   bash build.sh --frontend     # 只出前端
+#   REBUILD_BASE=1 bash build.sh --backend  # 重建 JRE + PostgreSQL 客户端基础镜像
 # ============================================================================
 
 set -euo pipefail
@@ -56,26 +57,34 @@ if [ "$BACKEND" = "1" ]; then
     $MVN clean package -Pprod -DskipTests -q
     [ -f "ruoyi-admin/target/ruoyi-admin.jar" ] || fail "打包失败"
 
-    # 基础镜像预拉兜底：多镜像源 pull 后 retag，避免 daocloud 等源间歇 502 卡死构建
-    BASE_IMAGE="eclipse-temurin:21-jre-jammy"
-    if ! docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
-        info ">>> 预拉基础镜像 $BASE_IMAGE ..."
-        PULLED=0
-        for MIRROR in "docker.1ms.run/library" "docker.1panel.live/library" "docker.m.daocloud.io/library" ""; do
-            SRC="${MIRROR:+$MIRROR/}$BASE_IMAGE"
-            if docker pull "$SRC"; then
-                [ -n "$MIRROR" ] && docker tag "$SRC" "$BASE_IMAGE"
-                PULLED=1
-                break
-            fi
-        done
-        [ "$PULLED" = "1" ] || fail "基础镜像拉取失败：$BASE_IMAGE"
+    # 日常构建复用本地运行基础镜像；首次或 REBUILD_BASE=1 时才构建 JRE + PostgreSQL 客户端。
+    RUNTIME_IMAGE="panjia-base:21-jre-pg16"
+    UPSTREAM_IMAGE="eclipse-temurin:21-jre-jammy"
+    if [ "${REBUILD_BASE:-0}" = "1" ] || ! docker image inspect "$RUNTIME_IMAGE" >/dev/null 2>&1; then
+        if ! docker image inspect "$UPSTREAM_IMAGE" >/dev/null 2>&1; then
+            info ">>> 预拉上游基础镜像 $UPSTREAM_IMAGE ..."
+            PULLED=0
+            for MIRROR in "docker.1ms.run/library" "docker.1panel.live/library" "docker.m.daocloud.io/library" ""; do
+                SRC="${MIRROR:+$MIRROR/}$UPSTREAM_IMAGE"
+                if docker pull "$SRC"; then
+                    [ -n "$MIRROR" ] && docker tag "$SRC" "$UPSTREAM_IMAGE"
+                    PULLED=1
+                    break
+                fi
+            done
+            [ "$PULLED" = "1" ] || fail "上游基础镜像拉取失败：$UPSTREAM_IMAGE"
+        fi
+        info ">>> 构建本地运行基础镜像 $RUNTIME_IMAGE ..."
+        DOCKER_BUILDKIT=1 docker build --pull=false --provenance=false --sbom=false \
+            --target runtime-base -t "$RUNTIME_IMAGE" "$PROJECT_DIR"
+    else
+        info ">>> 复用本地运行基础镜像 $RUNTIME_IMAGE"
     fi
 
-    info ">>> docker build..."
-    # DOCKER_BUILDKIT=1：启用 BuildKit，分层缓存命中时明确显示 CACHED，
-    # 避免每次发版重装 postgresql-client 等基础层（只要 Dockerfile 前段不变就命中缓存）
-    DOCKER_BUILDKIT=1 docker build -t panjia-server:latest "$PROJECT_DIR"
+    info ">>> docker build（仅更新应用层，禁止自动拉取基础镜像）..."
+    DOCKER_BUILDKIT=1 docker build --pull=false --provenance=false --sbom=false \
+        --build-arg RUNTIME_BASE="$RUNTIME_IMAGE" \
+        -t panjia-server:latest "$PROJECT_DIR"
 
     info ">>> docker save → panjia-server-latest.tar..."
     docker save -o "$SCRIPT_DIR/panjia-server-latest.tar" panjia-server:latest
