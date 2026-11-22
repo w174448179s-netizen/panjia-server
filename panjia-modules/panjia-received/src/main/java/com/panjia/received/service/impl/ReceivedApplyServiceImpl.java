@@ -421,22 +421,27 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                         .last("LIMIT 1"));
                 if (detail != null) {
                     ReceivedApply bound = detail.getReceivedApplyId() == null ? null : applyMapper.selectById(detail.getReceivedApplyId());
-                    if (bound != null && bound.getStatus() == ReceivedApplyStatus.APPROVED) {
-                        // 已审批数据不覆盖，仅纳入本次建单绑定
-                        detailIds.add(detail.getId());
-                        continue;
-                    }
+                    boolean approved = bound != null && bound.getStatus() == ReceivedApplyStatus.APPROVED;
                     detail.setEmployeeId(role.getEmployeeId());
                     detail.setEmployeeExternalCode(role.getEmployeeExternalCode());
                     detail.setDeptId(role.getDeptId() != null ? role.getDeptId() : bo.getStoreDeptId());
                     detail.setRoleType(role.getRoleType());
                     detail.setRoleName(role.getRoleName());
                     detail.setShareRatio(role.getShareRatio());
-                    detail.setPerformanceAmount(role.getAmount());
+                    if (!approved) {
+                        detail.setPerformanceAmount(role.getAmount());
+                    }
                     detail.setUpdateTime(LocalDateTime.now());
                     detailMapper.updateById(detail);
                     detailIds.add(detail.getId());
                 } else {
+                    long sameAmount = detailMapper.countSameAmount(bo.getContractNo(), orderNo, bo.getPeriod(),
+                        role.getEmployeeId(), role.getEmployeeExternalCode(), role.getAmount());
+                    if (sameAmount > 0) {
+                        log.debug("[理房通去化] 已存在同合同同员工同期间同金额实收，跳过补录：contractNo={}, period={}, employeeId={}, amount={}",
+                            bo.getContractNo(), bo.getPeriod(), role.getEmployeeId(), role.getAmount());
+                        continue;
+                    }
                     detail = new com.panjia.received.domain.ReceivedDetail();
                     detail.setContractId(contract.getId());
                     detail.setEmployeeId(role.getEmployeeId());

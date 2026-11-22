@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.panjia.ledger.domain.LfAccount;
 import com.panjia.ledger.domain.LfMatchResult;
 import com.panjia.ledger.domain.LfStatementRow;
+import com.panjia.ledger.domain.LedgerSubject;
 import com.panjia.ledger.dto.LfAllocBo;
 import com.panjia.ledger.dto.LfDiffDetailVO;
 import com.panjia.ledger.dto.LfStatementQuery;
@@ -60,6 +61,25 @@ public class LfStatementQueryService {
         return toVOs(rowMapper.selectList(wrapper));
     }
 
+    /** 当前数据范围内已导入的交易类型，供前端下拉选择 */
+    public List<String> transactionTypes(Long loginDeptId, boolean allScope) {
+        LambdaQueryWrapper<LfStatementRow> wrapper = new LambdaQueryWrapper<>();
+        if (!applyDataScope(wrapper, loginDeptId, allScope)) {
+            return List.of();
+        }
+        wrapper.select(LfStatementRow::getTransactionType)
+            .isNotNull(LfStatementRow::getTransactionType)
+            .ne(LfStatementRow::getTransactionType, "")
+            .groupBy(LfStatementRow::getTransactionType)
+            .orderByAsc(LfStatementRow::getTransactionType);
+        return rowMapper.selectObjs(wrapper).stream()
+            .map(String::valueOf).filter(StringUtils::isNotBlank).toList();
+    }
+
+    public List<LedgerSubject> expenseSubjects() {
+        return expenseService.loadExpenseSubjects();
+    }
+
     private LambdaQueryWrapper<LfStatementRow> buildWrapper(LfStatementQuery query, Long loginDeptId,
                                                             boolean allScope) {
         LambdaQueryWrapper<LfStatementRow> wrapper = new LambdaQueryWrapper<>();
@@ -69,10 +89,11 @@ public class LfStatementQueryService {
                 .eq(query.getAccountId() != null, LfStatementRow::getAccountId, query.getAccountId())
                 .eq(StringUtils.isNotBlank(query.getIncomeExpenseType()),
                     LfStatementRow::getIncomeExpenseType, query.getIncomeExpenseType())
-                .like(StringUtils.isNotBlank(query.getTransactionType()),
+                .eq(StringUtils.isNotBlank(query.getTransactionType()),
                     LfStatementRow::getTransactionType, query.getTransactionType())
                 .eq(StringUtils.isNotBlank(query.getCategory()),
                     LfStatementRow::getCategory, query.getCategory())
+                .eq(query.getSubjectId() != null, LfStatementRow::getSubjectId, query.getSubjectId())
                 .eq(query.getDecorationFlag() != null,
                     LfStatementRow::getDecorationFlag, query.getDecorationFlag())
                 .eq(StringUtils.isNotBlank(query.getAllocStatus()),
@@ -92,21 +113,30 @@ public class LfStatementQueryService {
                     .or().like(LfStatementRow::getCounterpartyName, query.getKeyword()));
             }
         }
-        if (!allScope) {
-            if (loginDeptId == null) {
-                return null;
-            }
-            List<Long> deptIds = new java.util.ArrayList<>(expenseService.loadSubtree(loginDeptId).stream()
-                .map(com.panjia.ledger.dto.DeptRowDTO::getDeptId).toList());
-            deptIds.addAll(rowMapper.selectAncestorDeptIds(loginDeptId));
-            deptIds = deptIds.stream().distinct().toList();
-            if (deptIds.isEmpty()) {
-                return null;
-            }
-            wrapper.in(LfStatementRow::getStoreDeptId, deptIds);
+        if (!applyDataScope(wrapper, loginDeptId, allScope)) {
+            return null;
         }
         wrapper.orderByDesc(LfStatementRow::getTransactionTime).orderByDesc(LfStatementRow::getId);
         return wrapper;
+    }
+
+    private boolean applyDataScope(LambdaQueryWrapper<LfStatementRow> wrapper,
+                                   Long loginDeptId, boolean allScope) {
+        if (allScope) {
+            return true;
+        }
+        if (loginDeptId == null) {
+            return false;
+        }
+        List<Long> deptIds = new java.util.ArrayList<>(expenseService.loadSubtree(loginDeptId).stream()
+            .map(com.panjia.ledger.dto.DeptRowDTO::getDeptId).toList());
+        deptIds.addAll(rowMapper.selectAncestorDeptIds(loginDeptId));
+        deptIds = deptIds.stream().distinct().toList();
+        if (deptIds.isEmpty()) {
+            return false;
+        }
+        wrapper.in(LfStatementRow::getStoreDeptId, deptIds);
+        return true;
     }
 
     private List<LfStatementVO> toVOs(List<LfStatementRow> rows) {
@@ -193,6 +223,7 @@ public class LfStatementQueryService {
             received.setId(asLong(line.get("id")));
             received.setPeriod(asString(line.get("period")));
             received.setEmployeeId(asLong(line.get("employeeId")));
+            received.setDeptName(asString(line.get("deptName")));
             received.setRoleName(asString(line.get("roleName")));
             received.setRoleType(asString(line.get("roleType")));
             received.setPerformanceAmount(asDecimal(line.get("performanceAmount")));

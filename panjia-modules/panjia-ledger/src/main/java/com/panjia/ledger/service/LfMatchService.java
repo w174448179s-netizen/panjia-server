@@ -33,6 +33,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class LfMatchService {
 
+    private static final BigDecimal MATCH_TOLERANCE = new BigDecimal("0.10");
+
     private final LfStatementRowMapper rowMapper;
     private final LfMatchResultMapper matchResultMapper;
     private final IReceivedApplyService receivedApplyService;
@@ -120,8 +122,11 @@ public class LfMatchService {
         if (received.compareTo(BigDecimal.ZERO) == 0) {
             status = "NOT_FOUND";
             stats.notFound++;
-        } else if (diff.abs().compareTo(new BigDecimal("0.01")) <= 0) {
+        } else if (diff.abs().compareTo(BigDecimal.ZERO) == 0) {
             status = "MATCHED";
+            stats.matched++;
+        } else if (diff.abs().compareTo(MATCH_TOLERANCE) <= 0) {
+            status = "TOLERANCE_MATCH";
             stats.matched++;
         } else {
             status = "AMOUNT_DIFF";
@@ -198,6 +203,7 @@ public class LfMatchService {
             }
             LfStatementReceivedBo.RoleItem item = new LfStatementReceivedBo.RoleItem();
             item.setEmployeeId(asLong(role.get("employeeId")));
+            item.setEmployeeExternalCode(asString(role.get("employeeExternalCode")));
             item.setDeptId(asLong(role.get("deptId")) != null ? asLong(role.get("deptId")) : first.getStoreDeptId());
             item.setRoleType(asString(role.get("roleType")));
             item.setRoleName(asString(role.get("roleName")));

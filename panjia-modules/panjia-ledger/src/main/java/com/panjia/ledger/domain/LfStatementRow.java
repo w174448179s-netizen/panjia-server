@@ -52,7 +52,7 @@ public class LfStatementRow implements Serializable {
     private String paymentNo;
     private Integer rawRowNo;
 
-    /** BUSINESS/REVERSAL/FEE/WITHDRAW/NON_BUSINESS */
+    /** BUSINESS/REVERSAL/FEE/DEPT_INCOME/WITHDRAW/NON_BUSINESS */
     private String category;
 
     /** 售前房屋美化（去化模式） */
@@ -74,7 +74,7 @@ public class LfStatementRow implements Serializable {
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private LocalDateTime allocTime;
 
-    /** MATCHED/AMOUNT_DIFF/NOT_FOUND/MULTI_MATCH/PENDING_SIGN_ROLE */
+    /** MATCHED/TOLERANCE_MATCH/AMOUNT_DIFF/NOT_FOUND/MULTI_MATCH/PENDING_SIGN_ROLE */
     @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String matchStatus;
 

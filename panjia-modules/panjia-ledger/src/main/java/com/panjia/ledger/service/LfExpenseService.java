@@ -31,6 +31,7 @@ import java.util.stream.Collectors;
 public class LfExpenseService {
 
     private static final String SOURCE_TYPE = "LF_STATEMENT";
+    private static final String DEPARTMENT_INCOME_SUBJECT = "品效商圈权益";
 
     private final LedgerSubjectMapper subjectMapper;
     private final LedgerEntryMapper entryMapper;
@@ -73,10 +74,16 @@ public class LfExpenseService {
     }
 
     /**
-     * 给费用行匹配科目和归属组。
-     * <p>单组门店自动归到该组；多组门店为 PENDING，等待手工划归。</p>
+     * 给费用行匹配科目和归属组，部门收入固定归入导入门店。
+     * <p>费用行：单组门店自动归到该组；多组门店为 PENDING，等待手工划归。</p>
      */
     public void applyExpenseMeta(LfStatementRow row, List<LedgerSubject> subjects, List<DeptRowDTO> subtree) {
+        if ("DEPT_INCOME".equals(row.getCategory())) {
+            row.setSubjectId(findDepartmentIncomeSubject());
+            row.setExpenseDeptId(row.getStoreDeptId());
+            row.setAllocStatus("AUTO");
+            return;
+        }
         if (!"FEE".equals(row.getCategory())) {
             row.setSubjectId(null);
             row.setExpenseDeptId(null);
@@ -98,6 +105,15 @@ public class LfExpenseService {
             row.setExpenseDeptId(null);
             row.setAllocStatus("PENDING");
         }
+    }
+
+    private Long findDepartmentIncomeSubject() {
+        LedgerSubject subject = subjectMapper.selectOne(new LambdaQueryWrapper<LedgerSubject>()
+            .eq(LedgerSubject::getDirection, "INCOME")
+            .eq(LedgerSubject::getSubjectName, DEPARTMENT_INCOME_SUBJECT)
+            .eq(LedgerSubject::getStatus, "0")
+            .last("LIMIT 1"));
+        return subject == null ? null : subject.getId();
     }
 
     private Long matchSubject(LfStatementRow row, List<LedgerSubject> subjects) {
@@ -129,23 +145,26 @@ public class LfExpenseService {
         return value.replace(" ", "").replace("　", "").trim();
     }
 
-    /** 单行费用写入/覆盖部门收支录入（按记账流水号幂等） */
+    /** 单行费用/部门收入写入或覆盖部门收支（按记账流水号幂等） */
     @Transactional(rollbackFor = Exception.class)
     public void syncLedgerEntry(LfStatementRow row, Long operatorId) {
         removeLedgerEntry(row.getVoucherNo());
-        if (!"FEE".equals(row.getCategory()) || row.getSubjectId() == null
-            || row.getExpenseDeptId() == null || row.getTransactionAmount() == null) {
+        boolean expense = "FEE".equals(row.getCategory());
+        boolean income = "DEPT_INCOME".equals(row.getCategory());
+        Long deptId = income ? row.getStoreDeptId() : row.getExpenseDeptId();
+        if ((!expense && !income) || row.getSubjectId() == null
+            || deptId == null || row.getTransactionAmount() == null) {
             return;
         }
-        BigDecimal amount = row.getTransactionAmount().abs();
+        BigDecimal amount = income ? row.getTransactionAmount() : row.getTransactionAmount().abs();
         if (amount.compareTo(BigDecimal.ZERO) == 0) {
             return;
         }
         YearMonth ym = YearMonth.parse(row.getPeriod());
         LedgerEntry entry = new LedgerEntry();
         entry.setSubjectId(row.getSubjectId());
-        entry.setDeptId(row.getExpenseDeptId());
-        entry.setDirection("EXPENSE");
+        entry.setDeptId(deptId);
+        entry.setDirection(income ? "INCOME" : "EXPENSE");
         entry.setAmount(amount);
         entry.setStartDate(ym.atDay(1));
         entry.setEndDate(ym.atEndOfMonth());

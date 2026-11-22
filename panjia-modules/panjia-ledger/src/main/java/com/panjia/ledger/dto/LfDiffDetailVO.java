@@ -40,6 +40,7 @@ public class LfDiffDetailVO {
         private Long id;
         private String period;
         private Long employeeId;
+        private String deptName;
         private String roleName;
         private String roleType;
         private BigDecimal performanceAmount;

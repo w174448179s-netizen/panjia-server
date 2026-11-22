@@ -20,6 +20,31 @@ import java.util.Map;
 @Mapper
 public interface ReceivedDetailMapper extends BaseMapper<ReceivedDetail> {
 
+    /** 同合同/订单、归属月、员工和金额的 ACTIVE 实收数量，用于理房通去化补录防重。 */
+    @Select("""
+        <script>
+        SELECT COUNT(1)
+        FROM pj_received_detail rd
+        JOIN pj_received_contract rc ON rc.id = rd.contract_id
+        WHERE rd.detail_status = 'ACTIVE'
+          AND rd.period = #{period}
+          AND rd.performance_amount = #{amount}
+          AND (rc.contract_no = #{contractNo} OR rc.order_no = #{contractNo}
+               OR rc.contract_no = #{orderNo} OR rc.order_no = #{orderNo})
+          AND (1 = 0
+               <if test="employeeId != null">OR rd.employee_id = #{employeeId}</if>
+               <if test="employeeExternalCode != null and employeeExternalCode != ''">
+                   OR rd.employee_external_code = #{employeeExternalCode}
+               </if>)
+        </script>
+        """)
+    long countSameAmount(@Param("contractNo") String contractNo,
+                         @Param("orderNo") String orderNo,
+                         @Param("period") String period,
+                         @Param("employeeId") Long employeeId,
+                         @Param("employeeExternalCode") String employeeExternalCode,
+                         @Param("amount") BigDecimal amount);
+
     /**
      * 按员工口径合计实收金额：指定单据集合内该员工的 ACTIVE 明细合计。
      * <p>

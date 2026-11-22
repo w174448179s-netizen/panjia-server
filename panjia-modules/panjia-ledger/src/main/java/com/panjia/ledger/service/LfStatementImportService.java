@@ -60,6 +60,8 @@ public class LfStatementImportService {
         DateTimeFormatter.ofPattern("yyyy-M-d H:m")
     );
 
+    private static final String DEPARTMENT_INCOME_REMARK = "佣金分账-居间代理费-品效商圈权益";
+
     private static final List<String> REVERSAL_KEYWORDS = List.of(
         "解约", "退款", "业绩变更", "冲减", "追回", "调账", "补足手续费", "应付账单", "佣金调账", "退单", "退费"
     );
@@ -427,8 +429,13 @@ public class LfStatementImportService {
         return "GEN-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
     }
 
-    /** 分类：业务/冲减/费用/提现/非业务；售前房屋美化单独标记 */
+    /** 分类：业务/冲减/费用/部门收入/提现/非业务；售前房屋美化单独标记 */
     private void classify(LfStatementRow row) {
+        if (DEPARTMENT_INCOME_REMARK.equals(StringUtils.trim(row.getTransactionRemark()))) {
+            row.setCategory("DEPT_INCOME");
+            row.setDecorationFlag(false);
+            return;
+        }
         String text = StringUtils.defaultString(row.getBusinessDesc())
             + "|" + StringUtils.defaultString(row.getTransactionType())
             + "|" + StringUtils.defaultString(row.getTransactionRemark());

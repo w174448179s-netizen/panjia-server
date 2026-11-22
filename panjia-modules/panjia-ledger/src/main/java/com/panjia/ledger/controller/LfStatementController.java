@@ -2,6 +2,7 @@ package com.panjia.ledger.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import cn.dev33.satoken.stp.StpUtil;
+import com.panjia.ledger.domain.LedgerSubject;
 import com.panjia.ledger.domain.LfMatchResult;
 import com.panjia.ledger.dto.LfAllocBo;
 import com.panjia.ledger.dto.LfDiffDetailVO;
@@ -44,6 +45,18 @@ public class LfStatementController {
     public R<PageResult<LfStatementVO>> list(@ModelAttribute LfStatementQuery query,
                                              @ModelAttribute PageQuery pageQuery) {
         return R.ok(queryService.list(query, pageQuery, LoginHelper.getDeptId(), allScope()));
+    }
+
+    @SaCheckPermission("ledger:lf:list")
+    @GetMapping("/transactionTypes")
+    public R<List<String>> transactionTypes() {
+        return R.ok(queryService.transactionTypes(LoginHelper.getDeptId(), allScope()));
+    }
+
+    @SaCheckPermission("ledger:lf:list")
+    @GetMapping("/expenseSubjects")
+    public R<List<LedgerSubject>> expenseSubjects() {
+        return R.ok(queryService.expenseSubjects());
     }
 
     @SaCheckPermission("ledger:lf:import")

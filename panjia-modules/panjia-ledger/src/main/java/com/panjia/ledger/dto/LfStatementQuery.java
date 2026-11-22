@@ -14,6 +14,7 @@ public class LfStatementQuery {
     private String incomeExpenseType;
     private String transactionType;
     private String category;
+    private Long subjectId;
     /** 是否去化（售前房屋美化）流水 */
     private Boolean decorationFlag;
     private String allocStatus;

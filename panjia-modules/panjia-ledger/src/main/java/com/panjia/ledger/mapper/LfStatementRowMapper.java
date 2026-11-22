@@ -58,15 +58,9 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
         """)
     int countFlowByContract(@Param("contractNo") String contractNo);
 
-    /** 某合同全部实收净额（所有期间、所有来源） */
+    /** 某合同原始实收导入净额（所有期间，不含实收调整单） */
     @Select("""
         SELECT COALESCE(SUM(d.performance_amount), 0)
-             + COALESCE((
-                 SELECT SUM(a.target_amount - a.original_amount)
-                 FROM pj_perf_received_adjust a
-                 WHERE a.status NOT IN ('EXECUTED', 'REJECTED')
-                   AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
-             ), 0)
         FROM pj_received_detail d
         JOIN pj_received_contract c ON c.id = d.contract_id
         WHERE d.detail_status = 'ACTIVE'
@@ -74,26 +68,22 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
         """)
     BigDecimal sumReceivedByContract(@Param("contractNo") String contractNo);
 
-    /** 某合同全部实收明细分行（差异下钻） */
+    /** 某合同原始实收导入明细分行（差异下钻，不含实收调整单） */
     @Select("""
         SELECT d.id AS "id", d.period AS "period", d.employee_id AS "employeeId",
                d.role_name AS "roleName", d.role_type AS "roleType",
                d.performance_amount AS "performanceAmount", c.source_type AS "sourceType",
-               a.status AS "applyStatus"
+               a.status AS "applyStatus", sd.dept_name AS "deptName"
         FROM pj_received_detail d
         JOIN pj_received_contract c ON c.id = d.contract_id
         LEFT JOIN pj_perf_received_apply a ON a.id = d.received_apply_id
+        LEFT JOIN pj_people_employee e
+          ON e.employee_id = d.employee_id
+          OR (d.employee_id IS NULL AND e.employee_code = d.employee_external_code)
+        LEFT JOIN sys_dept sd ON sd.dept_id = COALESCE(d.dept_id, c.dept_id, e.dept_id)
         WHERE d.detail_status = 'ACTIVE'
           AND (c.contract_no = #{contractNo} OR c.order_no = #{contractNo})
-        UNION ALL
-        SELECT a.id AS "id", a.period AS "period", a.employee_id AS "employeeId",
-               '调整单' AS "roleName", 'ADJUST' AS "roleType",
-               (a.target_amount - a.original_amount) AS "performanceAmount",
-               'RECEIVED_ADJUST' AS "sourceType", a.status AS "applyStatus"
-        FROM pj_perf_received_adjust a
-        WHERE a.status NOT IN ('EXECUTED', 'REJECTED')
-          AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
-        ORDER BY "period", "id"
+        ORDER BY d.period, d.id
         """)
     List<Map<String, Object>> selectReceivedLines(@Param("contractNo") String contractNo);
 
@@ -129,18 +119,24 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
 
     /** 去化合同的新签角色人（PERF_EXPECT ACTIVE，合同全周期） */
     @Select("""
-        SELECT employee_id AS "employeeId", MAX(role_type) AS "roleType",
-               MAX(role_name) AS "roleName", SUM(performance_amount) AS "performanceAmount",
-               MAX(share_ratio) AS "shareRatio", MAX(order_no) AS "orderNo",
-               MAX(dept_id) AS "deptId", MAX(property_address) AS "propertyAddress",
-               MAX(business_date) AS "businessDate"
-        FROM pj_perf_fact
-        WHERE fact_type = 'PERF_EXPECT'
-          AND fact_status = 'ACTIVE'
-          AND biz_type = '去化模式'
-          AND (contract_no = #{contractNo} OR order_no = #{contractNo})
-        GROUP BY employee_id
-        ORDER BY employee_id
+        SELECT f.employee_id AS "employeeId", MAX(f.role_type) AS "roleType",
+               COALESCE(MAX(NULLIF(f.role_name, '')), MAX(e.employee_name)) AS "roleName",
+               COALESCE(MAX(f.employee_external_code), MAX(e.employee_code)) AS "employeeExternalCode",
+               SUM(f.performance_amount) AS "performanceAmount",
+               MAX(f.share_ratio) AS "shareRatio", MAX(f.order_no) AS "orderNo",
+               COALESCE(MAX(f.dept_id), MAX(e.dept_id)) AS "deptId",
+               MAX(f.property_address) AS "propertyAddress",
+               MAX(f.business_date) AS "businessDate"
+        FROM pj_perf_fact f
+        LEFT JOIN pj_people_employee e
+          ON e.employee_id = f.employee_id
+          OR (f.employee_id IS NULL AND e.employee_code = f.employee_external_code)
+        WHERE f.fact_type = 'PERF_EXPECT'
+          AND f.fact_status = 'ACTIVE'
+          AND f.biz_type = '去化模式'
+          AND (f.contract_no = #{contractNo} OR f.order_no = #{contractNo})
+        GROUP BY f.employee_id
+        ORDER BY f.employee_id
         """)
     List<Map<String, Object>> selectDecorationRoles(@Param("contractNo") String contractNo);
 
@@ -207,12 +203,12 @@ public interface LfStatementRowMapper extends BaseMapperPlus<LfStatementRow, LfS
     Page<Map<String, Object>> selectPendingSubjectSummary(Page<Map<String, Object>> page,
                                                           @Param("storeDeptId") Long storeDeptId);
 
-    /** 某批次单组自动划归的费用行（用于写 pj_ledger_entry） */
+    /** 某批次已匹配科目和部门的费用/部门收入行（用于写 pj_ledger_entry） */
     @Select("""
         SELECT *
         FROM pj_lf_statement_row
         WHERE batch_id = #{batchId}
-          AND category = 'FEE'
+          AND category IN ('FEE', 'DEPT_INCOME')
           AND subject_id IS NOT NULL
           AND expense_dept_id IS NOT NULL
         """)
