@@ -1,9 +1,4 @@
-# 默认沿用下面的 runtime-base，兼容其他直接 docker build 的脚本；
-# deploy/docker/build.sh 传入本地 panjia-base，日常构建不再拉取 Temurin 或执行 apt。
-ARG RUNTIME_BASE=runtime-base
-
-# 运行基础镜像构建目标：build.sh 首次构建并标记为 panjia-base:21-jre-pg16。
-FROM eclipse-temurin:21-jre-jammy AS runtime-base
+FROM eclipse-temurin:21-jre-jammy
 
 # 安装 PostgreSQL 16 客户端（备份恢复功能 local 模式用，与 Dockerfile.local 同口径）：
 # 生产容器内无 docker CLI，BackupServiceImpl 直接执行 pg_dump/pg_restore 经 TCP
@@ -26,8 +21,6 @@ http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
     && apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-16 \
     && rm -rf /var/lib/apt/lists/*
-
-FROM ${RUNTIME_BASE}
 
 RUN mkdir -p /ruoyi/server/logs /ruoyi/server/temp /ruoyi/server/data /ruoyi/server/backup
 
