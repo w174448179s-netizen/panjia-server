@@ -3,8 +3,10 @@ package com.panjia.people.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.panjia.contracts.dto.EmployeeChannelMappingDTO;
 import com.panjia.contracts.dto.ImUserMappingSyncResult;
 import com.panjia.contracts.dto.ImUserSyncDTO;
+import com.panjia.contracts.port.EmployeeChannelMappingQueryPort;
 import com.panjia.contracts.port.ImUserAuthPort;
 import com.panjia.contracts.port.ImUserMappingSyncPort;
 import com.panjia.people.domain.Employee;
@@ -24,7 +26,10 @@ import org.dromara.system.mapper.SysUserMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,7 +47,7 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPort {
+public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPort, EmployeeChannelMappingQueryPort {
 
     /** 匹配方式：工号匹配 */
     private static final String MATCH_CODE = "CODE";
@@ -193,6 +198,80 @@ public class ImUserMappingService implements ImUserMappingSyncPort, ImUserAuthPo
         }
         log.warn("[IM映射] userid={} 存在映射但未绑定员工", externalUserId);
         return null;
+    }
+
+    // ==================== 离职当月员工映射查询 ====================
+
+    /**
+     * 查离职日期落在指定月份的员工的渠道账号映射。
+     * <p>
+     * 钉钉通讯录 /user/list 不返回离职员工，但离职当月的历史考勤报表 / 积分日志
+     * 仍可按其 userId 拉取；这里从员工主数据 + 映射表兜底返回，供同步模块把
+     * 离职员工补进拉取名单。
+     */
+    @Override
+    public List<EmployeeChannelMappingDTO> listDimissionInMonth(String channel, String corpId, YearMonth month) {
+        if (month == null || StringUtils.isBlank(channel)) {
+            return List.of();
+        }
+        String cid = corpId == null ? "" : corpId.trim();
+        LocalDate from = month.atDay(1);
+        LocalDate to = month.atEndOfMonth();
+
+        // 1. 离职日期落在当月的员工工号（按 leaveDate 判断，不依赖 status，避免状态未及时更新漏人）
+        List<Employee> dimissionEmployees = employeeMapper.selectList(
+            new LambdaQueryWrapper<Employee>()
+                .isNotNull(Employee::getLeaveDate)
+                .ge(Employee::getLeaveDate, from)
+                .le(Employee::getLeaveDate, to));
+        if (dimissionEmployees.isEmpty()) {
+            return List.of();
+        }
+        Set<String> codes = dimissionEmployees.stream()
+            .map(Employee::getEmployeeCode)
+            .filter(StringUtils::isNotBlank)
+            .map(String::trim)
+            .collect(Collectors.toSet());
+        if (codes.isEmpty()) {
+            return List.of();
+        }
+
+        // 2. 按工号查渠道映射（兼容历史数据 corp_id 存空串的情况，与 findBoundUserId 口径一致）
+        List<ImUserMapping> mappings = mappingMapper.selectList(
+            new LambdaQueryWrapper<ImUserMapping>()
+                .eq(ImUserMapping::getChannel, channel)
+                .eq(ImUserMapping::getCorpId, cid)
+                .in(ImUserMapping::getExternalCode, codes)
+                .isNotNull(ImUserMapping::getExternalUserId));
+        if (mappings.isEmpty() && !cid.isEmpty()) {
+            mappings = mappingMapper.selectList(
+                new LambdaQueryWrapper<ImUserMapping>()
+                    .eq(ImUserMapping::getChannel, channel)
+                    .in(ImUserMapping::getExternalCode, codes)
+                    .isNotNull(ImUserMapping::getExternalUserId));
+        }
+        if (mappings.isEmpty()) {
+            return List.of();
+        }
+
+        // 一个工号理论对应一条渠道映射，多条时取第一条
+        Map<String, String> userIdByCode = new LinkedHashMap<>();
+        for (ImUserMapping mapping : mappings) {
+            if (StringUtils.isBlank(mapping.getExternalCode()) || StringUtils.isBlank(mapping.getExternalUserId())) {
+                continue;
+            }
+            userIdByCode.putIfAbsent(mapping.getExternalCode().trim(), mapping.getExternalUserId().trim());
+        }
+        List<EmployeeChannelMappingDTO> result = new ArrayList<>(userIdByCode.size());
+        for (Map.Entry<String, String> entry : userIdByCode.entrySet()) {
+            EmployeeChannelMappingDTO dto = new EmployeeChannelMappingDTO();
+            dto.setEmployeeCode(entry.getKey());
+            dto.setExternalUserId(entry.getValue());
+            result.add(dto);
+        }
+        log.info("[IM映射] 查询离职当月员工映射：month={}, channel={}, 离职员工 {} 人, 命中映射 {} 人",
+            month, channel, codes.size(), result.size());
+        return result;
     }
 
     // ==================== 管理界面 ====================

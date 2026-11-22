@@ -2,6 +2,8 @@ package com.panjia.dingtalk.service.impl;
 
 import com.panjia.contracts.dto.AttendanceDetailSyncDTO;
 import com.panjia.contracts.dto.AttendanceSummarySyncDTO;
+import com.panjia.contracts.dto.EmployeeChannelMappingDTO;
+import com.panjia.contracts.port.EmployeeChannelMappingQueryPort;
 import com.panjia.contracts.port.PeopleAttendanceSyncPort;
 import com.panjia.dingtalk.client.DingTalkAttendanceClient;
 import com.panjia.dingtalk.client.DingTalkContactClient;
@@ -62,12 +64,16 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
         COL_ATTEND_DAYS, COL_REST_DAYS, COL_LATE_TIMES, COL_LATE_MINUTE,
         COL_LACK_ON_DUTY, COL_LACK_OFF_DUTY, COL_ABSENT_DAYS);
 
+    /** 渠道标识：钉钉 */
+    private static final String CHANNEL_DINGTALK = "DINGTALK";
+
     private final DingTalkContactClient contactClient;
     private final DingTalkAttendanceClient attendanceClient;
     private final PeopleAttendanceSyncPort attendanceSyncPort;
     private final DingTalkUserMappingSyncService userMappingSyncService;
     private final DingTalkSyncLogService syncLogService;
     private final DingTalkConfigProvider configProvider;
+    private final EmployeeChannelMappingQueryPort mappingQueryPort;
 
     /** 异步执行线程池（手动触发用，避免阻塞 HTTP 请求） */
     private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -134,6 +140,26 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
                 userIdToJobNumber.put(user.getUserId(), user.getJobNumber().trim());
             }
 
+            // 补充离职当月员工：钉钉 /user/list 不返回离职员工，但其离职当月的历史考勤
+            // 仍可按 userId 拉取，从本地映射表兜底补进名单（不覆盖在职员工的实时映射）
+            int dimissionSupplemented = 0;
+            try {
+                List<EmployeeChannelMappingDTO> dimissionMappings =
+                    mappingQueryPort.listDimissionInMonth(CHANNEL_DINGTALK, configProvider.corpId(), month);
+                for (EmployeeChannelMappingDTO mapping : dimissionMappings) {
+                    if (StringUtils.isBlank(mapping.getExternalUserId())
+                        || StringUtils.isBlank(mapping.getEmployeeCode())) {
+                        continue;
+                    }
+                    if (userIdToJobNumber.putIfAbsent(
+                        mapping.getExternalUserId().trim(), mapping.getEmployeeCode().trim()) == null) {
+                        dimissionSupplemented++;
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[钉钉考勤同步] 离职当月员工映射补充失败（不影响在职员工同步）：{}", e.getMessage());
+            }
+
             List<AttendanceSummarySyncDTO> summaries = new ArrayList<>();
             List<AttendanceDetailSyncDTO> details = new ArrayList<>();
             int failedUsers = 0;
@@ -188,10 +214,10 @@ public class DingTalkAttendanceSyncServiceImpl implements DingTalkAttendanceSync
 
             String message = String.format(
                 "钉钉人员 %d 人；月度汇总 %d 条；每日明细 %d 条；无工号跳过 %d 人；取数/同步失败 %d 人%s；"
-                    + "口径：钉钉智能考勤报表（事假=%s，病假=%s 记入诊所类）",
+                    + "离职当月补充 %d 人；口径：钉钉智能考勤报表（事假=%s，病假=%s 记入诊所类）",
                 users.size(), summaries.size(), details.size(), noJobNumber, failedUsers,
                 firstError == null ? "" : "（首个错误：" + firstError + "）",
-                leavePersonal, leaveSick);
+                dimissionSupplemented, leavePersonal, leaveSick);
             if (!noJobNumberNames.isEmpty()) {
                 message = message + "；无工号人员（最多列 20 个）：" + String.join("、", noJobNumberNames);
             }

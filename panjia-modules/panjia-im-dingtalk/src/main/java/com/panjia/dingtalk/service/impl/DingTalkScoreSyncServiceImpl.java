@@ -2,7 +2,9 @@ package com.panjia.dingtalk.service.impl;
 
 import com.panjia.common.config.ScoreSubmitWindowProvider;
 import com.panjia.common.util.ScoreSubmitWindow;
+import com.panjia.contracts.dto.EmployeeChannelMappingDTO;
 import com.panjia.contracts.dto.ScoreDetailSyncDTO;
+import com.panjia.contracts.port.EmployeeChannelMappingQueryPort;
 import com.panjia.contracts.port.PeopleScoreSyncPort;
 import com.panjia.dingtalk.client.DingTalkContactClient;
 import com.panjia.dingtalk.client.DingTalkScoreClient;
@@ -46,12 +48,16 @@ import java.util.concurrent.Executors;
 @RequiredArgsConstructor
 public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
 
+    /** 渠道标识：钉钉 */
+    private static final String CHANNEL_DINGTALK = "DINGTALK";
+
     private final DingTalkContactClient contactClient;
     private final DingTalkScoreClient scoreClient;
     private final DingTalkConfigProvider configProvider;
     private final PeopleScoreSyncPort scoreSyncPort;
     private final DingTalkSyncLogService syncLogService;
     private final ScoreSubmitWindowProvider scoreSubmitWindowProvider;
+    private final EmployeeChannelMappingQueryPort mappingQueryPort;
 
     /** 异步执行线程池（手动触发用，避免阻塞 HTTP 请求） */
     private final ExecutorService asyncExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -107,6 +113,26 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
                     continue;
                 }
                 userIdToJobNumber.put(user.getUserId(), user.getJobNumber().trim());
+            }
+
+            // 补充离职当月员工：钉钉 /user/list 不返回离职员工，但其离职当月提交的
+            // 积分日报日志仍能拉到，需从本地映射表兜底补上映射才能匹配到工号
+            int dimissionSupplemented = 0;
+            try {
+                List<EmployeeChannelMappingDTO> dimissionMappings =
+                    mappingQueryPort.listDimissionInMonth(CHANNEL_DINGTALK, configProvider.corpId(), month);
+                for (EmployeeChannelMappingDTO mapping : dimissionMappings) {
+                    if (StringUtils.isBlank(mapping.getExternalUserId())
+                        || StringUtils.isBlank(mapping.getEmployeeCode())) {
+                        continue;
+                    }
+                    if (userIdToJobNumber.putIfAbsent(
+                        mapping.getExternalUserId().trim(), mapping.getEmployeeCode().trim()) == null) {
+                        dimissionSupplemented++;
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[钉钉积分同步] 离职当月员工映射补充失败（不影响在职员工同步）：{}", e.getMessage());
             }
 
             // 提交窗口口径由参数管理配置，每次同步读一次
@@ -176,10 +202,10 @@ public class DingTalkScoreSyncServiceImpl implements DingTalkScoreSyncService {
             }
 
             String message = String.format(
-                "钉钉积分日报 %d 条；涉及员工 %d 人；每日明细 %d 条；无法匹配工号 %d 条；"
+                "钉钉积分日报 %d 条；涉及员工 %d 人；每日明细 %d 条；无法匹配工号 %d 条；离职当月补充 %d 人；"
                     + "%s~次日%s 窗口外提交不计积分 %d 条；%s 后晚提交 %d 条；"
                     + "口径：日志模板 %s，同员工同日保留最晚提交的一条，月度汇总按明细重算",
-                logs.size(), employeeCodes.size(), details.size(), unmatched,
+                logs.size(), employeeCodes.size(), details.size(), unmatched, dimissionSupplemented,
                 window.start(), window.end(), invalid, window.lateStart(), late,
                 templateNames);
             if (!unmatchedNames.isEmpty()) {
