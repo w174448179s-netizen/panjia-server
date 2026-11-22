@@ -2424,6 +2424,9 @@ public class CommissionApplicationService {
         summary.put("totalExpectedAmount", summaryExpectedAmount);
         summary.put("totalExpectedConvertedAmount", summaryExpectedConvertedAmount);
         summary.put("totalReceivedAmount", summaryReceivedAmount);
+        summary.put("totalReceivedNegativeAmount", all.stream()
+            .map(r -> r.getReceivedNegativeAmount() != null ? r.getReceivedNegativeAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
         // 实收净额合计：有正/负/净额的行取净额，其余取自身实收，避免重复累加
         summary.put("totalReceivedNetAmount", all.stream()
             .map(r -> r.getReceivedNetAmount() != null
@@ -2608,6 +2611,9 @@ public class CommissionApplicationService {
             .reduce(BigDecimal.ZERO, BigDecimal::add));
         summary.put("totalReceivedAmount", all.stream()
             .map(r -> r.getReceivedAmount() != null ? r.getReceivedAmount() : BigDecimal.ZERO)
+            .reduce(BigDecimal.ZERO, BigDecimal::add));
+        summary.put("totalReceivedNegativeAmount", all.stream()
+            .map(r -> r.getReceivedNegativeAmount() != null ? r.getReceivedNegativeAmount() : BigDecimal.ZERO)
             .reduce(BigDecimal.ZERO, BigDecimal::add));
         // 净额合计：有正/负/净额的行取净额，负向行取自身实收，避免与净额行重复
         summary.put("totalReceivedNetAmount", all.stream()

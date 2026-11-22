@@ -31,8 +31,9 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
 
     /**
      * 所选月份已锁定结佣单的有效实收按部门汇总（收入）。
-     * <p>与结佣审批筛选「已锁定」的实收合计一致：同业务键、同方向按到账月归属到对应结佣单，
-     * 早于全部单时归最早单，晚于全部单时归最晚单；补收月剔除，负向实收归负向结佣单。
+     * <p>与结佣审批筛选「已锁定」的实收（含负向冲减）一致：同业务键、同方向按到账月归属到对应结佣单，
+     * 早于全部单时归最早单，晚于全部单时归最晚单；补收月剔除。
+     * 负向实收优先归负向单，无负向单时回挂正向单冲减实收。
      * 部门优先取明细/合同快照，其次取 DEPT 事实，最后回退员工当前部门。</p>
      */
     @Select("""
@@ -144,7 +145,7 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
             ) pa ON TRUE
             WHERE s.positive_amount IS NOT NULL
             UNION ALL
-            SELECT s.dept_id, s.negative_amount AS amount, na.id AS app_id
+            SELECT s.dept_id, s.negative_amount AS amount, COALESCE(na.id, pa.id) AS app_id
             FROM attribution_stats s
             LEFT JOIN LATERAL (
                 SELECT x.id
@@ -167,6 +168,27 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
                 ORDER BY x.priority
                 LIMIT 1
             ) na ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT x.id
+                FROM (
+                    (SELECT ca.id, 1 AS priority
+                     FROM pj_commission_application ca
+                     WHERE (ca.contract_no = s.biz_key OR ca.order_no = s.biz_key)
+                       AND ca.total_amount IS NOT NULL AND ca.total_amount >= 0
+                       AND ca.status NOT IN ('REJECTED', 'CANCELLED')
+                       AND COALESCE(ca.period, '') <= s.period
+                     ORDER BY ca.period DESC, ca.id DESC LIMIT 1)
+                    UNION ALL
+                    (SELECT ca.id, 2 AS priority
+                     FROM pj_commission_application ca
+                     WHERE (ca.contract_no = s.biz_key OR ca.order_no = s.biz_key)
+                       AND ca.total_amount IS NOT NULL AND ca.total_amount >= 0
+                       AND ca.status NOT IN ('REJECTED', 'CANCELLED')
+                     ORDER BY ca.period ASC, ca.id ASC LIMIT 1)
+                ) x
+                ORDER BY x.priority
+                LIMIT 1
+            ) pa ON TRUE
             WHERE s.negative_amount IS NOT NULL
         )
         SELECT a.dept_id AS deptId, SUM(a.amount) AS amount
