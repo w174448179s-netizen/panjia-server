@@ -97,8 +97,9 @@ public class LfStatementController {
     @GetMapping("/diff/list")
     public R<PageResult<LfMatchResult>> diffList(@RequestParam(required = false) String matchStatus,
                                                  @RequestParam(required = false) String contractNo,
+                                                 @RequestParam(required = false) Long storeDeptId,
                                                  @ModelAttribute PageQuery pageQuery) {
-        return R.ok(queryService.diffList(matchStatus, contractNo, pageQuery));
+        return R.ok(queryService.diffList(matchStatus, contractNo, storeDeptId, pageQuery));
     }
 
     @SaCheckPermission("ledger:lf:list")

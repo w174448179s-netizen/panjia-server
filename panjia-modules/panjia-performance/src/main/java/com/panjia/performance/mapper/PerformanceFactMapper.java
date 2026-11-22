@@ -935,7 +935,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * 应收原值沿 ACTIVE 行 sourceKey 链取最早 REVERSED 金额聚合，与「合同业绩明细」页 originalAmount 同口径。
      * 实收原值同样沿 rd 的 sourceKey 链取最早 REVERSED 金额（实收调整 supersede 产生链），
      * receivedAdjusted 标记链上存在 REVERSED 或为「增加角色人」新人行（MANUAL-RADJ，原值按 0）。
-     * orderNo 非空时按订单号限定（合同号非空再加合同号=双键精确，同合同号挂多订单防跨订单配对）；
+     * orderNo 非空时按订单号限定（合同号非空时，新签合同号相同或为空均可配对）；
      * orderNo 为空（历史单据）退化合同号双列 OR 旧口径；合同号与订单号都为空时不匹配任何行；
      * degradeToContract=true（调用方双侧闸门判定两侧订单都唯一）时新签侧退化仅按合同号配对，
      * 兼容贝壳新签 order_no 误填成合同号的脏数据（实收侧 JOIN 仍用双键，实收订单号本身是准确的）。
@@ -980,7 +980,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 <when test="degradeToContract">AND a.contract_no = #{contractNo}</when>
                 <when test="orderNo != null and orderNo != ''">
                   AND a.order_no = #{orderNo}
-                  <if test="contractNo != null and contractNo != ''">AND a.contract_no = #{contractNo}</if>
+                  <if test="contractNo != null and contractNo != ''">
+                    AND (a.contract_no = #{contractNo} OR NULLIF(BTRIM(a.contract_no), '') IS NULL)
+                  </if>
                 </when>
                 <when test="contractNo != null and contractNo != ''">
                   AND (a.contract_no = #{contractNo} OR a.order_no = #{contractNo})
@@ -1078,7 +1080,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
                 <when test="orderNo != null and orderNo != ''">
                   AND pe.order_no = #{orderNo}
-                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
+                  <if test="contractNo != null and contractNo != ''">
+                    AND (pe.contract_no = #{contractNo} OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                  </if>
                 </when>
                 <when test="contractNo != null and contractNo != ''">
                   AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
@@ -1103,7 +1107,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                 <when test="degradeToContract">AND pe.contract_no = #{contractNo}</when>
                 <when test="orderNo != null and orderNo != ''">
                   AND pe.order_no = #{orderNo}
-                  <if test="contractNo != null and contractNo != ''">AND pe.contract_no = #{contractNo}</if>
+                  <if test="contractNo != null and contractNo != ''">
+                    AND (pe.contract_no = #{contractNo} OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                  </if>
                 </when>
                 <when test="contractNo != null and contractNo != ''">
                   AND (pe.contract_no = #{contractNo} OR pe.order_no = #{contractNo})
@@ -1118,7 +1124,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                                       </when>
                                       <when test="orderNo != null and orderNo != ''">
                                         <if test="contractNo != null and contractNo != ''">
-                                          oe.contract_no = rc.contract_no
+                                          (oe.contract_no = rc.contract_no OR NULLIF(BTRIM(oe.contract_no), '') IS NULL)
                                           AND
                                         </if>
                                         oe.order_no = rc.order_no
@@ -1156,7 +1162,7 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
      * degrade=true（调用方双侧闸门：新签事实/实收合同两侧该合同去重订单号都恰 1）→
      * 应收子查询退化仅按合同号配对，兼容贝壳新签 order_no 误填成合同号的脏数据
      * （实收侧 JOIN 仍用双键，实收订单号本身是准确的）；
-     * 合同号+订单号齐全（非退化）→ 双键同时满足（同合同号挂多订单防串单）；
+     * 合同号+订单号齐全（非退化）→ 订单号精确，新签合同号相同或为空；
      * 合同号为空串（一手房/家装荐客等无合同号业务）→ 按订单号；
      * 订单号为空串（历史单据）→ 退化 contract_no/order_no 双键 OR 旧口径。
      *
@@ -1190,7 +1196,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                        WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                          AND (
                                    (k.dg AND pe.contract_no = k.ck)
-                                OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; ''
+                                     AND (pe.contract_no = k.ck OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                                     AND pe.order_no = k.ok)
                                 OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                 OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                              )
@@ -1216,7 +1224,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                              )
                              AND (
                                        (k.dg AND pe.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; ''
+                                     AND (pe.contract_no = k.ck OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                                     AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                                  )
@@ -1229,7 +1239,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                              AND (
                                        (k.dg AND pe.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; ''
+                                     AND (pe.contract_no = k.ck OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                                     AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                                  )
@@ -1242,7 +1254,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                              AND (
                                        (k.dg AND pe.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; ''
+                                     AND (pe.contract_no = k.ck OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                                     AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                                  )
@@ -1256,7 +1270,9 @@ public interface PerformanceFactMapper extends BaseMapperPlus<PerformanceFact, P
                            WHERE pe.fact_status = 'ACTIVE' AND pe.fact_type = 'PERF_EXPECT'
                              AND (
                                        (k.dg AND pe.contract_no = k.ck)
-                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; '' AND pe.contract_no = k.ck AND pe.order_no = k.ok)
+                                    OR (NOT k.dg AND k.ok &lt;&gt; '' AND k.ck &lt;&gt; ''
+                                     AND (pe.contract_no = k.ck OR NULLIF(BTRIM(pe.contract_no), '') IS NULL)
+                                     AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ck = '' AND pe.order_no = k.ok)
                                     OR (NOT k.dg AND k.ok = '' AND (pe.contract_no = k.ck OR pe.order_no = k.ck))
                                  )

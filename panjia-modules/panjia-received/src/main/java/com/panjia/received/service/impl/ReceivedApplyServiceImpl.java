@@ -1958,9 +1958,9 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
      * 按「当月优先」口径取该 bizKey 对应的 ACTIVE PERF_EXPECT 新签事实（金额合计/人数校验共用唯一取数入口）。
      * <p>匹配口径（2026-10-11 双侧闸门定稿）：
      * <ul>
-     *   <li>合同号+订单号齐全：双键精确；未命中时经 {@link #canDegradeExpectToReceived}
-     *       双侧闸门（新签事实/实收合同全局订单都唯一）才退化按合同号汇总——兼容贝壳新签
-     *       orderNo 误填成合同号；同合同多订单双键不中返回空（走人工，宁可不自动通过也不串单）；</li>
+     *   <li>合同号+订单号齐全：订单号精确，新签合同号相同或为空；未命中时经
+     *       {@link #canDegradeExpectToReceived} 双侧闸门（新签事实/实收合同全局订单都唯一）
+     *       才退化按合同号汇总——兼容贝壳新签 orderNo 误填成合同号；</li>
      *   <li>订单号为空（历史单据）：退化旧口径 contract_no/order_no 双键 OR；</li>
      *   <li>合同号为空：按订单号。</li>
      * </ul>
@@ -1979,8 +1979,10 @@ public class ReceivedApplyServiceImpl implements IReceivedApplyService, Received
                 new LambdaQueryWrapper<PerformanceFact>()
                     .eq(PerformanceFact::getFactType, FACT_TYPE_EXPECT)
                     .eq(PerformanceFact::getFactStatus, com.panjia.performance.domain.FactStatus.ACTIVE)
-                    .eq(PerformanceFact::getContractNo, contractNo)
-                    .eq(PerformanceFact::getOrderNo, orderNo));
+                    .eq(PerformanceFact::getOrderNo, orderNo)
+                    // 订单号精确匹配时，新签未维护合同号不影响关联；其他非空合同号仍排除
+                    .and(w -> w.eq(PerformanceFact::getContractNo, contractNo)
+                        .or().apply("NULLIF(BTRIM(contract_no), '') IS NULL")));
             if (!precise.isEmpty()) {
                 return precise;
             }

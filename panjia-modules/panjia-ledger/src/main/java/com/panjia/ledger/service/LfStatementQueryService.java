@@ -182,11 +182,24 @@ public class LfStatementQueryService {
         return count;
     }
 
-    public PageResult<LfMatchResult> diffList(String matchStatus, String contractNo, PageQuery pageQuery) {
+    public PageResult<LfMatchResult> diffList(String matchStatus, String contractNo, Long storeDeptId,
+                                              PageQuery pageQuery) {
         LambdaQueryWrapper<LfMatchResult> wrapper = new LambdaQueryWrapper<LfMatchResult>()
             .eq(StringUtils.isNotBlank(matchStatus), LfMatchResult::getMatchStatus, matchStatus)
-            .like(StringUtils.isNotBlank(contractNo), LfMatchResult::getContractNo, contractNo)
-            .orderByDesc(LfMatchResult::getLastMatchTime)
+            .like(StringUtils.isNotBlank(contractNo), LfMatchResult::getContractNo, contractNo);
+        if (storeDeptId != null) {
+            List<Long> deptIds = new ArrayList<>(expenseService.loadSubtree(storeDeptId).stream()
+                .map(com.panjia.ledger.dto.DeptRowDTO::getDeptId).toList());
+            if (!deptIds.contains(storeDeptId)) {
+                deptIds.add(storeDeptId);
+            }
+            String placeholders = java.util.stream.IntStream.range(0, deptIds.size())
+                .mapToObj(i -> "{" + i + "}").collect(Collectors.joining(","));
+            wrapper.apply("EXISTS (SELECT 1 FROM pj_lf_statement_row r "
+                + "WHERE r.contract_no = pj_lf_match_result.contract_no "
+                + "AND r.store_dept_id IN (" + placeholders + "))", deptIds.toArray());
+        }
+        wrapper.orderByDesc(LfMatchResult::getLastMatchTime)
             .orderByDesc(LfMatchResult::getId);
         Page<LfMatchResult> page = matchResultMapper.selectPage(
             pageQuery == null ? new PageQuery().build() : pageQuery.build(), wrapper);
