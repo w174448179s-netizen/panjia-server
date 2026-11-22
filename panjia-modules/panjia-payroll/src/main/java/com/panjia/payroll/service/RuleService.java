@@ -314,6 +314,10 @@ public class RuleService {
                     ? (ObjectNode) deptOverride.get(p.getScopeKey()) : objectMapper.createObjectNode();
                 JsonNode incoming = objectMapper.readTree(p.getRuleContent() == null ? "{}" : p.getRuleContent());
                 merged.setAll((ObjectNode) incoming);
+                // 门店社保基数（base_social 列）：按门店覆盖，未配置回退全局 baseSocial
+                if (p.getBaseSocial() != null) {
+                    merged.put("baseSocial", p.getBaseSocial().toString());
+                }
                 deptOverride.set(p.getScopeKey(), merged);
             } catch (Exception e) {
                 log.warn("dept policy rule content parse failed, scopeKey={}", p.getScopeKey(), e);
@@ -397,6 +401,17 @@ public class RuleService {
          */
         public JsonNode deptOverride(Long deptId) {
             return root.path("policy").path("deptOverride").path(String.valueOf(deptId));
+        }
+
+        /**
+         * 门店社保基数（DEPT 政策 base_social）：按门店配置；未按门店配置时回退全局 baseSocial。
+         */
+        public java.math.BigDecimal baseSocial(Long deptId) {
+            JsonNode n = deptOverride(deptId).path("baseSocial");
+            if (!n.isMissingNode() && !n.isNull() && !n.asText("").isBlank()) {
+                return new java.math.BigDecimal(n.asText("0"));
+            }
+            return new java.math.BigDecimal(policy().path("baseSocial").asText("1637.15"));
         }
 
         /**

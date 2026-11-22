@@ -693,21 +693,20 @@ public class SalaryCalculationEngine {
             // 优先取员工级自定义金额（SalaryFact SOCIAL_FEE）：仅「非空且非 0」视为有效覆盖；
             // null/0 表示未单独核定（清空即回退），走三级取值：
             // 职级固定额 socialFixedFee > 职级比例 socialSettlementRatio × baseSocial
+            // baseSocial 按门店取（DEPT 政策），未配置回退全局
             BigDecimal socialFee = BigDecimal.ZERO;
             BigDecimal employerSocial = BigDecimal.ZERO;
             BigDecimal customSocialFee = emp.getSocialFee();
             boolean hasCustomSocialFee = customSocialFee != null && customSocialFee.signum() != 0;
             if (!parttime && Boolean.TRUE.equals(emp.getSocialInsured())) {
+                BigDecimal baseSocial = snap.baseSocial(emp.getDeptId());
                 if (hasCustomSocialFee) {
                     socialFee = customSocialFee;
-                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
                 } else if (policy.path("socialFixedFee").has(level)) {
-                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     socialFee = bd(policy.path("socialFixedFee").path(level).asText("0"));
                     employerSocial = MoneyUtil.round2(baseSocial.subtract(socialFee).max(BigDecimal.ZERO));
                 } else {
-                    BigDecimal baseSocial = bd(policy.path("baseSocial").asText("1637.15"));
                     BigDecimal ratio = bd(snap.socialRatio().path(level).asText("0.30"));
                     socialFee = MoneyUtil.round2(baseSocial.multiply(ratio));
                     employerSocial = MoneyUtil.round2(baseSocial.multiply(BigDecimal.ONE.subtract(ratio)));
@@ -1071,7 +1070,7 @@ public class SalaryCalculationEngine {
             return false;
         }
         String level = emp.getLevelCode() == null ? "A0" : emp.getLevelCode();
-        BigDecimal baseSocial = bd(snap.policy().path("baseSocial").asText("1637.15"));
+        BigDecimal baseSocial = snap.baseSocial(emp.getDeptId());
         BigDecimal personalFee;
         if (emp.getSocialFee() != null) {
             personalFee = emp.getSocialFee();
