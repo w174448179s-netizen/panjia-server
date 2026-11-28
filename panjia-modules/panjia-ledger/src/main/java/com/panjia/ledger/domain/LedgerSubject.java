@@ -39,7 +39,7 @@ public class LedgerSubject implements Serializable {
 
     private Integer sortOrder;
 
-    /** MANUAL=手工录入 / RECEIVED_DETAIL=实收明细自动 / PAYROLL_GROSS=工资应发自动 */
+    /** MANUAL=手工录入 / RECEIVED_DETAIL=实收明细自动 / PAYROLL_GROSS=工资应发自动 / PAYROLL_SOCIAL=社保费用自动 / PAYROLL_COMMERCIAL_INSURANCE=商业保险自动 */
     private String dataSource;
 
     /** 0=启用 / 1=停用 */

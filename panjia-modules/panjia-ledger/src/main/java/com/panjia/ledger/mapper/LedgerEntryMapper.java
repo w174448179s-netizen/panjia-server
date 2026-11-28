@@ -14,8 +14,9 @@ import java.util.List;
 
 /**
  * 部门收支录入 Mapper。
- * <p>跨域只读查询说明：实收明细来自 received 域（pj_received_*），工资应发来自 payroll 域
- * （pj_payroll_*），部门来自 people 域（sys_dept）。此处仅做报表取数，不写跨域数据。</p>
+ * <p>跨域只读查询说明：实收明细来自 received 域（pj_received_*），工资应发与门店社保、
+ * 商业保险配置来自 payroll 域（pj_payroll_*），部门及人员来自 people 域（sys_dept、pj_people_*）。
+ * 此处仅做报表取数，不写跨域数据。</p>
  */
 @Mapper
 public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEntry> {
@@ -199,29 +200,265 @@ public interface LedgerEntryMapper extends BaseMapperPlus<LedgerEntry, LedgerEnt
     List<DeptAmountDTO> sumReceivedByDept(@Param("period") String period, @Param("refDate") LocalDate refDate);
 
     /**
-     * 工资应发（gross）按部门汇总（支出）；仅统计已计算及之后状态的批次。
+     * 工资按部门汇总（支出）；仅统计已计算及之后状态的批次。
+     * <p>口径：普通员工（非总监）取应发大于 0 的 gross 合计；总监工资按管辖店组分摊——
+     * 每个店组计入「底薪 ÷ 店组数量 + 该店组的总监提成」，不再把总监整笔工资挂在其所属非末级部门。</p>
      * <p>部门优先取工资明细快照，其次按归属月取 DEPT 事实（员工调店时间轴）。</p>
      */
     @Select("""
-        SELECT COALESCE(d.dept_id, df.value::BIGINT) AS deptId,
-               SUM(COALESCE(d.gross, 0)) AS amount
-        FROM pj_payroll_detail d
-        JOIN pj_payroll_batch b ON b.id = d.batch_id
-        LEFT JOIN LATERAL (
-            SELECT f.value
-            FROM pj_people_salary_fact f
-            WHERE f.employee_id = d.employee_id
-              AND f.fact_type = 'DEPT'
-              AND f.effective_date <= #{refDate}
-              AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
-            ORDER BY f.effective_date DESC, f.create_time DESC
-            LIMIT 1
-        ) df ON TRUE
-        WHERE d.period = #{period}
-          AND b.status IN ('已计算', '待审核', '已确认', '已锁定', '已发放')
-        GROUP BY COALESCE(d.dept_id, df.value::BIGINT)
+        WITH payroll_rows AS (
+            SELECT COALESCE(d.employee_role, '') AS employee_role,
+                   COALESCE(d.gross, 0) AS gross,
+                   COALESCE(NULLIF(d.base_salary, 0), 6000) AS base_salary,
+                   d.director_store_items,
+                   COALESCE(d.dept_id, df.value::BIGINT) AS dept_id
+            FROM pj_payroll_detail d
+            JOIN pj_payroll_batch b ON b.id = d.batch_id
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = d.employee_id
+                  AND f.fact_type = 'DEPT'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) df ON TRUE
+            WHERE d.period = #{period}
+              AND b.status IN ('已计算', '待审核', '已确认', '已锁定', '已发放')
+        ), staff_salary AS (
+            SELECT dept_id, SUM(gross) AS amount
+            FROM payroll_rows
+            WHERE employee_role <> 'DIRECTOR'
+              AND gross > 0
+            GROUP BY dept_id
+        ), director_items AS (
+            SELECT NULLIF(it->>'deptId', '')::BIGINT AS dept_id,
+                   COALESCE(NULLIF(it->>'income', '')::NUMERIC, 0) AS income,
+                   base_salary,
+                   jsonb_array_length(director_store_items::jsonb) AS group_count
+            FROM payroll_rows
+            CROSS JOIN LATERAL jsonb_array_elements(director_store_items::jsonb) it
+            WHERE employee_role = 'DIRECTOR'
+              AND director_store_items LIKE '[%'
+              AND jsonb_array_length(director_store_items::jsonb) > 0
+        ), director_salary AS (
+            SELECT dept_id, SUM(income + base_salary / group_count) AS amount
+            FROM director_items
+            WHERE dept_id IS NOT NULL
+            GROUP BY dept_id
+        )
+        SELECT dept_id AS deptId, SUM(amount) AS amount
+        FROM (
+            SELECT dept_id, amount FROM staff_salary
+            UNION ALL
+            SELECT dept_id, amount FROM director_salary
+        ) t
+        GROUP BY dept_id
         """)
     List<DeptAmountDTO> sumPayrollGrossByDept(@Param("period") String period, @Param("refDate") LocalDate refDate);
+
+    /**
+     * 社保费用按部门汇总（支出）：薪酬配置 DEPT 政策 socialStandard × 该部门已配置缴社保的在职/兼职人数；
+     * 另加总监社保分摊——总监缴纳的社保（公司承担部分）÷ 管辖店组数，逐店组计入。
+     * <p>人数仅统计当日最新 SOCIAL 事实为 true 的员工（非全员）；员工部门优先取归属月首日生效的 DEPT 事实，缺失时回退员工当前部门。</p>
+     */
+    @Select("""
+        WITH employee_dept AS (
+            SELECT e.employee_id, COALESCE(df.value::BIGINT, e.dept_id) AS dept_id
+            FROM pj_people_employee e
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'DEPT'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) df ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'SOCIAL'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) sf ON TRUE
+            WHERE e.status IN ('ACTIVE', 'PARTTIME')
+              AND sf.value = 'true'
+        ), dept_policy AS (
+            SELECT p.scope_key::BIGINT AS dept_id,
+                   NULLIF(BTRIM(p.rule_content->>'socialStandard'), '')::NUMERIC AS standard,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY p.scope_key
+                       ORDER BY p.effective_from DESC, p.id DESC
+                   ) AS rn
+            FROM pj_payroll_policy_rule p
+            WHERE p.scope_type = 'DEPT'
+              AND p.scope_key IS NOT NULL
+              AND p.effective_from <= #{refDate}
+              AND (p.effective_to IS NULL OR p.effective_to >= #{refDate})
+        ), staff_social AS (
+            SELECT ed.dept_id AS dept_id, dp.standard * COUNT(*) AS amount
+            FROM employee_dept ed
+            JOIN dept_policy dp ON dp.dept_id = ed.dept_id AND dp.rn = 1
+            WHERE ed.dept_id IS NOT NULL
+              AND dp.standard IS NOT NULL
+            GROUP BY ed.dept_id, dp.standard
+        ), director_rows AS (
+            SELECT d.employer_social,
+                   d.director_store_items::jsonb AS items,
+                   jsonb_array_length(d.director_store_items::jsonb) AS group_count
+            FROM pj_payroll_detail d
+            JOIN pj_payroll_batch b ON b.id = d.batch_id
+            WHERE d.period = to_char(#{refDate}, 'YYYY-MM')
+              AND b.status IN ('已计算', '待审核', '已确认', '已锁定', '已发放')
+              AND d.employee_role = 'DIRECTOR'
+              AND d.director_store_items LIKE '[%'
+              AND jsonb_array_length(d.director_store_items::jsonb) > 0
+              AND COALESCE(d.employer_social, 0) <> 0
+        ), director_social AS (
+            SELECT NULLIF(it->>'deptId', '')::BIGINT AS dept_id,
+                   SUM(dr.employer_social / dr.group_count) AS amount
+            FROM director_rows dr
+            CROSS JOIN LATERAL jsonb_array_elements(dr.items) it
+            WHERE NULLIF(it->>'deptId', '') IS NOT NULL
+            GROUP BY NULLIF(it->>'deptId', '')::BIGINT
+        )
+        SELECT dept_id AS deptId, SUM(amount) AS amount
+        FROM (
+            SELECT dept_id, amount FROM staff_social
+            UNION ALL
+            SELECT dept_id, amount FROM director_social
+        ) t
+        GROUP BY dept_id
+        """)
+    List<DeptAmountDTO> sumSocialByDept(@Param("refDate") LocalDate refDate);
+
+    /**
+     * 商业保险按部门汇总（支出）：归属月首日有效的门店 commercialStandard × 当月已交纳人数。
+     * <p>人数仅统计在职及兼职员工，且当日最新 COMMERCIAL 事实为 true；部门归属口径与社保一致。</p>
+     */
+    @Select("""
+        WITH employee_dept AS (
+            SELECT e.employee_id, COALESCE(df.value::BIGINT, e.dept_id) AS dept_id
+            FROM pj_people_employee e
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'DEPT'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) df ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'COMMERCIAL'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) cf ON TRUE
+            WHERE e.status IN ('ACTIVE', 'PARTTIME')
+              AND cf.value = 'true'
+        ), dept_policy AS (
+            SELECT p.scope_key::BIGINT AS dept_id,
+                   NULLIF(BTRIM(p.rule_content->>'commercialStandard'), '')::NUMERIC AS standard,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY p.scope_key
+                       ORDER BY p.effective_from DESC, p.id DESC
+                   ) AS rn
+            FROM pj_payroll_policy_rule p
+            WHERE p.scope_type = 'DEPT'
+              AND p.scope_key IS NOT NULL
+              AND p.effective_from <= #{refDate}
+              AND (p.effective_to IS NULL OR p.effective_to >= #{refDate})
+        )
+        SELECT ed.dept_id AS deptId, dp.standard * COUNT(*) AS amount
+        FROM employee_dept ed
+        JOIN dept_policy dp ON dp.dept_id = ed.dept_id AND dp.rn = 1
+        WHERE ed.dept_id IS NOT NULL
+          AND dp.standard IS NOT NULL
+        GROUP BY ed.dept_id, dp.standard
+        """)
+    List<DeptAmountDTO> sumCommercialByDept(@Param("refDate") LocalDate refDate);
+
+    /**
+     * 宿舍费按部门汇总（支出）：对 DORMITORY=true 的在职/兼职员工逐人取宿舍费后求和。
+     * <p>单人金额 = 员工自定义宿舍费（DORMITORY_FEE，含 0）→ 门店宿舍费标准 dormStandard → 全局宿舍管理费 dormitoryFee。</p>
+     * <p>部门归属口径与社保一致（DEPT 事实优先，缺失回退员工当前部门）。</p>
+     */
+    @Select("""
+        WITH employee_dept AS (
+            SELECT e.employee_id, COALESCE(df.value::BIGINT, e.dept_id) AS dept_id,
+                   NULLIF(BTRIM(dormFee.value), '')::NUMERIC AS dorm_fee
+            FROM pj_people_employee e
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'DEPT'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) df ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'DORMITORY'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) dorm ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT f.value
+                FROM pj_people_salary_fact f
+                WHERE f.employee_id = e.employee_id
+                  AND f.fact_type = 'DORMITORY_FEE'
+                  AND f.effective_date <= #{refDate}
+                  AND (f.expire_date IS NULL OR #{refDate} < f.expire_date)
+                ORDER BY f.effective_date DESC, f.create_time DESC
+                LIMIT 1
+            ) dormFee ON TRUE
+            WHERE e.status IN ('ACTIVE', 'PARTTIME')
+              AND dorm.value = 'true'
+        ), dept_policy AS (
+            SELECT p.scope_key::BIGINT AS dept_id,
+                   NULLIF(BTRIM(p.rule_content->>'dormStandard'), '')::NUMERIC AS standard,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY p.scope_key
+                       ORDER BY p.effective_from DESC, p.id DESC
+                   ) AS rn
+            FROM pj_payroll_policy_rule p
+            WHERE p.scope_type = 'DEPT'
+              AND p.scope_key IS NOT NULL
+              AND p.effective_from <= #{refDate}
+              AND (p.effective_to IS NULL OR p.effective_to >= #{refDate})
+        ), global_policy AS (
+            SELECT NULLIF(BTRIM(p.rule_content->>'dormitoryFee'), '')::NUMERIC AS fee
+            FROM pj_payroll_policy_rule p
+            WHERE p.scope_type = 'GLOBAL'
+            ORDER BY p.id DESC
+            LIMIT 1
+        )
+        SELECT ed.dept_id AS deptId,
+               SUM(COALESCE(ed.dorm_fee, dp.standard, (SELECT fee FROM global_policy), 0)) AS amount
+        FROM employee_dept ed
+        LEFT JOIN dept_policy dp ON dp.dept_id = ed.dept_id AND dp.rn = 1
+        WHERE ed.dept_id IS NOT NULL
+        GROUP BY ed.dept_id
+        """)
+    List<DeptAmountDTO> sumDormitoryByDept(@Param("refDate") LocalDate refDate);
 
     /**
      * 手工录入按科目+部门汇总；生效期间与归属月相交即整笔计入（不按天折算）。

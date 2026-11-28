@@ -37,7 +37,10 @@ import java.util.stream.Collectors;
  *   <li>部门列 = 全部末级部门；录在非末级部门的数据单列“未分配”。</li>
  *   <li>手工录入：生效期间与归属月相交即整笔计入（不按天折算），支出以负数展示。</li>
  *   <li>佣金收入：实收明细 ACTIVE + 实收申请 APPROVED，按明细部门（缺失时回退员工部门）汇总。</li>
- *   <li>工资：薪资格批次应发合计(gross)，按明细部门汇总，支出负数展示。</li>
+ *   <li>工资：普通员工取应发大于 0 的 gross 合计；总监工资按管辖店组分摊（底薪÷店组数+该组提成），支出负数展示。</li>
+ *   <li>社保：薪酬配置 DEPT 政策 socialStandard × 该部门已配置缴社保的在职/兼职人数，另加总监社保按管辖店组分摊，支出负数展示。</li>
+ *   <li>商业保险：DEPT 政策 commercialStandard × 当月 COMMERCIAL=true 的在职/兼职人数，支出负数展示。</li>
+ *   <li>宿舍费：当月 DORMITORY=true 员工的宿舍费合计（个人自定义金额优先，其次门店 dormStandard，再回退全局 dormitoryFee），支出负数展示。</li>
  *   <li>父级科目只做分组不展示汇总值；底部输出合计营收/合计费用/营业利润。</li>
  * </ul>
  */
@@ -69,7 +72,7 @@ public class LedgerReportService {
         Map<Long, Map<Long, BigDecimal>> amounts = new HashMap<>();
         for (SubjectDeptAmountDTO row : entryMapper.sumEntriesByPeriod(periodStart, periodEnd)) {
             LedgerSubject subject = subjectMap.get(row.getSubjectId());
-            if (subject != null) {
+            if (subject != null && LedgerSubjectService.DATA_SOURCE_MANUAL.equals(subject.getDataSource())) {
                 addAmount(amounts, subject, row.getDeptId(), row.getAmount());
             }
         }
@@ -80,6 +83,18 @@ public class LedgerReportService {
                 }
             } else if (LedgerSubjectService.DATA_SOURCE_PAYROLL.equals(subject.getDataSource())) {
                 for (DeptAmountDTO row : entryMapper.sumPayrollGrossByDept(period, periodStart)) {
+                    addAmount(amounts, subject, row.getDeptId(), row.getAmount());
+                }
+            } else if (LedgerSubjectService.DATA_SOURCE_SOCIAL.equals(subject.getDataSource())) {
+                for (DeptAmountDTO row : entryMapper.sumSocialByDept(periodStart)) {
+                    addAmount(amounts, subject, row.getDeptId(), row.getAmount());
+                }
+            } else if (LedgerSubjectService.DATA_SOURCE_COMMERCIAL.equals(subject.getDataSource())) {
+                for (DeptAmountDTO row : entryMapper.sumCommercialByDept(periodStart)) {
+                    addAmount(amounts, subject, row.getDeptId(), row.getAmount());
+                }
+            } else if (LedgerSubjectService.DATA_SOURCE_DORMITORY.equals(subject.getDataSource())) {
+                for (DeptAmountDTO row : entryMapper.sumDormitoryByDept(periodStart)) {
                     addAmount(amounts, subject, row.getDeptId(), row.getAmount());
                 }
             }

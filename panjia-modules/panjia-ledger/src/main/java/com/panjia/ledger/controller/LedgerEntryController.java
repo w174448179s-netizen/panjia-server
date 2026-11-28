@@ -69,6 +69,7 @@ public class LedgerEntryController {
         List<LedgerEntryExcelRow> rows = new ArrayList<>(list.size());
         for (LedgerEntryVO vo : list) {
             LedgerEntryExcelRow row = new LedgerEntryExcelRow();
+            row.setSerialNo(vo.getSourceSerialNo());
             row.setDirection("INCOME".equals(vo.getDirection()) ? "收入" : "支出");
             row.setSubjectPath(vo.getSubjectPath());
             row.setDeptName(vo.getDeptName());

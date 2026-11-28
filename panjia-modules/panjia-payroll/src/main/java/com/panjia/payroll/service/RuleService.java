@@ -16,6 +16,7 @@ import com.panjia.payroll.mapper.RankRuleMapper;
 import com.panjia.payroll.mapper.RuleSnapshotMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -98,14 +99,51 @@ public class RuleService {
     }
 
     public void savePolicyRule(PolicyRule rule) {
+        boolean deptPolicy = "DEPT".equals(rule.getScopeType());
         if (rule.getEffectiveFrom() == null) {
-            rule.setEffectiveFrom(LocalDate.now());
+            rule.setEffectiveFrom(deptPolicy ? YearMonth.now().atDay(1) : LocalDate.now());
         }
         if (rule.getId() == null) {
             policyRuleMapper.insert(rule);
-        } else {
-            policyRuleMapper.updateById(rule);
+            return;
         }
+        if (!deptPolicy) {
+            policyRuleMapper.updateById(rule);
+            return;
+        }
+
+        // 门店社保、商业保险标准按版本调整；允许选择历史生效日，旧版本仍保留供更早月份使用。
+        PolicyRule current = policyRuleMapper.selectById(rule.getId());
+        if (current == null) {
+            throw new ServiceException("门店配置不存在，请刷新后重试");
+        }
+        boolean sameBaseSocial = current.getBaseSocial() == null
+            ? rule.getBaseSocial() == null
+            : rule.getBaseSocial() != null && current.getBaseSocial().compareTo(rule.getBaseSocial()) == 0;
+        if (sameBaseSocial
+            && java.util.Objects.equals(current.getScopeKey(), rule.getScopeKey())
+            && java.util.Objects.equals(current.getRuleContent(), rule.getRuleContent())) {
+            return;
+        }
+        rule.setId(null);
+        rule.setCreateTime(null);
+        rule.setUpdateTime(null);
+        policyRuleMapper.insert(rule);
+    }
+
+    /** 修正指定门店配置历史版本，不影响其他生效版本。 */
+    public void updateDeptPolicyRule(PolicyRule rule) {
+        PolicyRule current = policyRuleMapper.selectById(rule.getId());
+        if (current == null || !"DEPT".equals(current.getScopeType())) {
+            throw new ServiceException("门店配置历史版本不存在，请刷新后重试");
+        }
+        if (rule.getEffectiveFrom() == null) {
+            throw new ServiceException("生效日不能为空");
+        }
+        // 不允许通过历史版本修正规避门店归属，版本仍属于原部门。
+        rule.setScopeType(current.getScopeType());
+        rule.setScopeKey(current.getScopeKey());
+        policyRuleMapper.updateById(rule);
     }
 
     public void saveConversionRule(ConversionRule rule) {
@@ -297,8 +335,12 @@ public class RuleService {
         }
 
         // dept overrides merged into policy.deptOverride（key=deptId；门店社保扣减标准 socialStandard 等）
+        // 每个部门只取参考日生效的最新版本；同日多次调整按 ID 取最后新增的一版。
         ObjectNode deptOverride = policyNode.has("deptOverride")
             ? (ObjectNode) policyNode.get("deptOverride") : policyNode.putObject("deptOverride");
+        Comparator<PolicyRule> versionOrder = Comparator.comparing(PolicyRule::getEffectiveFrom)
+            .thenComparing(PolicyRule::getId);
+        Map<String, PolicyRule> latestDeptPolicies = new HashMap<>();
         for (PolicyRule p : policies) {
             if (!"DEPT".equals(p.getScopeType()) || p.getScopeKey() == null) {
                 continue;
@@ -309,6 +351,10 @@ public class RuleService {
             if (p.getEffectiveTo() != null && p.getEffectiveTo().isBefore(refDate)) {
                 continue;
             }
+            latestDeptPolicies.merge(p.getScopeKey(), p,
+                (current, candidate) -> versionOrder.compare(candidate, current) > 0 ? candidate : current);
+        }
+        for (PolicyRule p : latestDeptPolicies.values()) {
             try {
                 ObjectNode merged = deptOverride.has(p.getScopeKey())
                     ? (ObjectNode) deptOverride.get(p.getScopeKey()) : objectMapper.createObjectNode();

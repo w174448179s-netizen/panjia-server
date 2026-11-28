@@ -17,6 +17,7 @@ import org.dromara.common.core.domain.R;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -26,7 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 薪酬规则配置（职级/政策/折算，只影响新算月份，不改历史）。
+ * 薪酬规则配置（职级/政策/折算，按生效版本计算；门店配置支持显式修正历史版本）。
  * <p>配置类接口仅对持有「薪酬规则配置」权限的角色开放（当前仅超管），
  * 避免任意登录用户改写算薪口径。</p>
  */
@@ -62,6 +63,15 @@ public class RuleController {
     @PostMapping("/policy")
     public R<Void> savePolicy(@RequestBody PolicyRule rule) {
         ruleService.savePolicyRule(rule);
+        return R.ok();
+    }
+
+    /** 修正指定门店配置历史版本。 */
+    @SaCheckPermission("payroll:rule:list")
+    @PutMapping("/policy/{id}")
+    public R<Void> updateDeptPolicy(@PathVariable Long id, @RequestBody PolicyRule rule) {
+        rule.setId(id);
+        ruleService.updateDeptPolicyRule(rule);
         return R.ok();
     }
 

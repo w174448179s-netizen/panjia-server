@@ -17,7 +17,7 @@ import java.util.List;
 /**
  * 收支科目配置服务。
  * <p>规则：收入/支出各自独立成树；最多 4 级；只有叶子节点可被录入；
- * 自动取数科目（实收/工资）必须是叶子，且不允许手工录入。</p>
+ * 自动取数科目（实收/工资/社保/商业保险）必须是叶子，且不允许手工录入。</p>
  */
 @Slf4j
 @Service
@@ -29,6 +29,9 @@ public class LedgerSubjectService {
     public static final String DATA_SOURCE_MANUAL = "MANUAL";
     public static final String DATA_SOURCE_RECEIVED = "RECEIVED_DETAIL";
     public static final String DATA_SOURCE_PAYROLL = "PAYROLL_GROSS";
+    public static final String DATA_SOURCE_SOCIAL = "PAYROLL_SOCIAL";
+    public static final String DATA_SOURCE_COMMERCIAL = "PAYROLL_COMMERCIAL_INSURANCE";
+    public static final String DATA_SOURCE_DORMITORY = "PAYROLL_DORMITORY";
     public static final int MAX_LEVEL = 4;
 
     private final LedgerSubjectMapper subjectMapper;
@@ -172,7 +175,10 @@ public class LedgerSubjectService {
         }
         if (!DATA_SOURCE_MANUAL.equals(dataSource)
             && !DATA_SOURCE_RECEIVED.equals(dataSource)
-            && !DATA_SOURCE_PAYROLL.equals(dataSource)) {
+            && !DATA_SOURCE_PAYROLL.equals(dataSource)
+            && !DATA_SOURCE_SOCIAL.equals(dataSource)
+            && !DATA_SOURCE_COMMERCIAL.equals(dataSource)
+            && !DATA_SOURCE_DORMITORY.equals(dataSource)) {
             throw new ServiceException("不支持的数据来源：" + dataSource);
         }
         return dataSource;

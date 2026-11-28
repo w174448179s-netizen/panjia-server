@@ -10,6 +10,10 @@ import org.apache.fesod.sheet.annotation.ExcelProperty;
 @Data
 public class LedgerEntryExcelRow {
 
+    /** 记账流水号（可不填，导入时未填则自动生成） */
+    @ExcelProperty("记账流水号")
+    private String serialNo;
+
     @ExcelProperty("方向")
     private String direction;
 

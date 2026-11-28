@@ -18,11 +18,13 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 /**
@@ -81,20 +83,36 @@ public class LedgerEntryService {
      */
     public Long create(LedgerEntry entry, Long operatorId) {
         validate(entry);
+        if (StringUtils.isNotBlank(entry.getSourceSerialNo())) {
+            entry.setSourceSerialNo(entry.getSourceSerialNo().trim());
+        }
         LedgerEntry existing = findSamePeriod(entry.getSubjectId(), entry.getDeptId(),
             entry.getStartDate(), entry.getEndDate(), null);
         if (existing != null) {
             existing.setAmount(entry.getAmount());
             existing.setRemark(entry.getRemark());
+            if (StringUtils.isNotBlank(entry.getSourceSerialNo())) {
+                existing.setSourceSerialNo(entry.getSourceSerialNo());
+            }
             existing.setUpdateTime(LocalDateTime.now());
             entryMapper.updateById(existing);
             return existing.getId();
+        }
+        // 记账流水号：手工/导入未填时按「年月日时分秒 + 5 位随机数」自动生成
+        if (StringUtils.isBlank(entry.getSourceSerialNo())) {
+            entry.setSourceSerialNo(generateSourceSerialNo());
         }
         entry.setCreateBy(operatorId);
         entry.setCreateTime(LocalDateTime.now());
         entry.setUpdateTime(LocalDateTime.now());
         entryMapper.insert(entry);
         return entry.getId();
+    }
+
+    /** 生成记账流水号：yyyyMMddHHmmss + 5 位随机数 */
+    private String generateSourceSerialNo() {
+        return LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"))
+            + String.format("%05d", ThreadLocalRandom.current().nextInt(100000));
     }
 
     /** 查找同科目 + 同部门 + 同生效/失效日期的记录（excludeId 用于编辑时排除自身） */
@@ -128,6 +146,9 @@ public class LedgerEntryService {
         db.setStartDate(input.getStartDate());
         db.setEndDate(input.getEndDate());
         db.setRemark(input.getRemark());
+        if (StringUtils.isNotBlank(input.getSourceSerialNo())) {
+            db.setSourceSerialNo(input.getSourceSerialNo().trim());
+        }
         db.setUpdateTime(LocalDateTime.now());
         entryMapper.updateById(db);
     }
@@ -283,13 +304,15 @@ public class LedgerEntryService {
         entry.setStartDate(parseDate(row.getStartDate(), "生效日期"));
         entry.setEndDate(parseDate(row.getEndDate(), "失效日期"));
         entry.setRemark(StringUtils.trim(row.getRemark()));
+        entry.setSourceSerialNo(StringUtils.trim(row.getSerialNo()));
         return entry;
     }
 
     private boolean isBlankRow(LedgerEntryExcelRow row) {
         return StringUtils.isBlank(row.getDirection()) && StringUtils.isBlank(row.getSubjectPath())
             && StringUtils.isBlank(row.getDeptName()) && StringUtils.isBlank(row.getAmount())
-            && StringUtils.isBlank(row.getStartDate()) && StringUtils.isBlank(row.getEndDate());
+            && StringUtils.isBlank(row.getStartDate()) && StringUtils.isBlank(row.getEndDate())
+            && StringUtils.isBlank(row.getRemark()) && StringUtils.isBlank(row.getSerialNo());
     }
 
     private String parseDirection(String text) {
